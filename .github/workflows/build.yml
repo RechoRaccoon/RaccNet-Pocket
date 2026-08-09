@@ -1,0 +1,47 @@
+name: Build Release APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & Sign APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.4'
+
+      - name: Build release APK
+        run: gradle assembleRelease --stacktrace
+
+      - name: Sign APK with committed keystore
+        run: |
+          BUILD_TOOLS=$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)
+          $ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner sign \
+            --ks raccnetlite-release.jks \
+            --ks-key-alias raccnetlite \
+            --ks-pass pass:RaccNetLite2024 \
+            --key-pass pass:RaccNetLite2024 \
+            --out app/build/outputs/apk/release/RaccNetLite-signed.apk \
+            app/build/outputs/apk/release/app-release-unsigned.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: RaccNetLite-APK
+          path: app/build/outputs/apk/release/RaccNetLite-signed.apk
+          retention-days: 90
