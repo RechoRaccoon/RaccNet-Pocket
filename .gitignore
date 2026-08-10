@@ -1,0 +1,20 @@
+# Build outputs
+/build
+/app/build
+
+# Gradle
+.gradle
+**/build/
+!src/**/build/
+
+# Android Studio
+*.iml
+.idea/
+.DS_Store
+local.properties
+captures/
+.externalNativeBuild
+.cxx
+
+# Generated
+/app/release/
