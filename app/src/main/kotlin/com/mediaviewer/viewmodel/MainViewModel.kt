@@ -15,6 +15,7 @@ import com.mediaviewer.worker.DownloadWorker
 import com.mediaviewer.worker.GifDownloadWorker
 import com.mediaviewer.worker.urlToDownloadInfo
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -698,33 +699,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // (often before that ever happened) saw an empty list and
             // silently marked itself "loaded" with nothing fetched, so
             // reviews never showed up even for accounts confirmed to have
-            // some. Also broadened per feedback: pulls from everyone the
-            // user follows now, matching how Popfeed's own "Reviews from
-            // Friends" section sources its list — not just DM contacts.
+            // some.
+            //
+            // Scope change (per feedback, this session): narrowed back down
+            // to Mutuals specifically ("Latest Reviews From Mutuals" now,
+            // not everyone followed) — reuses the exact same dmConversations
+            // list the Mutuals row and Send Post use (via
+            // ensureDmConversationsLoadedSuspend, single-flight-guarded —
+            // see its comment), rather than a separate getAllFollows() call.
+            // This also directly helps the "why is this slow" complaint:
+            // mutuals are typically a much smaller set than everyone
+            // followed, so there's simply far less to fan out over. See
+            // BlueskyRepository.getPopfeedReviews for the other half of the
+            // speed fix (parallel + cached collection-name lookup, replacing
+            // what used to be up to 3 sequential requests per account).
             //
             // Second bug fix (this session): even after the fix above,
             // Latest Reviews was still reported as never showing up.
-            // getAllFollows().getOrDefault(emptyList()) makes "the follows
-            // fetch genuinely failed" indistinguishable from "the user
-            // follows nobody" — and this function used to set
-            // friendsReviewsLoaded = true unconditionally either way,
-            // permanently caching a transient failure as "checked, nothing
-            // to show" for the rest of the app's process lifetime (no retry
-            // short of a full app restart). Since this runs the instant the
-            // Hub's AT Protocol page first composes — often just after cold
-            // start, competing with several other concurrent app-launch
-            // network calls for the same host — a transient failure here
-            // was actually quite likely. Now `loaded` is only set on an
-            // actually-successful follows fetch, so a failed attempt is
-            // retried the next time the Hub page composes instead of
-            // sticking forever.
-            val followsResult = bskyRepo.getAllFollows(bskyToken, _bskyDid.value)
-            if (followsResult.isSuccess) {
-                val accounts = followsResult.getOrDefault(emptyList())
-                _friendsReviews.value = if (accounts.isEmpty()) emptyList()
-                    else runCatching { bskyRepo.getFriendsPopfeedReviews(accounts) }.getOrDefault(emptyList())
-                friendsReviewsLoaded = true
-            }
+            // getOrDefault(emptyList()) on a failed fetch makes "the fetch
+            // genuinely failed" indistinguishable from "no accounts to
+            // check" — and this function used to set friendsReviewsLoaded =
+            // true unconditionally either way, permanently caching a
+            // transient failure as "checked, nothing to show" for the rest
+            // of the app's process lifetime (no retry short of a full app
+            // restart). Since this runs the instant the Hub's AT Protocol
+            // page first composes — often just after cold start, competing
+            // with several other concurrent app-launch network calls — a
+            // transient failure here was actually quite likely. Now `loaded`
+            // is only set once dmConversations has genuinely finished
+            // loading (isNotEmpty, or the load attempt completed), so a
+            // failed/still-pending attempt is retried the next time the Hub
+            // page composes instead of sticking forever.
+            ensureDmConversationsLoadedSuspend(silent = true)
+            val accounts = _dmConversations.value.map { it.member }
+            _friendsReviews.value = if (accounts.isEmpty()) emptyList()
+                else runCatching { bskyRepo.getFriendsPopfeedReviews(accounts) }.getOrDefault(emptyList())
+            // Same "don't cache a failure as done" principle as before: only
+            // latch `loaded` once there's actually a non-empty mutuals list
+            // to have fetched reviews for. If it's still empty (which is
+            // ambiguous between "genuinely zero mutuals" and "the fetch
+            // hasn't succeeded yet" — dmConversations has no separate loaded
+            // flag of its own either), leaving this retriable next Hub visit
+            // is cheap (ensureDmConversationsLoadedSuspend fast-paths) and
+            // matches how the Mutuals row itself already behaves.
+            if (accounts.isNotEmpty()) friendsReviewsLoaded = true
             _friendsReviewsLoading.value = false
         }
     }
@@ -893,7 +911,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 loadFeed()
                 loadAvailableFeeds()
                 prefetchUserLists()   // preload so list picker opens instantly
-                loadDmConversations(silent = true) // item 6: pull available DMs on app open
+                startHubBackgroundWarmup() // item 6/this session: Mutuals/Reviews/Livestreams, see its own comment
                 preloadFriendsFeed()  // item 7: warm the From Friends feed in the background too
                 loadSelfProfile()     // Settings Update: warm the Profile button's avatar/banner preview
             }
@@ -921,7 +939,7 @@ _bskyDid.value          = session.did
                     loadFeed()
                     loadAvailableFeeds()
                     prefetchUserLists()   // preload so list picker opens instantly
-                    loadDmConversations(silent = true)
+                    startHubBackgroundWarmup()
                     loadSelfProfile()
                 }
                 .onFailure { _errorMessage.value = it.message ?: "Login failed" }
@@ -1847,6 +1865,67 @@ _bskyDid.value          = session.did
     fun ensureDmConversationsLoaded() {
         if (!_bskyLoggedIn.value) return
         viewModelScope.launch(Dispatchers.IO) { ensureDmConversationsLoadedSuspend(silent = true) }
+    }
+
+    // Feature (this session): Mutuals/Latest Reviews/Livestreams used to
+    // only get ONE chance to load automatically — the single attempt fired
+    // at cold start/login — with the Hub's own AT Protocol page composing
+    // being the only other thing that ever retried it (via
+    // ensureDmConversationsLoaded/loadFriendsReviewsIfNeeded/
+    // loadLiveFriendsIfNeeded above). If that one cold-start attempt lost
+    // the race against the rest of the app-launch network storm and failed
+    // silently, and the user never happened to open the Hub, it simply
+    // never loaded — no matter how long the app stayed open on the feed or
+    // anywhere else. This starts a small set of background retry loops the
+    // moment the user's logged in, entirely on viewModelScope — the same
+    // ViewModel-lifetime scope every other background load in this app
+    // already uses, which lives for as long as the Activity does (this
+    // ViewModel is obtained via `by viewModels()` at the Activity level in
+    // MainActivity, not scoped to any individual screen/composable), so it
+    // is NOT tied to, and does not get cancelled or paused by, navigating
+    // between the feed, Grid, Comments, or Hub — it runs identically no
+    // matter which screen is currently showing, exactly like loadFeed() or
+    // any other existing background call already does. Each loop backs off
+    // and stops retrying once its data has actually loaded (or the user's
+    // logged out), so a healthy app isn't left doing pointless work forever.
+    private fun startHubBackgroundWarmup() {
+        viewModelScope.launch(Dispatchers.IO) {
+            retryWithBackoff(isDone = { _dmConversations.value.isNotEmpty() || !_bskyLoggedIn.value }) {
+                ensureDmConversationsLoadedSuspend(silent = true)
+            }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            retryWithBackoff(isDone = { friendsReviewsLoaded || !_bskyLoggedIn.value }) {
+                // loadFriendsReviewsIfNeeded() launches its own coroutine and
+                // returns immediately (it's the same public entry point the
+                // Hub page's LaunchedEffect calls) — wait for that in-flight
+                // attempt to actually finish before this loop re-checks
+                // isDone and possibly retries, otherwise every backoff tick
+                // would pile a new attempt on top of a still-running one.
+                loadFriendsReviewsIfNeeded()
+                while (_friendsReviewsLoading.value) delay(300)
+            }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            retryWithBackoff(isDone = { liveFriendsLoaded || !_bskyLoggedIn.value }) {
+                loadLiveFriendsIfNeeded()
+                while (_liveFriendsLoading.value) delay(300)
+            }
+        }
+    }
+
+    /** Retries [attempt] with exponential-ish backoff until [isDone] is true
+     *  or [maxAttempts] is used up — bounded so a persistently broken case
+     *  (e.g. genuinely no network) doesn't retry forever in the background. */
+    private suspend fun retryWithBackoff(maxAttempts: Int = 6, isDone: () -> Boolean, attempt: suspend () -> Unit) {
+        var delayMs = 3000L
+        repeat(maxAttempts) {
+            if (isDone()) return
+            attempt()
+            if (isDone()) return
+            delay(delayMs)
+            delayMs = (delayMs * 2).coerceAtMost(30_000L)
+        }
     }
 
     private suspend fun loadDmConversationsBlocking(silent: Boolean = false) {

@@ -133,6 +133,7 @@ fun MainFeedScreen(
     onSetGlassRimIntensity: (Float) -> Unit = {},
     // Item 8: Friends/Livestreams Hub sections.
     dmConversations: List<com.mediaviewer.model.DmConversation> = emptyList(),
+    dmConversationsLoading: Boolean = false,
     friendsReviews: List<com.mediaviewer.model.FriendPopfeedReview> = emptyList(),
     friendsReviewsLoading: Boolean = false,
     onLoadFriendsReviews: () -> Unit = {},
@@ -141,6 +142,7 @@ fun MainFeedScreen(
     liveFriendsLoading: Boolean = false,
     onLoadLiveFriends: () -> Unit = {},
     onEnsureFriends: () -> Unit = {},
+    selfAvatarUrl: String? = null,
     availableFeeds: List<BskyFeedInfo>,
     selectedFeedUri: String?,
     authorFeedState: MainViewModel.AuthorFeedSavedState?,
@@ -426,6 +428,7 @@ fun MainFeedScreen(
                         dominantColor             = lastDominantColor,
                         backdrop                  = lastBackdrop,
                         dmConversations           = dmConversations,
+                        dmConversationsLoading    = dmConversationsLoading,
                         friendsReviews            = friendsReviews,
                         friendsReviewsLoading     = friendsReviewsLoading,
                         onLoadFriendsReviews      = onLoadFriendsReviews,
@@ -433,7 +436,8 @@ fun MainFeedScreen(
                         liveFriends               = liveFriends,
                         liveFriendsLoading        = liveFriendsLoading,
                         onLoadLiveFriends         = onLoadLiveFriends,
-                        onEnsureFriends           = onEnsureFriends
+                        onEnsureFriends           = onEnsureFriends,
+                        selfAvatarUrl             = selfAvatarUrl
                     )
                     ScreenState.GRID -> GridScreen(
                         items           = mediaItems,

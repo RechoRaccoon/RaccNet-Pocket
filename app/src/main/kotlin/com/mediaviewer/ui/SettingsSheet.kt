@@ -4,6 +4,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
@@ -139,6 +144,7 @@ fun SettingsSheet(
     backdrop: GlassBackdrop? = null,
     // Item 8: Friends section (Profiles/Reviews sub-tabs).
     dmConversations: List<com.mediaviewer.model.DmConversation> = emptyList(),
+    dmConversationsLoading: Boolean = false,
     friendsReviews: List<com.mediaviewer.model.FriendPopfeedReview> = emptyList(),
     friendsReviewsLoading: Boolean = false,
     onLoadFriendsReviews: () -> Unit = {},
@@ -151,8 +157,29 @@ fun SettingsSheet(
     // Mutuals (dmConversations) load/retry itself on compose, the same way
     // it already does for friendsReviews/liveFriends — see the matching
     // comment on AtProtocolPageContent's LaunchedEffect below.
-    onEnsureFriends: () -> Unit = {}
+    onEnsureFriends: () -> Unit = {},
+    // Feature (this session): the logged-in user's own avatar URL, so the
+    // Hub's rims/background can reflect the user's own profile color
+    // instead of whatever post they were last looking at (see below).
+    selfAvatarUrl: String? = null
 ) {
+    // Feature (this session): every rim/background tint throughout the Hub
+    // (all three pages — Settings/AT Protocol/e621 — plus the background
+    // gradient and the page-switcher chips at the top) used to reflect the
+    // currently-viewed POST's dominant color, inherited from the same
+    // `dominantColor` the feed/Grid/Comments screens use. Per feedback, the
+    // Hub should instead reflect the logged-in user's OWN profile picture —
+    // the same idea DmInboxOverlay already applies to "your" message
+    // bubbles via `selfAvatarUrl` (see its `myTint`). Shadowing the
+    // `dominantColor` parameter here, once, is what actually makes this
+    // apply everywhere: every one of this file's `tint = dominantColor` /
+    // `panelTint = dominantColor` call sites (in this composable and in the
+    // three page-content composables it calls, which all just receive
+    // whatever's passed in under that same parameter name) automatically
+    // picks up the profile color with no per-call-site changes needed, and
+    // no risk of missing one across a file this size. Falls back to the
+    // post color if there's no avatar yet (e.g. profile hasn't loaded).
+    val dominantColor = selfAvatarUrl?.let { rememberDominantColor(it) } ?: dominantColor
     var hubPage by remember {
         mutableStateOf(if (appMode == AppMode.BLUESKY) HubPage.AT_PROTOCOL else HubPage.E621)
     }
@@ -314,7 +341,8 @@ fun SettingsSheet(
                             onSelectFeed = onSelectFeed, isLoading = isLoading,
                             onLoginBluesky = onLoginBluesky, onOpenSearch = onOpenSearch,
                             liquidGlass = liquidGlass, dominantColor = dominantColor, backdrop = backdrop,
-                            dmConversations = dmConversations, friendsReviews = friendsReviews,
+                            dmConversations = dmConversations, dmConversationsLoading = dmConversationsLoading,
+                            friendsReviews = friendsReviews,
                             friendsReviewsLoading = friendsReviewsLoading, onLoadFriendsReviews = onLoadFriendsReviews,
                             onOpenProfile = onOpenProfile,
                             liveFriends = liveFriends, liveFriendsLoading = liveFriendsLoading,
@@ -766,6 +794,7 @@ private fun AtProtocolPageContent(
     backdrop: GlassBackdrop?,
     // Item 8: Friends section (Profiles/Reviews sub-tabs).
     dmConversations: List<com.mediaviewer.model.DmConversation> = emptyList(),
+    dmConversationsLoading: Boolean = false,
     friendsReviews: List<com.mediaviewer.model.FriendPopfeedReview> = emptyList(),
     friendsReviewsLoading: Boolean = false,
     onLoadFriendsReviews: () -> Unit = {},
@@ -946,6 +975,18 @@ private fun AtProtocolPageContent(
         }
         Spacer(Modifier.height(8.dp))
 
+        // Feature (this session): skeleton placeholders while loading,
+        // YouTube-style, instead of a spinner/empty-state swap that used to
+        // change this section's height depending on whether it had 0, a
+        // few, or many results. Always render at least SKELETON_SLOTS slots
+        // (enough to fill a row without scrolling on a typical phone
+        // width); real avatars fill in from the front as they arrive, any
+        // slots still loading show a pulsing placeholder, and any slots
+        // left over once loading is done (genuinely fewer mutuals than
+        // slots, or zero) go fully invisible but stay laid out — so the
+        // row's height, and therefore the whole page's scroll position,
+        // never jumps around loading or after it finishes.
+        //
         // Bug fix: this used to filter to `convoId.isNotBlank()` (existing
         // DM threads only) — copied from the DM inbox picker, where that
         // filter is correct (you can't show "history" for a thread that
@@ -956,99 +997,89 @@ private fun AtProtocolPageContent(
         // them, not just people already messaged. Already sorted by most
         // recent interaction by loadDmRecipients.
         val friends = remember(dmConversations) { dmConversations.map { it.member } }
-        if (friends.isEmpty()) {
-            // Bug fix: fallback/empty-state text in these sections was left-
-            // aligned by default (just following the padding start) — now
-            // centered across the full row width like the rest of the app's
-            // empty states.
-            Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), contentAlignment = Alignment.Center) {
-                Text("No mutuals yet", color = DimGray, fontSize = 12.sp)
-            }
-        } else {
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                friends.forEach { friend ->
-                    Column(
-                        Modifier.width(60.dp).clickable { onOpenProfile(friend) },
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        val avatarShape = CircleShape
-                        Box(
-                            Modifier.size(52.dp)
-                                .then(if (liquidGlass) Modifier.glassPanel(true, shape = avatarShape, tint = dominantColor) else Modifier.clip(avatarShape).background(Color.White.copy(0.1f))),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (friend.avatarUrl != null) {
-                                AsyncImage(model = friend.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                                    modifier = Modifier.size(46.dp).clip(avatarShape))
-                            } else {
-                                Box(Modifier.size(46.dp).clip(avatarShape).background(Color.White.copy(0.15f)))
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            for (i in 0 until maxOf(MUTUAL_SKELETON_SLOTS, friends.size)) {
+                val friend = friends.getOrNull(i)
+                val avatarShape = CircleShape
+                Column(
+                    Modifier.width(60.dp).then(if (friend != null) Modifier.clickable { onOpenProfile(friend) } else Modifier),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    when {
+                        friend != null -> {
+                            Box(
+                                Modifier.size(52.dp)
+                                    .then(if (liquidGlass) Modifier.glassPanel(true, shape = avatarShape, tint = dominantColor) else Modifier.clip(avatarShape).background(Color.White.copy(0.1f))),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (friend.avatarUrl != null) {
+                                    AsyncImage(model = friend.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                                        modifier = Modifier.size(46.dp).clip(avatarShape))
+                                } else {
+                                    Box(Modifier.size(46.dp).clip(avatarShape).background(Color.White.copy(0.15f)))
+                                }
                             }
+                            Spacer(Modifier.height(4.dp))
+                            Text(friend.displayName, color = Color.White, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        Spacer(Modifier.height(4.dp))
-                        Text(friend.displayName, color = Color.White, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        dmConversationsLoading -> {
+                            ShimmerBox(avatarShape, Modifier.size(52.dp))
+                            Spacer(Modifier.height(4.dp))
+                            ShimmerBox(RoundedCornerShape(3.dp), Modifier.width(40.dp).height(9.dp))
+                        }
+                        else -> {
+                            // Genuinely no more mutuals to show — invisible,
+                            // same footprint, not removed (see comment above).
+                            Box(Modifier.size(52.dp))
+                            Spacer(Modifier.height(4.dp))
+                            Box(Modifier.width(40.dp).height(9.dp))
+                        }
                     }
                 }
             }
         }
 
-        // ── Item 8: Latest Reviews — its own section now, separate from
-        // Friends (was a sub-tab of it before), and pulled from everyone the
-        // user follows rather than just DM contacts — same aggregation
-        // approach Popfeed's own "Reviews from Friends" homepage section
-        // uses. Horizontally scrollable, matching Friends/Livestreams. ──────
+        // ── Item 8: Latest Reviews From Mutuals — its own section, and now
+        // scoped specifically to Mutuals (not everyone followed) per
+        // feedback: it reuses the exact same dmConversations list as the
+        // row above (loaded once via ensureDmConversationsLoadedSuspend),
+        // both for speed — mutuals are a much smaller set to fan out
+        // review-lookups over than everyone followed — and because a
+        // "Reviews from Friends"-style section reads better scoped to
+        // people you actually talk to. See BlueskyRepository.
+        // getPopfeedReviews for the other half of the speed fix (parallel +
+        // cached collection-name lookup, replacing what used to be up to 3
+        // sequential requests per account). ─────────────────────────────
         Spacer(Modifier.height(14.dp))
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
-            Text("Latest Reviews", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+            Text("Latest Reviews From Mutuals", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(horizontal = 10.dp))
             HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
         }
         Spacer(Modifier.height(8.dp))
-        when {
-            friendsReviewsLoading && friendsReviews.isEmpty() -> {
-                Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 1.5.dp)
-                }
-            }
-            friendsReviews.isEmpty() -> {
-                Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), contentAlignment = Alignment.Center) {
-                    Text("No reviews yet", color = DimGray, fontSize = 12.sp)
-                }
-            }
-            else -> {
-                Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    friendsReviews.take(20).forEach { fr ->
-                        val shape = RoundedCornerShape(12.dp)
-                        Column(
-                            Modifier.width(140.dp)
-                                .then(if (liquidGlass) Modifier.glassPanel(true, shape = shape, tint = dominantColor) else Modifier.clip(shape).background(Color.White.copy(0.06f)))
-                                .clickable { onOpenProfile(fr.author) }
-                                .padding(10.dp)
-                        ) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                if (fr.review.mediaImageUrl != null) {
-                                    AsyncImage(model = fr.review.mediaImageUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                                        modifier = Modifier.size(width = 40.dp, height = 56.dp).clip(RoundedCornerShape(6.dp)))
-                                }
-                                Column(Modifier.weight(1f)) {
-                                    Text(fr.review.mediaTitle, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                    Text("★${fr.review.ratingOutOf5}", color = DimGray, fontSize = 11.sp)
-                                }
-                            }
-                            Spacer(Modifier.height(6.dp))
-                            Text(fr.author.displayName, color = DimGray, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (fr.review.reviewText.isNotBlank()) {
-                                Text(fr.review.reviewText, color = Color.White.copy(0.7f), fontSize = 11.sp, lineHeight = 14.sp,
-                                    maxLines = 3, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp))
-                            }
-                        }
-                    }
+        // Feature (this session): review cards restyled to match the
+        // Backlog tab's poster cards (see ProfileOverlay.kt's BacklogCard —
+        // same poster aspect ratio, same title-below-poster layout), just
+        // with the card's glass bubble extended upward to fit a small
+        // author strip (avatar + display name) above the poster, since
+        // unlike Backlog these are reviews from other people, not the
+        // profile owner's own list — the author needs to be visible on the
+        // card itself. Same skeleton-placeholder approach as Mutuals above.
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            val reviews = friendsReviews.take(20)
+            for (i in 0 until maxOf(REVIEW_SKELETON_SLOTS, reviews.size)) {
+                val fr = reviews.getOrNull(i)
+                when {
+                    fr != null -> MutualReviewCard(fr, liquidGlass, dominantColor, onOpenProfile)
+                    friendsReviewsLoading -> MutualReviewCardSkeleton()
+                    else -> Spacer(Modifier.width(REVIEW_CARD_WIDTH).height(REVIEW_CARD_HEIGHT))
                 }
             }
         }
@@ -1063,27 +1094,15 @@ private fun AtProtocolPageContent(
             HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
         }
         Spacer(Modifier.height(8.dp))
-        when {
-            liveFriendsLoading && liveFriends.isEmpty() -> {
-                Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 1.5.dp)
-                }
-            }
-            liveFriends.isEmpty() -> {
-                // Honest empty state (same philosophy as Search's Lists tab) —
-                // most people you follow won't be Streamplace users at any
-                // given moment, this isn't an error.
-                Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), contentAlignment = Alignment.Center) {
-                    Text("No one you follow is live right now", color = DimGray, fontSize = 12.sp)
-                }
-            }
-            else -> {
-                Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    liveFriends.forEach { stream ->
-                        val cardShape = RoundedCornerShape(12.dp)
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            for (i in 0 until maxOf(LIVESTREAM_SKELETON_SLOTS, liveFriends.size)) {
+                val stream = liveFriends.getOrNull(i)
+                val cardShape = RoundedCornerShape(12.dp)
+                when {
+                    stream != null -> {
                         // Item 8/19: same "open in browser" fallback the VODs
                         // tab already uses — Streamplace's HLS playback format
                         // isn't mapped out for inline playback yet.
@@ -1114,10 +1133,128 @@ private fun AtProtocolPageContent(
                             }
                         }
                     }
+                    liveFriendsLoading -> {
+                        Column(Modifier.width(140.dp)) {
+                            ShimmerBox(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp), Modifier.fillMaxWidth().height(78.dp))
+                            Column(Modifier.padding(8.dp)) {
+                                ShimmerBox(RoundedCornerShape(3.dp), Modifier.fillMaxWidth(0.8f).height(11.dp))
+                                Spacer(Modifier.height(5.dp))
+                                ShimmerBox(RoundedCornerShape(3.dp), Modifier.fillMaxWidth(0.5f).height(9.dp))
+                            }
+                        }
+                    }
+                    else -> {
+                        // Honest empty state (same philosophy as Search's
+                        // Lists tab) — most people you follow won't be
+                        // Streamplace users at any given moment, this isn't
+                        // an error. Invisible, same footprint as a real
+                        // card, not removed, so the row's height stays
+                        // constant whether it ends up with 0 or several.
+                        Spacer(Modifier.width(140.dp).height(78.dp + 8.dp + 11.dp + 5.dp + 9.dp + 16.dp))
+                    }
                 }
             }
         }
         Spacer(Modifier.height(16.dp))
+    }
+}
+
+// Feature (this session): skeleton-placeholder slot counts for the Hub's
+// horizontally-scrolling sections — chosen to fill a typical phone-width
+// row without scrolling, per feedback ("show enough to fill up the row").
+// Mutuals avatars are narrow (60.dp incl. spacing) so 6 fit comfortably;
+// the Review/Livestream cards are much wider (140-ish dp) so 3 is the
+// realistic fill count without visibly overflowing on most screens.
+private const val MUTUAL_SKELETON_SLOTS = 6
+private const val REVIEW_SKELETON_SLOTS = 3
+private const val LIVESTREAM_SKELETON_SLOTS = 3
+private val REVIEW_CARD_WIDTH = 108.dp
+private val REVIEW_CARD_HEIGHT = 232.dp
+
+/** A single pulsing placeholder block — the Hub's YouTube-style loading
+ *  skeleton primitive, reused for every section's placeholder slots. */
+@Composable
+private fun ShimmerBox(shape: androidx.compose.ui.graphics.Shape, modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "hubShimmer")
+    val alpha by transition.animateFloat(
+        initialValue = 0.05f, targetValue = 0.15f,
+        animationSpec = infiniteRepeatable(animation = tween(700, easing = LinearEasing), repeatMode = RepeatMode.Reverse),
+        label = "hubShimmerAlpha"
+    )
+    Box(modifier.clip(shape).background(Color.White.copy(alpha = alpha)))
+}
+
+/** Latest-Reviews-From-Mutuals card: same poster-card layout as the
+ *  profile's Backlog tab (see ProfileOverlay.kt's BacklogCard — poster
+ *  image, title below it), with the glass bubble extended upward to fit a
+ *  small author avatar + display name strip above the poster, since (unlike
+ *  Backlog, which is always the profile owner's own list) each of these
+ *  reviews is from a different mutual and needs to show whose it is. */
+@Composable
+private fun MutualReviewCard(
+    fr: com.mediaviewer.model.FriendPopfeedReview,
+    liquidGlass: Boolean,
+    dominantColor: Color,
+    onOpenProfile: (com.mediaviewer.model.AuthorInfo) -> Unit
+) {
+    val shape = RoundedCornerShape(14.dp)
+    val posterShape = RoundedCornerShape(0.dp)
+    Column(
+        Modifier.width(REVIEW_CARD_WIDTH)
+            .then(if (liquidGlass) Modifier.glassPanel(true, tint = dominantColor, shape = shape) else Modifier.clip(shape).background(Color.White.copy(0.06f)))
+            .clickable { onOpenProfile(fr.author) }
+    ) {
+        // Author strip — the extra headroom above the poster.
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            val avatarShape = CircleShape
+            Box(Modifier.size(18.dp).clip(avatarShape).background(Color.White.copy(0.15f))) {
+                if (fr.author.avatarUrl != null) {
+                    AsyncImage(model = fr.author.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize().clip(avatarShape))
+                }
+            }
+            Text(fr.author.displayName, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Medium,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        }
+        // Poster — same aspect ratio as Backlog's poster tiles.
+        Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f)) {
+            if (fr.review.mediaImageUrl != null) {
+                AsyncImage(model = fr.review.mediaImageUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().clip(posterShape))
+            } else {
+                Box(Modifier.fillMaxSize().clip(posterShape).background(Color.White.copy(0.10f)))
+            }
+        }
+        // Title + rating, below the poster (matching Backlog's layout).
+        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)) {
+            Text(fr.review.mediaTitle, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("★ ${"%.1f".format(fr.review.ratingOutOf5)}", color = DimGray, fontSize = 10.sp)
+        }
+    }
+}
+
+/** Skeleton twin of [MutualReviewCard] — same footprint, exact same layout
+ *  slots, so the row's height/width never shifts when real cards arrive. */
+@Composable
+private fun MutualReviewCardSkeleton() {
+    val shape = RoundedCornerShape(14.dp)
+    Column(Modifier.width(REVIEW_CARD_WIDTH).clip(shape).background(Color.White.copy(0.03f))) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            ShimmerBox(CircleShape, Modifier.size(18.dp))
+            ShimmerBox(RoundedCornerShape(3.dp), Modifier.weight(1f).height(10.dp))
+        }
+        ShimmerBox(RoundedCornerShape(0.dp), Modifier.fillMaxWidth().aspectRatio(2f / 3f))
+        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)) {
+            ShimmerBox(RoundedCornerShape(3.dp), Modifier.fillMaxWidth(0.75f).height(11.dp))
+            Spacer(Modifier.height(5.dp))
+            ShimmerBox(RoundedCornerShape(3.dp), Modifier.width(28.dp).height(9.dp))
+        }
     }
 }
 

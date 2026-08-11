@@ -1,5 +1,6 @@
 package com.mediaviewer.repository
 
+import android.util.Log
 import com.mediaviewer.model.*
 import com.mediaviewer.network.BlueskyApi
 import com.mediaviewer.network.NetworkClient
@@ -358,16 +359,31 @@ class BlueskyRepository {
         return out.toString().trim()
     }
 
-    /** Profile "Reviews" tab (Popfeed, social.popfeed.review — formerly the
-     *  deprecated app.popsky.review). Field names aren't publicly documented,
-     *  so several plausible aliases are checked for the media title/image,
-     *  rating, and body text. Returns empty (never an error) if the account
-     *  has no reviews or Popfeed isn't reachable. */
-    suspend fun getPopfeedReviews(did: String): List<PopfeedReview> {
-        for (collection in listOf("social.popfeed.feed.review", "social.popfeed.review", "app.popsky.review")) {
+    // Speed fix (this session): getPopfeedReviews used to try 3 possible
+    // Popfeed collection names SEQUENTIALLY — one full network round trip
+    // each — before giving up on an account with no reviews under the
+    // first name tried. With N accounts fanned out in parallel via
+    // getFriendsPopfeedReviews, that's up to 3x the necessary round trips
+    // for every account whose reviews live under whichever collection name
+    // this app happens to check last — a very plausible explanation for
+    // "loads reviews from one person but not another known to have some"
+    // (a slow 2nd/3rd sequential attempt losing the race against
+    // OkHttp's per-host concurrency cap under that much fan-out, or simply
+    // taking long enough that it looked like it never happened). Two
+    // fixes: (1) the 3 collection names are now tried in parallel per
+    // account instead of sequentially — same total request count, far less
+    // wall-clock time; (2) whichever collection name actually returns data
+    // is remembered process-wide, and checked FIRST (alone, no fan-out at
+    // all) for every subsequent account — in practice a given Popfeed
+    // deployment uses one collection name for everyone, so only the very
+    // first review lookup each app run pays the "try all 3" cost.
+    @Volatile private var knownPopfeedCollection: String? = null
+
+    suspend fun getPopfeedReviews(did: String): List<PopfeedReview> = coroutineScope {
+        suspend fun tryCollection(collection: String): List<PopfeedReview>? {
             val resp = runCatching { api.listRecords(null, did, collection, 50, null) }.getOrNull()
-            val body = resp?.takeIf { it.isSuccessful }?.body() ?: continue
-            if (body.records.isEmpty()) continue
+            val body = resp?.takeIf { it.isSuccessful }?.body() ?: return null
+            if (body.records.isEmpty()) return null
             val reviews = body.records.mapNotNull { rec ->
                 val obj = rec.value?.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
                 val subject = obj.getAsJsonObject("subject") ?: obj.getAsJsonObject("item") ?: obj
@@ -383,14 +399,8 @@ class BlueskyRepository {
                 val text = firstStringField(obj, "text", "review", "body", "content") ?: ""
                 // Popfeed's rating field is on a fixed 0–10 scale (half-star
                 // granularity — one point per half star), not a 0–5 scale.
-                // The previous "divide by 2 only if raw > 5" heuristic was
-                // wrong: it silently skipped the conversion for any rating at
-                // or below 2.5 stars (raw <= 5), which displayed as roughly
-                // double the real rating — e.g. a true 2.5-star review (raw
-                // rating = 5) stayed at 5 and rendered as a full 5 stars, and
-                // a true 0.5-star review (raw rating = 1) rendered as a full
-                // star instead of a half star. Always dividing by 2 here is
-                // what actually matches the confirmed 0–10 scale.
+                // Always dividing by 2 here is what matches that confirmed
+                // 0–10 scale (see history for the previous, wrong heuristic).
                 val rawRating = obj.get("rating")?.takeIf { it.isJsonPrimitive }?.asFloat
                     ?: obj.get("stars")?.takeIf { it.isJsonPrimitive }?.asFloat
                     ?: obj.get("score")?.takeIf { it.isJsonPrimitive }?.asFloat ?: 0f
@@ -401,9 +411,28 @@ class BlueskyRepository {
                     ratingOutOf5 = rating5.coerceIn(0f, 5f), reviewText = text, createdAt = createdAt
                 )
             }
-            if (reviews.isNotEmpty()) return reviews.sortedByDescending { it.createdAt }
+            return reviews.takeIf { it.isNotEmpty() }
         }
-        return emptyList()
+
+        val allCollections = listOf("social.popfeed.feed.review", "social.popfeed.review", "app.popsky.review")
+
+        // Fast path: we already know which collection this Popfeed
+        // deployment uses — a single request, no fan-out.
+        knownPopfeedCollection?.let { known ->
+            tryCollection(known)?.let { return@coroutineScope it.sortedByDescending { r -> r.createdAt } }
+        }
+
+        // Otherwise (first lookup this session, or this specific account
+        // just has no reviews under the known collection) check the rest
+        // in parallel rather than one-at-a-time.
+        val remaining = allCollections.filterNot { it == knownPopfeedCollection }
+        val hit = remaining.map { collection -> async { collection to tryCollection(collection) } }
+            .awaitAll().firstOrNull { it.second != null }
+        if (hit != null) {
+            knownPopfeedCollection = hit.first
+            return@coroutineScope hit.second!!.sortedByDescending { it.createdAt }
+        }
+        emptyList()
     }
 
     /** Every account the user follows (not just mutuals/DM contacts) — used by
@@ -1045,9 +1074,16 @@ class BlueskyRepository {
             val quotedEmbed = record.embeds?.firstOrNull()
             // Bug fix: same gallery/carousel handling as parseFeedItem below —
             // a quoted/embedded carousel post's images live under `items`,
-            // not `images`, on an app.bsky.embed.gallery#view embed.
+            // not `images`, on an app.bsky.embed.gallery#view embed, and
+            // each item's thumbnail comes back under "thumbnail" instead of
+            // "thumb" (see BskyImageView's comment in Models.kt for the
+            // confirmed root cause).
             val quotedImage = quotedEmbed?.takeIf { it.type.contains("images") || it.type.contains("gallery") }
                 ?.let { it.images?.firstOrNull() ?: it.items?.firstOrNull() }
+            val quotedImageThumb = quotedImage?.let { img ->
+                val t = img.thumb
+                if (!t.isNullOrBlank()) t else img.thumbnail?.takeIf { it.isNotBlank() } ?: img.fullsize
+            }
             val quotedVideo = quotedEmbed?.takeIf { it.type.contains("video") }
             DmEmbeddedPost(
                 postUri = uri,
@@ -1058,7 +1094,7 @@ class BlueskyRepository {
                     avatarUrl = rawAuthor.avatar
                 ),
                 text = record.value?.text ?: "",
-                thumbUrl = quotedVideo?.thumbnail ?: quotedImage?.thumb,
+                thumbUrl = quotedVideo?.thumbnail ?: quotedImageThumb,
                 isVideo = quotedVideo != null
             )
         }.getOrNull()
@@ -1123,85 +1159,60 @@ class BlueskyRepository {
                 // same `images: [ViewImage]` shape the classic 1-4 image
                 // embed uses (the actual on-the-wire failure mode wasn't
                 // directly observable without a live carousel post to trace),
-                // checking for a populated `images` list directly — not just
-                // the type string — means it's still recognized as an image
-                // post instead of silently falling to the `else` catch-all
-                // below. This is additive/defensive: it doesn't change
-                // behavior for any embed that already matched the old check.
-                // Bug fix (root-caused this session): 5-10 image "photo
-                // carousel" posts were STILL vanishing from every tab after
-                // the previous "gallery $type" fix, and independent research
-                // this session turned up two real problems with that fix:
-                //
-                // 1) Bluesky's own lexicon repo (github.com/bluesky-social/
-                //    atproto, lexicons/app/bsky/embed/images.json, checked
-                //    live) still declares `maxLength: 4` on both the record
-                //    and view forms of app.bsky.embed.images as of today —
-                //    there is no separate, published "gallery" lexicon. The
-                //    feature is real (bsky.app's own account confirmed
-                //    "attach up to 10 photos... carousel only appears for
-                //    posts with at least 5 photos" in their v1.123 release
-                //    post), but going by the only lexicon that's actually
-                //    published, it most plausibly ships as a "soft" (server-
-                //    enforced, not yet schema-documented) raise of the same
-                //    `app.bsky.embed.images#view`'s `images` array past 4
-                //    entries — Bluesky has done exactly this kind of soft
-                //    limit change before (the 1MB->2MB image size bump). If
-                //    that's what's happening, `embed.type` still just says
-                //    "app.bsky.embed.images#view" and `embed.images` (not
-                //    `embed.items`) already holds all 5-10 photos — meaning
-                //    the *previous* "gallery" detection logic wasn't even
-                //    being exercised for these posts, they should have
-                //    already matched the plain `type.contains("images")`
-                //    check. That the posts still vanished points at problem
-                //    #2 below instead. The `items`-based gallery check stays
-                //    in as a defensive fallback in case a real, distinctly-
-                //    typed gallery embed does exist or shows up later, but
-                //    it's very likely not the actual mechanism in play.
-                //
-                // 2) The REAL likely cause: `parseFeedItemSafe` (see below)
-                //    wraps every post's parse in `runCatching { }.getOrDefault
-                //    (emptyList())` specifically so one bad post can't blank
-                //    a whole page — but that safety net means any exception
-                //    thrown while parsing a post is now SILENT: the post just
-                //    disappears, no crash, no log, nothing. `BskyImageView`'s
-                //    `thumb`/`fullsize` fields are declared non-null Kotlin
-                //    `String`s, but Gson deserializes via `Unsafe` and
-                //    bypasses the constructor, so it can leave them
-                //    genuinely null at runtime if a 5-10 image response ever
-                //    has a subtly different per-image shape than the
-                //    classic 4-image one (e.g. a field present on some but
-                //    not all images, or present under a different key this
-                //    app hasn't seen yet). The instant `first.fullsize` gets
-                //    passed into `MediaItem(mediaUrl = ...)` below, Kotlin's
-                //    generated null-check on that constructor param throws —
-                //    and `parseFeedItemSafe` swallows it whole. This exactly
-                //    matches "doesn't show up in Text OR Media" (it's not
-                //    being categorized as anything, it's being thrown away
-                //    before a MediaItem is ever produced) and "claimed fixed
-                //    but wasn't" (the gallery-detection fix from last session
-                //    was real and reasonable, it just wasn't the thing
-                //    actually crashing). Filtering out any image entries
-                //    missing a usable thumb/fullsize *before* constructing
-                //    anything means one malformed photo in a 5-10 image post
-                //    degrades to "show the post with the photos that did
-                //    parse" instead of "silently discard the whole post."
+                // Bug fix (root cause CONFIRMED this session against a real
+                // live app.bsky.feed.getPostThread response for an actual
+                // 5-10 image post — see BskyImageView's comment in
+                // Models.kt): these posts use a real, distinct
+                // "app.bsky.embed.gallery#view" embed (not a soft-raised
+                // app.bsky.embed.images#view as previously guessed), with
+                // photos under `items` (not `images`) — so the detection
+                // logic below (checking type/images/items) was already
+                // correct. The actual bug was one level deeper: each
+                // gallery photo's thumbnail URL comes back under a DIFFERENT
+                // JSON key — "thumbnail" — than the "thumb" key
+                // app.bsky.embed.images#view uses for the exact same thing.
+                // BskyImageView.thumb is a non-null Kotlin String, so Gson
+                // silently left it null for every gallery photo (this app's
+                // documented "Gson bypasses constructors" bug class), which
+                // the crash-safety filter added earlier this session (to
+                // stop that null from throwing when passed into MediaItem's
+                // constructor) correctly treated as "unusable" — for EVERY
+                // photo in EVERY gallery post, since none of them ever have
+                // `thumb` populated. That's why `images` always ended up
+                // empty after filtering and the post fell through to
+                // text-only: not a crash, not a detection miss, just every
+                // single photo failing the same too-strict check. resolvedThumb()
+                // below now checks both keys (falling back to the fullsize
+                // URL itself as a last resort — still a valid, just
+                // unscaled-down, image), and the filter accepts an image as
+                // long as EITHER key is present.
                 embed.type.contains("images") || embed.type.contains("gallery") ||
                     !embed.images.isNullOrEmpty() || !embed.items.isNullOrEmpty() -> {
+                    fun resolvedThumb(img: BskyImageView): String {
+                        // Bug fix: must use the null-safe isNullOrBlank()
+                        // here, not isNotBlank() — img.thumb is statically
+                        // typed as non-null String, but for a gallery photo
+                        // it's genuinely null at runtime (see comment
+                        // above), and isNotBlank() dereferences its receiver
+                        // without a null check, which would throw exactly
+                        // the crash this whole fix exists to prevent.
+                        val t = img.thumb
+                        return if (!t.isNullOrBlank()) t else img.thumbnail?.takeIf { it.isNotBlank() } ?: img.fullsize
+                    }
                     val images = (embed.images?.takeIf { it.isNotEmpty() } ?: embed.items ?: emptyList())
-                        .filter { !it.fullsize.isNullOrBlank() && !it.thumb.isNullOrBlank() }
+                        .filter { !it.fullsize.isNullOrBlank() && (!it.thumb.isNullOrBlank() || !it.thumbnail.isNullOrBlank()) }
                     if (images.isEmpty()) textOnlyItem() else {
                         val first = images.first()
                         listOf(
                             MediaItem(
                                 id = post.cid, mediaUrl = first.fullsize,
-                                thumbUrl = first.thumb, isVideo = false, postUri = post.uri, postCid = post.cid,
+                                thumbUrl = resolvedThumb(first), isVideo = false, postUri = post.uri, postCid = post.cid,
                                 author = author, likeUri = post.viewer?.like, repostUri = post.viewer?.repost,
                                 isLiked = post.viewer?.like != null, isReposted = post.viewer?.repost != null,
                                 likeCount = post.likeCount ?: 0, replyCount = post.replyCount ?: 0,
                                 repostCount = post.repostCount ?: 0, altText = first.alt ?: "",
                                 mediaGroup = if (images.size > 1) images.map {
-                                    MediaGroupItem(mediaUrl = it.fullsize, thumbUrl = it.thumb, altText = it.alt ?: "")
+                                    MediaGroupItem(mediaUrl = it.fullsize, thumbUrl = resolvedThumb(it), altText = it.alt ?: "")
                                 } else emptyList(),
                                 text = text
                             )
@@ -1242,29 +1253,33 @@ class BlueskyRepository {
                             isFollowing = quotedAuthorRaw.viewer?.following != null
                         )
                         val quotedEmbed = quoted.embeds?.firstOrNull()
-                        // Bug fix: same crash-safety issue as parseFeedItem's
-                        // main image branch above — a quoted post with a
-                        // 5-10 image carousel whose photo list has any entry
-                        // missing thumb/fullsize would throw when read below
-                        // (Gson can leave non-null fields null at runtime),
-                        // and that exception is swallowed silently by
-                        // parseFeedItemSafe, discarding the whole outer post.
-                        // Filtering to only images with both fields present
-                        // before picking `firstOrNull()` avoids that.
+                        // Bug fix (root cause confirmed this session — see
+                        // BskyImageView's comment in Models.kt): gallery
+                        // (5-10 image) photos use a "thumbnail" key instead
+                        // of "thumb" for the exact same value, which the
+                        // filter here was treating as "unusable" for every
+                        // single gallery photo. goodImage() now accepts
+                        // either key, and quotedImageThumb resolves whichever
+                        // one is actually present (falling back to the
+                        // fullsize URL as a last resort).
                         val quotedImage = quotedEmbed?.takeIf {
                             it.type.contains("images") || it.type.contains("gallery") ||
                                 !it.images.isNullOrEmpty() || !it.items.isNullOrEmpty()
                         }?.let { qe ->
                             fun goodImage(list: List<BskyImageView>?) =
-                                list?.firstOrNull { !it.fullsize.isNullOrBlank() && !it.thumb.isNullOrBlank() }
+                                list?.firstOrNull { !it.fullsize.isNullOrBlank() && (!it.thumb.isNullOrBlank() || !it.thumbnail.isNullOrBlank()) }
                             goodImage(qe.images) ?: goodImage(qe.items)
+                        }
+                        val quotedImageThumb = quotedImage?.let { img ->
+                            val t = img.thumb
+                            if (!t.isNullOrBlank()) t else img.thumbnail?.takeIf { it.isNotBlank() } ?: img.fullsize
                         }
                         val quotedVideo = quotedEmbed?.takeIf { it.type.contains("video") }
                         listOf(
                             MediaItem(
                                 id = post.cid,
                                 mediaUrl = quotedVideo?.thumbnail ?: quotedImage?.fullsize ?: "",
-                                thumbUrl = quotedVideo?.thumbnail ?: quotedImage?.thumb ?: "",
+                                thumbUrl = quotedVideo?.thumbnail ?: quotedImageThumb ?: "",
                                 isVideo = quotedVideo != null,
                                 videoPlaylistUrl = quotedVideo?.playlist, videoBlobCid = quotedVideo?.cid,
                                 // Interactions (like/repost/etc.) still act on the
@@ -1284,7 +1299,33 @@ class BlueskyRepository {
                         )
                     }
                 }
-                else -> textOnlyItem()
+                else -> {
+                    // Diagnostic logging (this session): despite broadening
+                    // detection to trust `items` regardless of the `$type`
+                    // string, and despite live-checking Bluesky's own
+                    // lexicon repo (still shows maxLength: 4 on
+                    // app.bsky.embed.images as of this fix, no separate
+                    // published "gallery" type exists), 5-10 image posts are
+                    // still falling through to this catch-all — meaning the
+                    // real embed shape genuinely doesn't match any of
+                    // "images"/"gallery" in its $type AND has nothing usable
+                    // in `images` or `items`. Rather than guess a third
+                    // time, this logs the actual $type string and which
+                    // fields Gson did/didn't populate whenever an embed
+                    // exists but isn't recognized, specifically flagging the
+                    // 5+ media items case bsky.app's own carousel targets.
+                    // Filtering logcat for "RaccNet-Embed" on a real 5-10
+                    // image post will show the literal wire shape instead of
+                    // another guess — that's the fastest way to get this
+                    // right on the next round.
+                    if (post.embed != null) {
+                        Log.w("RaccNet-Embed", "Unrecognized embed on ${post.uri}: type='${embed.type}' " +
+                            "images=${embed.images?.size ?: -1} items=${embed.items?.size ?: -1} " +
+                            "hasMedia=${embed.media != null} hasRecord=${embed.record != null} " +
+                            "hasEmbeds=${embed.embeds?.size ?: -1} textLen=${text.length}")
+                    }
+                    textOnlyItem()
+                }
             }
         }
     }

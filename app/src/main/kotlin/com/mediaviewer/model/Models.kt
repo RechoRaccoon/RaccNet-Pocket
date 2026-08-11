@@ -201,7 +201,22 @@ data class BskyImageView(
     val thumb: String,
     val fullsize: String,
     val alt: String? = null,
-    val aspectRatio: BskyAspectRatio? = null
+    val aspectRatio: BskyAspectRatio? = null,
+    // Bug fix (this session, root cause confirmed against a real live API
+    // response for a genuine 5-10 image post): app.bsky.embed.gallery#view's
+    // per-image objects use a DIFFERENT key for the thumbnail than
+    // app.bsky.embed.images#view does — "thumbnail" instead of "thumb".
+    // Since `thumb` above is a non-null Kotlin String, Gson (which bypasses
+    // constructors and leaves unmatched non-null fields null at runtime,
+    // per this file's known bug class) was silently leaving `thumb` null for
+    // every gallery photo, which the defensive filter added earlier this
+    // session (to stop that null from crashing MediaItem's constructor)
+    // correctly rejected — every photo in every 5-10 image post, meaning
+    // `images` always ended up empty after filtering and the whole post
+    // fell through to text-only. This extra field lets Gson also capture
+    // the gallery-specific key; see resolvedThumb() in BlueskyRepository
+    // for how the two are reconciled.
+    val thumbnail: String? = null
 )
 
 data class BskyAspectRatio(val width: Int, val height: Int)
