@@ -1,5 +1,6 @@
 package com.mediaviewer.network
 
+import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
@@ -8,11 +9,34 @@ import java.util.concurrent.TimeUnit
 
 object NetworkClient {
 
+    // Bug fix (this session, part of the "autoloading is inconsistent" fix):
+    // OkHttp's default Dispatcher caps concurrent requests at 5 per host and
+    // 64 total. At app cold start this app fires off roughly half a dozen
+    // independent ViewModel-level loads at once (feed, available feeds,
+    // user lists, DM conversations/mutuals, From Friends preload, self
+    // profile) — several of which (getMutuals, getAllFollows) are
+    // themselves multi-page paginated fetches making several sequential
+    // calls each. All of it goes through the single shared `api` client's
+    // connection pool to the same bsky.social host, so the default 5-per-
+    // host cap meant most of this cold-start traffic was queueing behind
+    // itself rather than actually running concurrently, making the whole
+    // window meaningfully slower and more likely to hit a timeout/transient
+    // failure than it needed to be — this is a real contributing factor to
+    // the intermittent "Mutuals sometimes doesn't load on launch" bug (see
+    // MainViewModel.ensureDmConversationsLoaded's comment for the full
+    // picture). Raising both limits gives cold-start traffic room to
+    // actually run in parallel instead of queueing.
+    private fun buildDispatcher(): Dispatcher = Dispatcher().apply {
+        maxRequests = 64
+        maxRequestsPerHost = 16
+    }
+
     private fun buildOkHttp(userAgent: String = "MediaViewer/1.0"): OkHttpClient {
         val logging = HttpLoggingInterceptor().apply {
             level = HttpLoggingInterceptor.Level.BASIC
         }
         return OkHttpClient.Builder()
+            .dispatcher(buildDispatcher())
             .addInterceptor(logging)
             .addInterceptor { chain ->
                 val req = chain.request().newBuilder()

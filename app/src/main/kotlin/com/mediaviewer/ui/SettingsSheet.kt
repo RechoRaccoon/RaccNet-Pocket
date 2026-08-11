@@ -146,7 +146,12 @@ fun SettingsSheet(
     // Item 8/19: Livestreams section.
     liveFriends: List<com.mediaviewer.model.StreamplaceLiveStream> = emptyList(),
     liveFriendsLoading: Boolean = false,
-    onLoadLiveFriends: () -> Unit = {}
+    onLoadLiveFriends: () -> Unit = {},
+    // Bug fix (this session): lets the Hub's AT Protocol page trigger a
+    // Mutuals (dmConversations) load/retry itself on compose, the same way
+    // it already does for friendsReviews/liveFriends — see the matching
+    // comment on AtProtocolPageContent's LaunchedEffect below.
+    onEnsureFriends: () -> Unit = {}
 ) {
     var hubPage by remember {
         mutableStateOf(if (appMode == AppMode.BLUESKY) HubPage.AT_PROTOCOL else HubPage.E621)
@@ -313,7 +318,8 @@ fun SettingsSheet(
                             friendsReviewsLoading = friendsReviewsLoading, onLoadFriendsReviews = onLoadFriendsReviews,
                             onOpenProfile = onOpenProfile,
                             liveFriends = liveFriends, liveFriendsLoading = liveFriendsLoading,
-                            onLoadLiveFriends = onLoadLiveFriends
+                            onLoadLiveFriends = onLoadLiveFriends,
+                            onEnsureFriends = onEnsureFriends
                         )
                         HubPage.E621 -> E621PageContent(
                             e621LoggedIn = e621LoggedIn, e621SearchTags = e621SearchTags,
@@ -767,15 +773,23 @@ private fun AtProtocolPageContent(
     // Item 8/19: Livestreams section.
     liveFriends: List<com.mediaviewer.model.StreamplaceLiveStream> = emptyList(),
     liveFriendsLoading: Boolean = false,
-    onLoadLiveFriends: () -> Unit = {}
+    onLoadLiveFriends: () -> Unit = {},
+    onEnsureFriends: () -> Unit = {}
 ) {
     // Item 8: both of the new sections' fetches are lazy — kick them off once
     // when this page first composes rather than eagerly for every Hub visit
     // (they only matter once the person actually scrolls down to them, and
     // both no-op internally if already loading/loaded).
+    // Bug fix (this session): the Mutuals avatar row used to rely entirely
+    // on the app-launch background prefetch succeeding, with no retry if it
+    // silently failed (see MainViewModel.ensureDmConversationsLoaded's
+    // comment for the actual root cause) — onEnsureFriends() here gives it
+    // the same "retry on every Hub visit if not loaded yet" self-healing
+    // onLoadFriendsReviews/onLoadLiveFriends already had.
     LaunchedEffect(Unit) {
         onLoadFriendsReviews()
         onLoadLiveFriends()
+        onEnsureFriends()
     }
     var bskyId by remember { mutableStateOf("") }
     var bskyPw by remember { mutableStateOf("") }
@@ -918,11 +932,15 @@ private fun AtProtocolPageContent(
             }
         }
 
-        // ── Item 8: Friends — quick-access avatar row (DM/mutual contacts) ──
+        // ── Item 8: Mutuals — quick-access avatar row (DM/mutual contacts) ──
+        // Bug fix: renamed from "Friends" to "Mutuals" — this row is
+        // specifically the mutual-follow set (see loadDmRecipients), and
+        // "Friends" was ambiguous/confusing next to the "From Friends" grid
+        // button above, which is a different, broader concept.
         Spacer(Modifier.height(14.dp))
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
-            Text("Friends", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+            Text("Mutuals", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(horizontal = 10.dp))
             HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
         }
@@ -944,7 +962,7 @@ private fun AtProtocolPageContent(
             // centered across the full row width like the rest of the app's
             // empty states.
             Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), contentAlignment = Alignment.Center) {
-                Text("No friends yet", color = DimGray, fontSize = 12.sp)
+                Text("No mutuals yet", color = DimGray, fontSize = 12.sp)
             }
         } else {
             Row(

@@ -17,6 +17,8 @@ import com.mediaviewer.worker.urlToDownloadInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -699,10 +701,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // some. Also broadened per feedback: pulls from everyone the
             // user follows now, matching how Popfeed's own "Reviews from
             // Friends" section sources its list — not just DM contacts.
-            val accounts = bskyRepo.getAllFollows(bskyToken, _bskyDid.value).getOrDefault(emptyList())
-            _friendsReviews.value = if (accounts.isEmpty()) emptyList()
-                else runCatching { bskyRepo.getFriendsPopfeedReviews(accounts) }.getOrDefault(emptyList())
-            friendsReviewsLoaded = true
+            //
+            // Second bug fix (this session): even after the fix above,
+            // Latest Reviews was still reported as never showing up.
+            // getAllFollows().getOrDefault(emptyList()) makes "the follows
+            // fetch genuinely failed" indistinguishable from "the user
+            // follows nobody" — and this function used to set
+            // friendsReviewsLoaded = true unconditionally either way,
+            // permanently caching a transient failure as "checked, nothing
+            // to show" for the rest of the app's process lifetime (no retry
+            // short of a full app restart). Since this runs the instant the
+            // Hub's AT Protocol page first composes — often just after cold
+            // start, competing with several other concurrent app-launch
+            // network calls for the same host — a transient failure here
+            // was actually quite likely. Now `loaded` is only set on an
+            // actually-successful follows fetch, so a failed attempt is
+            // retried the next time the Hub page composes instead of
+            // sticking forever.
+            val followsResult = bskyRepo.getAllFollows(bskyToken, _bskyDid.value)
+            if (followsResult.isSuccess) {
+                val accounts = followsResult.getOrDefault(emptyList())
+                _friendsReviews.value = if (accounts.isEmpty()) emptyList()
+                    else runCatching { bskyRepo.getFriendsPopfeedReviews(accounts) }.getOrDefault(emptyList())
+                friendsReviewsLoaded = true
+            }
             _friendsReviewsLoading.value = false
         }
     }
@@ -727,10 +749,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // Bug fix + roadmap: same dmConversations-not-loaded-yet issue as
             // Reviews above, and broadened to everyone the user follows
             // rather than just DM contacts, per feedback.
-            val dids = bskyRepo.getAllFollows(bskyToken, _bskyDid.value).getOrDefault(emptyList()).map { it.did }.toSet()
-            _liveFriends.value = if (dids.isEmpty()) emptyList()
-                else streamplaceRepo.getLiveFriends(dids).getOrDefault(emptyList())
-            liveFriendsLoaded = true
+            // Same "don't cache a transient failure as done" fix as
+            // loadFriendsReviewsIfNeeded above — only mark loaded on an
+            // actually-successful follows fetch.
+            val followsResult = bskyRepo.getAllFollows(bskyToken, _bskyDid.value)
+            if (followsResult.isSuccess) {
+                val dids = followsResult.getOrDefault(emptyList()).map { it.did }.toSet()
+                _liveFriends.value = if (dids.isEmpty()) emptyList()
+                    else streamplaceRepo.getLiveFriends(dids).getOrDefault(emptyList())
+                liveFriendsLoaded = true
+            }
             _liveFriendsLoading.value = false
         }
     }
@@ -1588,7 +1616,7 @@ _bskyDid.value          = session.did
         if (friendsFeedPreloadStarted) return
         friendsFeedPreloadStarted = true
         viewModelScope.launch(Dispatchers.IO) {
-            if (_dmConversations.value.isEmpty()) loadDmConversationsBlocking(silent = true)
+            ensureDmConversationsLoadedSuspend(silent = true)
             val realConvos = _dmConversations.value.filter { it.convoId.isNotBlank() }
             bskyRepo.getFriendsSharedPosts(bskyToken, _bskyDid.value, realConvos)
                 .onSuccess { _friendsFeedCache.value = it }
@@ -1639,7 +1667,7 @@ _bskyDid.value          = session.did
         // (handled in the UI layer) while we fetch it live.
         viewModelScope.launch(Dispatchers.IO) {
             _friendsFeedLoadingOverlay.value = true
-            if (_dmConversations.value.isEmpty()) loadDmConversationsBlocking(silent = true)
+            ensureDmConversationsLoadedSuspend(silent = true)
             val realConvos = _dmConversations.value.filter { it.convoId.isNotBlank() }
             bskyRepo.getFriendsSharedPosts(bskyToken, _bskyDid.value, realConvos)
                 .onSuccess { items ->
@@ -1770,9 +1798,55 @@ _bskyDid.value          = session.did
 
     // ── DMs / Send popup (item 6) ──────────────────────────────────────────────
 
+    // Bug fix (this session): "Mutuals"/dmConversations autoloading was
+    // reported as inconsistent — sometimes populated on cold start, often
+    // not, only reliably fixed by manually opening the Send Post popup.
+    // Root cause: at cold start, MainViewModel's init block fires off
+    // loadDmConversations(silent=true) AND preloadFriendsFeed() (which
+    // *also* independently loads dmConversations if empty) essentially
+    // simultaneously, alongside loadFeed/loadAvailableFeeds/
+    // prefetchUserLists/loadSelfProfile — six-plus concurrent network calls
+    // at once, several of which (getMutuals) themselves fan out into
+    // multiple paginated follows/followers requests. Any one of those
+    // hitting a transient failure (timeout, 429, connection hiccup — much
+    // more likely under this much simultaneous cold-start load) silently
+    // resolved to an empty list via loadDmRecipients' getOrDefault, and
+    // nothing ever retried afterward unless the user happened to trigger
+    // openSendPopup(), which re-checked "isEmpty -> reload" and got a clean
+    // shot at it (by then, the cold-start network storm had settled).
+    // Two-part fix: (1) a mutex makes concurrent callers actually wait for
+    // and share one in-flight load instead of racing duplicate requests
+    // that make the congestion worse, and (2) the Hub's AT Protocol page
+    // now also calls ensureDmConversationsLoaded() itself (see
+    // AtProtocolPageContent's LaunchedEffect in SettingsSheet.kt) the same
+    // way it already self-heals friendsReviews/liveFriends — so simply
+    // opening the Hub is itself a retry, not just something that works if
+    // you happen to open Send Post.
+    private val dmConversationsMutex = Mutex()
+
+    private suspend fun ensureDmConversationsLoadedSuspend(silent: Boolean) {
+        if (_dmConversations.value.isNotEmpty()) return
+        dmConversationsMutex.withLock {
+            // Re-check inside the lock: another caller may have already
+            // finished loading while we were waiting for the lock.
+            if (_dmConversations.value.isNotEmpty()) return@withLock
+            loadDmConversationsBlocking(silent)
+        }
+    }
+
     fun loadDmConversations(silent: Boolean = false) {
         if (!_bskyLoggedIn.value) return
-        viewModelScope.launch(Dispatchers.IO) { loadDmConversationsBlocking(silent) }
+        viewModelScope.launch(Dispatchers.IO) { ensureDmConversationsLoadedSuspend(silent) }
+    }
+
+    /** Public, fire-and-forget entry point for the Hub's AT Protocol page to
+     *  call every time it composes — no-ops instantly if already loaded or
+     *  already in flight (via the mutex + isNotEmpty check above), so it's
+     *  cheap to call unconditionally and gives the Mutuals row a real chance
+     *  to self-heal if the cold-start load happened to fail. */
+    fun ensureDmConversationsLoaded() {
+        if (!_bskyLoggedIn.value) return
+        viewModelScope.launch(Dispatchers.IO) { ensureDmConversationsLoadedSuspend(silent = true) }
     }
 
     private suspend fun loadDmConversationsBlocking(silent: Boolean = false) {

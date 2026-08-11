@@ -1128,20 +1128,68 @@ class BlueskyRepository {
                 // post instead of silently falling to the `else` catch-all
                 // below. This is additive/defensive: it doesn't change
                 // behavior for any embed that already matched the old check.
-                // Bug fix: Bluesky's 5-10 image "photo carousel" posts use a
-                // distinct app.bsky.embed.gallery#view embed, not
-                // app.bsky.embed.images#view — confirmed via the actual
-                // lexicon: the type string contains "gallery", not "images",
-                // and the photo list comes back under `items` instead of
-                // `images` (same BskyImageView shape). These were falling
-                // through to the `else -> textOnlyItem()` catch-all below
-                // because nothing recognized the gallery type or looked at
-                // `items`. The `!embed.images.isNullOrEmpty()` fallback stays
-                // too, purely defensive, in case some other embed variant
-                // ever populates `images` under a $type this app doesn't
-                // otherwise recognize.
-                embed.type.contains("images") || embed.type.contains("gallery") || !embed.images.isNullOrEmpty() -> {
-                    val images = embed.images?.takeIf { it.isNotEmpty() } ?: embed.items ?: emptyList()
+                // Bug fix (root-caused this session): 5-10 image "photo
+                // carousel" posts were STILL vanishing from every tab after
+                // the previous "gallery $type" fix, and independent research
+                // this session turned up two real problems with that fix:
+                //
+                // 1) Bluesky's own lexicon repo (github.com/bluesky-social/
+                //    atproto, lexicons/app/bsky/embed/images.json, checked
+                //    live) still declares `maxLength: 4` on both the record
+                //    and view forms of app.bsky.embed.images as of today —
+                //    there is no separate, published "gallery" lexicon. The
+                //    feature is real (bsky.app's own account confirmed
+                //    "attach up to 10 photos... carousel only appears for
+                //    posts with at least 5 photos" in their v1.123 release
+                //    post), but going by the only lexicon that's actually
+                //    published, it most plausibly ships as a "soft" (server-
+                //    enforced, not yet schema-documented) raise of the same
+                //    `app.bsky.embed.images#view`'s `images` array past 4
+                //    entries — Bluesky has done exactly this kind of soft
+                //    limit change before (the 1MB->2MB image size bump). If
+                //    that's what's happening, `embed.type` still just says
+                //    "app.bsky.embed.images#view" and `embed.images` (not
+                //    `embed.items`) already holds all 5-10 photos — meaning
+                //    the *previous* "gallery" detection logic wasn't even
+                //    being exercised for these posts, they should have
+                //    already matched the plain `type.contains("images")`
+                //    check. That the posts still vanished points at problem
+                //    #2 below instead. The `items`-based gallery check stays
+                //    in as a defensive fallback in case a real, distinctly-
+                //    typed gallery embed does exist or shows up later, but
+                //    it's very likely not the actual mechanism in play.
+                //
+                // 2) The REAL likely cause: `parseFeedItemSafe` (see below)
+                //    wraps every post's parse in `runCatching { }.getOrDefault
+                //    (emptyList())` specifically so one bad post can't blank
+                //    a whole page — but that safety net means any exception
+                //    thrown while parsing a post is now SILENT: the post just
+                //    disappears, no crash, no log, nothing. `BskyImageView`'s
+                //    `thumb`/`fullsize` fields are declared non-null Kotlin
+                //    `String`s, but Gson deserializes via `Unsafe` and
+                //    bypasses the constructor, so it can leave them
+                //    genuinely null at runtime if a 5-10 image response ever
+                //    has a subtly different per-image shape than the
+                //    classic 4-image one (e.g. a field present on some but
+                //    not all images, or present under a different key this
+                //    app hasn't seen yet). The instant `first.fullsize` gets
+                //    passed into `MediaItem(mediaUrl = ...)` below, Kotlin's
+                //    generated null-check on that constructor param throws —
+                //    and `parseFeedItemSafe` swallows it whole. This exactly
+                //    matches "doesn't show up in Text OR Media" (it's not
+                //    being categorized as anything, it's being thrown away
+                //    before a MediaItem is ever produced) and "claimed fixed
+                //    but wasn't" (the gallery-detection fix from last session
+                //    was real and reasonable, it just wasn't the thing
+                //    actually crashing). Filtering out any image entries
+                //    missing a usable thumb/fullsize *before* constructing
+                //    anything means one malformed photo in a 5-10 image post
+                //    degrades to "show the post with the photos that did
+                //    parse" instead of "silently discard the whole post."
+                embed.type.contains("images") || embed.type.contains("gallery") ||
+                    !embed.images.isNullOrEmpty() || !embed.items.isNullOrEmpty() -> {
+                    val images = (embed.images?.takeIf { it.isNotEmpty() } ?: embed.items ?: emptyList())
+                        .filter { !it.fullsize.isNullOrBlank() && !it.thumb.isNullOrBlank() }
                     if (images.isEmpty()) textOnlyItem() else {
                         val first = images.first()
                         listOf(
@@ -1194,12 +1242,23 @@ class BlueskyRepository {
                             isFollowing = quotedAuthorRaw.viewer?.following != null
                         )
                         val quotedEmbed = quoted.embeds?.firstOrNull()
-                        // Bug fix: quoted carousel posts (app.bsky.embed.
-                        // gallery#view) carry their photos under `items`
-                        // instead of `images` — same fix as parseFeedItem's
-                        // main image branch above.
-                        val quotedImage = quotedEmbed?.takeIf { it.type.contains("images") || it.type.contains("gallery") || !it.images.isNullOrEmpty() }
-                            ?.let { it.images?.firstOrNull() ?: it.items?.firstOrNull() }
+                        // Bug fix: same crash-safety issue as parseFeedItem's
+                        // main image branch above — a quoted post with a
+                        // 5-10 image carousel whose photo list has any entry
+                        // missing thumb/fullsize would throw when read below
+                        // (Gson can leave non-null fields null at runtime),
+                        // and that exception is swallowed silently by
+                        // parseFeedItemSafe, discarding the whole outer post.
+                        // Filtering to only images with both fields present
+                        // before picking `firstOrNull()` avoids that.
+                        val quotedImage = quotedEmbed?.takeIf {
+                            it.type.contains("images") || it.type.contains("gallery") ||
+                                !it.images.isNullOrEmpty() || !it.items.isNullOrEmpty()
+                        }?.let { qe ->
+                            fun goodImage(list: List<BskyImageView>?) =
+                                list?.firstOrNull { !it.fullsize.isNullOrBlank() && !it.thumb.isNullOrBlank() }
+                            goodImage(qe.images) ?: goodImage(qe.items)
+                        }
                         val quotedVideo = quotedEmbed?.takeIf { it.type.contains("video") }
                         listOf(
                             MediaItem(

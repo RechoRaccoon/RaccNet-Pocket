@@ -243,6 +243,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             liveFriends               = liveFriends,
             liveFriendsLoading        = liveFriendsLoading,
             onLoadLiveFriends         = viewModel::loadLiveFriendsIfNeeded,
+            onEnsureFriends           = viewModel::ensureDmConversationsLoaded,
             availableFeeds            = availableFeeds,
             selectedFeedUri           = selectedFeed,
             authorFeedState           = authorFeedState,

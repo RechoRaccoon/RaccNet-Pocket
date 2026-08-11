@@ -140,6 +140,7 @@ fun MainFeedScreen(
     liveFriends: List<com.mediaviewer.model.StreamplaceLiveStream> = emptyList(),
     liveFriendsLoading: Boolean = false,
     onLoadLiveFriends: () -> Unit = {},
+    onEnsureFriends: () -> Unit = {},
     availableFeeds: List<BskyFeedInfo>,
     selectedFeedUri: String?,
     authorFeedState: MainViewModel.AuthorFeedSavedState?,
@@ -431,7 +432,8 @@ fun MainFeedScreen(
                         onOpenProfile             = onOpenProfile,
                         liveFriends               = liveFriends,
                         liveFriendsLoading        = liveFriendsLoading,
-                        onLoadLiveFriends         = onLoadLiveFriends
+                        onLoadLiveFriends         = onLoadLiveFriends,
+                        onEnsureFriends           = onEnsureFriends
                     )
                     ScreenState.GRID -> GridScreen(
                         items           = mediaItems,
