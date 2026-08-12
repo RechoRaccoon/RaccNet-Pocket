@@ -1322,7 +1322,7 @@ class BlueskyRepository {
                         Log.w("RaccNet-Embed", "Unrecognized embed on ${post.uri}: type='${embed.type}' " +
                             "images=${embed.images?.size ?: -1} items=${embed.items?.size ?: -1} " +
                             "hasMedia=${embed.media != null} hasRecord=${embed.record != null} " +
-                            "hasEmbeds=${embed.embeds?.size ?: -1} textLen=${text.length}")
+                            "textLen=${text.length}")
                     }
                     textOnlyItem()
                 }
