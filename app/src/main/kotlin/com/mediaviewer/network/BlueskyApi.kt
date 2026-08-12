@@ -131,6 +131,17 @@ interface BlueskyApi {
         @Query("actor") actor: String
     ): Response<BskyProfileDetailed>
 
+    // Feature (this session): Live Now — batch profile fetch (up to 25
+    // actors per the real lexicon's maxLength) used to check a set of
+    // mutuals' "Live Now" status all at once instead of one getProfile call
+    // per account. Retrofit repeats @Query("actors") once per list item,
+    // matching the lexicon's array query param.
+    @GET("xrpc/app.bsky.actor.getProfiles")
+    suspend fun getProfiles(
+        @Header("Authorization") token: String,
+        @Query("actors") actors: List<String>
+    ): Response<BskyGetProfilesResponse>
+
     // Generic repo record listing — used for likes/reposts of OTHER accounts
     // (which getActorLikes can't fetch), and for probing/reading third-party
     // AT Proto app records (Leaflet blogs, Popfeed reviews) that have no

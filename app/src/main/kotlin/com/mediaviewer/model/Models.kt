@@ -414,8 +414,32 @@ data class BskyProfileDetailed(
     val followersCount: Int? = 0,
     val followsCount: Int? = 0,
     val postsCount: Int? = 0,
-    val viewer: BskyActorViewer? = null
+    val viewer: BskyActorViewer? = null,
+    // Feature (this session): Bluesky's "Live Now" badge — confirmed via the
+    // actual indigo (Go reference implementation) generated types:
+    // ActorDefs_ProfileViewBasic/ProfileViewDetailed carry an optional
+    // `status` field (app.bsky.actor.defs#statusView) with an `embed`
+    // pointing at the off-platform stream (Twitch, YouTube, etc). See
+    // BskyStatusView below.
+    val status: BskyStatusView? = null
 )
+
+/** app.bsky.actor.defs#statusView — the "Live Now" badge on a profile.
+ *  `status` is the status-type NSID (only "app.bsky.actor.status#live" is
+ *  known to exist); `embed` carries the off-platform link (an
+ *  app.bsky.embed.external view — reusing the existing BskyEmbed/
+ *  BskyExternalView models rather than a bespoke type, since that's the
+ *  same embed shape used elsewhere for link cards). `isActive` distinguishes
+ *  a current/live status from a stale one Bluesky hasn't expired yet. */
+data class BskyStatusView(
+    val status: String? = null,
+    val embed: BskyEmbed? = null,
+    val isActive: Boolean? = null,
+    val expiresAt: String? = null
+)
+
+/** app.bsky.actor.getProfiles batch response — up to 25 actors per call. */
+data class BskyGetProfilesResponse(val profiles: List<BskyProfileDetailed>)
 
 /** UI-ready profile detail used by the Profile Overlay. */
 data class ProfileData(
@@ -601,6 +625,23 @@ data class StreamplaceLiveStream(
     val thumbUrl: String?,
     val viewerCount: Int
 )
+
+/** Feature (this session): Bluesky's native "Live Now" badge — a mutual's
+ *  profile status pointing at an off-platform stream (Twitch/YouTube), as
+ *  opposed to [StreamplaceLiveStream] which is a separate, AT-Protocol-
+ *  native streaming service. Distinct model (rather than reusing
+ *  StreamplaceLiveStream) since the source/embed shape is genuinely
+ *  different and the platform needs to be known to build the right embed
+ *  player URL. */
+data class BlueskyLiveNowStream(
+    val author: AuthorInfo,
+    val title: String,
+    val uri: String,
+    val thumbUrl: String?,
+    val platform: LiveNowPlatform
+)
+
+enum class LiveNowPlatform { TWITCH, YOUTUBE, OTHER }
 
 /** Item 8: one friend's recent Popfeed review, for the Hub's Friends →
  *  Reviews sub-tab — an aggregate across every friend/DM contact's own

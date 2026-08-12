@@ -1,5 +1,8 @@
 package com.mediaviewer.ui
 
+import android.webkit.WebChromeClient
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -21,7 +24,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Close
@@ -57,6 +59,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.mediaviewer.model.AppMode
@@ -149,10 +152,15 @@ fun SettingsSheet(
     friendsReviewsLoading: Boolean = false,
     onLoadFriendsReviews: () -> Unit = {},
     onOpenProfile: (com.mediaviewer.model.AuthorInfo) -> Unit = {},
+    onOpenReview: (com.mediaviewer.model.FriendPopfeedReview) -> Unit = {},
     // Item 8/19: Livestreams section.
     liveFriends: List<com.mediaviewer.model.StreamplaceLiveStream> = emptyList(),
     liveFriendsLoading: Boolean = false,
     onLoadLiveFriends: () -> Unit = {},
+    blueskyLiveNow: List<com.mediaviewer.model.BlueskyLiveNowStream> = emptyList(),
+    blueskyLiveNowLoading: Boolean = false,
+    onLoadBlueskyLiveNow: () -> Unit = {},
+    onOpenLiveNowPlayer: (com.mediaviewer.model.BlueskyLiveNowStream) -> Unit = {},
     // Bug fix (this session): lets the Hub's AT Protocol page trigger a
     // Mutuals (dmConversations) load/retry itself on compose, the same way
     // it already does for friendsReviews/liveFriends — see the matching
@@ -344,9 +352,11 @@ fun SettingsSheet(
                             dmConversations = dmConversations, dmConversationsLoading = dmConversationsLoading,
                             friendsReviews = friendsReviews,
                             friendsReviewsLoading = friendsReviewsLoading, onLoadFriendsReviews = onLoadFriendsReviews,
-                            onOpenProfile = onOpenProfile,
+                            onOpenProfile = onOpenProfile, onOpenReview = onOpenReview,
                             liveFriends = liveFriends, liveFriendsLoading = liveFriendsLoading,
                             onLoadLiveFriends = onLoadLiveFriends,
+                            blueskyLiveNow = blueskyLiveNow, blueskyLiveNowLoading = blueskyLiveNowLoading,
+                            onLoadBlueskyLiveNow = onLoadBlueskyLiveNow, onOpenLiveNowPlayer = onOpenLiveNowPlayer,
                             onEnsureFriends = onEnsureFriends
                         )
                         HubPage.E621 -> E621PageContent(
@@ -501,7 +511,14 @@ private fun SettingsPageContent(
     }
 
     Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 10.dp),
+        // Feature (this session): the Hub isn't supposed to scroll — a
+        // scrollable inner Column was fighting with the swipe gesture above
+        // (page-switch left/right, swipe-up-to-feed) for the same vertical
+        // drag events, and the nestedScrollConnection above only existed to
+        // patch around that conflict. Removing the scroll entirely removes
+        // the conflict at the source instead of continuing to patch around
+        // it — the swipe handling itself is untouched.
+        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         SectionDivider("App Settings")
@@ -799,10 +816,15 @@ private fun AtProtocolPageContent(
     friendsReviewsLoading: Boolean = false,
     onLoadFriendsReviews: () -> Unit = {},
     onOpenProfile: (com.mediaviewer.model.AuthorInfo) -> Unit = {},
+    onOpenReview: (com.mediaviewer.model.FriendPopfeedReview) -> Unit = {},
     // Item 8/19: Livestreams section.
     liveFriends: List<com.mediaviewer.model.StreamplaceLiveStream> = emptyList(),
     liveFriendsLoading: Boolean = false,
     onLoadLiveFriends: () -> Unit = {},
+    blueskyLiveNow: List<com.mediaviewer.model.BlueskyLiveNowStream> = emptyList(),
+    blueskyLiveNowLoading: Boolean = false,
+    onLoadBlueskyLiveNow: () -> Unit = {},
+    onOpenLiveNowPlayer: (com.mediaviewer.model.BlueskyLiveNowStream) -> Unit = {},
     onEnsureFriends: () -> Unit = {}
 ) {
     // Item 8: both of the new sections' fetches are lazy — kick them off once
@@ -818,12 +840,19 @@ private fun AtProtocolPageContent(
     LaunchedEffect(Unit) {
         onLoadFriendsReviews()
         onLoadLiveFriends()
+        onLoadBlueskyLiveNow()
         onEnsureFriends()
     }
     var bskyId by remember { mutableStateOf("") }
     var bskyPw by remember { mutableStateOf("") }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+    // Feature (this session): same fix as the Settings page above — no
+    // scroll on this Column anymore, so it can't fight the swipe gesture
+    // for vertical drag events. This does mean the Mutuals/Reviews/
+    // Livestreams sections need to fit on one screen without scrolling —
+    // the card/skeleton sizing this session was tightened up specifically
+    // with that in mind.
+    Column(Modifier.fillMaxSize()) {
         if (!bskyLoggedIn) {
             Column(
                 modifier = Modifier.fillMaxSize().padding(horizontal = 36.dp),
@@ -1077,15 +1106,21 @@ private fun AtProtocolPageContent(
             for (i in 0 until maxOf(REVIEW_SKELETON_SLOTS, reviews.size)) {
                 val fr = reviews.getOrNull(i)
                 when {
-                    fr != null -> MutualReviewCard(fr, liquidGlass, dominantColor, onOpenProfile)
-                    friendsReviewsLoading -> MutualReviewCardSkeleton()
+                    fr != null -> MutualReviewCard(fr, liquidGlass, dominantColor, onOpenReview)
+                    friendsReviewsLoading -> MutualReviewCardSkeleton(liquidGlass, dominantColor)
                     else -> Spacer(Modifier.width(REVIEW_CARD_WIDTH).height(REVIEW_CARD_HEIGHT))
                 }
             }
         }
 
-        // ── Item 8/19: Livestreams — everyone the user follows, not just
-        // DM/mutual friends. ─────────────────────────────────────────────
+        // ── Item 8/19: Livestreams — everyone the user follows, combining
+        // two distinct sources: Streamplace (an AT-Protocol-native
+        // streaming service) and Bluesky's own built-in "Live Now" profile
+        // badge (an off-platform link to Twitch/YouTube/etc, added this
+        // session — see BlueskyLiveNowStream in Models.kt and
+        // MainViewModel.loadBlueskyLiveNowIfNeeded). Both render as the same
+        // card shape in one merged, combined row so they read as one
+        // section rather than two. ─────────────────────────────────────────
         Spacer(Modifier.height(14.dp))
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
@@ -1098,42 +1133,14 @@ private fun AtProtocolPageContent(
             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            for (i in 0 until maxOf(LIVESTREAM_SKELETON_SLOTS, liveFriends.size)) {
-                val stream = liveFriends.getOrNull(i)
-                val cardShape = RoundedCornerShape(12.dp)
+            val combined: List<LiveCardSource> =
+                liveFriends.map { LiveCardSource.Streamplace(it) } + blueskyLiveNow.map { LiveCardSource.BlueskyLive(it) }
+            val stillLoading = liveFriendsLoading || blueskyLiveNowLoading
+            for (i in 0 until maxOf(LIVESTREAM_SKELETON_SLOTS, combined.size)) {
+                val source = combined.getOrNull(i)
                 when {
-                    stream != null -> {
-                        // Item 8/19: same "open in browser" fallback the VODs
-                        // tab already uses — Streamplace's HLS playback format
-                        // isn't mapped out for inline playback yet.
-                        val uriHandler = LocalUriHandler.current
-                        Column(
-                            Modifier.width(140.dp)
-                                .then(if (liquidGlass) Modifier.glassPanel(true, shape = cardShape, tint = LikeRed) else Modifier.clip(cardShape).background(LikeRed.copy(0.18f)))
-                                .clickable { uriHandler.openUri("https://stream.place/${stream.authorHandle}") }
-                        ) {
-                            Box(Modifier.fillMaxWidth().height(78.dp)) {
-                                if (stream.thumbUrl != null) {
-                                    AsyncImage(model = stream.thumbUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                                        modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp)))
-                                } else {
-                                    Box(Modifier.fillMaxSize().background(Color.White.copy(0.08f)))
-                                }
-                                Box(
-                                    Modifier.padding(6.dp).clip(RoundedCornerShape(4.dp)).background(LikeRed).padding(horizontal = 5.dp, vertical = 2.dp)
-                                ) {
-                                    Text("LIVE", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                            Column(Modifier.padding(8.dp)) {
-                                Text(stream.title.ifBlank { "Untitled stream" }, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(stream.authorDisplayName ?: stream.authorHandle, color = DimGray, fontSize = 10.sp,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                        }
-                    }
-                    liveFriendsLoading -> {
+                    source != null -> LiveCard(source, liquidGlass, onOpenLiveNowPlayer)
+                    stillLoading -> {
                         Column(Modifier.width(140.dp)) {
                             ShimmerBox(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp), Modifier.fillMaxWidth().height(78.dp))
                             Column(Modifier.padding(8.dp)) {
@@ -1169,7 +1176,165 @@ private const val MUTUAL_SKELETON_SLOTS = 6
 private const val REVIEW_SKELETON_SLOTS = 3
 private const val LIVESTREAM_SKELETON_SLOTS = 3
 private val REVIEW_CARD_WIDTH = 108.dp
-private val REVIEW_CARD_HEIGHT = 232.dp
+private val REVIEW_CARD_HEIGHT = 206.dp
+
+// Platform brand colors for Bluesky "Live Now" cards/badges — Twitch and
+// YouTube's own accent colors, so a glance at the card tint alone tells you
+// which platform it links to before you even read the badge text.
+private val TwitchPurple = Color(0xFF9146FF)
+private val YouTubeRed = Color(0xFFFF0000)
+
+/** One entry in the merged Livestreams row — either a Streamplace stream or
+ *  a Bluesky-native "Live Now" badge. A sealed class instead of two parallel
+ *  lists means the row can interleave/render them with one loop instead of
+ *  duplicating the whole card block per source. */
+private sealed class LiveCardSource {
+    data class Streamplace(val stream: com.mediaviewer.model.StreamplaceLiveStream) : LiveCardSource()
+    data class BlueskyLive(val stream: com.mediaviewer.model.BlueskyLiveNowStream) : LiveCardSource()
+}
+
+/** Renders one Livestreams card for either source. Streamplace keeps its
+ *  existing "open in browser" behavior (its HLS format isn't mapped out for
+ *  inline playback); Bluesky Live Now cards open the new inline embed
+ *  player overlay instead (see LiveNowPlayerOverlay below) — this is the
+ *  literal "embed" this feature was asked for, not just a link out. */
+@Composable
+private fun LiveCard(source: LiveCardSource, liquidGlass: Boolean, onOpenLiveNowPlayer: (com.mediaviewer.model.BlueskyLiveNowStream) -> Unit) {
+    val cardShape = RoundedCornerShape(12.dp)
+    val uriHandler = LocalUriHandler.current
+    val (thumbUrl, title, subtitle, tint, badgeText, onClick) = when (source) {
+        is LiveCardSource.Streamplace -> {
+            val s = source.stream
+            SixTuple(s.thumbUrl, s.title.ifBlank { "Untitled stream" }, s.authorDisplayName ?: s.authorHandle,
+                LikeRed, "LIVE") { uriHandler.openUri("https://stream.place/${s.authorHandle}") }
+        }
+        is LiveCardSource.BlueskyLive -> {
+            val s = source.stream
+            val tint = when (s.platform) {
+                com.mediaviewer.model.LiveNowPlatform.TWITCH -> TwitchPurple
+                com.mediaviewer.model.LiveNowPlatform.YOUTUBE -> YouTubeRed
+                com.mediaviewer.model.LiveNowPlatform.OTHER -> LikeRed
+            }
+            val badge = when (s.platform) {
+                com.mediaviewer.model.LiveNowPlatform.TWITCH -> "TWITCH"
+                com.mediaviewer.model.LiveNowPlatform.YOUTUBE -> "YOUTUBE"
+                com.mediaviewer.model.LiveNowPlatform.OTHER -> "LIVE"
+            }
+            SixTuple(s.thumbUrl, s.title, s.author.displayName, tint, badge) { onOpenLiveNowPlayer(s) }
+        }
+    }
+    Column(
+        Modifier.width(140.dp)
+            .then(if (liquidGlass) Modifier.glassPanel(true, shape = cardShape, tint = tint) else Modifier.clip(cardShape).background(tint.copy(0.18f)))
+            .clickable(onClick = onClick)
+    ) {
+        Box(Modifier.fillMaxWidth().height(78.dp)) {
+            if (thumbUrl != null) {
+                AsyncImage(model = thumbUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp)))
+            } else {
+                Box(Modifier.fillMaxSize().background(Color.White.copy(0.08f)))
+            }
+            Box(Modifier.padding(6.dp).clip(RoundedCornerShape(4.dp)).background(tint).padding(horizontal = 5.dp, vertical = 2.dp)) {
+                Text(badgeText, color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        Column(Modifier.padding(8.dp)) {
+            Text(title, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, color = DimGray, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+/** Tiny local helper so [LiveCard] can destructure the per-source card data
+ *  in one `when` branch instead of a longer if/else with repeated fields. */
+private data class SixTuple(
+    val thumbUrl: String?, val title: String, val subtitle: String,
+    val tint: Color, val badgeText: String, val onClick: () -> Unit
+)
+
+/** Feature (this session): the actual "embed" for a Bluesky Live Now
+ *  stream — a full-screen glass overlay hosting a WebView that loads the
+ *  platform's own embeddable player (Twitch/YouTube), rather than just
+ *  bouncing out to the browser like Streamplace still does. Reuses this
+ *  file's established overlay conventions: blockClicksBehind on the root so
+ *  taps can't fall through to the feed behind it, and a close button in the
+ *  same position/style other overlays use. */
+@Composable
+fun LiveNowPlayerOverlay(stream: com.mediaviewer.model.BlueskyLiveNowStream, onClose: () -> Unit) {
+    Box(
+        Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.92f)).blockClicksBehind(),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars)) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(stream.title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(stream.author.displayName, color = DimGray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Box(
+                    Modifier.size(32.dp).clip(CircleShape).background(Color.White.copy(0.12f)).clickable { onClose() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(18.dp))
+                }
+            }
+            // 16:9 embed player — most live platform embeds (Twitch, YouTube)
+            // are widescreen regardless of the source stream's own aspect.
+            Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(Color.Black)) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        WebView(ctx).apply {
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            settings.mediaPlaybackRequiresUserGesture = false
+                            webChromeClient = WebChromeClient()
+                            webViewClient = WebViewClient()
+                            loadUrl(embedUrlFor(stream))
+                        }
+                    },
+                    update = { it.loadUrl(embedUrlFor(stream)) }
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Live via ${stream.uri.substringAfter("://").substringBefore("/")}",
+                color = DimGray, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 16.dp)
+            )
+        }
+    }
+}
+
+/** Builds the actual embeddable-player URL for a Live Now link. Twitch's
+ *  embed requires a `parent` query param naming the embedding page's host —
+ *  Twitch only validates this as a string match, not real domain ownership,
+ *  and third-party (non-browser) embedders commonly supply a placeholder
+ *  value for exactly this reason since there's no real "page host" inside a
+ *  native app's WebView. YouTube just needs the video ID out of any of its
+ *  common URL shapes. Anything else (a platform this app doesn't have a
+ *  known embed format for) falls back to loading the link directly, which
+ *  will render its normal (non-embed) page in the WebView — not a true
+ *  inline player, but still viewable without leaving the app. */
+private fun embedUrlFor(stream: com.mediaviewer.model.BlueskyLiveNowStream): String {
+    val uri = stream.uri
+    return when (stream.platform) {
+        com.mediaviewer.model.LiveNowPlatform.TWITCH -> {
+            val channel = uri.trimEnd('/').substringAfterLast('/')
+            "https://player.twitch.tv/?channel=$channel&parent=raccnetlite.app&muted=false"
+        }
+        com.mediaviewer.model.LiveNowPlatform.YOUTUBE -> {
+            val videoId = Regex("(?:v=|youtu\\.be/|embed/|live/)([A-Za-z0-9_-]{6,})").find(uri)?.groupValues?.get(1)
+            if (videoId != null) "https://www.youtube.com/embed/$videoId?autoplay=1" else uri
+        }
+        com.mediaviewer.model.LiveNowPlatform.OTHER -> uri
+    }
+}
 
 /** A single pulsing placeholder block — the Hub's YouTube-style loading
  *  skeleton primitive, reused for every section's placeholder slots. */
@@ -1189,72 +1354,99 @@ private fun ShimmerBox(shape: androidx.compose.ui.graphics.Shape, modifier: Modi
  *  image, title below it), with the glass bubble extended upward to fit a
  *  small author avatar + display name strip above the poster, since (unlike
  *  Backlog, which is always the profile owner's own list) each of these
- *  reviews is from a different mutual and needs to show whose it is. */
+ *  reviews is from a different mutual and needs to show whose it is.
+ *  Feature (this session): tapping a card now opens the review's own detail
+ *  overlay (via onOpenReview -> MainViewModel.openMutualReview), the same
+ *  overlay you'd land on by opening that person's profile and tapping the
+ *  review there, instead of just opening their profile. The star rating
+ *  moved off the title row entirely into a small StarRatingPill (the exact
+ *  same one profiles' own Reviews tab uses — see ProfileOverlay.kt) layered
+ *  on the poster's top-right corner, and both the author strip and title
+ *  row were tightened up considerably per feedback (the strip was reading
+ *  as two lines when it only needs one; the title row had room for a
+ *  rating line it no longer needs). */
 @Composable
 private fun MutualReviewCard(
     fr: com.mediaviewer.model.FriendPopfeedReview,
     liquidGlass: Boolean,
     dominantColor: Color,
-    onOpenProfile: (com.mediaviewer.model.AuthorInfo) -> Unit
+    onOpenReview: (com.mediaviewer.model.FriendPopfeedReview) -> Unit
 ) {
     val shape = RoundedCornerShape(14.dp)
-    val posterShape = RoundedCornerShape(0.dp)
     Column(
         Modifier.width(REVIEW_CARD_WIDTH)
-            .then(if (liquidGlass) Modifier.glassPanel(true, tint = dominantColor, shape = shape) else Modifier.clip(shape).background(Color.White.copy(0.06f)))
-            .clickable { onOpenProfile(fr.author) }
+            .then(reviewCardBackground(liquidGlass, dominantColor, shape))
+            .clickable { onOpenReview(fr) }
     ) {
-        // Author strip — the extra headroom above the poster.
+        // Author strip — tightened to a single line's worth of height (was
+        // reading as two lines before): smaller avatar, minimal padding.
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
         ) {
             val avatarShape = CircleShape
-            Box(Modifier.size(18.dp).clip(avatarShape).background(Color.White.copy(0.15f))) {
+            Box(Modifier.size(14.dp).clip(avatarShape).background(Color.White.copy(0.15f))) {
                 if (fr.author.avatarUrl != null) {
                     AsyncImage(model = fr.author.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize().clip(avatarShape))
                 }
             }
-            Text(fr.author.displayName, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Medium,
+            Text(fr.author.displayName, color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Medium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         }
-        // Poster — same aspect ratio as Backlog's poster tiles.
+        // Poster — same aspect ratio as Backlog's poster tiles, with the
+        // star rating now living here as a glass pill in the top-right
+        // corner instead of as a text line below.
         Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f)) {
             if (fr.review.mediaImageUrl != null) {
                 AsyncImage(model = fr.review.mediaImageUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize().clip(posterShape))
+                    modifier = Modifier.fillMaxSize())
             } else {
-                Box(Modifier.fillMaxSize().clip(posterShape).background(Color.White.copy(0.10f)))
+                Box(Modifier.fillMaxSize().background(Color.White.copy(0.10f)))
             }
+            StarRatingPill(
+                rating = fr.review.ratingOutOf5, liquidGlass = liquidGlass, tint = dominantColor,
+                modifier = Modifier.align(Alignment.TopEnd).padding(4.dp)
+            )
         }
-        // Title + rating, below the poster (matching Backlog's layout).
-        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)) {
-            Text(fr.review.mediaTitle, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("★ ${"%.1f".format(fr.review.ratingOutOf5)}", color = DimGray, fontSize = 10.sp)
-        }
+        // Title only, below the poster — no rating line (moved above).
+        Text(
+            fr.review.mediaTitle, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)
+        )
     }
 }
 
-/** Skeleton twin of [MutualReviewCard] — same footprint, exact same layout
- *  slots, so the row's height/width never shifts when real cards arrive. */
+/** Shared background modifier for [MutualReviewCard] and its skeleton twin —
+ *  factored out so the skeleton can never visually drift from the real
+ *  card's shape/clip/glass treatment again (this was the cause of the
+ *  "placeholder doesn't match the real card's shape" report: the skeleton
+ *  was using a flat clip+background while the real card used glassPanel,
+ *  which renders its own distinct bounds/corner treatment). */
 @Composable
-private fun MutualReviewCardSkeleton() {
+private fun reviewCardBackground(liquidGlass: Boolean, dominantColor: Color, shape: RoundedCornerShape): Modifier =
+    if (liquidGlass) Modifier.glassPanel(true, tint = dominantColor, shape = shape)
+    else Modifier.clip(shape).background(Color.White.copy(0.06f))
+
+/** Skeleton twin of [MutualReviewCard] — same background treatment (see
+ *  [reviewCardBackground]) and the same three-region layout/sizing, so the
+ *  row's height/width/shape never shifts when real cards arrive. */
+@Composable
+private fun MutualReviewCardSkeleton(liquidGlass: Boolean, dominantColor: Color) {
     val shape = RoundedCornerShape(14.dp)
-    Column(Modifier.width(REVIEW_CARD_WIDTH).clip(shape).background(Color.White.copy(0.03f))) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            ShimmerBox(CircleShape, Modifier.size(18.dp))
-            ShimmerBox(RoundedCornerShape(3.dp), Modifier.weight(1f).height(10.dp))
+    Column(Modifier.width(REVIEW_CARD_WIDTH).then(reviewCardBackground(liquidGlass, dominantColor, shape))) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            ShimmerBox(CircleShape, Modifier.size(14.dp))
+            ShimmerBox(RoundedCornerShape(3.dp), Modifier.weight(1f).height(9.dp))
         }
-        ShimmerBox(RoundedCornerShape(0.dp), Modifier.fillMaxWidth().aspectRatio(2f / 3f))
-        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)) {
-            ShimmerBox(RoundedCornerShape(3.dp), Modifier.fillMaxWidth(0.75f).height(11.dp))
-            Spacer(Modifier.height(5.dp))
-            ShimmerBox(RoundedCornerShape(3.dp), Modifier.width(28.dp).height(9.dp))
+        Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f)) {
+            ShimmerBox(RoundedCornerShape(0.dp), Modifier.matchParentSize())
         }
+        ShimmerBox(RoundedCornerShape(3.dp), Modifier.fillMaxWidth(0.75f).height(11.dp)
+            .padding(horizontal = 8.dp, vertical = 4.dp))
     }
 }
 

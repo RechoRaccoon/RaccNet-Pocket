@@ -198,6 +198,9 @@ private fun AppRoot(viewModel: MainViewModel) {
     val friendsReviewsLoading by viewModel.friendsReviewsLoading.collectAsState()
     val liveFriends           by viewModel.liveFriends.collectAsState()
     val liveFriendsLoading    by viewModel.liveFriendsLoading.collectAsState()
+    val blueskyLiveNow        by viewModel.blueskyLiveNow.collectAsState()
+    val blueskyLiveNowLoading by viewModel.blueskyLiveNowLoading.collectAsState()
+    val playingLiveNow        by viewModel.playingLiveNow.collectAsState()
     val searchOpen             by viewModel.searchOpen.collectAsState()
     val searchState            by viewModel.searchState.collectAsState()
     // Phase 4
@@ -240,10 +243,15 @@ private fun AppRoot(viewModel: MainViewModel) {
             friendsReviews            = friendsReviews,
             friendsReviewsLoading     = friendsReviewsLoading,
             onLoadFriendsReviews      = viewModel::loadFriendsReviewsIfNeeded,
+            onOpenReview              = viewModel::openMutualReview,
             onOpenProfile             = { author -> viewModel.openProfile(author) },
             liveFriends               = liveFriends,
             liveFriendsLoading        = liveFriendsLoading,
             onLoadLiveFriends         = viewModel::loadLiveFriendsIfNeeded,
+            blueskyLiveNow            = blueskyLiveNow,
+            blueskyLiveNowLoading     = blueskyLiveNowLoading,
+            onLoadBlueskyLiveNow      = viewModel::loadBlueskyLiveNowIfNeeded,
+            onOpenLiveNowPlayer       = viewModel::openLiveNowPlayer,
             onEnsureFriends           = viewModel::ensureDmConversationsLoaded,
             selfAvatarUrl             = selfProfile?.author?.avatarUrl,
             availableFeeds            = availableFeeds,
@@ -383,6 +391,15 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onOpenAccount   = { author -> viewModel.closeSearch(); viewModel.openProfile(author) },
                 onClose         = viewModel::closeSearch
             )
+        }
+
+        // Feature (this session): the Hub's Bluesky "Live Now" cards open
+        // this instead of bouncing out to a browser — layered the same way
+        // every other full-screen overlay in this app is (DM inbox, Search),
+        // on top of everything else.
+        val currentPlayingLiveNow = playingLiveNow
+        if (currentPlayingLiveNow != null) {
+            LiveNowPlayerOverlay(stream = currentPlayingLiveNow, onClose = viewModel::closeLiveNowPlayer)
         }
 
         val currentProfileOverlay = profileOverlay

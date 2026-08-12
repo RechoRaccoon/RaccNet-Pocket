@@ -489,6 +489,53 @@ class BlueskyRepository {
         }.awaitAll().flatten().sortedByDescending { it.review.createdAt }
     }
 
+    /** Feature (this session): Bluesky's native "Live Now" badge — checks a
+     *  set of accounts' profile `status` (app.bsky.actor.defs#statusView,
+     *  confirmed against the real indigo/Go reference implementation — see
+     *  BskyStatusView's comment in Models.kt) for an active status with an
+     *  off-platform embed link, via app.bsky.actor.getProfiles (batched 25
+     *  actors at a time, the lexicon's real cap, fetched in parallel).
+     *  Wrapped per-batch and per-item in runCatching, per this file's
+     *  established defensive-parsing pattern, so one bad batch/account can't
+     *  take the others down with it. */
+    suspend fun getLiveNowStreams(token: String, dids: List<String>): Result<List<BlueskyLiveNowStream>> = runCatching {
+        coroutineScope {
+            dids.distinct().chunked(25).map { batch ->
+                async {
+                    val resp = runCatching { retryOnce { api.getProfiles("Bearer $token", batch) } }.getOrNull()
+                    val profiles = resp?.takeIf { it.isSuccessful }?.body()?.profiles ?: return@async emptyList()
+                    profiles.mapNotNull { profile ->
+                        runCatching {
+                            val status = profile.status ?: return@runCatching null
+                            if (status.isActive == false) return@runCatching null
+                            val external = status.embed?.external ?: return@runCatching null
+                            if (external.uri.isBlank()) return@runCatching null
+                            BlueskyLiveNowStream(
+                                author = AuthorInfo(
+                                    did = profile.did, handle = profile.handle,
+                                    displayName = profile.displayName ?: profile.handle, avatarUrl = profile.avatar
+                                ),
+                                title = external.title?.takeIf { it.isNotBlank() } ?: "Live now",
+                                uri = external.uri,
+                                thumbUrl = external.thumb,
+                                platform = liveNowPlatformFor(external.uri)
+                            )
+                        }.getOrNull()
+                    }
+                }
+            }.awaitAll().flatten()
+        }
+    }
+
+    private fun liveNowPlatformFor(uri: String): LiveNowPlatform {
+        val host = runCatching { java.net.URI(uri).host?.lowercase() }.getOrNull() ?: ""
+        return when {
+            host.contains("twitch.tv") -> LiveNowPlatform.TWITCH
+            host.contains("youtube.com") || host.contains("youtu.be") -> LiveNowPlatform.YOUTUBE
+            else -> LiveNowPlatform.OTHER
+        }
+    }
+
     private fun firstStringField(obj: com.google.gson.JsonObject?, vararg keys: String): String? {
         if (obj == null) return null
         for (k in keys) {

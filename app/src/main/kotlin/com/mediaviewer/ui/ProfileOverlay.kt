@@ -1105,8 +1105,12 @@ private fun ReviewRow(review: PopfeedReview, liquidGlass: Boolean, onOpenReview:
     }
 }
 
+// Made non-private (this session) so the Hub's Mutual Review cards in
+// SettingsSheet.kt can reuse the exact same star-rating look instead of
+// re-implementing it — per feedback, "look at how Review stars look in the
+// Reviews tab on profiles for reference."
 @Composable
-private fun StarRatingPill(rating: Float, liquidGlass: Boolean, tint: Color = NeutralGlassTint, modifier: Modifier = Modifier) {
+fun StarRatingPill(rating: Float, liquidGlass: Boolean, tint: Color = NeutralGlassTint, modifier: Modifier = Modifier) {
     val shape = RoundedCornerShape(10.dp)
     Row(
         modifier

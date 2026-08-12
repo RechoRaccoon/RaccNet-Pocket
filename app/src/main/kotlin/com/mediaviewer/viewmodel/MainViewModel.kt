@@ -789,6 +789,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshFriendsReviews() { friendsReviewsLoaded = false; loadFriendsReviewsIfNeeded() }
     fun refreshLiveFriends() { liveFriendsLoaded = false; loadLiveFriendsIfNeeded() }
 
+    // Feature (this session): Bluesky's own native "Live Now" badge —
+    // distinct from Streamplace above, this is an off-platform link (Twitch/
+    // YouTube) a mutual set on their own profile via Bluesky's built-in
+    // status feature. Rendered in the same Livestreams section as the
+    // Streamplace cards (see SettingsSheet.kt), scoped the same way
+    // (everyone followed, matching Streamplace's own scope in this section
+    // rather than Mutuals-only, so the two sources stay visually/logically
+    // consistent within one section) via the same getAllFollows() list.
+    private val _blueskyLiveNow = MutableStateFlow<List<BlueskyLiveNowStream>>(emptyList())
+    val blueskyLiveNow: StateFlow<List<BlueskyLiveNowStream>> = _blueskyLiveNow
+    private val _blueskyLiveNowLoading = MutableStateFlow(false)
+    val blueskyLiveNowLoading: StateFlow<Boolean> = _blueskyLiveNowLoading
+    private var blueskyLiveNowLoaded = false
+
+    fun loadBlueskyLiveNowIfNeeded() {
+        if (blueskyLiveNowLoaded || _blueskyLiveNowLoading.value) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _blueskyLiveNowLoading.value = true
+            // Same "don't cache a transient failure as done" principle as
+            // Reviews/Streamplace above — only latch loaded on genuine success.
+            val followsResult = bskyRepo.getAllFollows(bskyToken, _bskyDid.value)
+            if (followsResult.isSuccess) {
+                val dids = followsResult.getOrDefault(emptyList()).map { it.did }
+                _blueskyLiveNow.value = if (dids.isEmpty()) emptyList()
+                    else bskyRepo.getLiveNowStreams(bskyToken, dids).getOrDefault(emptyList())
+                blueskyLiveNowLoaded = true
+            }
+            _blueskyLiveNowLoading.value = false
+        }
+    }
+    fun refreshBlueskyLiveNow() { blueskyLiveNowLoaded = false; loadBlueskyLiveNowIfNeeded() }
+
+    // Which Bluesky Live Now stream (if any) is currently expanded into the
+    // inline embed player overlay — see LiveNowPlayerOverlay in
+    // SettingsSheet.kt. Only one at a time, same pattern as sendPopupTarget.
+    private val _playingLiveNow = MutableStateFlow<BlueskyLiveNowStream?>(null)
+    val playingLiveNow: StateFlow<BlueskyLiveNowStream?> = _playingLiveNow
+    fun openLiveNowPlayer(stream: BlueskyLiveNowStream) { _playingLiveNow.value = stream }
+    fun closeLiveNowPlayer() { _playingLiveNow.value = null }
+
     fun sendDmThreadReply(text: String) {
         val thread = _dmThread.value ?: return
         if (text.isBlank() || thread.convo.convoId.isBlank()) return
@@ -1166,13 +1206,18 @@ _bskyDid.value          = session.did
      *  profile fetch, the default (Posts) tab, and background probes for
      *  Leaflet blogs / Popfeed reviews so those tabs only appear once we know
      *  the account actually has content in them. */
-    fun openProfile(author: AuthorInfo, initialTab: ProfileTab = ProfileTab.MEDIA) {
+    // Feature (this session): lets a caller that already has a specific
+    // review in hand (the Hub's Mutual Reviews cards) jump straight to that
+    // review's detail overlay, layered on top of the profile it belongs to
+    // — the exact same visual result as opening the profile normally,
+    // going to its Reviews tab, and tapping that review, just in one step.
+    fun openProfile(author: AuthorInfo, initialTab: ProfileTab = ProfileTab.MEDIA, review: PopfeedReview? = null) {
         if (!_bskyLoggedIn.value) return
         // Item 17: don't clobber a profile that's already open (visible or
         // hidden behind a post pager) — chain onto it via `parent` so
         // closeProfile() can unwind back through it instead of losing it.
         val parent = _profileOverlay.value
-        _profileOverlay.value = ProfileOverlayState(author = author, selectedTab = initialTab, parent = parent)
+        _profileOverlay.value = ProfileOverlayState(author = author, selectedTab = initialTab, parent = parent, openReview = review)
 
         viewModelScope.launch(Dispatchers.IO) {
             var result = bskyRepo.getFullProfile(bskyToken, author.did)
@@ -1427,6 +1472,15 @@ _bskyDid.value          = session.did
     }
 
     fun openProfileBlog(blog: LeafletBlog) { _profileOverlay.value = _profileOverlay.value?.copy(openBlog = blog) }
+
+    /** Feature (this session): the Hub's Mutual Reviews cards call this
+     *  directly instead of onOpenProfile — opens the review's author's
+     *  profile (Reviews tab) with the review's own detail overlay already
+     *  showing on top, matching "open the full review in its overlay the
+     *  same way it does when opening one on someone's profile." */
+    fun openMutualReview(fr: FriendPopfeedReview) {
+        openProfile(fr.author, initialTab = ProfileTab.REVIEWS, review = fr.review)
+    }
     fun closeProfileBlog() { _profileOverlay.value = _profileOverlay.value?.copy(openBlog = null) }
     fun openProfileReview(review: PopfeedReview) { _profileOverlay.value = _profileOverlay.value?.copy(openReview = review) }
     fun closeProfileReview() { _profileOverlay.value = _profileOverlay.value?.copy(openReview = null) }
@@ -1912,6 +1966,12 @@ _bskyDid.value          = session.did
                 while (_liveFriendsLoading.value) delay(300)
             }
         }
+        viewModelScope.launch(Dispatchers.IO) {
+            retryWithBackoff(isDone = { blueskyLiveNowLoaded || !_bskyLoggedIn.value }) {
+                loadBlueskyLiveNowIfNeeded()
+                while (_blueskyLiveNowLoading.value) delay(300)
+            }
+        }
     }
 
     /** Retries [attempt] with exponential-ish backoff until [isDone] is true
@@ -1994,15 +2054,62 @@ _bskyDid.value          = session.did
 
 
 
+    // Bug fix (this session): switching to the e621/AT Protocol Hub pages
+    // flips the active AppMode (see goToHubPage's onSwitchMode calls in
+    // SettingsSheet.kt — viewing the e621 Hub page is, by design, meant to
+    // make e621 the active mode so swiping back down to the feed shows e621
+    // content matching the Hub page you were just on). The bug: swiping back
+    // to the AT Protocol Hub page flips the mode back to Bluesky just as
+    // legitimately, but `setMode` used to always call loadFeed()/
+    // loadE621Posts() on every switch, which resets to page 1 and index 0
+    // and re-fetches from the network — so a simple round trip through the
+    // e621 Hub page and back (or Settings and back, if that also happens to
+    // pass through a different mode) silently blew away exactly where the
+    // user was in their feed. These two caches snapshot each mode's feed
+    // (items, scroll index, and pagination cursor) the moment you switch
+    // away from it, and restore that snapshot instead of re-fetching when
+    // you switch back — network only happens the first time a mode is ever
+    // activated. An explicit refresh (switching away and back on purpose to
+    // force a reload, or tapping the already-open feed's own button) still
+    // works exactly as before, since neither of those paths go through this
+    // restore branch.
+    private var cachedBlueskyFeed: FeedSnapshot? = null
+    private var cachedE621Feed: FeedSnapshot? = null
+    private data class FeedSnapshot(
+        val items: List<MediaItem>, val index: Int, val cursor: String?,
+        val activeMode: ActiveFeedMode, val activeActorDid: String?, val authorFeedState: AuthorFeedSavedState?
+    )
+
     fun setMode(mode: AppMode) {
+        if (_appMode.value == mode) return // already there — nothing to switch, nothing to reload
+        // Snapshot whichever mode we're leaving before touching anything.
+        when (_appMode.value) {
+            AppMode.BLUESKY -> cachedBlueskyFeed = FeedSnapshot(
+                _mediaItems.value, _currentIndex.value, feedCursor, activeFeedMode, activeFeedActorDid, _authorFeedState.value
+            )
+            AppMode.E621 -> cachedE621Feed = FeedSnapshot(
+                _mediaItems.value, _currentIndex.value, null, ActiveFeedMode.NORMAL, null, null
+            )
+        }
         _appMode.value = mode
         viewModelScope.launch { prefs.setLastMode(mode.name) }
-        if (mode == AppMode.E621) {
-            if (_e621LoggedIn.value) loadE621Posts()
-            else _screenState.value = ScreenState.SETTINGS
-        } else {
-            if (_bskyLoggedIn.value) { loadFeed(); loadAvailableFeeds() }
-            else _screenState.value = ScreenState.SETTINGS
+        when (mode) {
+            AppMode.E621 -> {
+                if (!_e621LoggedIn.value) { _screenState.value = ScreenState.SETTINGS; return }
+                val cached = cachedE621Feed
+                if (cached != null) { _mediaItems.value = cached.items; _currentIndex.value = cached.index }
+                else loadE621Posts()
+            }
+            AppMode.BLUESKY -> {
+                if (!_bskyLoggedIn.value) { _screenState.value = ScreenState.SETTINGS; return }
+                val cached = cachedBlueskyFeed
+                if (cached != null) {
+                    _mediaItems.value = cached.items; _currentIndex.value = cached.index; feedCursor = cached.cursor
+                    activeFeedMode = cached.activeMode; activeFeedActorDid = cached.activeActorDid
+                    _authorFeedState.value = cached.authorFeedState
+                    loadAvailableFeeds()
+                } else { loadFeed(); loadAvailableFeeds() }
+            }
         }
     }
 
