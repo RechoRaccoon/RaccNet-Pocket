@@ -519,14 +519,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── Search (item 7) ──────────────────────────────────────────────────────
 
-    enum class SearchFilter { POSTS, ACCOUNTS, LISTS, STARTER_PACKS }
+    // Reordered/renamed (per feedback): People now first (was Posts), and
+    // the old "Lists" slot — which never actually had a working search
+    // behind it, see the FEEDS case in runSearch below — is now Feeds,
+    // backed by a real search. Enum name kept as ACCOUNTS/FEEDS rather than
+    // renaming the Kotlin identifiers too, to keep this diff scoped to
+    // what's user-visible; .label() below is what actually says "People".
+    enum class SearchFilter { ACCOUNTS, POSTS, FEEDS, STARTER_PACKS }
 
     data class SearchState(
         val query: String = "",
-        val filter: SearchFilter = SearchFilter.POSTS,
+        val filter: SearchFilter = SearchFilter.ACCOUNTS,
         val posts: List<MediaItem> = emptyList(),
         val accounts: List<SearchAccountResult> = emptyList(),
         val starterPacks: List<SearchStarterPackResult> = emptyList(),
+        val feeds: List<SearchFeedResult> = emptyList(),
         val loading: Boolean = false,
         val hasSearched: Boolean = false
     )
@@ -558,7 +565,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _searchState.value = _searchState.value.copy(query = query)
         if (query.isBlank()) {
             _searchState.value = _searchState.value.copy(
-                posts = emptyList(), accounts = emptyList(), starterPacks = emptyList(), loading = false, hasSearched = false
+                posts = emptyList(), accounts = emptyList(), starterPacks = emptyList(), feeds = emptyList(), loading = false, hasSearched = false
             )
             return
         }
@@ -581,13 +588,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         _searchState.value = _searchState.value.copy(starterPacks = packs, loading = false, hasSearched = true)
                     }.onFailure { _searchState.value = _searchState.value.copy(loading = false, hasSearched = true) }
                 }
-                // Item 7: Bluesky's public API has no list-search endpoint —
-                // only per-actor app.bsky.graph.getLists — so this tab has
-                // nothing to fetch. SearchOverlay shows an explanatory empty
-                // state instead of a fake/broken result list.
-                SearchFilter.LISTS -> {
-                    _searchState.value = _searchState.value.copy(loading = false, hasSearched = true)
+                // Feature (this session): replaces the old "Lists" filter,
+                // which had no working search behind it at all (Bluesky's
+                // public API has no list-search endpoint) — Feeds does,
+                // via app.bsky.unspecced.getPopularFeedGenerators's query
+                // param, so this tab now actually returns results instead
+                // of always showing an explanatory empty state.
+                SearchFilter.FEEDS -> {
+                    bskyRepo.searchFeeds(bskyToken, query).onSuccess { feeds ->
+                        _searchState.value = _searchState.value.copy(feeds = feeds, loading = false, hasSearched = true)
+                    }.onFailure { _searchState.value = _searchState.value.copy(loading = false, hasSearched = true) }
                 }
+            }
+        }
+    }
+
+    /** Search page's Feeds tab: "Add" on a feed result — writes it into the
+     *  user's saved feeds (see BlueskyRepository.addSavedFeed) and refreshes
+     *  the Hub's own feed-picker list so it shows up there immediately
+     *  without needing to reopen the app. */
+    fun addSavedFeedFromSearch(feed: SearchFeedResult) {
+        viewModelScope.launch(Dispatchers.IO) {
+            bskyRepo.addSavedFeed(bskyToken, feed.uri).onSuccess {
+                loadAvailableFeeds()
             }
         }
     }
@@ -713,23 +736,87 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _friendsReviewsLoading = MutableStateFlow(false)
     val friendsReviewsLoading: StateFlow<Boolean> = _friendsReviewsLoading
     private var firehoseIndexerStarted = false
+    // Bug fix (this session): loadFriendsReviewsIfNeeded() used to be
+    // guarded only by `firehoseIndexerStarted || _friendsReviewsLoading.
+    // value`, checked on the caller's thread and then set to true only
+    // *inside* the launched coroutine — a classic check-then-act race. Two
+    // near-simultaneous callers (this genuinely happens: startHubBackground
+    // Warmup's retry loop in init{} and AtProtocolPageContent's own
+    // LaunchedEffect(Unit) both call this, and can land within the same few
+    // milliseconds of a cold start if the Hub page is already the visible
+    // screen) could both pass the guard before either set the flag, both
+    // call FirehoseIndexer.start(), and since start() clears its cache
+    // before re-hydrating, the second call's clear() could stomp the first
+    // call's hydrate() coroutine mid-flight — losing all but whichever
+    // account or two had already been written back in by the time the wipe
+    // landed. That's what was behind "reviews only show up for one
+    // person": not a data bug, a startup race. AtomicBoolean.compareAndSet
+    // is what actually closes this (unlike the StateFlow check above, this
+    // one has no gap between "check" and "claim" for a second thread to
+    // land in).
+    private val firehoseIndexerStartClaimed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    // ── Hub "New" indicators (see PreferencesManager.SEEN_HUB_ITEM_URIS) ──
+    private val _seenHubUris = MutableStateFlow<Set<String>>(emptySet())
+    val seenHubUris: StateFlow<Set<String>> = _seenHubUris
+
+    fun markHubItemSeen(uri: String) {
+        if (uri in _seenHubUris.value) return
+        _seenHubUris.value = _seenHubUris.value + uri
+        viewModelScope.launch(Dispatchers.IO) { prefs.markHubItemSeen(uri) }
+    }
+
+    /** "Clear Indicators" bubble — marks every review/blog currently in the
+     *  Hub as seen in one shot, whether or not it's actually still showing
+     *  a badge (idempotent, so this is cheap to just always pass the full
+     *  current lists rather than diffing first). */
+    fun clearHubIndicators() {
+        val uris = friendsReviews.value.map { it.review.uri } + friendsBlogs.value.map { it.blog.uri }
+        if (uris.isEmpty()) return
+        _seenHubUris.value = _seenHubUris.value + uris
+        viewModelScope.launch(Dispatchers.IO) { prefs.markHubItemsSeen(uris) }
+    }
 
     /** Starts the firehose indexer (one-time getAllFollows + Jetstream
      *  subscribe) the first time the Hub's AT Protocol page composes, same
      *  entry-point shape as the old per-visit loader so callers don't need
      *  to change. Subsequent calls are a no-op — after the first start, the
-     *  indexer's own StateFlows just stay live via the firehose. */
+     *  indexer's own StateFlows just stay live via the firehose. See
+     *  firehoseIndexerStartClaimed's comment for why this needs to be a
+     *  true atomic claim rather than the StateFlow check this used to use. */
     fun loadFriendsReviewsIfNeeded() {
-        if (firehoseIndexerStarted || _friendsReviewsLoading.value) return
+        if (firehoseIndexerStarted) return
+        if (!firehoseIndexerStartClaimed.compareAndSet(false, true)) return
+        _friendsReviewsLoading.value = true
         viewModelScope.launch(Dispatchers.IO) {
-            _friendsReviewsLoading.value = true
             val follows = bskyRepo.getAllFollows(bskyToken, _bskyDid.value)
             if (follows.isSuccess) {
                 firehoseIndexer.start(_bskyDid.value, follows.getOrDefault(emptyList()))
                 firehoseIndexerStarted = true
+            } else {
+                // Genuine failure (not "someone else already claimed it") —
+                // release the claim so the next retry from
+                // startHubBackgroundWarmup's backoff loop can actually try
+                // again, instead of being permanently locked out by its own
+                // failed attempt.
+                firehoseIndexerStartClaimed.set(false)
             }
             _friendsReviewsLoading.value = false
         }
+    }
+
+    /** Bug fix (this session): the Hub's Reviews/Blogs/Live sections used to
+     *  only ever (re)connect once per app process — if the Jetstream
+     *  WebSocket died while backgrounded and failed to reconnect (Android
+     *  can throttle background threads under Doze/App Standby, which is
+     *  exactly what JetstreamClient's own backoff retry runs on), nothing
+     *  else ever prompted a retry, and the Hub would just silently go stale
+     *  until the user logged out and back in (which forces a brand new
+     *  FirehoseIndexer.start()). Called from MainActivity.onResume — a
+     *  much more reliable "we're back, check the connection" signal than
+     *  relying purely on the socket's own timer. */
+    fun onAppForegrounded() {
+        firehoseIndexer.onAppForegrounded()
     }
 
     // ── Item 8/19: Hub "Livestreams" section ─────────────────────────────────
@@ -780,7 +867,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // just "forget what we loaded and load again" — exposed separately from
     // the *IfNeeded functions so a future refresh gesture has something to
     // call without duplicating the fetch logic.
-    fun refreshFriendsReviews() { firehoseIndexerStarted = false; loadFriendsReviewsIfNeeded() }
+    fun refreshFriendsReviews() { firehoseIndexerStarted = false; firehoseIndexerStartClaimed.set(false); loadFriendsReviewsIfNeeded() }
     fun refreshLiveFriends() { liveFriendsLoaded = false; loadLiveFriendsIfNeeded() }
 
     // Feature (this session): Bluesky's own native "Live Now" badge —
@@ -907,6 +994,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { prefs.translateTargetLang.collect { _translationTargetLang.value = it } }
         viewModelScope.launch { prefs.customFontPath.collect { _customFontPath.value = it } }
         viewModelScope.launch { prefs.customFontName.collect { _customFontName.value = it } }
+        viewModelScope.launch { prefs.seenHubItemUris.collect { _seenHubUris.value = it } }
         loadHistoryFromPrefs()
         trackHistoryAutomatically()
         viewModelScope.launch {
@@ -989,6 +1077,28 @@ _bskyDid.value          = session.did
             bskyToken = ""; bskyRefreshToken = ""; _bskyDid.value = ""; bskyHandle = ""
             _bskyLoggedIn.value = false
             _selfProfile.value = null
+            // Bug fix (this session): none of this used to be reset on
+            // logout, so a subsequent login within the same app process
+            // (ViewModel/FirehoseIndexer instances survive logout — they're
+            // only recreated on a fresh process) would find
+            // firehoseIndexerStarted/liveFriendsLoaded/etc. still true from
+            // the PREVIOUS account and treat the Hub as already warm,
+            // silently keeping the old account's cached data around and
+            // never re-hydrating for the new one. Also stops the firehose
+            // connection and DM polling loop rather than leaving them
+            // running against a session that's no longer valid.
+            firehoseIndexer.stop()
+            firehoseIndexerStarted = false
+            firehoseIndexerStartClaimed.set(false)
+            _friendsReviewsLoading.value = false
+            liveFriendsLoaded = false
+            _liveFriends.value = emptyList()
+            blueskyLiveNowLoaded = false
+            _blueskyLiveNow.value = emptyList()
+            dmLivePollingJob?.cancel()
+            dmLivePollingJob = null
+            dmLogCursor = null
+            _dmConversations.value = emptyList()
             if (_appMode.value == AppMode.BLUESKY) {
                 _mediaItems.value = emptyList()
                 _screenState.value = ScreenState.SETTINGS
@@ -1235,13 +1345,13 @@ _bskyDid.value          = session.did
     // review's detail overlay, layered on top of the profile it belongs to
     // — the exact same visual result as opening the profile normally,
     // going to its Reviews tab, and tapping that review, just in one step.
-    fun openProfile(author: AuthorInfo, initialTab: ProfileTab = ProfileTab.MEDIA, review: PopfeedReview? = null) {
+    fun openProfile(author: AuthorInfo, initialTab: ProfileTab = ProfileTab.MEDIA, review: PopfeedReview? = null, blog: LeafletBlog? = null) {
         if (!_bskyLoggedIn.value) return
         // Item 17: don't clobber a profile that's already open (visible or
         // hidden behind a post pager) — chain onto it via `parent` so
         // closeProfile() can unwind back through it instead of losing it.
         val parent = _profileOverlay.value
-        _profileOverlay.value = ProfileOverlayState(author = author, selectedTab = initialTab, parent = parent, openReview = review)
+        _profileOverlay.value = ProfileOverlayState(author = author, selectedTab = initialTab, parent = parent, openReview = review, openBlog = blog)
 
         viewModelScope.launch(Dispatchers.IO) {
             var result = bskyRepo.getFullProfile(bskyToken, author.did)
@@ -1514,6 +1624,13 @@ _bskyDid.value          = session.did
      *  same way it does when opening one on someone's profile." */
     fun openMutualReview(fr: FriendPopfeedReview) {
         openProfile(fr.author, initialTab = ProfileTab.REVIEWS, review = fr.review)
+        markHubItemSeen(fr.review.uri)
+    }
+
+    /** Hub Blogs section equivalent of [openMutualReview] above. */
+    fun openMutualBlog(fb: FriendLeafletBlog) {
+        openProfile(fb.author, initialTab = ProfileTab.BLOGS, blog = fb.blog)
+        markHubItemSeen(fb.blog.uri)
     }
     fun closeProfileBlog() { _profileOverlay.value = _profileOverlay.value?.copy(openBlog = null) }
     fun openProfileReview(review: PopfeedReview) { _profileOverlay.value = _profileOverlay.value?.copy(openReview = review) }

@@ -41,6 +41,14 @@ object PrefKeys {
     // Phase 4 — custom app-wide font pack
     val CUSTOM_FONT_PATH      = stringPreferencesKey("custom_font_path")
     val CUSTOM_FONT_NAME      = stringPreferencesKey("custom_font_name")
+    // Hub "New" indicators (Reviews/Blogs cards) — purely local, never
+    // synced anywhere: a review/blog's own URI, once its card has been
+    // tapped (or "Clear Indicators" hit), is added here so its badge
+    // doesn't come back on a later Hub visit. This can only ever grow, but
+    // review/blog URIs are short strings and this is a person's own
+    // lifetime of Hub activity, not remotely large enough to worry about
+    // trimming.
+    val SEEN_HUB_ITEM_URIS    = stringSetPreferencesKey("seen_hub_item_uris")
 }
 
 class PreferencesManager(private val context: Context) {
@@ -83,6 +91,7 @@ class PreferencesManager(private val context: Context) {
     // Phase 4: custom font pack — absolute path to the copied-in font file on
     // internal storage, plus its original display name for the Settings row.
     val customFontPath: Flow<String?>          = context.dataStore.data.map { it[PrefKeys.CUSTOM_FONT_PATH] }
+    val seenHubItemUris: Flow<Set<String>>     = context.dataStore.data.map { it[PrefKeys.SEEN_HUB_ITEM_URIS] ?: emptySet() }
     val customFontName: Flow<String?>          = context.dataStore.data.map { it[PrefKeys.CUSTOM_FONT_NAME] }
 
     suspend fun setTranslateEnabled(enabled: Boolean) {
@@ -105,8 +114,23 @@ class PreferencesManager(private val context: Context) {
         }
     }
 
-    suspend fun setHideTextOnlyPosts(enabled: Boolean) {
-        context.dataStore.edit { prefs -> prefs[PrefKeys.HIDE_TEXT_ONLY_POSTS] = enabled }
+    /** Marks a single Hub review/blog card as seen — used when the user taps
+     *  it. See SEEN_HUB_ITEM_URIS's own comment. */
+    suspend fun markHubItemSeen(uri: String) {
+        context.dataStore.edit { prefs ->
+            prefs[PrefKeys.SEEN_HUB_ITEM_URIS] = (prefs[PrefKeys.SEEN_HUB_ITEM_URIS] ?: emptySet()) + uri
+        }
+    }
+
+    /** "Clear Indicators" bubble at the bottom of the Hub — marks every URI
+     *  currently showing a "New" badge as seen in one write. */
+    suspend fun markHubItemsSeen(uris: Collection<String>) {
+        context.dataStore.edit { prefs ->
+            prefs[PrefKeys.SEEN_HUB_ITEM_URIS] = (prefs[PrefKeys.SEEN_HUB_ITEM_URIS] ?: emptySet()) + uris
+        }
+    }
+
+    suspend fun setHideTextOnlyPosts(enabled: Boolean) {        context.dataStore.edit { prefs -> prefs[PrefKeys.HIDE_TEXT_ONLY_POSTS] = enabled }
     }
 
     suspend fun setHistoryJson(json: String) {

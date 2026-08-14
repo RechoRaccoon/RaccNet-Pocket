@@ -53,6 +53,7 @@ class JetstreamClient(
     @Volatile private var cursor: Long? = null
     @Volatile private var stopped = true
     @Volatile private var reconnectAttempt = 0
+    @Volatile private var connected = false
 
     private val _events = MutableSharedFlow<JetstreamCommitEvent>(extraBufferCapacity = 512)
     val events: SharedFlow<JetstreamCommitEvent> = _events
@@ -64,8 +65,22 @@ class JetstreamClient(
 
     fun stop() {
         stopped = true
+        connected = false
         socket?.close(1000, "client stop")
         socket = null
+    }
+
+    /** Called on app foreground resume (see MainActivity.onResume /
+     *  FirehoseIndexer.onAppForegrounded) — immediately attempts a fresh
+     *  connection if this client isn't currently connected, rather than
+     *  waiting on scheduleReconnect's own backoff timer. Android can
+     *  throttle background threads (Doze/App Standby), so that timer isn't
+     *  a reliable way to notice "we're back in the foreground, reconnect
+     *  now" — this is. No-op if already connected or never started. */
+    fun reconnectIfNeeded() {
+        if (stopped || connected) return
+        reconnectAttempt = 0
+        connect()
     }
 
     private fun buildUrl(): String {
@@ -81,6 +96,7 @@ class JetstreamClient(
         socket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 reconnectAttempt = 0
+                connected = true
                 Log.d(TAG, "connected")
             }
 
@@ -89,11 +105,13 @@ class JetstreamClient(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                connected = false
                 Log.w(TAG, "connection failure, reconnecting: ${t.message}")
                 scheduleReconnect()
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                connected = false
                 if (!stopped) scheduleReconnect()
             }
         })

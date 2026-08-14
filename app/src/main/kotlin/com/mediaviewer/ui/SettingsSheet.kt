@@ -173,6 +173,12 @@ fun SettingsSheet(
     // it already does for friendsReviews/liveFriends — see the matching
     // comment on AtProtocolPageContent's LaunchedEffect below.
     onEnsureFriends: () -> Unit = {},
+    // Hub Blogs section — mirrors Reviews above.
+    friendsBlogs: List<com.mediaviewer.model.FriendLeafletBlog> = emptyList(),
+    onOpenBlog: (com.mediaviewer.model.FriendLeafletBlog) -> Unit = {},
+    // Hub "New" indicators — purely local read-state, see MainViewModel.
+    seenHubUris: Set<String> = emptySet(),
+    onClearHubIndicators: () -> Unit = {},
     // Feature (this session): the logged-in user's own avatar URL, so the
     // Hub's rims/background can reflect the user's own profile color
     // instead of whatever post they were last looking at (see below).
@@ -383,7 +389,9 @@ fun SettingsSheet(
                             onLoadLiveFriends = onLoadLiveFriends,
                             blueskyLiveNow = blueskyLiveNow, blueskyLiveNowLoading = blueskyLiveNowLoading,
                             onLoadBlueskyLiveNow = onLoadBlueskyLiveNow, onOpenLiveNowPlayer = onOpenLiveNowPlayer,
-                            onEnsureFriends = onEnsureFriends
+                            onEnsureFriends = onEnsureFriends,
+                            friendsBlogs = friendsBlogs, onOpenBlog = onOpenBlog,
+                            seenHubUris = seenHubUris, onClearHubIndicators = onClearHubIndicators
                         )
                         HubPage.E621 -> E621PageContent(
                             e621LoggedIn = e621LoggedIn, e621SearchTags = e621SearchTags,
@@ -855,7 +863,13 @@ private fun AtProtocolPageContent(
     blueskyLiveNowLoading: Boolean = false,
     onLoadBlueskyLiveNow: () -> Unit = {},
     onOpenLiveNowPlayer: (com.mediaviewer.model.BlueskyLiveNowStream) -> Unit = {},
-    onEnsureFriends: () -> Unit = {}
+    onEnsureFriends: () -> Unit = {},
+    // Hub Blogs section — mirrors Reviews.
+    friendsBlogs: List<com.mediaviewer.model.FriendLeafletBlog> = emptyList(),
+    onOpenBlog: (com.mediaviewer.model.FriendLeafletBlog) -> Unit = {},
+    // Hub "New" indicators.
+    seenHubUris: Set<String> = emptySet(),
+    onClearHubIndicators: () -> Unit = {}
 ) {
     // Item 8: both of the new sections' fetches are lazy — kick them off once
     // when this page first composes rather than eagerly for every Hub visit
@@ -1101,6 +1115,20 @@ private fun AtProtocolPageContent(
             }
         }
 
+        // ── Item: Live / Reviews / Blogs — reorderable Hub sections ──
+        // Sorted by most recent post, except Live: the moment someone
+        // followed is live right now, Live jumps to the very front — a
+        // live stream happening beats "posted 10 minutes ago" regardless
+        // of its own recency, per feedback. When nobody's live, Live
+        // doesn't really have a "most recent post" of its own to sort by,
+        // so it just falls to the back rather than claiming one.
+        val combinedLive: List<LiveCardSource> = remember(liveFriends, blueskyLiveNow) {
+            liveFriends.map { LiveCardSource.Streamplace(it) } + blueskyLiveNow.map { LiveCardSource.BlueskyLive(it) }
+        }
+        val hasCurrentLive = combinedLive.isNotEmpty()
+        val reviewsRecency = friendsReviews.firstOrNull()?.review?.createdAt ?: ""
+        val blogsRecency = friendsBlogs.firstOrNull()?.blog?.createdAt ?: ""
+
         // ── Item 8/19: Livestreams — everyone the user follows, combining
         // two distinct sources: Streamplace (an AT-Protocol-native
         // streaming service) and Bluesky's own built-in "Live Now" profile
@@ -1108,90 +1136,160 @@ private fun AtProtocolPageContent(
         // session — see BlueskyLiveNowStream in Models.kt and
         // MainViewModel.loadBlueskyLiveNowIfNeeded). Both render as the same
         // card shape in one merged, combined row so they read as one
-        // section rather than two. Moved above Latest Reviews From Mutuals
-        // per feedback. ─────────────────────────────────────────
-        Spacer(Modifier.height(14.dp))
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
-            Text("Livestreams", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(horizontal = 10.dp))
-            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            val combined: List<LiveCardSource> =
-                liveFriends.map { LiveCardSource.Streamplace(it) } + blueskyLiveNow.map { LiveCardSource.BlueskyLive(it) }
-            val stillLoading = liveFriendsLoading || blueskyLiveNowLoading
-            for (i in 0 until maxOf(LIVESTREAM_SKELETON_SLOTS, combined.size)) {
-                val source = combined.getOrNull(i)
-                when {
-                    source != null -> LiveCard(source, liquidGlass, onOpenLiveNowPlayer)
-                    stillLoading -> {
-                        Column(Modifier.width(140.dp)) {
-                            ShimmerBox(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp), Modifier.fillMaxWidth().height(78.dp))
-                            Column(Modifier.padding(8.dp)) {
-                                ShimmerBox(RoundedCornerShape(3.dp), Modifier.fillMaxWidth(0.8f).height(11.dp))
-                                Spacer(Modifier.height(5.dp))
-                                ShimmerBox(RoundedCornerShape(3.dp), Modifier.fillMaxWidth(0.5f).height(9.dp))
+        // section rather than two.
+        @Composable
+        fun LiveSectionContent() {
+            Spacer(Modifier.height(14.dp))
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+                Text("Livestreams", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 10.dp))
+                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                val stillLoading = liveFriendsLoading || blueskyLiveNowLoading
+                for (i in 0 until maxOf(LIVESTREAM_SKELETON_SLOTS, combinedLive.size)) {
+                    val source = combinedLive.getOrNull(i)
+                    when {
+                        source != null -> LiveCard(source, liquidGlass, onOpenLiveNowPlayer)
+                        stillLoading -> {
+                            Column(Modifier.width(140.dp)) {
+                                ShimmerBox(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp), Modifier.fillMaxWidth().height(78.dp))
+                                Column(Modifier.padding(8.dp)) {
+                                    ShimmerBox(RoundedCornerShape(3.dp), Modifier.fillMaxWidth(0.8f).height(11.dp))
+                                    Spacer(Modifier.height(5.dp))
+                                    ShimmerBox(RoundedCornerShape(3.dp), Modifier.fillMaxWidth(0.5f).height(9.dp))
+                                }
                             }
                         }
-                    }
-                    else -> {
-                        // Honest empty state (same philosophy as Search's
-                        // Lists tab) — most people you follow won't be
-                        // Streamplace users at any given moment, this isn't
-                        // an error. Invisible, same footprint as a real
-                        // card, not removed, so the row's height stays
-                        // constant whether it ends up with 0 or several.
-                        Spacer(Modifier.width(140.dp).height(78.dp + 8.dp + 11.dp + 5.dp + 9.dp + 16.dp))
+                        else -> {
+                            // Honest empty state (same philosophy as Search's
+                            // Lists tab) — most people you follow won't be
+                            // Streamplace users at any given moment, this isn't
+                            // an error. Invisible, same footprint as a real
+                            // card, not removed, so the row's height stays
+                            // constant whether it ends up with 0 or several.
+                            Spacer(Modifier.width(140.dp).height(78.dp + 8.dp + 11.dp + 5.dp + 9.dp + 16.dp))
+                        }
                     }
                 }
             }
         }
 
-        // ── Item 8: Latest Reviews From Mutuals — its own section, and now
-        // scoped specifically to Mutuals (not everyone followed) per
-        // feedback: it reuses the exact same dmConversations list as the
-        // row above (loaded once via ensureDmConversationsLoadedSuspend),
-        // both for speed — mutuals are a much smaller set to fan out
-        // review-lookups over than everyone followed — and because a
-        // "Reviews from Friends"-style section reads better scoped to
-        // people you actually talk to. See BlueskyRepository.
-        // getPopfeedReviews for the other half of the speed fix (parallel +
-        // cached collection-name lookup, replacing what used to be up to 3
-        // sequential requests per account). Moved below Livestreams per
-        // feedback. ─────────────────────────────────────────
-        Spacer(Modifier.height(14.dp))
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
-            Text("Latest Reviews From Mutuals", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(horizontal = 10.dp))
-            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
-        }
-        Spacer(Modifier.height(8.dp))
-        // Feature (this session): review cards restyled to match the
-        // Backlog tab's poster cards (see ProfileOverlay.kt's BacklogCard —
-        // same poster aspect ratio, same title-below-poster layout), just
-        // with the card's glass bubble extended upward to fit a small
-        // author strip (avatar + display name) above the poster, since
-        // unlike Backlog these are reviews from other people, not the
-        // profile owner's own list — the author needs to be visible on the
-        // card itself. Same skeleton-placeholder approach as Mutuals above.
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            val reviews = friendsReviews.take(20)
-            for (i in 0 until maxOf(REVIEW_SKELETON_SLOTS, reviews.size)) {
-                val fr = reviews.getOrNull(i)
-                when {
-                    fr != null -> MutualReviewCard(fr, liquidGlass, dominantColor, onOpenReview)
-                    friendsReviewsLoading -> MutualReviewCardSkeleton(liquidGlass, dominantColor)
-                    else -> Spacer(Modifier.width(REVIEW_CARD_WIDTH).height(REVIEW_CARD_HEIGHT))
+        // ── Item 8: Latest Reviews — everyone the user follows (broadened
+        // from Mutuals-only this session, now that the firehose indexer —
+        // see FirehoseIndexer.kt — makes that feasible speed-wise). Each
+        // card gets a small "New" badge (top-right corner) until tapped —
+        // purely local read-state, see MainViewModel.markHubItemSeen.
+        @Composable
+        fun ReviewsSectionContent() {
+            Spacer(Modifier.height(14.dp))
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+                Text("Latest Reviews", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 10.dp))
+                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                val reviews = friendsReviews.take(20)
+                for (i in 0 until maxOf(REVIEW_SKELETON_SLOTS, reviews.size)) {
+                    val fr = reviews.getOrNull(i)
+                    when {
+                        fr != null -> Box {
+                            MutualReviewCard(fr, liquidGlass, dominantColor, onOpenReview)
+                            if (fr.review.uri !in seenHubUris) {
+                                NewIndicatorBadge(liquidGlass, Modifier.align(Alignment.TopEnd).padding(4.dp))
+                            }
+                        }
+                        friendsReviewsLoading -> MutualReviewCardSkeleton(liquidGlass, dominantColor)
+                        else -> Spacer(Modifier.width(REVIEW_CARD_WIDTH).height(REVIEW_CARD_HEIGHT))
+                    }
                 }
+            }
+        }
+
+        // ── Item: Blogs — new section, everyone the user follows, same
+        // firehose-backed source as Reviews. Same card as profiles' own
+        // Blogs tab (see ProfileOverlay.kt's BlogBubble — thumbnail fill,
+        // title/date top-right, description bottom-left), just smaller to
+        // match the width of a Reviews card so both rows read consistently.
+        @Composable
+        fun BlogsSectionContent() {
+            Spacer(Modifier.height(14.dp))
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+                Text("Blogs", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 10.dp))
+                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                val blogs = friendsBlogs.take(20)
+                for (i in 0 until maxOf(REVIEW_SKELETON_SLOTS, blogs.size)) {
+                    val fb = blogs.getOrNull(i)
+                    when {
+                        fb != null -> Box(Modifier.width(REVIEW_CARD_WIDTH)) {
+                            BlogBubble(
+                                blog = fb.blog, liquidGlass = liquidGlass, tint = dominantColor,
+                                onOpenBlog = { onOpenBlog(fb) }, height = REVIEW_CARD_HEIGHT,
+                                titleFontSize = 10.sp, pillMaxWidth = 90.dp
+                            )
+                            // Title/date pills already claim the blog card's
+                            // own top-right corner (see BlogBubble) — top-
+                            // left is the free corner here, unlike Reviews.
+                            if (fb.blog.uri !in seenHubUris) {
+                                NewIndicatorBadge(liquidGlass, Modifier.align(Alignment.TopStart).padding(4.dp))
+                            }
+                        }
+                        // Reuses the Reviews loading flag — the firehose
+                        // indexer's one `start()` call populates both lists
+                        // together (see FirehoseIndexer), so there's no
+                        // separate "blogs loading" state to track.
+                        friendsReviewsLoading -> ShimmerBox(RoundedCornerShape(16.dp), Modifier.width(REVIEW_CARD_WIDTH).height(REVIEW_CARD_HEIGHT))
+                        else -> Spacer(Modifier.width(REVIEW_CARD_WIDTH).height(REVIEW_CARD_HEIGHT))
+                    }
+                }
+            }
+        }
+
+        val sectionOrder = remember(hasCurrentLive, reviewsRecency, blogsRecency) {
+            val nonLive = listOf("reviews" to reviewsRecency, "blogs" to blogsRecency)
+                .sortedByDescending { it.second }.map { it.first }
+            if (hasCurrentLive) listOf("live") + nonLive else nonLive + listOf("live")
+        }
+        sectionOrder.forEach { key ->
+            when (key) {
+                "live" -> LiveSectionContent()
+                "reviews" -> ReviewsSectionContent()
+                "blogs" -> BlogsSectionContent()
+            }
+        }
+
+        // ── "Clear Indicators" — a short, centered, liquid-glass bubble
+        // below all sections (not fixed/floating — scrolls with the rest
+        // of the Hub, per feedback). Marks every review/blog currently in
+        // the Hub as seen in one tap.
+        Spacer(Modifier.height(20.dp))
+        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            val pillShape = RoundedCornerShape(20.dp)
+            Row(
+                Modifier
+                    .then(if (liquidGlass) Modifier.glassPanel(true, tint = dominantColor, shape = pillShape) else Modifier.clip(pillShape).background(Color.White.copy(0.08f)))
+                    .clickable { onClearHubIndicators() }
+                    .padding(horizontal = 20.dp, vertical = 10.dp)
+            ) {
+                Text("Clear Indicators", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
         }
         Spacer(Modifier.height(16.dp))
@@ -1371,6 +1469,22 @@ private fun embedUrlFor(stream: com.mediaviewer.model.BlueskyLiveNowStream): Str
             if (videoId != null) "https://www.youtube.com/embed/$videoId?autoplay=1" else uri
         }
         com.mediaviewer.model.LiveNowPlatform.OTHER -> uri
+    }
+}
+
+/** Small circular liquid-glass "New" badge — layered on the corner of a Hub
+ *  review/blog card, shown until that card is tapped (see MainViewModel.
+ *  markHubItemSeen) or the "Clear Indicators" bubble is used. Purely local
+ *  read-state: never synced anywhere, never visible to anyone else. */
+@Composable
+private fun NewIndicatorBadge(liquidGlass: Boolean, modifier: Modifier = Modifier) {
+    val shape = CircleShape
+    Box(
+        modifier.size(26.dp)
+            .then(if (liquidGlass) Modifier.glassPanel(true, tint = LikeRed, shape = shape) else Modifier.clip(shape).background(LikeRed.copy(0.9f))),
+        contentAlignment = Alignment.Center
+    ) {
+        Text("New", color = Color.White, fontSize = 7.sp, lineHeight = 7.sp, fontWeight = FontWeight.Bold, maxLines = 1)
     }
 }
 

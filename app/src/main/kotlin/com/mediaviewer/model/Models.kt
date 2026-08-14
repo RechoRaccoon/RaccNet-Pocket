@@ -285,8 +285,14 @@ data class BskyFeedGeneratorView(
     val did: String,
     val displayName: String,
     val description: String? = null,
-    val avatar: String? = null
+    val avatar: String? = null,
+    // Search page's Feeds filter shows "by @handle" — everything else that
+    // already used this model (getSavedFeeds' batch resolution) ignores
+    // this field, so adding it here is backward compatible.
+    val creator: BskyFeedCreator? = null
 )
+
+data class BskyFeedCreator(val handle: String = "")
 
 data class BskyGetFeedGeneratorsResponse(val feeds: List<BskyFeedGeneratorView>)
 
@@ -497,7 +503,13 @@ data class PopfeedReview(
     val mediaBackdropUrl: String? = null,
     val ratingOutOf5: Float = 0f,
     val reviewText: String = "",
-    val createdAt: String = ""
+    val createdAt: String = "",
+    // Profile tabs sub-filter row (Reviews: All/Movies/TV/Games/Music) —
+    // raw creativeWorkType string off the record, e.g. "movie"/"tv_show"/
+    // "video_game"/"album" (see BlueskyRepository.getPopfeedBacklog's
+    // comment for where this field name was confirmed). Bucketed into the
+    // four filter categories by ProfileOverlay's reviewCategoryBucket().
+    val mediaCategory: String? = null
 )
 
 /** A single Popfeed backlog/watchlist entry (movie, TV show, or game the
@@ -511,7 +523,9 @@ data class PopfeedBacklogItem(
     val uri: String,
     val title: String,
     val imageUrl: String? = null,
-    val createdAt: String = ""
+    val createdAt: String = "",
+    // Same sub-filter bucketing as PopfeedReview.mediaCategory above.
+    val mediaCategory: String? = null
 )
 
 // ── Settings Update ───────────────────────────────────────────────────────────
@@ -721,6 +735,17 @@ data class SearchStarterPackResult(
     val description: String?,
     val creator: AuthorInfo,
     val joinedCount: Int
+)
+
+/** Search page's Feeds filter (see BlueskyApi.searchFeedGenerators) — a
+ *  discoverable feed generator the user can add to their own saved feeds,
+ *  as distinct from BskyFeedInfo, which is one already in their saved list. */
+data class SearchFeedResult(
+    val uri: String,
+    val displayName: String,
+    val description: String?,
+    val avatarUrl: String?,
+    val creatorHandle: String
 )
 
 data class SharedPostMessage(

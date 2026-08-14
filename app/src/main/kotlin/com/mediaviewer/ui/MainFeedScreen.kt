@@ -139,6 +139,12 @@ fun MainFeedScreen(
     onLoadFriendsReviews: () -> Unit = {},
     onOpenProfile: (com.mediaviewer.model.AuthorInfo) -> Unit = {},
     onOpenReview: (com.mediaviewer.model.FriendPopfeedReview) -> Unit = {},
+    // Hub Blogs section (mirrors Reviews above).
+    friendsBlogs: List<com.mediaviewer.model.FriendLeafletBlog> = emptyList(),
+    onOpenBlog: (com.mediaviewer.model.FriendLeafletBlog) -> Unit = {},
+    // Hub "New" indicators — purely local read-state, see MainViewModel.
+    seenHubUris: Set<String> = emptySet(),
+    onClearHubIndicators: () -> Unit = {},
     liveFriends: List<com.mediaviewer.model.StreamplaceLiveStream> = emptyList(),
     liveFriendsLoading: Boolean = false,
     onLoadLiveFriends: () -> Unit = {},
@@ -439,6 +445,10 @@ fun MainFeedScreen(
                         onLoadFriendsReviews      = onLoadFriendsReviews,
                         onOpenReview              = onOpenReview,
                         onOpenProfile             = onOpenProfile,
+                        friendsBlogs              = friendsBlogs,
+                        onOpenBlog                = onOpenBlog,
+                        seenHubUris               = seenHubUris,
+                        onClearHubIndicators      = onClearHubIndicators,
                         liveFriends               = liveFriends,
                         liveFriendsLoading        = liveFriendsLoading,
                         onLoadLiveFriends         = onLoadLiveFriends,

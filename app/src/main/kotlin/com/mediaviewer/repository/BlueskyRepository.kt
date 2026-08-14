@@ -427,9 +427,12 @@ class BlueskyRepository {
             ?: obj.get("score")?.takeIf { it.isJsonPrimitive }?.asFloat ?: 0f
         val rating5 = rawRating / 2f
         val createdAt = firstStringField(obj, "createdAt", "publishedAt") ?: ""
+        val category = firstStringField(subject, "creativeWorkType", "mediaType", "type")
+            ?: firstStringField(obj, "creativeWorkType", "mediaType", "type")
         return PopfeedReview(
             uri = uri, mediaTitle = title, mediaImageUrl = image, mediaBackdropUrl = backdrop,
-            ratingOutOf5 = rating5.coerceIn(0f, 5f), reviewText = text, createdAt = createdAt
+            ratingOutOf5 = rating5.coerceIn(0f, 5f), reviewText = text, createdAt = createdAt,
+            mediaCategory = category
         )
     }
 
@@ -624,9 +627,12 @@ class BlueskyRepository {
 
         // listType follows a "{status}_{mediaTypePlural}" convention for books
         // (confirmed: "currently_reading_books") — these are the plausible
-        // equivalents for a movie/TV/game backlog or watchlist.
+        // equivalents for a movie/TV/game/music backlog or watchlist.
         val backlogKeywords = listOf("backlog", "watchlist", "want_to", "towatch", "to_watch", "toplay", "to_play", "plan_to", "planning")
-        val mediaTypeKeywords = listOf("movie", "film", "tv", "show", "game")
+        // Broadened to include music (album/song/track) — profile tabs
+        // sub-filter row (this session) needs Music as a real Backlog
+        // bucket alongside Movies/TV/Games, not just the original three.
+        val mediaTypeKeywords = listOf("movie", "film", "tv", "show", "game", "album", "music", "song", "track")
 
         val result = LinkedHashMap<String, PopfeedBacklogItem>()
         for (rec in body.records) {
@@ -638,7 +644,7 @@ class BlueskyRepository {
             val title = firstStringField(obj, "title") ?: continue
             val image = firstImageField(obj, did, "posterUrl", "coverUrl", "artworkUrl", "poster", "image", "coverImage", "thumb")
             val createdAt = firstStringField(obj, "createdAt", "updatedAt") ?: ""
-            result[rec.uri] = PopfeedBacklogItem(uri = rec.uri, title = title, imageUrl = image, createdAt = createdAt)
+            result[rec.uri] = PopfeedBacklogItem(uri = rec.uri, title = title, imageUrl = image, createdAt = createdAt, mediaCategory = creativeWorkType)
         }
         return result.values.sortedByDescending { it.createdAt }
     }
@@ -723,6 +729,62 @@ class BlueskyRepository {
             }.getOrNull()
         }
         Pair(results, body.cursor)
+    }
+
+    /** Search page's Feeds filter — see BlueskyApi.searchFeedGenerators'
+     *  doc comment for why this replaces the old (never-implemented)
+     *  "Lists" filter: Bluesky's public API has a feed-search endpoint but
+     *  no list-search one. */
+    suspend fun searchFeeds(token: String, query: String): Result<List<SearchFeedResult>> = runCatching {
+        val resp = api.searchFeedGenerators("Bearer $token", query)
+        val body = resp.body() ?: error("Search feeds ${resp.code()}")
+        body.feeds.map { f ->
+            SearchFeedResult(
+                uri = f.uri, displayName = f.displayName, description = f.description,
+                avatarUrl = f.avatar, creatorHandle = f.creator?.handle ?: ""
+            )
+        }
+    }
+
+    /** Adds a feed generator to the user's saved feeds (unpinned — shows up
+     *  in their feed picker, matching what tapping "Add" on a feed does in
+     *  the official app). Preferences are read-modify-write: there's no
+     *  delta endpoint, so this fetches the current preferences array,
+     *  appends into (or creates) the savedFeedsPrefV2 entry, and writes the
+     *  whole array back. See getSavedFeeds above for the matching read-side
+     *  parsing this mirrors. */
+    suspend fun addSavedFeed(token: String, feedUri: String): Result<Unit> = runCatching {
+        val getResp = api.getPreferences("Bearer $token")
+        val body = getResp.body() ?: error("Prefs ${getResp.code()}")
+        val preferences = body.preferences.toMutableList()
+
+        val v2Index = preferences.indexOfFirst {
+            it.isJsonObject && it.asJsonObject.get("\$type")?.asString?.endsWith("savedFeedsPrefV2") == true
+        }
+
+        val newItem = com.google.gson.JsonObject().apply {
+            addProperty("type", "feed")
+            addProperty("value", feedUri)
+            addProperty("pinned", false)
+            addProperty("id", java.util.UUID.randomUUID().toString())
+        }
+
+        if (v2Index >= 0) {
+            val v2Obj = preferences[v2Index].asJsonObject
+            val items = v2Obj.getAsJsonArray("items") ?: com.google.gson.JsonArray().also { v2Obj.add("items", it) }
+            // Don't add a duplicate if it's somehow already saved.
+            val alreadySaved = items.any { it.isJsonObject && it.asJsonObject.get("value")?.asString == feedUri }
+            if (!alreadySaved) items.add(newItem)
+        } else {
+            val newPref = com.google.gson.JsonObject().apply {
+                addProperty("\$type", "app.bsky.actor.defs#savedFeedsPrefV2")
+                add("items", com.google.gson.JsonArray().apply { add(newItem) })
+            }
+            preferences.add(newPref)
+        }
+
+        val putResp = api.putPreferences("Bearer $token", BskyPreferencesResponse(preferences))
+        if (!putResp.isSuccessful) error("Put prefs ${putResp.code()}: ${errorBodyText(putResp)}")
     }
 
     // ── Social Actions ────────────────────────────────────────────────────────

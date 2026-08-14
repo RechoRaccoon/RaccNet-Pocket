@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.RssFeed
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -58,6 +59,7 @@ fun SearchOverlay(
     onSelectFilter: (MainViewModel.SearchFilter) -> Unit,
     onOpenPost: (Int) -> Unit,
     onOpenAccount: (AuthorInfo) -> Unit,
+    onAddFeed: (com.mediaviewer.model.SearchFeedResult) -> Unit = {},
     onClose: () -> Unit
 ) {
     androidx.activity.compose.BackHandler(onBack = onClose)
@@ -161,13 +163,14 @@ fun SearchOverlay(
                     !state.hasSearched -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text("Search posts, accounts, and starter packs", color = DimGray, fontSize = 13.sp)
                     }
-                    state.filter == MainViewModel.SearchFilter.LISTS -> Box(
-                        Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            "List search isn't available through Bluesky's public API yet — only your own lists can be browsed, from the AT Protocol page.",
-                            color = DimGray, fontSize = 13.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center, lineHeight = 18.sp
-                        )
+                    state.filter == MainViewModel.SearchFilter.FEEDS -> {
+                        if (state.feeds.isEmpty()) EmptyResultsText() else {
+                            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 4.dp)) {
+                                items(state.feeds, key = { it.uri }) { feed ->
+                                    FeedResultRow(feed = feed, liquidGlass = liquidGlass, onAdd = { onAddFeed(feed) })
+                                }
+                            }
+                        }
                     }
                     state.filter == MainViewModel.SearchFilter.POSTS -> {
                         if (state.posts.isEmpty()) EmptyResultsText() else {
@@ -216,9 +219,9 @@ private fun EmptyResultsText() {
 }
 
 private fun MainViewModel.SearchFilter.label(): String = when (this) {
+    MainViewModel.SearchFilter.ACCOUNTS      -> "People"
     MainViewModel.SearchFilter.POSTS         -> "Posts"
-    MainViewModel.SearchFilter.ACCOUNTS      -> "Accounts"
-    MainViewModel.SearchFilter.LISTS         -> "Lists"
+    MainViewModel.SearchFilter.FEEDS         -> "Feeds"
     MainViewModel.SearchFilter.STARTER_PACKS -> "Starter Packs"
 }
 
@@ -281,6 +284,46 @@ private fun StarterPackResultRow(pack: SearchStarterPackResult, liquidGlass: Boo
             if (!pack.description.isNullOrBlank()) {
                 Text(pack.description, color = Color.White.copy(0.7f), fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
             }
+        }
+    }
+}
+
+/** Search page's Feeds filter — a discoverable feed generator with an "Add"
+ *  button (writes it to the user's saved feeds, see MainViewModel.
+ *  addSavedFeedFromSearch) instead of a click-to-open row, since these
+ *  aren't things you "view", you subscribe to them. */
+@Composable
+private fun FeedResultRow(feed: SearchFeedResult, liquidGlass: Boolean, onAdd: () -> Unit) {
+    var added by remember(feed.uri) { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Box(Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).background(Color.White.copy(0.1f)), contentAlignment = Alignment.Center) {
+            if (feed.avatarUrl != null) {
+                AsyncImage(model = feed.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            } else {
+                Icon(Icons.Default.RssFeed, contentDescription = null, tint = DimGray, modifier = Modifier.size(20.dp))
+            }
+        }
+        Column(Modifier.weight(1f)) {
+            Text(feed.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (feed.creatorHandle.isNotBlank()) {
+                Text("by @${feed.creatorHandle}", color = DimGray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            if (!feed.description.isNullOrBlank()) {
+                Text(feed.description, color = Color.White.copy(0.7f), fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+            }
+        }
+        val pillShape = RoundedCornerShape(14.dp)
+        Box(
+            Modifier
+                .then(if (liquidGlass) Modifier.glassPanel(true, shape = pillShape) else Modifier.clip(pillShape).background(Color.White.copy(0.1f)))
+                .clickable(enabled = !added) { added = true; onAdd() }
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+        ) {
+            Text(if (added) "Added" else "Add", color = if (added) VoteGreen else Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
         }
     }
 }

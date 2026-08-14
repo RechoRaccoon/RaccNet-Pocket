@@ -89,6 +89,27 @@ interface BlueskyApi {
         @Header("Authorization") token: String
     ): Response<BskyPreferencesResponse>
 
+    // Writes the full preferences array back — used to add a feed to the
+    // user's saved feeds (see BlueskyRepository.addSavedFeed). Bluesky's
+    // putPreferences lexicon takes the whole array, not a delta, so callers
+    // always read-modify-write via getPreferences first.
+    @POST("xrpc/app.bsky.actor.putPreferences")
+    suspend fun putPreferences(
+        @Header("Authorization") token: String,
+        @Body request: BskyPreferencesResponse
+    ): Response<Unit>
+
+    // Search page's Feeds filter (renamed from the old, never-actually-
+    // implemented "Lists" filter — Bluesky's public API has no list-search
+    // endpoint, but it does have this one for feed generators). Same
+    // endpoint the official app's feed search uses.
+    @GET("xrpc/app.bsky.unspecced.getPopularFeedGenerators")
+    suspend fun searchFeedGenerators(
+        @Header("Authorization") token: String,
+        @Query("query") query: String,
+        @Query("limit") limit: Int = 25
+    ): Response<BskyGetFeedGeneratorsResponse>
+
     @GET("xrpc/app.bsky.feed.getFeedGenerators")
     suspend fun getFeedGenerators(
         @Header("Authorization") token: String,

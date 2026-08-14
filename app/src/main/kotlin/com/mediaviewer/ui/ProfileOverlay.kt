@@ -71,6 +71,76 @@ private fun MainViewModel.ProfileTab.label(): String = when (this) {
     MainViewModel.ProfileTab.VODS       -> "Vods"
 }
 
+// ─── Profile tabs sub-filter row ────────────────────────────────────────────
+// A second, half-height row of pills under the main tab row (Popfeed does
+// this too — a type filter directly under the tab strip). Only shown for
+// tabs where it means something: Media/Reposts/Likes filter by
+// image-vs-video, Reviews/Backlog filter by the media's own category.
+
+private enum class MediaKindFilter { ALL, IMAGES, VIDEOS }
+private fun MediaKindFilter.label() = when (this) {
+    MediaKindFilter.ALL -> "All"; MediaKindFilter.IMAGES -> "Images"; MediaKindFilter.VIDEOS -> "Videos"
+}
+private fun MediaKindFilter.matches(item: MediaItem) = when (this) {
+    MediaKindFilter.ALL -> true
+    MediaKindFilter.IMAGES -> !item.isVideo
+    MediaKindFilter.VIDEOS -> item.isVideo
+}
+
+private enum class ReviewKindFilter { ALL, MOVIES, TV, GAMES, MUSIC }
+private fun ReviewKindFilter.label() = when (this) {
+    ReviewKindFilter.ALL -> "All"; ReviewKindFilter.MOVIES -> "Movies"; ReviewKindFilter.TV -> "TV"
+    ReviewKindFilter.GAMES -> "Games"; ReviewKindFilter.MUSIC -> "Music"
+}
+
+/** Buckets a raw creativeWorkType string (e.g. "movie", "tv_show",
+ *  "video_game", "album") into one of the four sub-filter categories.
+ *  Keyword-contains matching, same defensive style as the rest of this
+ *  record's parsing (see BlueskyRepository.getPopfeedBacklog) — Popfeed's
+ *  exact set of type strings isn't fully documented, so this is deliberately
+ *  loose rather than an exact-match enum. Null/unrecognized categories only
+ *  show up under "All", never hidden entirely. */
+private fun categoryBucket(raw: String?): ReviewKindFilter? {
+    val v = raw?.lowercase() ?: return null
+    return when {
+        v.contains("movie") || v.contains("film") -> ReviewKindFilter.MOVIES
+        v.contains("tv") || v.contains("show") || v.contains("series") || v.contains("episode") -> ReviewKindFilter.TV
+        v.contains("game") -> ReviewKindFilter.GAMES
+        v.contains("album") || v.contains("music") || v.contains("song") || v.contains("track") -> ReviewKindFilter.MUSIC
+        else -> null
+    }
+}
+private fun ReviewKindFilter.matchesReview(review: PopfeedReview) = this == ReviewKindFilter.ALL || categoryBucket(review.mediaCategory) == this
+private fun ReviewKindFilter.matchesBacklog(item: PopfeedBacklogItem) = this == ReviewKindFilter.ALL || categoryBucket(item.mediaCategory) == this
+
+@Composable
+private fun <T> ProfileSubFilterRow(options: List<T>, selected: T, liquidGlass: Boolean, tint: Color, labelOf: (T) -> String, onSelect: (T) -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 12.dp, vertical = 5.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        options.forEach { option ->
+            val isSelected = option == selected
+            val shape = RoundedCornerShape(12.dp)
+            Box(
+                Modifier
+                    .then(
+                        if (liquidGlass) Modifier.glassPanel(true, tint = if (isSelected) tint else tint.copy(alpha = 0.4f), shape = shape)
+                        else Modifier.clip(shape).background(if (isSelected) Color.White.copy(0.15f) else Color.White.copy(0.06f))
+                    )
+                    .clickable { onSelect(option) }
+                    .padding(horizontal = 9.dp, vertical = 4.dp)
+            ) {
+                Text(labelOf(option), color = if (isSelected) Color.White else DimGray, fontSize = 11.sp,
+                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal)
+            }
+        }
+    }
+}
+
 /**
  * Profile Overhaul — a full-screen overlay page for viewing an account's
  * profile. Rendered above everything else (see MainActivity) so closing it
@@ -168,6 +238,14 @@ fun ProfileOverlay(
     var hasShownContentOnce by remember(author.did) { mutableStateOf(false) }
     LaunchedEffect(contentReady) { if (contentReady) hasShownContentOnce = true }
 
+    // Profile tabs sub-filter row state — purely local/display-only (not
+    // round-tripped through the ViewModel, since it never needs to survive
+    // beyond this composition), reset whenever the profile or the selected
+    // tab changes so switching tabs/profiles doesn't carry over a stale
+    // filter selection from a completely different tab's category set.
+    var mediaKindFilter by remember(author.did, state.selectedTab) { mutableStateOf(MediaKindFilter.ALL) }
+    var reviewKindFilter by remember(author.did, state.selectedTab) { mutableStateOf(ReviewKindFilter.ALL) }
+
     Box(
         Modifier
             .fillMaxSize()
@@ -224,6 +302,12 @@ fun ProfileOverlay(
 
             item(key = "profile_tabs") {
                 Column {
+                    // Compact divider above the tab row (per feedback) — the
+                    // existing divider below the tabs stays where it was;
+                    // this just adds the matching one above so the tab strip
+                    // reads as its own bounded section rather than floating
+                    // directly under the header.
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
                     ProfileTabsRow(
                         tabs = MainViewModel.ProfileTab.entries.filter { it in state.availableTabs },
                         selected = state.selectedTab,
@@ -232,12 +316,36 @@ fun ProfileOverlay(
                         onSelect = onSelectTab
                     )
                     HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
+                    // Sub-filter row (per feedback) — a second, half-height
+                    // row of pills directly under the tab strip, same
+                    // treatment Popfeed itself uses. Only rendered for tabs
+                    // where a type filter means something; other tabs (Text
+                    // Posts, Blogs, Vods) show nothing extra here.
+                    when (state.selectedTab) {
+                        MainViewModel.ProfileTab.MEDIA, MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES -> {
+                            ProfileSubFilterRow(
+                                options = MediaKindFilter.entries.toList(), selected = mediaKindFilter,
+                                liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
+                                onSelect = { mediaKindFilter = it }
+                            )
+                        }
+                        MainViewModel.ProfileTab.REVIEWS, MainViewModel.ProfileTab.BACKLOG -> {
+                            ProfileSubFilterRow(
+                                options = ReviewKindFilter.entries.toList(), selected = reviewKindFilter,
+                                liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
+                                onSelect = { reviewKindFilter = it }
+                            )
+                        }
+                        else -> {}
+                    }
                 }
             }
 
             profileResultsContent(
                 state = state,
                 liquidGlass = liquidGlass,
+                mediaKindFilter = mediaKindFilter,
+                reviewKindFilter = reviewKindFilter,
                 profileTint = blended,
                 onLoadMore = onLoadMore,
                 // Bug fix: capture scroll position before this profile gets
@@ -703,6 +811,8 @@ private fun LazyListScope.profileResultsContent(
     state: MainViewModel.ProfileOverlayState,
     liquidGlass: Boolean,
     profileTint: Color,
+    mediaKindFilter: MediaKindFilter,
+    reviewKindFilter: ReviewKindFilter,
     onLoadMore: () -> Unit,
     onTapItem: (Int) -> Unit,
     onOpenBlog: (LeafletBlog) -> Unit,
@@ -712,10 +822,16 @@ private fun LazyListScope.profileResultsContent(
 
     when (state.selectedTab) {
         MainViewModel.ProfileTab.MEDIA, MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES -> {
+            val allItems = tabState?.items ?: emptyList()
+            // See profileMediaGridRows' own doc comment on `filter` for why
+            // this passes the full, unfiltered list through plus a
+            // predicate, rather than pre-filtering the list itself —
+            // onTapItem's index has to stay valid against the original list.
             profileMediaGridRows(
-                items = tabState?.items ?: emptyList(),
+                items = allItems,
                 loading = tabState?.loading == true,
-                onTapItem = onTapItem, onLoadMore = onLoadMore
+                onTapItem = onTapItem, onLoadMore = onLoadMore,
+                filter = { mediaKindFilter.matches(it) }
             )
         }
         MainViewModel.ProfileTab.TEXT_POSTS -> {
@@ -748,13 +864,15 @@ private fun LazyListScope.profileResultsContent(
             }
         }
         MainViewModel.ProfileTab.REVIEWS -> {
-            items(tabState?.reviews ?: emptyList(), key = { "review_${it.uri}" }) { review ->
+            val reviews = (tabState?.reviews ?: emptyList()).filter { reviewKindFilter.matchesReview(it) }
+            items(reviews, key = { "review_${it.uri}" }) { review ->
                 ReviewRow(review = review, liquidGlass = liquidGlass, onOpenReview = onOpenReview,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
             }
         }
         MainViewModel.ProfileTab.BACKLOG -> {
-            profileBacklogGridRows(items = tabState?.backlog ?: emptyList(), liquidGlass = liquidGlass)
+            val backlog = (tabState?.backlog ?: emptyList()).filter { reviewKindFilter.matchesBacklog(it) }
+            profileBacklogGridRows(items = backlog, liquidGlass = liquidGlass)
         }
         MainViewModel.ProfileTab.VODS -> {
             items(tabState?.vods ?: emptyList(), key = { "vod_${it.uri}" }) { vod ->
@@ -783,13 +901,36 @@ private fun LazyListScope.profileResultsContent(
 }
 
 private fun LazyListScope.profileMediaGridRows(
-    items: List<MediaItem>, loading: Boolean, onTapItem: (Int) -> Unit, onLoadMore: () -> Unit
+    items: List<MediaItem>, loading: Boolean, onTapItem: (Int) -> Unit, onLoadMore: () -> Unit,
+    // Sub-filter row predicate (see MediaKindFilter.matches) — deliberately
+    // applied INSIDE this function, filtering the flattened thumbnail
+    // entries rather than the `items` list itself, so postIndex below stays
+    // a true index into the original, unfiltered `items` list. onTapItem's
+    // caller (openProfileMediaItem-style pager navigation) indexes against
+    // that same original list — passing it a filtered list's index instead
+    // would silently open the wrong post the moment a filter narrowed what
+    // was on screen.
+    filter: (MediaItem) -> Boolean = { true }
 ) {
     val flattened = items.mapIndexed { postIndex, item ->
+        if (!filter(item)) return@mapIndexed emptyList()
         if (item.mediaGroup.size > 1) item.mediaGroup.map { img -> postIndex to img.thumbUrl.ifBlank { img.mediaUrl } }
         else listOf(postIndex to item.thumbUrl.ifBlank { item.mediaUrl })
     }.flatten()
     val rows = flattened.chunked(3)
+
+    // Edge case: a sub-filter (e.g. "Videos") can match nothing in the
+    // currently-loaded page even though `items` itself isn't empty — in
+    // that case `rows` is empty too, so the itemsIndexed loop below never
+    // renders a row and its own near-the-end onLoadMore trigger never
+    // fires. Without this, a filter that happens to match zero items on the
+    // current page would just show a dead-end empty grid instead of
+    // continuing to page in looking for a match.
+    if (rows.isEmpty() && items.isNotEmpty() && !loading) {
+        item(key = "grid_filtered_empty_loadmore") {
+            LaunchedEffect(items.size) { onLoadMore() }
+        }
+    }
 
     itemsIndexed(rows, key = { i, row -> "grid_row_${i}_${row.firstOrNull()?.first ?: i}" }) { rowIndex, row ->
         // Fire load-more once we're rendering near the last few rows.

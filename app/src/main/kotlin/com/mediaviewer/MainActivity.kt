@@ -119,8 +119,7 @@ private fun CrashLogScreen(log: String, onDismiss: () -> Unit) {
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
+    override fun onCreate(savedInstanceState: Bundle?) {        super.onCreate(savedInstanceState)
         installCrashHandler(applicationContext)
         enableEdgeToEdge()
         setContent {
@@ -142,6 +141,26 @@ class MainActivity : ComponentActivity() {
             }
             MediaViewerTheme(customFontFamily = customFontFamily) { AppRoot(viewModel) }
         }
+    }
+
+    // Bug fix: the Hub's Reviews/Blogs/Live sections and the Jetstream
+    // firehose connection they depend on (see FirehoseIndexer.kt) used to
+    // only ever get (re)established once, right after login — if the app
+    // was later backgrounded long enough for Android to suspend its
+    // network sockets (or the process was frozen under memory pressure
+    // without being fully killed), the Jetstream WebSocket could silently
+    // die and never successfully reconnect, and nothing else prompted a
+    // retry — so the Hub would just quietly go stale until the user logged
+    // out and back in, which forced a brand-new FirehoseIndexer.start().
+    // Foreground resume is a much more reliable, immediate signal to
+    // reconnect than relying purely on the socket's own background retry
+    // thread (which Android can throttle while backgrounded/Doze), so this
+    // nudges the indexer's connection every time the app becomes visible
+    // again — a no-op if it's already connected (see JetstreamClient.
+    // reconnectIfNeeded), so this is cheap to call unconditionally.
+    override fun onResume() {
+        super.onResume()
+        viewModel.onAppForegrounded()
     }
 }
 
@@ -197,6 +216,8 @@ private fun AppRoot(viewModel: MainViewModel) {
     // Item 8: Hub Friends/Livestreams sections.
     val friendsReviews        by viewModel.friendsReviews.collectAsState()
     val friendsReviewsLoading by viewModel.friendsReviewsLoading.collectAsState()
+    val friendsBlogs           by viewModel.friendsBlogs.collectAsState()
+    val seenHubUris            by viewModel.seenHubUris.collectAsState()
     val liveFriends           by viewModel.liveFriends.collectAsState()
     val liveFriendsLoading    by viewModel.liveFriendsLoading.collectAsState()
     val blueskyLiveNow        by viewModel.blueskyLiveNow.collectAsState()
@@ -246,6 +267,10 @@ private fun AppRoot(viewModel: MainViewModel) {
             onLoadFriendsReviews      = viewModel::loadFriendsReviewsIfNeeded,
             onOpenReview              = viewModel::openMutualReview,
             onOpenProfile             = { author -> viewModel.openProfile(author) },
+            friendsBlogs              = friendsBlogs,
+            onOpenBlog                = viewModel::openMutualBlog,
+            seenHubUris               = seenHubUris,
+            onClearHubIndicators      = viewModel::clearHubIndicators,
             liveFriends               = liveFriends,
             liveFriendsLoading        = liveFriendsLoading,
             onLoadLiveFriends         = viewModel::loadLiveFriendsIfNeeded,
@@ -390,6 +415,7 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onSelectFilter  = viewModel::setSearchFilter,
                 onOpenPost      = viewModel::openPostFromSearch,
                 onOpenAccount   = { author -> viewModel.closeSearch(); viewModel.openProfile(author) },
+                onAddFeed       = viewModel::addSavedFeedFromSearch,
                 onClose         = viewModel::closeSearch
             )
         }

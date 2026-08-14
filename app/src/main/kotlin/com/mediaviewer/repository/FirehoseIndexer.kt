@@ -100,9 +100,26 @@ class FirehoseIndexer(private val bskyRepo: BlueskyRepository) {
         js.start()
     }
 
+    /** Stops the Jetstream connection and clears every cache — called on
+     *  logout so a subsequent login (same process, same ViewModel/indexer
+     *  instance) starts from a clean slate instead of momentarily showing
+     *  the previous account's cached reviews/blogs/follow-graph. */
     fun stop() {
         jetstream?.stop()
         jetstream = null
+        followedAuthors.clear(); reviewsByDid.clear(); blogsByDid.clear()
+        _followedDids.value = emptySet()
+        _friendReviews.value = emptyList()
+        _friendBlogs.value = emptyList()
+        myDid = ""
+    }
+
+    /** See JetstreamClient.reconnectIfNeeded's doc comment — called from
+     *  MainViewModel.onAppForegrounded, itself called from MainActivity.
+     *  onResume. No-op if the indexer was never started (not logged in
+     *  yet) or the socket's already connected. */
+    fun onAppForegrounded() {
+        jetstream?.reconnectIfNeeded()
     }
 
     private suspend fun hydrate(accounts: List<AuthorInfo>) = coroutineScope {
