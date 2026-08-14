@@ -473,7 +473,12 @@ data class LeafletBlog(
     val uri: String,
     val title: String,
     val bodyText: String,
-    val createdAt: String
+    val createdAt: String,
+    // Blog-card redesign: best-effort cover image/description, extracted
+    // defensively the same way the rest of this record's fields are (see
+    // BlueskyRepository.parseLeafletBlogRecord) — either can be absent.
+    val description: String? = null,
+    val thumbnailUrl: String? = null
 )
 
 /** A single Popfeed (social.popfeed.review, formerly app.popsky.review)
@@ -569,6 +574,18 @@ data class BskyGetConvoForMembersResponse(val convo: BskyConvoView)
 
 data class BskyGetMessagesResponse(val messages: List<BskyMessageView>, val cursor: String? = null)
 
+/** One entry from chat.bsky.convo.getLog — a delta feed across every convo
+ *  at once. `$type` distinguishes create/update/delete-message and convo-
+ *  read events (only the message-bearing ones are used here; unrecognized
+ *  types are just skipped rather than erroring). */
+data class BskyConvoLogEntry(
+    @com.google.gson.annotations.SerializedName("\$type") val type: String? = null,
+    val convoId: String? = null,
+    val rev: String? = null,
+    val message: BskyMessageView? = null
+)
+data class BskyGetConvoLogResponse(val logs: List<BskyConvoLogEntry> = emptyList(), val cursor: String? = null)
+
 data class BskySendMessageInput(
     val text: String,
     val facets: List<Map<String, Any>>? = null,
@@ -648,6 +665,10 @@ enum class LiveNowPlatform { TWITCH, YOUTUBE, OTHER }
  *  Reviews tab (see BlueskyRepository.getPopfeedReviews for the single-
  *  profile version this is built from), sorted newest first. */
 data class FriendPopfeedReview(val author: AuthorInfo, val review: PopfeedReview)
+
+/** Hub "Blogs" section: one followed account's recent Leaflet blog, mirroring
+ *  FriendPopfeedReview's shape — see FirehoseIndexer. */
+data class FriendLeafletBlog(val author: AuthorInfo, val blog: LeafletBlog)
 
 data class DmEmbeddedPost(
     val postUri: String,

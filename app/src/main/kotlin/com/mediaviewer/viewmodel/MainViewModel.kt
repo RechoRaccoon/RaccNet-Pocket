@@ -1,6 +1,7 @@
 package com.mediaviewer.viewmodel
 
 import android.app.Application
+import android.util.Log
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -9,6 +10,7 @@ import coil.request.ImageRequest
 import com.mediaviewer.model.*
 import com.mediaviewer.repository.BlueskyRepository
 import com.mediaviewer.repository.E621Repository
+import com.mediaviewer.repository.FirehoseIndexer
 import com.mediaviewer.repository.StreamplaceRepository
 import com.mediaviewer.util.PreferencesManager
 import com.mediaviewer.worker.DownloadWorker
@@ -295,6 +297,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // post flips it back to false instead of reconstructing the profile
         // from scratch.
         val hidden: Boolean = false,
+        // Bug fix: scrolling a profile's grid, tapping a post, then pinching
+        // back in was jumping to the bottom of the results instead of
+        // staying put. The composable itself does stay alive at zero size
+        // while hidden (see `hidden` above) and in principle should keep its
+        // own LazyListState untouched, but a LazyColumn collapsed to 0dp and
+        // re-expanded doesn't reliably preserve its exact scroll position on
+        // its own. So the scroll position is now also explicitly captured
+        // here (see saveProfileScrollPosition(), called right before hiding,
+        // from both openPostFromProfileTab and pinchOutFromProfile) and
+        // force-restored by ProfileOverlay itself the moment `hidden` flips
+        // back to false, instead of trusting Compose to have kept it.
+        val scrollIndex: Int = 0,
+        val scrollOffset: Int = 0,
         // Item 17: if a profile is opened while another profile overlay is
         // already up (visible or hidden behind a post pager) — e.g. tapping
         // a different author's avatar from inside a post reached via a
@@ -684,65 +699,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // inbox). Profiles just reuses that list directly for its avatar row;
     // Reviews needs its own fetch, done once lazily the first time the tab
     // is opened rather than eagerly on every Hub visit.
-    private val _friendsReviews = MutableStateFlow<List<FriendPopfeedReview>>(emptyList())
-    val friendsReviews: StateFlow<List<FriendPopfeedReview>> = _friendsReviews
+    // Firehose-backed indexer (see its own doc comment) — replaces the old
+    // "fan out one listRecords call per followed account, every Hub visit"
+    // approach with a one-time hydration plus live Jetstream updates.
+    // Scope change (per feedback, this session): broadened from Mutuals to
+    // everyone the user follows, matching how Live/VODs already worked —
+    // only feasible speed-wise because the indexer no longer re-fetches on
+    // every visit.
+    val firehoseIndexer = FirehoseIndexer(bskyRepo)
+    val friendsReviews: StateFlow<List<FriendPopfeedReview>> = firehoseIndexer.friendReviews
+    val friendsBlogs: StateFlow<List<FriendLeafletBlog>> = firehoseIndexer.friendBlogs
+
     private val _friendsReviewsLoading = MutableStateFlow(false)
     val friendsReviewsLoading: StateFlow<Boolean> = _friendsReviewsLoading
-    private var friendsReviewsLoaded = false
+    private var firehoseIndexerStarted = false
 
+    /** Starts the firehose indexer (one-time getAllFollows + Jetstream
+     *  subscribe) the first time the Hub's AT Protocol page composes, same
+     *  entry-point shape as the old per-visit loader so callers don't need
+     *  to change. Subsequent calls are a no-op — after the first start, the
+     *  indexer's own StateFlows just stay live via the firehose. */
     fun loadFriendsReviewsIfNeeded() {
-        if (friendsReviewsLoaded || _friendsReviewsLoading.value) return
+        if (firehoseIndexerStarted || _friendsReviewsLoading.value) return
         viewModelScope.launch(Dispatchers.IO) {
             _friendsReviewsLoading.value = true
-            // Bug fix: this used to read from `dmConversations`, which is
-            // lazy-loaded only once the DM inbox is opened — reading it here
-            // (often before that ever happened) saw an empty list and
-            // silently marked itself "loaded" with nothing fetched, so
-            // reviews never showed up even for accounts confirmed to have
-            // some.
-            //
-            // Scope change (per feedback, this session): narrowed back down
-            // to Mutuals specifically ("Latest Reviews From Mutuals" now,
-            // not everyone followed) — reuses the exact same dmConversations
-            // list the Mutuals row and Send Post use (via
-            // ensureDmConversationsLoadedSuspend, single-flight-guarded —
-            // see its comment), rather than a separate getAllFollows() call.
-            // This also directly helps the "why is this slow" complaint:
-            // mutuals are typically a much smaller set than everyone
-            // followed, so there's simply far less to fan out over. See
-            // BlueskyRepository.getPopfeedReviews for the other half of the
-            // speed fix (parallel + cached collection-name lookup, replacing
-            // what used to be up to 3 sequential requests per account).
-            //
-            // Second bug fix (this session): even after the fix above,
-            // Latest Reviews was still reported as never showing up.
-            // getOrDefault(emptyList()) on a failed fetch makes "the fetch
-            // genuinely failed" indistinguishable from "no accounts to
-            // check" — and this function used to set friendsReviewsLoaded =
-            // true unconditionally either way, permanently caching a
-            // transient failure as "checked, nothing to show" for the rest
-            // of the app's process lifetime (no retry short of a full app
-            // restart). Since this runs the instant the Hub's AT Protocol
-            // page first composes — often just after cold start, competing
-            // with several other concurrent app-launch network calls — a
-            // transient failure here was actually quite likely. Now `loaded`
-            // is only set once dmConversations has genuinely finished
-            // loading (isNotEmpty, or the load attempt completed), so a
-            // failed/still-pending attempt is retried the next time the Hub
-            // page composes instead of sticking forever.
-            ensureDmConversationsLoadedSuspend(silent = true)
-            val accounts = _dmConversations.value.map { it.member }
-            _friendsReviews.value = if (accounts.isEmpty()) emptyList()
-                else runCatching { bskyRepo.getFriendsPopfeedReviews(accounts) }.getOrDefault(emptyList())
-            // Same "don't cache a failure as done" principle as before: only
-            // latch `loaded` once there's actually a non-empty mutuals list
-            // to have fetched reviews for. If it's still empty (which is
-            // ambiguous between "genuinely zero mutuals" and "the fetch
-            // hasn't succeeded yet" — dmConversations has no separate loaded
-            // flag of its own either), leaving this retriable next Hub visit
-            // is cheap (ensureDmConversationsLoadedSuspend fast-paths) and
-            // matches how the Mutuals row itself already behaves.
-            if (accounts.isNotEmpty()) friendsReviewsLoaded = true
+            val follows = bskyRepo.getAllFollows(bskyToken, _bskyDid.value)
+            if (follows.isSuccess) {
+                firehoseIndexer.start(_bskyDid.value, follows.getOrDefault(emptyList()))
+                firehoseIndexerStarted = true
+            }
             _friendsReviewsLoading.value = false
         }
     }
@@ -760,6 +745,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val liveFriendsLoading: StateFlow<Boolean> = _liveFriendsLoading
     private var liveFriendsLoaded = false
 
+    /** Every followed DID, preferring the firehose indexer's live-updated
+     *  set (no network call at all, and already current) once it's warm;
+     *  falls back to a one-off getAllFollows if the indexer hasn't started
+     *  yet (e.g. this Hub section composes before the Reviews one has). */
+    private suspend fun followedDidsForLiveSections(): Result<Set<String>> {
+        firehoseIndexer.followedDids.value.takeIf { it.isNotEmpty() }?.let { return Result.success(it) }
+        return bskyRepo.getAllFollows(bskyToken, _bskyDid.value).map { list -> list.map { it.did }.toSet() }
+    }
+
     fun loadLiveFriendsIfNeeded() {
         if (liveFriendsLoaded || _liveFriendsLoading.value) return
         viewModelScope.launch(Dispatchers.IO) {
@@ -770,9 +764,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // Same "don't cache a transient failure as done" fix as
             // loadFriendsReviewsIfNeeded above — only mark loaded on an
             // actually-successful follows fetch.
-            val followsResult = bskyRepo.getAllFollows(bskyToken, _bskyDid.value)
+            val followsResult = followedDidsForLiveSections()
             if (followsResult.isSuccess) {
-                val dids = followsResult.getOrDefault(emptyList()).map { it.did }.toSet()
+                val dids = followsResult.getOrDefault(emptySet())
                 _liveFriends.value = if (dids.isEmpty()) emptyList()
                     else streamplaceRepo.getLiveFriends(dids).getOrDefault(emptyList())
                 liveFriendsLoaded = true
@@ -786,7 +780,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // just "forget what we loaded and load again" — exposed separately from
     // the *IfNeeded functions so a future refresh gesture has something to
     // call without duplicating the fetch logic.
-    fun refreshFriendsReviews() { friendsReviewsLoaded = false; loadFriendsReviewsIfNeeded() }
+    fun refreshFriendsReviews() { firehoseIndexerStarted = false; loadFriendsReviewsIfNeeded() }
     fun refreshLiveFriends() { liveFriendsLoaded = false; loadLiveFriendsIfNeeded() }
 
     // Feature (this session): Bluesky's own native "Live Now" badge —
@@ -809,9 +803,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _blueskyLiveNowLoading.value = true
             // Same "don't cache a transient failure as done" principle as
             // Reviews/Streamplace above — only latch loaded on genuine success.
-            val followsResult = bskyRepo.getAllFollows(bskyToken, _bskyDid.value)
+            val followsResult = followedDidsForLiveSections()
             if (followsResult.isSuccess) {
-                val dids = followsResult.getOrDefault(emptyList()).map { it.did }
+                val dids = followsResult.getOrDefault(emptySet()).toList()
                 _blueskyLiveNow.value = if (dids.isEmpty()) emptyList()
                     else bskyRepo.getLiveNowStreams(bskyToken, dids).getOrDefault(emptyList())
                 blueskyLiveNowLoaded = true
@@ -952,6 +946,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 loadAvailableFeeds()
                 prefetchUserLists()   // preload so list picker opens instantly
                 startHubBackgroundWarmup() // item 6/this session: Mutuals/Reviews/Livestreams, see its own comment
+                startDmLivePolling()
                 preloadFriendsFeed()  // item 7: warm the From Friends feed in the background too
                 loadSelfProfile()     // Settings Update: warm the Profile button's avatar/banner preview
             }
@@ -980,6 +975,7 @@ _bskyDid.value          = session.did
                     loadAvailableFeeds()
                     prefetchUserLists()   // preload so list picker opens instantly
                     startHubBackgroundWarmup()
+                    startDmLivePolling()
                     loadSelfProfile()
                 }
                 .onFailure { _errorMessage.value = it.message ?: "Login failed" }
@@ -1057,6 +1053,11 @@ _bskyDid.value          = session.did
     }
 
     fun loadFeed(reset: Boolean = true) {
+        // Bug fix (Outstanding Issue #1 — diagnostic, temporary): see
+        // setMode()'s matching Log.d for why this is here. Logs a stack
+        // trace too since loadFeed() has many call sites and knowing which
+        // one fired during a repro is the whole point.
+        Log.d("RaccNet-FeedState", "loadFeed(reset=$reset)", Exception("trace"))
         if (_appMode.value == AppMode.E621) { loadE621Posts(reset); return }
         if (!_bskyLoggedIn.value) return
         viewModelScope.launch(Dispatchers.IO) {
@@ -1149,10 +1150,31 @@ _bskyDid.value          = session.did
             }
             result.onSuccess { feeds ->
                 _availableFeeds.value = feeds
-                // There's no default "Home" feed anymore — if nothing is selected yet
-                // (and we're not inside an author/likes overlay), fall back to the
-                // user's first saved feed so the app never lands on an empty state.
-                if (_selectedFeedUri.value == null && _authorFeedState.value == null && feeds.isNotEmpty()) {
+                // Bug fix (Outstanding Issue #1 — feed loses scroll position
+                // navigating Hub pages): this auto-select-a-default-feed
+                // fallback is only meant to cover the genuine "nothing has
+                // ever been selected" case (fresh login, or a user who's
+                // always been on the implicit null-URI "Following" timeline
+                // and never explicitly picked a saved feed). But
+                // loadAvailableFeeds() itself gets called again every single
+                // time setMode() switches back into BLUESKY — including
+                // right after it just restored a cached feed snapshot — and
+                // a user sitting on that implicit null-URI "Following"
+                // timeline (a legitimate, common, ongoing state — see
+                // loadFeed()'s attempt(), which treats null the same as the
+                // pinned Following entry) would have `_selectedFeedUri.value
+                // == null` every single time this re-runs, so this branch
+                // would fire selectFeed() -> loadFeed(reset = true) and blow
+                // away the just-restored scroll position on every Hub
+                // round-trip. That's confirmed as one real, concrete cause
+                // of this bug (may not be the only one — see the
+                // diagnostic Log.d calls in loadFeed()/loadE621Posts()/
+                // setMode() below if this doesn't fully resolve it).
+                // Guarded with hasAutoSelectedFeed so it can only ever fire
+                // once per process, exactly like it already only mattered
+                // once before this bug existed.
+                if (!hasAutoSelectedFeed && _selectedFeedUri.value == null && _authorFeedState.value == null && feeds.isNotEmpty()) {
+                    hasAutoSelectedFeed = true
                     selectFeed(feeds.first().uri)
                 }
             }
@@ -1163,6 +1185,8 @@ _bskyDid.value          = session.did
             // everything the user can actually see is working fine — does more harm than good.
         }
     }
+    // Bug fix: see loadAvailableFeeds()'s doc comment above.
+    private var hasAutoSelectedFeed = false
 
     /** Opens an author's posts as an overlay, saving current feed state to restore later. */
     fun showAuthorFeed(item: MediaItem) {
@@ -1415,6 +1439,16 @@ _bskyDid.value          = session.did
      *  items into the main pager (same save/restore mechanism as [showAuthorFeed])
      *  so the post opens full-screen with normal swipe/like/comment behavior,
      *  and dismisses the Profile Overlay. */
+    /** Bug fix (see ProfileOverlayState.scrollIndex/scrollOffset doc comment
+     *  above): called by ProfileOverlay right before it's about to be hidden
+     *  (tapping a post, or pinching out to one) so the exact scroll position
+     *  is captured from a source of truth outside Compose's own LazyListState,
+     *  to be force-restored when the profile is revealed again. */
+    fun saveProfileScrollPosition(index: Int, offset: Int) {
+        val cur = _profileOverlay.value ?: return
+        _profileOverlay.value = cur.copy(scrollIndex = index, scrollOffset = offset)
+    }
+
     fun openPostFromProfileTab(index: Int) {
         val cur = _profileOverlay.value ?: return
         val items = cur.tabStates[cur.selectedTab]?.items ?: return
@@ -1558,11 +1592,20 @@ _bskyDid.value          = session.did
 
     fun selectFeed(uri: String?) {
         _selectedFeedUri.value = uri
+        // Bug fix: any explicit selection — including picking the null-URI
+        // "Following" entry on purpose — counts as "the user has made a
+        // choice," so loadAvailableFeeds()'s one-time default-feed fallback
+        // (see its doc comment) should never fire again after this, even
+        // though _selectedFeedUri.value can legitimately be null again.
+        hasAutoSelectedFeed = true
         viewModelScope.launch { prefs.setLastFeedUri(uri) }
         loadFeed(reset = true)
     }
 
     fun loadE621Posts(reset: Boolean = true) {
+        // Bug fix (Outstanding Issue #1 — diagnostic, temporary): see
+        // loadFeed()'s matching Log.d above.
+        Log.d("RaccNet-FeedState", "loadE621Posts(reset=$reset)", Exception("trace"))
         if (!_e621LoggedIn.value) return
         viewModelScope.launch(Dispatchers.IO) {
             if (reset) { e621Page = 1; _isLoading.value = true; _currentIndex.value = 0 }
@@ -1949,7 +1992,7 @@ _bskyDid.value          = session.did
             }
         }
         viewModelScope.launch(Dispatchers.IO) {
-            retryWithBackoff(isDone = { friendsReviewsLoaded || !_bskyLoggedIn.value }) {
+            retryWithBackoff(isDone = { firehoseIndexerStarted || !_bskyLoggedIn.value }) {
                 // loadFriendsReviewsIfNeeded() launches its own coroutine and
                 // returns immediately (it's the same public entry point the
                 // Hub page's LaunchedEffect calls) — wait for that in-flight
@@ -1972,6 +2015,75 @@ _bskyDid.value          = session.did
                 while (_blueskyLiveNowLoading.value) delay(300)
             }
         }
+    }
+
+    // ── Real-time DMs ─────────────────────────────────────────────────────────
+    // Per the architecture note's §2 (Direct Messages): there's no public
+    // chat firehose/WebSocket the way Jetstream exists for repo commits, so
+    // "real-time" here means short-interval polling of chat.bsky.convo.
+    // getLog — a delta endpoint across ALL convos at once, driven by a saved
+    // cursor — rather than re-fetching every conversation's full message
+    // list on a timer (what a naive polling implementation would do, and
+    // exactly the slow approach being replaced elsewhere in this session).
+    private var dmLogCursor: String? = null
+    private var dmLivePollingJob: kotlinx.coroutines.Job? = null
+
+    fun startDmLivePolling() {
+        if (dmLivePollingJob?.isActive == true || !_bskyLoggedIn.value) return
+        dmLivePollingJob = viewModelScope.launch(Dispatchers.IO) {
+            // Seed the cursor with one no-op call so the first real poll
+            // only returns messages that arrive from here on, instead of
+            // replaying recent history as if it just happened.
+            bskyRepo.getConvoLog(bskyToken, _bskyDid.value, null).onSuccess { (_, cursor) -> dmLogCursor = cursor }
+            while (_bskyLoggedIn.value) {
+                delay(4000)
+                val result = bskyRepo.getConvoLog(bskyToken, _bskyDid.value, dmLogCursor)
+                result.onSuccess { (logs, cursor) ->
+                    cursor?.let { dmLogCursor = it }
+                    if (logs.isNotEmpty()) applyDmLogEntries(logs)
+                }
+            }
+        }
+    }
+
+    private fun applyDmLogEntries(logs: List<BskyConvoLogEntry>) {
+        val messageEntries = logs.filter { it.convoId != null && it.message != null }
+        if (messageEntries.isEmpty()) return
+
+        val knownConvoIds = _dmConversations.value.map { it.convoId }.toSet()
+        val hasUnknownConvo = messageEntries.any { it.convoId !in knownConvoIds }
+
+        // A message in a convo we don't have locally yet (a brand-new convo,
+        // or the very first message from someone we've never messaged) needs
+        // that convo's member/profile info we don't have from the log alone
+        // — cheapest correct fix is a normal refresh, same call the DM inbox
+        // itself already uses. Existing convos are just bumped in place.
+        if (hasUnknownConvo) {
+            viewModelScope.launch(Dispatchers.IO) { loadDmConversationsBlocking(silent = true) }
+        } else {
+            val byConvo = messageEntries.groupBy { it.convoId!! }
+            _dmConversations.value = _dmConversations.value.map { convo ->
+                val latest = byConvo[convo.convoId]?.maxByOrNull { it.message!!.sentAt } ?: return@map convo
+                val msg = latest.message!!
+                convo.copy(
+                    lastActivityAt = msg.sentAt,
+                    lastSentByUsAt = if (msg.sender?.did == _bskyDid.value) msg.sentAt else convo.lastSentByUsAt
+                )
+            }.sortedByDescending { it.lastActivityAt.ifBlank { it.lastSentByUsAt } }
+        }
+
+        // Live-append into whichever thread is currently open, if any of
+        // these messages belong to it — this is what makes an open DM
+        // thread update in real time rather than only on next manual open.
+        val openConvoId = _dmThread.value?.convo?.convoId ?: return
+        val forOpenThread = messageEntries.filter { it.convoId == openConvoId }.mapNotNull { it.message }
+        if (forOpenThread.isEmpty()) return
+        val current = _dmThread.value ?: return
+        val existingIds = current.messages.map { it.id }.toSet()
+        val newOnes = forOpenThread.filterNot { it.id in existingIds }
+        if (newOnes.isEmpty()) return
+        val merged = (current.messages + newOnes).sortedBy { it.sentAt }
+        _dmThread.value = current.copy(messages = merged, embeddedPosts = buildEmbeddedPosts(merged))
     }
 
     /** Retries [attempt] with exponential-ish backoff until [isDone] is true
@@ -2081,6 +2193,12 @@ _bskyDid.value          = session.did
     )
 
     fun setMode(mode: AppMode) {
+        // Bug fix (Outstanding Issue #1 — diagnostic, temporary): logs every
+        // real call (the same-mode no-op above returns before this, so this
+        // only fires on genuine switches) so a logcat capture during a
+        // repro can show exactly when/how often this fires. Safe to leave
+        // in — remove once the bug's fully confirmed fixed.
+        Log.d("RaccNet-FeedState", "setMode: ${_appMode.value} -> $mode")
         if (_appMode.value == mode) return // already there — nothing to switch, nothing to reload
         // Snapshot whichever mode we're leaving before touching anything.
         when (_appMode.value) {
@@ -2107,7 +2225,16 @@ _bskyDid.value          = session.did
                     _mediaItems.value = cached.items; _currentIndex.value = cached.index; feedCursor = cached.cursor
                     activeFeedMode = cached.activeMode; activeFeedActorDid = cached.activeActorDid
                     _authorFeedState.value = cached.authorFeedState
-                    loadAvailableFeeds()
+                    // Bug fix: this used to unconditionally call
+                    // loadAvailableFeeds() on every single restore, which
+                    // (before the fix on loadAvailableFeeds() itself, above)
+                    // could stomp the snapshot just restored one line above
+                    // whenever the user was on the implicit null-URI
+                    // "Following" timeline. Now skipped entirely once the
+                    // feed-switcher chip row has already been populated —
+                    // there's no need to keep re-fetching that list on every
+                    // mode round-trip, only the very first time.
+                    if (_availableFeeds.value.isEmpty()) loadAvailableFeeds()
                 } else { loadFeed(); loadAvailableFeeds() }
             }
         }

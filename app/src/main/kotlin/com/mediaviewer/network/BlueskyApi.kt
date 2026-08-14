@@ -219,6 +219,16 @@ interface BlueskyApi {
         @Query("members") members: List<String>
     ): Response<BskyGetConvoForMembersResponse>
 
+    // Delta/catch-up feed across ALL convos at once — see BlueskyRepository.
+    // getConvoLog's doc comment for why this (rather than re-fetching full
+    // convo lists on a timer) is what powers real-time-feeling DMs here.
+    @Headers("atproto-proxy: did:web:api.bsky.chat#bsky_chat")
+    @GET("xrpc/chat.bsky.convo.getLog")
+    suspend fun getConvoLog(
+        @Header("Authorization") token: String,
+        @Query("cursor") cursor: String? = null
+    ): Response<BskyGetConvoLogResponse>
+
     @Headers("atproto-proxy: did:web:api.bsky.chat#bsky_chat")
     @GET("xrpc/chat.bsky.convo.getMessages")
     suspend fun getMessages(

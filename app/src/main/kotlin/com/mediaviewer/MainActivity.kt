@@ -427,7 +427,8 @@ private fun AppRoot(viewModel: MainViewModel) {
                     onCloseBlog       = viewModel::closeProfileBlog,
                     onOpenReview      = viewModel::openProfileReview,
                     onCloseReview     = viewModel::closeProfileReview,
-                    onPinchOut        = viewModel::pinchOutFromProfile
+                    onPinchOut        = viewModel::pinchOutFromProfile,
+                    onSaveScroll      = viewModel::saveProfileScrollPosition
                 )
             }
         }

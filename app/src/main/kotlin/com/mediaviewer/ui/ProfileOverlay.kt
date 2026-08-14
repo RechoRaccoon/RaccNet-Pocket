@@ -105,7 +105,11 @@ fun ProfileOverlay(
     // effect (see pinchOutFromProfile() in the ViewModel) when this profile
     // is the one currently hidden behind a post — hiding it again is what
     // reveals that post.
-    onPinchOut: () -> Unit
+    onPinchOut: () -> Unit,
+    // Bug fix: captures the current scroll position into the ViewModel right
+    // before this profile is hidden (see ProfileOverlayState.scrollIndex/
+    // scrollOffset doc comment) so it can be force-restored on the way back.
+    onSaveScroll: (Int, Int) -> Unit
 ) {
     val author  = state.author
     val profile = state.profile
@@ -125,8 +129,28 @@ fun ProfileOverlay(
 
     BackHandler(onClose)
 
-    val listState = rememberLazyListState()
+    // Bug fix: seed from the last explicitly-saved position too (not just
+    // relied on the LazyListState surviving the hide/show cycle on its
+    // own — see the force-restore LaunchedEffect below and the doc comment
+    // on ProfileOverlayState.scrollIndex/scrollOffset).
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = state.scrollIndex,
+        initialFirstVisibleItemScrollOffset = state.scrollOffset
+    )
     val coroutineScope = rememberCoroutineScope()
+
+    // Bug fix: force-restore the saved scroll position the moment this
+    // profile is revealed again (hidden flips false->true->false), instead
+    // of trusting that collapsing/expanding the LazyColumn via the 0dp-size
+    // trick in MainActivity kept the LazyListState's position intact on its
+    // own — in practice it doesn't reliably, which was the cause of the
+    // "jumps to the bottom of the results" bug. Also covers the very first
+    // open (hidden starts false), which is a harmless scrollToItem(0, 0).
+    LaunchedEffect(state.hidden) {
+        if (!state.hidden) {
+            listState.scrollToItem(state.scrollIndex, state.scrollOffset)
+        }
+    }
 
     // Item 0 = header, item 1 = tabs+divider. Once both have fully scrolled
     // past the top of the viewport (i.e. we're rendering item index 2+),
@@ -171,6 +195,8 @@ fun ProfileOverlay(
                             startDist = dist
                         } else if (!fired && dist / startDist > 1.4f) {
                             fired = true
+                            // Bug fix: capture scroll position before hiding.
+                            onSaveScroll(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
                             onPinchOut()
                         }
                     }
@@ -214,7 +240,13 @@ fun ProfileOverlay(
                 liquidGlass = liquidGlass,
                 profileTint = blended,
                 onLoadMore = onLoadMore,
-                onTapItem = onTapItem,
+                // Bug fix: capture scroll position before this profile gets
+                // hidden behind the post that's about to open — see
+                // onSaveScroll's doc comment above.
+                onTapItem = { index ->
+                    onSaveScroll(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+                    onTapItem(index)
+                },
                 onOpenBlog = onOpenBlog,
                 onOpenReview = onOpenReview
             )
@@ -264,7 +296,7 @@ fun ProfileOverlay(
         }
 
         state.openBlog?.let { blog ->
-            BlogDetailOverlay(blog = blog, author = author, liquidGlass = liquidGlass, onClose = onCloseBlog)
+            BlogDetailOverlay(blog = blog, author = author, liquidGlass = liquidGlass, tint = blended, onClose = onCloseBlog)
         }
         state.openReview?.let { review ->
             ReviewDetailOverlay(review = review, author = author, liquidGlass = liquidGlass, onClose = onCloseReview)
@@ -901,20 +933,76 @@ private fun TextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, o
 
 // ─── Blogs (Leaflet) ─────────────────────────────────────────────────────────
 
+/** A single blog card: the Leaflet thumbnail filling the whole card (falling
+ *  back to a flat tinted panel if the blog has none), title pill top-right
+ *  with the date pill directly under it — mirrors the blog reader's own
+ *  header layout so opening a card feels like a continuation of it — and,
+ *  if the blog has a description, a bubble bottom-left. That bubble is just
+ *  Box(Alignment.BottomStart) around a wrap-content Text: its bottom edge
+ *  stays anchored to the card's bottom edge, so a longer (more-lines)
+ *  description naturally pushes the bubble's top edge upward instead of
+ *  overflowing the card — no extra layout logic needed for that behavior.
+ *
+ *  Not private — the Hub's Blogs section (item: Hub Blogs) reuses this same
+ *  card at a smaller [height], the same way profiles' review-star pill is
+ *  shared with the Hub's review cards. */
 @Composable
-private fun BlogBubble(blog: LeafletBlog, liquidGlass: Boolean, tint: Color, onOpenBlog: (LeafletBlog) -> Unit, modifier: Modifier = Modifier) {
+fun BlogBubble(
+    blog: LeafletBlog, liquidGlass: Boolean, tint: Color, onOpenBlog: (LeafletBlog) -> Unit,
+    modifier: Modifier = Modifier, height: androidx.compose.ui.unit.Dp = 180.dp,
+    titleFontSize: androidx.compose.ui.unit.TextUnit = 13.sp, pillMaxWidth: androidx.compose.ui.unit.Dp = 220.dp
+) {
     val shape = RoundedCornerShape(16.dp)
+    val dateText = formatCreatedAt(blog.createdAt)
     Box(
         modifier
             .fillMaxWidth()
-            .then(
-                if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
-                else Modifier.clip(shape).background(Color.White.copy(0.06f))
-            )
+            .height(height)
+            .clip(shape)
+            .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.background(Color.White.copy(0.06f)))
             .clickable { onOpenBlog(blog) }
-            .padding(16.dp)
     ) {
-        Text(blog.title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        if (blog.thumbnailUrl != null) {
+            AsyncImage(model = blog.thumbnailUrl, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            // Scrim so the title/date/description bubbles stay legible over
+            // busy thumbnail art — same idea used for media-post captions.
+            Box(
+                Modifier.fillMaxSize().background(
+                    Brush.verticalGradient(listOf(Color.Black.copy(0.05f), Color.Black.copy(0.4f)))
+                )
+            )
+        }
+
+        Column(Modifier.align(Alignment.TopEnd).padding(10.dp), horizontalAlignment = Alignment.End) {
+            ProfileGlassPill(text = blog.title, liquidGlass = liquidGlass, tint = tint, fontSize = titleFontSize, bold = true,
+                modifier = Modifier.widthIn(max = pillMaxWidth))
+            if (dateText.isNotBlank()) {
+                Spacer(Modifier.height(6.dp))
+                val pillShape = RoundedCornerShape(12.dp)
+                Box(
+                    Modifier
+                        .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = pillShape) else Modifier.clip(pillShape).background(Color.White.copy(0.08f)))
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                ) {
+                    Text(dateText, color = Color.White.copy(0.85f), fontSize = 11.sp)
+                }
+            }
+        }
+
+        if (!blog.description.isNullOrBlank()) {
+            val descShape = RoundedCornerShape(12.dp)
+            Box(
+                Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(10.dp)
+                    .widthIn(max = 200.dp)
+                    .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = descShape) else Modifier.clip(descShape).background(Color.White.copy(0.08f)))
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
+            ) {
+                Text(blog.description, color = Color.White.copy(0.9f), fontSize = 11.sp, lineHeight = 15.sp,
+                    maxLines = 4, overflow = TextOverflow.Ellipsis)
+            }
+        }
     }
 }
 
@@ -1025,7 +1113,7 @@ private fun ByAndDateRow(author: AuthorInfo, createdAt: String, liquidGlass: Boo
 }
 
 @Composable
-private fun BlogDetailOverlay(blog: LeafletBlog, author: AuthorInfo, liquidGlass: Boolean, onClose: () -> Unit) {
+private fun BlogDetailOverlay(blog: LeafletBlog, author: AuthorInfo, liquidGlass: Boolean, tint: Color, onClose: () -> Unit) {
     Box(
         Modifier.fillMaxSize().background(Color.Black.copy(0.94f))
             // Consumes all touches so they can't fall through to the tabs/
@@ -1040,18 +1128,33 @@ private fun BlogDetailOverlay(blog: LeafletBlog, author: AuthorInfo, liquidGlass
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                CloseGlassBubble(liquidGlass = liquidGlass, tint = NeutralGlassTint, onClick = onClose)
+                CloseGlassBubble(liquidGlass = liquidGlass, tint = tint, onClick = onClose)
                 Spacer(Modifier.width(10.dp))
-                ProfileGlassPill(text = blog.title, liquidGlass = liquidGlass, tint = NeutralGlassTint, fontSize = 15.sp, bold = true)
+                ProfileGlassPill(text = blog.title, liquidGlass = liquidGlass, tint = tint, fontSize = 15.sp, bold = true)
             }
             ByAndDateRow(
-                author = author, createdAt = blog.createdAt, liquidGlass = liquidGlass, tint = NeutralGlassTint,
+                author = author, createdAt = blog.createdAt, liquidGlass = liquidGlass, tint = tint,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
             )
             HorizontalDivider(color = Color.White.copy(0.08f), thickness = 0.5.dp)
             // Horizontal padding matches the 12dp used by the header row
             // above so the body text's edges line up with the buttons.
             Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 20.dp)) {
+                // Cover image at the top of the reader too, if the blog has
+                // one — same banner treatment ReviewDetailOverlay gives its
+                // poster/backdrop art, so opening a blog with a thumbnail
+                // doesn't feel like it lost that art the moment you tap in.
+                if (blog.thumbnailUrl != null) {
+                    val bannerShape = RoundedCornerShape(16.dp)
+                    Box(
+                        Modifier.fillMaxWidth().height(200.dp)
+                            .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = bannerShape) else Modifier.clip(bannerShape))
+                    ) {
+                        AsyncImage(model = blog.thumbnailUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize().clip(bannerShape))
+                    }
+                    Spacer(Modifier.height(16.dp))
+                }
                 Text(blog.bodyText.ifBlank { "This blog has no readable text content." },
                     color = Color.White.copy(0.92f), fontSize = 14.sp, lineHeight = 21.sp)
                 Spacer(Modifier.height(40.dp))

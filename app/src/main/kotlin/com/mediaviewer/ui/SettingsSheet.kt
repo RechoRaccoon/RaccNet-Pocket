@@ -19,6 +19,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -71,10 +72,16 @@ import kotlin.math.abs
 
 // Item 5: which panel of the Hub is currently showing. This is purely local
 // UI state for the sheet itself — separate from `appMode`, which tracks
-// which content mode (Bluesky vs e621) is active behind the sheet. SETTINGS
-// has no corresponding AppMode; AT_PROTOCOL/E621 mirror AppMode.BLUESKY/
-// AppMode.E621 respectively and call onSwitchMode when selected so the rest
-// of the app (the feed behind the sheet) stays in sync.
+// which content mode (Bluesky vs e621) is actually active for the feed
+// behind the sheet. SETTINGS has no corresponding AppMode; AT_PROTOCOL/E621
+// correspond to AppMode.BLUESKY/AppMode.E621, but bug fix (per feedback):
+// merely browsing to the AT Protocol or e621 Hub page does NOT call
+// onSwitchMode anymore — it used to, which meant just landing on (or
+// accidentally swiping past) the e621 page immediately switched the active
+// feed and triggered a load/refresh even if the user never actually swiped
+// up into the feed itself. onSwitchMode is now only called from the
+// swipe-up-to-feed handler below, at the moment the user actually leaves
+// the Hub for the feed, based on whichever Hub page they're leaving from.
 private enum class HubPage { SETTINGS, AT_PROTOCOL, E621 }
 
 @Composable
@@ -199,14 +206,16 @@ fun SettingsSheet(
     // explicitly instead.
     var hubPageForward by remember { mutableStateOf(true) }
     val hubPages = remember { listOf(HubPage.SETTINGS, HubPage.AT_PROTOCOL, HubPage.E621) }
+    // Bug fix (per feedback): this used to also call onSwitchMode(...) here,
+    // meaning just navigating to (or swiping past) the AT Protocol/e621 Hub
+    // page immediately flipped the active feed and triggered a load/refresh
+    // — even if the user was just passing through and never actually
+    // swiped up into that feed. Now this purely changes which Hub page is
+    // showing; see onSwipeUpToFeed below for where the actual mode switch
+    // now happens.
     fun goToHubPage(target: HubPage, forward: Boolean = hubPages.indexOf(target) >= hubPages.indexOf(hubPage)) {
         hubPageForward = forward
         hubPage = target
-        when (target) {
-            HubPage.AT_PROTOCOL -> onSwitchMode(AppMode.BLUESKY)
-            HubPage.E621         -> onSwitchMode(AppMode.E621)
-            HubPage.SETTINGS     -> {}
-        }
     }
     // Item 5: wraps around at either end — swiping past e621 lands back on
     // Settings, and swiping back past Settings lands on e621.
@@ -214,6 +223,23 @@ fun SettingsSheet(
         val idx = hubPages.indexOf(hubPage)
         val next = ((idx + if (forward) 1 else -1) + hubPages.size) % hubPages.size
         goToHubPage(hubPages[next], forward = forward)
+    }
+
+    // Bug fix (per feedback): the actual AppMode switch — and therefore any
+    // feed load/refresh — now only happens right here, at the moment the
+    // user actually swipes up out of the Hub into the feed, based on
+    // whichever Hub page they're leaving from. Browsing between Hub pages
+    // itself (including landing on e621, even by accident) never touches
+    // the feed. Settings has no corresponding mode, so swiping up from
+    // Settings leaves whatever mode was already active untouched — it was
+    // never changed just by visiting Settings in the first place.
+    fun onSwipeUpToFeed() {
+        when (hubPage) {
+            HubPage.AT_PROTOCOL -> onSwitchMode(AppMode.BLUESKY)
+            HubPage.E621         -> onSwitchMode(AppMode.E621)
+            HubPage.SETTINGS     -> {}
+        }
+        onSwipeToFeed()
     }
 
     // Item: swipe-up-to-feed needs to keep working even on pages that
@@ -245,7 +271,7 @@ fun SettingsSheet(
     val nestedScrollConnection = remember(onSwipeToFeed) {
         object : NestedScrollConnection {
             override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-                if (source == NestedScrollSource.Drag && available.y < -24f) onSwipeToFeed()
+                if (source == NestedScrollSource.Drag && available.y < -24f) onSwipeUpToFeed()
                 return Offset.Zero
             }
         }
@@ -269,7 +295,7 @@ fun SettingsSheet(
                     onDragStart  = { totalX = 0f; totalY = 0f },
                     onDragEnd    = {
                         when {
-                            abs(totalY) > 80f && abs(totalY) > abs(totalX) * 1.2f && totalY < 0 -> onSwipeToFeed()
+                            abs(totalY) > 80f && abs(totalY) > abs(totalX) * 1.2f && totalY < 0 -> onSwipeUpToFeed()
                             abs(totalX) > 80f && abs(totalX) > abs(totalY) * 1.2f -> advanceHubPage(forward = totalX < 0)
                         }
                     },
@@ -511,14 +537,18 @@ private fun SettingsPageContent(
     }
 
     Column(
-        // Feature (this session): the Hub isn't supposed to scroll — a
-        // scrollable inner Column was fighting with the swipe gesture above
-        // (page-switch left/right, swipe-up-to-feed) for the same vertical
-        // drag events, and the nestedScrollConnection above only existed to
-        // patch around that conflict. Removing the scroll entirely removes
-        // the conflict at the source instead of continuing to patch around
-        // it — the swipe handling itself is untouched.
-        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 10.dp),
+        // Bug fix (revert per feedback — Hub is meant to scroll again): this
+        // used to be a non-scrolling Column with a comment explaining that
+        // scroll had been removed to avoid fighting the swipe gesture. The
+        // user has since reconsidered and wants the Hub scrollable again.
+        // The nestedScrollConnection on the shared outer Box (see the
+        // swipe-handling code above) was deliberately left fully intact the
+        // whole time specifically so an inner scrollable Column here could
+        // coexist with swipe-up-to-feed/page-switch — re-adding
+        // verticalScroll is all that's needed. Order matters: scroll comes
+        // before padding so the padding scrolls with the content rather
+        // than staying fixed.
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         SectionDivider("App Settings")
@@ -846,13 +876,13 @@ private fun AtProtocolPageContent(
     var bskyId by remember { mutableStateOf("") }
     var bskyPw by remember { mutableStateOf("") }
 
-    // Feature (this session): same fix as the Settings page above — no
-    // scroll on this Column anymore, so it can't fight the swipe gesture
-    // for vertical drag events. This does mean the Mutuals/Reviews/
-    // Livestreams sections need to fit on one screen without scrolling —
-    // the card/skeleton sizing this session was tightened up specifically
-    // with that in mind.
-    Column(Modifier.fillMaxSize()) {
+    // Bug fix (revert per feedback — Hub is meant to scroll again): same
+    // revert as the Settings page above — re-adding verticalScroll here too.
+    // The "fit on one screen without scrolling" constraint that motivated
+    // this session's card/skeleton sizing no longer applies once this is
+    // reverted, but the sizing itself is left as-is (still reasonable, no
+    // reason to churn it further).
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         if (!bskyLoggedIn) {
             Column(
                 modifier = Modifier.fillMaxSize().padding(horizontal = 36.dp),
@@ -1071,48 +1101,6 @@ private fun AtProtocolPageContent(
             }
         }
 
-        // ── Item 8: Latest Reviews From Mutuals — its own section, and now
-        // scoped specifically to Mutuals (not everyone followed) per
-        // feedback: it reuses the exact same dmConversations list as the
-        // row above (loaded once via ensureDmConversationsLoadedSuspend),
-        // both for speed — mutuals are a much smaller set to fan out
-        // review-lookups over than everyone followed — and because a
-        // "Reviews from Friends"-style section reads better scoped to
-        // people you actually talk to. See BlueskyRepository.
-        // getPopfeedReviews for the other half of the speed fix (parallel +
-        // cached collection-name lookup, replacing what used to be up to 3
-        // sequential requests per account). ─────────────────────────────
-        Spacer(Modifier.height(14.dp))
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
-            Text("Latest Reviews From Mutuals", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(horizontal = 10.dp))
-            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
-        }
-        Spacer(Modifier.height(8.dp))
-        // Feature (this session): review cards restyled to match the
-        // Backlog tab's poster cards (see ProfileOverlay.kt's BacklogCard —
-        // same poster aspect ratio, same title-below-poster layout), just
-        // with the card's glass bubble extended upward to fit a small
-        // author strip (avatar + display name) above the poster, since
-        // unlike Backlog these are reviews from other people, not the
-        // profile owner's own list — the author needs to be visible on the
-        // card itself. Same skeleton-placeholder approach as Mutuals above.
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            val reviews = friendsReviews.take(20)
-            for (i in 0 until maxOf(REVIEW_SKELETON_SLOTS, reviews.size)) {
-                val fr = reviews.getOrNull(i)
-                when {
-                    fr != null -> MutualReviewCard(fr, liquidGlass, dominantColor, onOpenReview)
-                    friendsReviewsLoading -> MutualReviewCardSkeleton(liquidGlass, dominantColor)
-                    else -> Spacer(Modifier.width(REVIEW_CARD_WIDTH).height(REVIEW_CARD_HEIGHT))
-                }
-            }
-        }
-
         // ── Item 8/19: Livestreams — everyone the user follows, combining
         // two distinct sources: Streamplace (an AT-Protocol-native
         // streaming service) and Bluesky's own built-in "Live Now" profile
@@ -1120,7 +1108,8 @@ private fun AtProtocolPageContent(
         // session — see BlueskyLiveNowStream in Models.kt and
         // MainViewModel.loadBlueskyLiveNowIfNeeded). Both render as the same
         // card shape in one merged, combined row so they read as one
-        // section rather than two. ─────────────────────────────────────────
+        // section rather than two. Moved above Latest Reviews From Mutuals
+        // per feedback. ─────────────────────────────────────────
         Spacer(Modifier.height(14.dp))
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
@@ -1162,6 +1151,49 @@ private fun AtProtocolPageContent(
                 }
             }
         }
+
+        // ── Item 8: Latest Reviews From Mutuals — its own section, and now
+        // scoped specifically to Mutuals (not everyone followed) per
+        // feedback: it reuses the exact same dmConversations list as the
+        // row above (loaded once via ensureDmConversationsLoadedSuspend),
+        // both for speed — mutuals are a much smaller set to fan out
+        // review-lookups over than everyone followed — and because a
+        // "Reviews from Friends"-style section reads better scoped to
+        // people you actually talk to. See BlueskyRepository.
+        // getPopfeedReviews for the other half of the speed fix (parallel +
+        // cached collection-name lookup, replacing what used to be up to 3
+        // sequential requests per account). Moved below Livestreams per
+        // feedback. ─────────────────────────────────────────
+        Spacer(Modifier.height(14.dp))
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+            Text("Latest Reviews From Mutuals", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(horizontal = 10.dp))
+            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+        }
+        Spacer(Modifier.height(8.dp))
+        // Feature (this session): review cards restyled to match the
+        // Backlog tab's poster cards (see ProfileOverlay.kt's BacklogCard —
+        // same poster aspect ratio, same title-below-poster layout), just
+        // with the card's glass bubble extended upward to fit a small
+        // author strip (avatar + display name) above the poster, since
+        // unlike Backlog these are reviews from other people, not the
+        // profile owner's own list — the author needs to be visible on the
+        // card itself. Same skeleton-placeholder approach as Mutuals above.
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            val reviews = friendsReviews.take(20)
+            for (i in 0 until maxOf(REVIEW_SKELETON_SLOTS, reviews.size)) {
+                val fr = reviews.getOrNull(i)
+                when {
+                    fr != null -> MutualReviewCard(fr, liquidGlass, dominantColor, onOpenReview)
+                    friendsReviewsLoading -> MutualReviewCardSkeleton(liquidGlass, dominantColor)
+                    else -> Spacer(Modifier.width(REVIEW_CARD_WIDTH).height(REVIEW_CARD_HEIGHT))
+                }
+            }
+        }
         Spacer(Modifier.height(16.dp))
     }
 }
@@ -1176,7 +1208,13 @@ private const val MUTUAL_SKELETON_SLOTS = 6
 private const val REVIEW_SKELETON_SLOTS = 3
 private const val LIVESTREAM_SKELETON_SLOTS = 3
 private val REVIEW_CARD_WIDTH = 108.dp
-private val REVIEW_CARD_HEIGHT = 206.dp
+// Recomputed after halving the author-strip and title-row heights per
+// feedback: poster stays 108.dp * 3/2 = 162.dp, author strip is now
+// ~14.dp (was ~22.dp), title row is now ~17.dp (was ~21.dp). Keep this in
+// sync with MutualReviewCard/MutualReviewCardSkeleton if their padding or
+// font sizes change again — this is only used for the invisible "no more
+// reviews" empty-slot Spacer's footprint.
+private val REVIEW_CARD_HEIGHT = 193.dp
 
 // Platform brand colors for Bluesky "Live Now" cards/badges — Twitch and
 // YouTube's own accent colors, so a glance at the card tint alone tells you
@@ -1378,21 +1416,23 @@ private fun MutualReviewCard(
             .then(reviewCardBackground(liquidGlass, dominantColor, shape))
             .clickable { onOpenReview(fr) }
     ) {
-        // Author strip — tightened to a single line's worth of height (was
-        // reading as two lines before): smaller avatar, minimal padding.
+        // Author strip — further halved in height per feedback (was still
+        // carrying more padding/avatar size than a single line of 9sp text
+        // actually needs): tighter vertical padding, smaller avatar, tight
+        // line height on the name so it doesn't add its own extra space.
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp)
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             val avatarShape = CircleShape
-            Box(Modifier.size(14.dp).clip(avatarShape).background(Color.White.copy(0.15f))) {
+            Box(Modifier.size(10.dp).clip(avatarShape).background(Color.White.copy(0.15f))) {
                 if (fr.author.avatarUrl != null) {
                     AsyncImage(model = fr.author.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize().clip(avatarShape))
                 }
             }
-            Text(fr.author.displayName, color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Medium,
+            Text(fr.author.displayName, color = Color.White, fontSize = 9.sp, lineHeight = 10.sp, fontWeight = FontWeight.Medium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         }
         // Poster — same aspect ratio as Backlog's poster tiles, with the
@@ -1411,10 +1451,13 @@ private fun MutualReviewCard(
             )
         }
         // Title only, below the poster — no rating line (moved above).
+        // Vertical padding halved per feedback (region had extra room the
+        // single-line title text didn't need); explicit tight lineHeight so
+        // the text itself doesn't reintroduce the space the padding cut.
         Text(
-            fr.review.mediaTitle, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+            fr.review.mediaTitle, color = Color.White, fontSize = 11.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp)
         )
     }
 }
@@ -1437,16 +1480,21 @@ private fun reviewCardBackground(liquidGlass: Boolean, dominantColor: Color, sha
 private fun MutualReviewCardSkeleton(liquidGlass: Boolean, dominantColor: Color) {
     val shape = RoundedCornerShape(14.dp)
     Column(Modifier.width(REVIEW_CARD_WIDTH).then(reviewCardBackground(liquidGlass, dominantColor, shape))) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            ShimmerBox(CircleShape, Modifier.size(14.dp))
+        // Kept in lockstep with MutualReviewCard's author strip sizing
+        // (10.dp avatar, 2.dp vertical padding, 4.dp spacing) — see
+        // reviewCardBackground's doc comment on why these two must match.
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            ShimmerBox(CircleShape, Modifier.size(10.dp))
             ShimmerBox(RoundedCornerShape(3.dp), Modifier.weight(1f).height(9.dp))
         }
         Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f)) {
             ShimmerBox(RoundedCornerShape(0.dp), Modifier.matchParentSize())
         }
+        // Kept in lockstep with MutualReviewCard's title row (2.dp vertical
+        // padding).
         ShimmerBox(RoundedCornerShape(3.dp), Modifier.fillMaxWidth(0.75f).height(11.dp)
-            .padding(horizontal = 8.dp, vertical = 4.dp))
+            .padding(horizontal = 8.dp, vertical = 2.dp))
     }
 }
 

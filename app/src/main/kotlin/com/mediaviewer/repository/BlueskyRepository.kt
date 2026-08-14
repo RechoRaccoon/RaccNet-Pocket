@@ -215,6 +215,13 @@ class BlueskyRepository {
         /** Sentinel URI standing in for the pinned "Following" home timeline, which
          *  (unlike every other saved feed) is served by getTimeline, not getFeed. */
         const val FOLLOWING_FEED_URI = "timeline://following"
+
+        /** All known Popfeed review/Leaflet blog collection names — shared by
+         *  the backfill paths below and FirehoseIndexer's Jetstream
+         *  `wantedCollections` filter, so there's exactly one place that
+         *  knows what these third-party lexicons are currently called. */
+        val REVIEW_COLLECTIONS = listOf("social.popfeed.feed.review", "social.popfeed.review", "app.popsky.review")
+        val LEAFLET_COLLECTIONS = listOf("site.standard.document", "pub.leaflet.document")
     }
 
     suspend fun getAuthorFeed(token: String, actorDid: String, cursor: String? = null)
@@ -312,21 +319,38 @@ class BlueskyRepository {
      *  an empty list (never an error) if the account has no Leaflet documents —
      *  callers use that to decide whether the Blogs tab appears at all. */
     suspend fun getLeafletBlogs(did: String): List<LeafletBlog> {
-        for (collection in listOf("site.standard.document", "pub.leaflet.document")) {
+        for (collection in LEAFLET_COLLECTIONS) {
             val resp = runCatching { api.listRecords(null, did, collection, 50, null) }.getOrNull()
             val body = resp?.takeIf { it.isSuccessful }?.body() ?: continue
             if (body.records.isEmpty()) continue
             val blogs = body.records.mapNotNull { rec ->
                 val obj = rec.value?.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
-                val title = obj.get("title")?.takeIf { it.isJsonPrimitive }?.asString?.takeIf { it.isNotBlank() }
-                    ?: return@mapNotNull null
-                val createdAt = obj.get("publishedAt")?.takeIf { it.isJsonPrimitive }?.asString
-                    ?: obj.get("createdAt")?.takeIf { it.isJsonPrimitive }?.asString ?: ""
-                LeafletBlog(uri = rec.uri, title = title, bodyText = extractLeafletBodyText(obj), createdAt = createdAt)
+                parseLeafletBlogRecord(did, rec.uri, obj)
             }
             if (blogs.isNotEmpty()) return blogs.sortedByDescending { it.createdAt }
         }
         return emptyList()
+    }
+
+    /** Parses one raw Leaflet document record (whether read via listRecords
+     *  during backfill, or pushed live off the Jetstream firehose — see
+     *  FirehoseIndexer) into a [LeafletBlog]. Pulled out of [getLeafletBlogs]
+     *  so both paths share exactly one parsing implementation. Best-effort
+     *  thumbnail/description extraction, same defensive style as
+     *  getPopfeedReviews below — Leaflet's block schema isn't fully modeled,
+     *  so these are just "the first image/text-ish field found under a
+     *  handful of likely key names", not a guaranteed-correct parse. */
+    suspend fun parseLeafletBlogRecord(did: String, uri: String, obj: com.google.gson.JsonObject): LeafletBlog? {
+        val title = obj.get("title")?.takeIf { it.isJsonPrimitive }?.asString?.takeIf { it.isNotBlank() }
+            ?: return null
+        val createdAt = obj.get("publishedAt")?.takeIf { it.isJsonPrimitive }?.asString
+            ?: obj.get("createdAt")?.takeIf { it.isJsonPrimitive }?.asString ?: ""
+        val description = firstStringField(obj, "description", "subtitle", "summary")
+        val thumbnailUrl = firstImageField(obj, did, "coverImage", "cover", "image", "thumb", "icon")
+        return LeafletBlog(
+            uri = uri, title = title, bodyText = extractLeafletBodyText(obj), createdAt = createdAt,
+            description = description, thumbnailUrl = thumbnailUrl
+        )
     }
 
     /** Leaflet documents are block-based (pages -> blocks -> nested content),
@@ -379,6 +403,36 @@ class BlueskyRepository {
     // first review lookup each app run pays the "try all 3" cost.
     @Volatile private var knownPopfeedCollection: String? = null
 
+    /** Parses one raw Popfeed review record (backfill via listRecords, or a
+     *  live Jetstream commit — see FirehoseIndexer) into a [PopfeedReview].
+     *  Pulled out of [getPopfeedReviews] so both paths share one parser. */
+    suspend fun parsePopfeedReviewRecord(did: String, uri: String, obj: com.google.gson.JsonObject): PopfeedReview? {
+        val subject = obj.getAsJsonObject("subject") ?: obj.getAsJsonObject("item") ?: obj
+        val title = firstStringField(subject, "title", "name") ?: firstStringField(obj, "title", "name")
+            ?: return null
+        val image = firstImageField(subject, did, "poster", "posterUrl", "coverUrl", "artworkUrl", "image", "coverImage", "thumb")
+            ?: firstImageField(obj, did, "poster", "posterUrl", "coverUrl", "artworkUrl", "image", "coverImage", "thumb")
+        // Distinct landscape/backdrop art (as opposed to the portrait
+        // poster above) — used for the wide banner in the review
+        // detail popup so it isn't a cropped portrait image.
+        val backdrop = firstImageField(subject, did, "backdrop", "backdropUrl", "banner", "bannerUrl", "landscape", "landscapeUrl", "fanart", "heroImage", "wideImage")
+            ?: firstImageField(obj, did, "backdrop", "backdropUrl", "banner", "bannerUrl", "landscape", "landscapeUrl", "fanart", "heroImage", "wideImage")
+        val text = firstStringField(obj, "text", "review", "body", "content") ?: ""
+        // Popfeed's rating field is on a fixed 0–10 scale (half-star
+        // granularity — one point per half star), not a 0–5 scale.
+        // Always dividing by 2 here is what matches that confirmed
+        // 0–10 scale (see history for the previous, wrong heuristic).
+        val rawRating = obj.get("rating")?.takeIf { it.isJsonPrimitive }?.asFloat
+            ?: obj.get("stars")?.takeIf { it.isJsonPrimitive }?.asFloat
+            ?: obj.get("score")?.takeIf { it.isJsonPrimitive }?.asFloat ?: 0f
+        val rating5 = rawRating / 2f
+        val createdAt = firstStringField(obj, "createdAt", "publishedAt") ?: ""
+        return PopfeedReview(
+            uri = uri, mediaTitle = title, mediaImageUrl = image, mediaBackdropUrl = backdrop,
+            ratingOutOf5 = rating5.coerceIn(0f, 5f), reviewText = text, createdAt = createdAt
+        )
+    }
+
     suspend fun getPopfeedReviews(did: String): List<PopfeedReview> = coroutineScope {
         suspend fun tryCollection(collection: String): List<PopfeedReview>? {
             val resp = runCatching { api.listRecords(null, did, collection, 50, null) }.getOrNull()
@@ -386,35 +440,12 @@ class BlueskyRepository {
             if (body.records.isEmpty()) return null
             val reviews = body.records.mapNotNull { rec ->
                 val obj = rec.value?.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
-                val subject = obj.getAsJsonObject("subject") ?: obj.getAsJsonObject("item") ?: obj
-                val title = firstStringField(subject, "title", "name") ?: firstStringField(obj, "title", "name")
-                    ?: return@mapNotNull null
-                val image = firstImageField(subject, did, "poster", "posterUrl", "coverUrl", "artworkUrl", "image", "coverImage", "thumb")
-                    ?: firstImageField(obj, did, "poster", "posterUrl", "coverUrl", "artworkUrl", "image", "coverImage", "thumb")
-                // Distinct landscape/backdrop art (as opposed to the portrait
-                // poster above) — used for the wide banner in the review
-                // detail popup so it isn't a cropped portrait image.
-                val backdrop = firstImageField(subject, did, "backdrop", "backdropUrl", "banner", "bannerUrl", "landscape", "landscapeUrl", "fanart", "heroImage", "wideImage")
-                    ?: firstImageField(obj, did, "backdrop", "backdropUrl", "banner", "bannerUrl", "landscape", "landscapeUrl", "fanart", "heroImage", "wideImage")
-                val text = firstStringField(obj, "text", "review", "body", "content") ?: ""
-                // Popfeed's rating field is on a fixed 0–10 scale (half-star
-                // granularity — one point per half star), not a 0–5 scale.
-                // Always dividing by 2 here is what matches that confirmed
-                // 0–10 scale (see history for the previous, wrong heuristic).
-                val rawRating = obj.get("rating")?.takeIf { it.isJsonPrimitive }?.asFloat
-                    ?: obj.get("stars")?.takeIf { it.isJsonPrimitive }?.asFloat
-                    ?: obj.get("score")?.takeIf { it.isJsonPrimitive }?.asFloat ?: 0f
-                val rating5 = rawRating / 2f
-                val createdAt = firstStringField(obj, "createdAt", "publishedAt") ?: ""
-                PopfeedReview(
-                    uri = rec.uri, mediaTitle = title, mediaImageUrl = image, mediaBackdropUrl = backdrop,
-                    ratingOutOf5 = rating5.coerceIn(0f, 5f), reviewText = text, createdAt = createdAt
-                )
+                parsePopfeedReviewRecord(did, rec.uri, obj)
             }
             return reviews.takeIf { it.isNotEmpty() }
         }
 
-        val allCollections = listOf("social.popfeed.feed.review", "social.popfeed.review", "app.popsky.review")
+        val allCollections = REVIEW_COLLECTIONS
 
         // Fast path: we already know which collection this Popfeed
         // deployment uses — a single request, no fan-out.
@@ -920,6 +951,25 @@ class BlueskyRepository {
                 }
             }.awaitAll()
         }.sortedByDescending { it.lastActivityAt.ifBlank { it.lastSentByUsAt } }
+    }
+
+    /** Real-time-ish DM sync (see FirehoseIndexer/MainViewModel's DM polling
+     *  loop): chat.bsky.convo.getLog is a delta/cursor endpoint — it returns
+     *  only what changed across ALL of the user's conversations since the
+     *  given cursor, so a short poll loop against this is cheap (one small
+     *  request) instead of re-fetching every conversation's full message
+     *  list on a timer. There's no public chat firehose/WebSocket the way
+     *  there is for repo commits (Jetstream), so polling this delta endpoint
+     *  is the standard approach for "real-time" DMs in an unofficial client —
+     *  see the architecture note's §2 Catch-Up/Delta Fetching. Passing
+     *  cursor = null returns recent history rather than everything, which is
+     *  fine for the poll loop's first call (it just seeds the cursor). */
+    suspend fun getConvoLog(token: String, myDid: String, cursor: String? = null)
+        : Result<Pair<List<BskyConvoLogEntry>, String?>> = runCatching {
+        ensureChatApi(myDid)
+        val resp = chatApi.getConvoLog("Bearer $token", cursor)
+        val body = resp.body() ?: error("GetConvoLog ${resp.code()}: ${errorBodyText(resp)}")
+        Pair(body.logs, body.cursor)
     }
 
     suspend fun getOrCreateConvo(token: String, myDid: String, memberDids: List<String>): Result<String> = runCatching {
