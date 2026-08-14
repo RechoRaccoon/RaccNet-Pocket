@@ -42,6 +42,7 @@ import coil.compose.AsyncImage
 import com.mediaviewer.model.AuthorInfo
 import com.mediaviewer.model.MediaItem
 import com.mediaviewer.model.SearchAccountResult
+import com.mediaviewer.model.SearchFeedResult
 import com.mediaviewer.model.SearchStarterPackResult
 import com.mediaviewer.ui.theme.*
 import com.mediaviewer.viewmodel.MainViewModel
