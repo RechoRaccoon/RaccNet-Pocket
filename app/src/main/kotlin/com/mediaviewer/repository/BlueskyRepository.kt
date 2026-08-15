@@ -576,7 +576,9 @@ class BlueskyRepository {
                 }
             }
         }.awaitAll().flatten().associateBy { it.did }
-    } (not just mutuals/DM contacts) — used by
+    }
+
+    /** Every account the user follows (not just mutuals/DM contacts) — used by
      *  item 8's Latest Reviews / Livestreams sections, which per Popfeed's own
      *  "Reviews from Friends" design (confirmed via their public writeups)
      *  pull from the full following list, not just people you actually talk
