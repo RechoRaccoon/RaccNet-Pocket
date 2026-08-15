@@ -811,9 +811,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Hub refresh bubble — re-checks Mutuals, Reviews, and Blogs against
      *  the network, bypassing every "already loaded" guard. Live sections
      *  aren't included: they already refresh on their own visit-driven
-     *  loader and weren't part of what was asked for here. */
+     *  loader and weren't part of what was asked for here.
+     *  Bug fix: this used to call a `loadDmRecipients(force = true)` that
+     *  didn't actually exist on the ViewModel (only as a same-named
+     *  BlueskyRepository function with an unrelated (token, myDid)
+     *  signature) — an unresolved-reference compile error. The real
+     *  unconditional Mutuals reloader is loadDmConversationsBlocking;
+     *  ensureDmConversationsLoaded/ensureDmConversationsLoadedSuspend both
+     *  short-circuit if a list is already loaded, which is exactly the
+     *  "already loaded" guard this button needs to bypass. */
     fun refreshHub() {
-        loadDmRecipients(force = true)
+        viewModelScope.launch(Dispatchers.IO) { loadDmConversationsBlocking(silent = true) }
         loadFriendsReviewsIfNeeded(force = true)
     }
 
