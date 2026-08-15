@@ -9,8 +9,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.time.Instant
 
@@ -217,11 +220,18 @@ class BlueskyRepository {
         const val FOLLOWING_FEED_URI = "timeline://following"
 
         /** All known Popfeed review/Leaflet blog collection names — shared by
-         *  the backfill paths below and FirehoseIndexer's Jetstream
-         *  `wantedCollections` filter, so there's exactly one place that
-         *  knows what these third-party lexicons are currently called. */
+         *  the backfill paths below, so there's exactly one place that knows
+         *  what these third-party lexicons are currently called. */
         val REVIEW_COLLECTIONS = listOf("social.popfeed.feed.review", "social.popfeed.review", "app.popsky.review")
         val LEAFLET_COLLECTIONS = listOf("site.standard.document", "pub.leaflet.document")
+
+        // See getSubscribedReviews's doc comment for where these numbers come
+        // from — deliberately well under the ~10 req/sec the documented
+        // 3,000-per-5-min HTTP limit implies, since a subscribed list can hit
+        // several different third-party PDSs at once, each with its own
+        // unknown limit.
+        private const val SUBSCRIBED_FETCH_CONCURRENCY = 3
+        private const val SUBSCRIBED_FETCH_STAGGER_MS = 150L
     }
 
     suspend fun getAuthorFeed(token: String, actorDid: String, cursor: String? = null)
@@ -326,7 +336,7 @@ class BlueskyRepository {
         // collection names, try that one first for every other account,
         // cutting the common case down to 1 request instead of up to 2.
         // Rate limiting is the whole reason this matters now: see
-        // FirehoseIndexer's hydrate() doc comment.
+        // getSubscribedReviews/getSubscribedBlogs's doc comment on pacing.
         knownLeafletCollection?.let { known ->
             val resp = runCatching { api.listRecords(null, did, known, 50, null) }.getOrNull()
             val body = resp?.takeIf { it.isSuccessful }?.body()
@@ -353,7 +363,7 @@ class BlueskyRepository {
 
     /** Parses one raw Leaflet document record (whether read via listRecords
      *  during backfill, or pushed live off the Jetstream firehose — see
-     *  FirehoseIndexer) into a [LeafletBlog]. Pulled out of [getLeafletBlogs]
+     *  getSubscribedBlogs) into a [LeafletBlog]. Pulled out of [getLeafletBlogs]
      *  so both paths share exactly one parsing implementation. Best-effort
      *  thumbnail/description extraction, same defensive style as
      *  getPopfeedReviews below — Leaflet's block schema isn't fully modeled,
@@ -423,7 +433,7 @@ class BlueskyRepository {
     @Volatile private var knownPopfeedCollection: String? = null
 
     /** Parses one raw Popfeed review record (backfill via listRecords, or a
-     *  live Jetstream commit — see FirehoseIndexer) into a [PopfeedReview].
+     *  getSubscribedReviews) into a [PopfeedReview].
      *  Pulled out of [getPopfeedReviews] so both paths share one parser. */
     suspend fun parsePopfeedReviewRecord(did: String, uri: String, obj: com.google.gson.JsonObject): PopfeedReview? {
         val subject = obj.getAsJsonObject("subject") ?: obj.getAsJsonObject("item") ?: obj
@@ -479,7 +489,7 @@ class BlueskyRepository {
         // just has no reviews under the known collection) check the rest
         // one at a time, not in parallel — this used to fire all of them
         // simultaneously, which meant every account still in "unknown
-        // collection" state during a hydration burst (see FirehoseIndexer)
+        // collection" state during a subscribed-accounts fetch (see getSubscribedReviews/getSubscribedBlogs)
         // was contributing up to 3 concurrent requests instead of 1, right
         // when the whole point was to keep that burst small enough not to
         // trip Bluesky's rate limiting. Once any account resolves this,
@@ -497,7 +507,76 @@ class BlueskyRepository {
         return emptyList()
     }
 
-    /** Every account the user follows (not just mutuals/DM contacts) — used by
+    /** Reviews for a caller-chosen set of subscribed accounts (see the
+     *  profile "Subscribe" button in the Reviews tab) — replaces the old
+     *  Jetstream/firehose-backed "everyone you follow" pipeline entirely.
+     *  There's genuinely no bulk "reviews for these N accounts" endpoint on
+     *  Popfeed's side (confirmed — no public AppView for it), so one
+     *  com.atproto.repo.listRecords call per subscribed account is
+     *  unavoidable; what's controllable is how it's paced.
+     *
+     *  Pacing here is sized off Bluesky's actually-documented limits, not a
+     *  guess: the write-quota "5,000 points/hour" limit some people cite
+     *  doesn't apply at all (listRecords is a read, points are only charged
+     *  for record creates/updates/deletes) — the real constraint for reads
+     *  is the general HTTP API limit, published as 3,000 requests per 5
+     *  minutes per IP (~10/sec sustained), plus each account's own PDS
+     *  potentially applying its own, unknown limit if it's not
+     *  bsky.social-hosted. A subscribed-accounts list is expected to be
+     *  small (tens, not hundreds — it's an explicit opt-in per account, not
+     *  "everyone followed"), so CONCURRENCY here is deliberately
+     *  conservative relative to the ~10 req/sec headroom that limit implies,
+     *  leaving comfortable margin for whatever a given third-party PDS's own
+     *  limit turns out to be. */
+    suspend fun getSubscribedReviews(token: String, dids: List<String>): List<FriendPopfeedReview> = coroutineScope {
+        if (dids.isEmpty()) return@coroutineScope emptyList()
+        val authors = fetchAuthorInfos(token, dids)
+        val gate = Semaphore(SUBSCRIBED_FETCH_CONCURRENCY)
+        dids.distinct().map { did ->
+            async {
+                delay((dids.indexOf(did) % SUBSCRIBED_FETCH_CONCURRENCY) * SUBSCRIBED_FETCH_STAGGER_MS)
+                gate.withPermit {
+                    val author = authors[did] ?: AuthorInfo(did = did, handle = did, displayName = did, avatarUrl = null)
+                    runCatching { getPopfeedReviews(did) }.getOrDefault(emptyList())
+                        .map { FriendPopfeedReview(author, it) }
+                }
+            }
+        }.awaitAll().flatten().sortedByDescending { it.review.createdAt }
+    }
+
+    /** Blogs equivalent of [getSubscribedReviews] — same reasoning, same
+     *  pacing, separate subscription list (an account can be subscribed for
+     *  Reviews, Blogs, both, or neither). */
+    suspend fun getSubscribedBlogs(token: String, dids: List<String>): List<FriendLeafletBlog> = coroutineScope {
+        if (dids.isEmpty()) return@coroutineScope emptyList()
+        val authors = fetchAuthorInfos(token, dids)
+        val gate = Semaphore(SUBSCRIBED_FETCH_CONCURRENCY)
+        dids.distinct().map { did ->
+            async {
+                delay((dids.indexOf(did) % SUBSCRIBED_FETCH_CONCURRENCY) * SUBSCRIBED_FETCH_STAGGER_MS)
+                gate.withPermit {
+                    val author = authors[did] ?: AuthorInfo(did = did, handle = did, displayName = did, avatarUrl = null)
+                    runCatching { getLeafletBlogs(did) }.getOrDefault(emptyList())
+                        .map { FriendLeafletBlog(author, it) }
+                }
+            }
+        }.awaitAll().flatten().sortedByDescending { it.blog.createdAt }
+    }
+
+    /** One batched app.bsky.actor.getProfiles call (groups of 25, same as
+     *  [getLiveNowStreams]) for display info (avatar/name) on a set of
+     *  DIDs — this part genuinely does have a real bulk AppView endpoint,
+     *  unlike the review/blog records themselves. */
+    private suspend fun fetchAuthorInfos(token: String, dids: List<String>): Map<String, AuthorInfo> = coroutineScope {
+        dids.distinct().chunked(25).map { batch ->
+            async {
+                val resp = runCatching { retryOnce { api.getProfiles("Bearer $token", batch) } }.getOrNull()
+                resp?.takeIf { it.isSuccessful }?.body()?.profiles.orEmpty().map { p ->
+                    AuthorInfo(did = p.did, handle = p.handle, displayName = p.displayName ?: p.handle, avatarUrl = p.avatar)
+                }
+            }
+        }.awaitAll().flatten().associateBy { it.did }
+    } (not just mutuals/DM contacts) — used by
      *  item 8's Latest Reviews / Livestreams sections, which per Popfeed's own
      *  "Reviews from Friends" design (confirmed via their public writeups)
      *  pull from the full following list, not just people you actually talk
@@ -529,12 +608,12 @@ class BlueskyRepository {
 
     // getFriendsPopfeedReviews (the old N-parallel-requests-per-follow fan-out
     // for the Hub's "Latest Reviews" section) has been removed — it was dead
-    // code with zero call sites (superseded by FirehoseIndexer, which hydrates
+    // code with zero call sites (superseded by the Subscribe-list model, which fetches only
     // the same data with bounded/staggered per-account requests once, caches
     // it to disk, and keeps it live afterward via a single filtered Jetstream
     // subscription instead of ever re-running a full fan-out). Purged per the
     // architecture note's "remove legacy PDS-loop caches that run parallel to
-    // the new pipeline" instruction — see FirehoseIndexer's class doc comment
+    // the new pipeline" instruction — see getSubscribedReviews's doc comment
     // for why a literal single "batched" REST call isn't possible here (no
     // such bulk endpoint exists for third-party lexicons like Popfeed/Leaflet)
     // and why Jetstream is the correct replacement instead.
@@ -1031,7 +1110,7 @@ class BlueskyRepository {
         }.sortedByDescending { it.lastActivityAt.ifBlank { it.lastSentByUsAt } }
     }
 
-    /** Real-time-ish DM sync (see FirehoseIndexer/MainViewModel's DM polling
+    /** Real-time-ish DM sync (see MainViewModel's DM polling
      *  loop): chat.bsky.convo.getLog is a delta/cursor endpoint — it returns
      *  only what changed across ALL of the user's conversations since the
      *  given cursor, so a short poll loop against this is cheap (one small

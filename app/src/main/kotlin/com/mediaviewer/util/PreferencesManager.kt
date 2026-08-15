@@ -35,36 +35,29 @@ object PrefKeys {
     val GLASS_RIM_INTENSITY    = floatPreferencesKey("glass_rim_intensity")
     val HIDE_TEXT_ONLY_POSTS  = booleanPreferencesKey("hide_text_only_posts")
     val HISTORY_JSON          = stringPreferencesKey("history_json")
-    // Firehose indexer cache (see FirehoseIndexer.kt) — persisted so a cold
-    // restart can show the Hub's Reviews/Blogs instantly from disk instead
-    // of re-running the full per-followed-account fetch burst that used to
-    // fire on every single app launch. That burst is what was tripping
-    // Bluesky's rate limiting (429s) on frequent restarts — this cache is
-    // the fix, not just a nice-to-have.
+    // Hub Reviews/Blogs cache — persisted so a cold restart can show the
+    // subscribed-accounts Reviews/Blogs sections instantly from disk while
+    // a fresh fetch runs in the background, instead of a blank section
+    // until that fetch completes.
     val HUB_REVIEWS_CACHE_JSON = stringPreferencesKey("hub_reviews_cache_json")
     val HUB_BLOGS_CACHE_JSON   = stringPreferencesKey("hub_blogs_cache_json")
     val HUB_CACHE_HYDRATED_AT  = longPreferencesKey("hub_cache_hydrated_at")
-    // Jetstream catch-up cursor (time_us) — see JetstreamClient's
-    // `initialCursor` doc comment. Persisted periodically while connected so
-    // the NEXT app launch can ask Jetstream to replay everything missed
-    // since last seen, instead of either (a) missing it entirely or (b)
-    // needing a full per-account REST re-fetch just to catch up.
-    val JETSTREAM_CURSOR       = longPreferencesKey("jetstream_cursor")
     // Phase 4 — on-device translation
     val TRANSLATE_ENABLED     = booleanPreferencesKey("translate_enabled")
     val TRANSLATE_TARGET_LANG = stringPreferencesKey("translate_target_lang")
     // Phase 4 — custom app-wide font pack
     val CUSTOM_FONT_PATH      = stringPreferencesKey("custom_font_path")
     val CUSTOM_FONT_NAME      = stringPreferencesKey("custom_font_name")
-    // Hub "New" indicators (Reviews/Blogs cards) — purely local, never
-    // synced anywhere: a review/blog's own URI, once its card has been
-    // tapped (or "Clear Indicators" hit), is added here so its badge
-    // doesn't come back on a later Hub visit. This can only ever grow, but
-    // review/blog URIs are short strings and this is a person's own
-    // lifetime of Hub activity, not remotely large enough to worry about
-    // trimming.
-    val SEEN_HUB_ITEM_URIS    = stringSetPreferencesKey("seen_hub_item_uris")
+    // Item (this session): local-only "Subscribe" lists on profiles' Reviews/
+    // Blogs tabs — the Hub's Reviews/Blogs sections now pull only from
+    // whichever accounts are in these sets (subscribing is per-section: an
+    // account can be subscribed for Reviews, Blogs, both, or neither), a
+    // direct-PDS-per-account model instead of the removed Jetstream/firehose
+    // "everyone you follow" pipeline. Never synced anywhere.
+    val SUBSCRIBED_REVIEW_DIDS = stringSetPreferencesKey("subscribed_review_dids")
+    val SUBSCRIBED_BLOG_DIDS   = stringSetPreferencesKey("subscribed_blog_dids")
 }
+
 
 class PreferencesManager(private val context: Context) {
 
@@ -99,7 +92,8 @@ class PreferencesManager(private val context: Context) {
     val hubReviewsCacheJson: Flow<String>       = context.dataStore.data.map { it[PrefKeys.HUB_REVIEWS_CACHE_JSON] ?: "[]" }
     val hubBlogsCacheJson: Flow<String>         = context.dataStore.data.map { it[PrefKeys.HUB_BLOGS_CACHE_JSON] ?: "[]" }
     val hubCacheHydratedAt: Flow<Long>          = context.dataStore.data.map { it[PrefKeys.HUB_CACHE_HYDRATED_AT] ?: 0L }
-    val jetstreamCursor: Flow<Long?>            = context.dataStore.data.map { it[PrefKeys.JETSTREAM_CURSOR] }
+    val subscribedReviewDids: Flow<Set<String>> = context.dataStore.data.map { it[PrefKeys.SUBSCRIBED_REVIEW_DIDS] ?: emptySet() }
+    val subscribedBlogDids: Flow<Set<String>>   = context.dataStore.data.map { it[PrefKeys.SUBSCRIBED_BLOG_DIDS] ?: emptySet() }
     // Phase 4: on-device translation toggle + preferred target language (BCP-47 tag).
     // Defaults to the device's own language so a fresh install "just works" without
     // the user having to hunt for the setting first.
@@ -110,7 +104,6 @@ class PreferencesManager(private val context: Context) {
     // Phase 4: custom font pack — absolute path to the copied-in font file on
     // internal storage, plus its original display name for the Settings row.
     val customFontPath: Flow<String?>          = context.dataStore.data.map { it[PrefKeys.CUSTOM_FONT_PATH] }
-    val seenHubItemUris: Flow<Set<String>>     = context.dataStore.data.map { it[PrefKeys.SEEN_HUB_ITEM_URIS] ?: emptySet() }
     val customFontName: Flow<String?>          = context.dataStore.data.map { it[PrefKeys.CUSTOM_FONT_NAME] }
 
     suspend fun setTranslateEnabled(enabled: Boolean) {
@@ -133,19 +126,21 @@ class PreferencesManager(private val context: Context) {
         }
     }
 
-    /** Marks a single Hub review/blog card as seen — used when the user taps
-     *  it. See SEEN_HUB_ITEM_URIS's own comment. */
-    suspend fun markHubItemSeen(uri: String) {
+    /** Toggles one account's Reviews-tab "Subscribe" state — added to (or
+     *  removed from) the set the Hub's Reviews section reads from. */
+    suspend fun toggleSubscribedReviewDid(did: String) {
         context.dataStore.edit { prefs ->
-            prefs[PrefKeys.SEEN_HUB_ITEM_URIS] = (prefs[PrefKeys.SEEN_HUB_ITEM_URIS] ?: emptySet()) + uri
+            val current = prefs[PrefKeys.SUBSCRIBED_REVIEW_DIDS] ?: emptySet()
+            prefs[PrefKeys.SUBSCRIBED_REVIEW_DIDS] = if (did in current) current - did else current + did
         }
     }
 
-    /** "Clear Indicators" bubble at the bottom of the Hub — marks every URI
-     *  currently showing a "New" badge as seen in one write. */
-    suspend fun markHubItemsSeen(uris: Collection<String>) {
+    /** Blogs-tab equivalent of [toggleSubscribedReviewDid] — a separate list,
+     *  since subscribing to someone's Reviews doesn't imply their Blogs. */
+    suspend fun toggleSubscribedBlogDid(did: String) {
         context.dataStore.edit { prefs ->
-            prefs[PrefKeys.SEEN_HUB_ITEM_URIS] = (prefs[PrefKeys.SEEN_HUB_ITEM_URIS] ?: emptySet()) + uris
+            val current = prefs[PrefKeys.SUBSCRIBED_BLOG_DIDS] ?: emptySet()
+            prefs[PrefKeys.SUBSCRIBED_BLOG_DIDS] = if (did in current) current - did else current + did
         }
     }
 
@@ -165,10 +160,6 @@ class PreferencesManager(private val context: Context) {
             prefs[PrefKeys.HUB_BLOGS_CACHE_JSON] = blogsJson
             prefs[PrefKeys.HUB_CACHE_HYDRATED_AT] = hydratedAt
         }
-    }
-
-    suspend fun setJetstreamCursor(cursor: Long) {
-        context.dataStore.edit { prefs -> prefs[PrefKeys.JETSTREAM_CURSOR] = cursor }
     }
 
     suspend fun setLiquidGlass(enabled: Boolean) {

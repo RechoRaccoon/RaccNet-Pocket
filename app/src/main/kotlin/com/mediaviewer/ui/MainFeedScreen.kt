@@ -142,16 +142,17 @@ fun MainFeedScreen(
     // Hub Blogs section (mirrors Reviews above).
     friendsBlogs: List<com.mediaviewer.model.FriendLeafletBlog> = emptyList(),
     onOpenBlog: (com.mediaviewer.model.FriendLeafletBlog) -> Unit = {},
-    // Hub "New" indicators — purely local read-state, see MainViewModel.
-    seenHubUris: Set<String> = emptySet(),
-    onClearHubIndicators: () -> Unit = {},
+    // Item (this session): Hub refresh bubble — re-checks Mutuals/Reviews/Blogs.
+    onRefreshHub: () -> Unit = {},
     liveFriends: List<com.mediaviewer.model.StreamplaceLiveStream> = emptyList(),
     liveFriendsLoading: Boolean = false,
     onLoadLiveFriends: () -> Unit = {},
     blueskyLiveNow: List<com.mediaviewer.model.BlueskyLiveNowStream> = emptyList(),
     blueskyLiveNowLoading: Boolean = false,
     onLoadBlueskyLiveNow: () -> Unit = {},
-    onOpenLiveNowPlayer: (com.mediaviewer.model.BlueskyLiveNowStream) -> Unit = {},
+    // Item (this session): generic over both Live sources now — see
+    // MainViewModel.PlayingLiveStream.
+    onOpenLivePlayer: (String, String, String) -> Unit = { _, _, _ -> },
     onEnsureFriends: () -> Unit = {},
     selfAvatarUrl: String? = null,
     availableFeeds: List<BskyFeedInfo>,
@@ -447,15 +448,14 @@ fun MainFeedScreen(
                         onOpenProfile             = onOpenProfile,
                         friendsBlogs              = friendsBlogs,
                         onOpenBlog                = onOpenBlog,
-                        seenHubUris               = seenHubUris,
-                        onClearHubIndicators      = onClearHubIndicators,
+                        onRefreshHub              = onRefreshHub,
                         liveFriends               = liveFriends,
                         liveFriendsLoading        = liveFriendsLoading,
                         onLoadLiveFriends         = onLoadLiveFriends,
                         blueskyLiveNow            = blueskyLiveNow,
                         blueskyLiveNowLoading     = blueskyLiveNowLoading,
                         onLoadBlueskyLiveNow      = onLoadBlueskyLiveNow,
-                        onOpenLiveNowPlayer       = onOpenLiveNowPlayer,
+                        onOpenLivePlayer          = onOpenLivePlayer,
                         onEnsureFriends           = onEnsureFriends,
                         selfAvatarUrl             = selfAvatarUrl
                     )

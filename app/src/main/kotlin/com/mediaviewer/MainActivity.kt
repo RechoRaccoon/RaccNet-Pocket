@@ -143,25 +143,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Bug fix: the Hub's Reviews/Blogs/Live sections and the Jetstream
-    // firehose connection they depend on (see FirehoseIndexer.kt) used to
-    // only ever get (re)established once, right after login — if the app
-    // was later backgrounded long enough for Android to suspend its
-    // network sockets (or the process was frozen under memory pressure
-    // without being fully killed), the Jetstream WebSocket could silently
-    // die and never successfully reconnect, and nothing else prompted a
-    // retry — so the Hub would just quietly go stale until the user logged
-    // out and back in, which forced a brand-new FirehoseIndexer.start().
-    // Foreground resume is a much more reliable, immediate signal to
-    // reconnect than relying purely on the socket's own background retry
-    // thread (which Android can throttle while backgrounded/Doze), so this
-    // nudges the indexer's connection every time the app becomes visible
-    // again — a no-op if it's already connected (see JetstreamClient.
-    // reconnectIfNeeded), so this is cheap to call unconditionally.
-    override fun onResume() {
-        super.onResume()
-        viewModel.onAppForegrounded()
-    }
+    // Item (this session): the Jetstream/firehose connection this used to
+    // nudge on every resume is gone (Reviews/Blogs are now a direct,
+    // per-visit/per-refresh PDS fetch off the Subscribe lists — see
+    // MainViewModel.loadFriendsReviewsIfNeeded — nothing persistent to
+    // reconnect), so there's nothing left for onResume to do here.
 }
 
 @Composable
@@ -217,12 +203,14 @@ private fun AppRoot(viewModel: MainViewModel) {
     val friendsReviews        by viewModel.friendsReviews.collectAsState()
     val friendsReviewsLoading by viewModel.friendsReviewsLoading.collectAsState()
     val friendsBlogs           by viewModel.friendsBlogs.collectAsState()
-    val seenHubUris            by viewModel.seenHubUris.collectAsState()
+
     val liveFriends           by viewModel.liveFriends.collectAsState()
     val liveFriendsLoading    by viewModel.liveFriendsLoading.collectAsState()
     val blueskyLiveNow        by viewModel.blueskyLiveNow.collectAsState()
     val blueskyLiveNowLoading by viewModel.blueskyLiveNowLoading.collectAsState()
-    val playingLiveNow        by viewModel.playingLiveNow.collectAsState()
+    val playingLive           by viewModel.playingLive.collectAsState()
+    val subscribedReviewDids  by viewModel.subscribedReviewDids.collectAsState()
+    val subscribedBlogDids    by viewModel.subscribedBlogDids.collectAsState()
     val searchOpen             by viewModel.searchOpen.collectAsState()
     val searchState            by viewModel.searchState.collectAsState()
     // Phase 4
@@ -269,15 +257,14 @@ private fun AppRoot(viewModel: MainViewModel) {
             onOpenProfile             = { author -> viewModel.openProfile(author) },
             friendsBlogs              = friendsBlogs,
             onOpenBlog                = viewModel::openMutualBlog,
-            seenHubUris               = seenHubUris,
-            onClearHubIndicators      = viewModel::clearHubIndicators,
+            onRefreshHub              = viewModel::refreshHub,
             liveFriends               = liveFriends,
             liveFriendsLoading        = liveFriendsLoading,
             onLoadLiveFriends         = viewModel::loadLiveFriendsIfNeeded,
             blueskyLiveNow            = blueskyLiveNow,
             blueskyLiveNowLoading     = blueskyLiveNowLoading,
             onLoadBlueskyLiveNow      = viewModel::loadBlueskyLiveNowIfNeeded,
-            onOpenLiveNowPlayer       = viewModel::openLiveNowPlayer,
+            onOpenLivePlayer          = viewModel::openLivePlayer,
             onEnsureFriends           = viewModel::ensureDmConversationsLoaded,
             selfAvatarUrl             = selfProfile?.author?.avatarUrl,
             availableFeeds            = availableFeeds,
@@ -420,13 +407,13 @@ private fun AppRoot(viewModel: MainViewModel) {
             )
         }
 
-        // Feature (this session): the Hub's Bluesky "Live Now" cards open
-        // this instead of bouncing out to a browser — layered the same way
+        // Item (this session): both Live sources (Streamplace + Bluesky Live
+        // Now) open this now, not just Bluesky's — layered the same way
         // every other full-screen overlay in this app is (DM inbox, Search),
         // on top of everything else.
-        val currentPlayingLiveNow = playingLiveNow
-        if (currentPlayingLiveNow != null) {
-            LiveNowPlayerOverlay(stream = currentPlayingLiveNow, onClose = viewModel::closeLiveNowPlayer)
+        val currentPlayingLive = playingLive
+        if (currentPlayingLive != null) {
+            LiveNowPlayerOverlay(stream = currentPlayingLive, onClose = viewModel::closeLivePlayer)
         }
 
         val currentProfileOverlay = profileOverlay
@@ -454,7 +441,11 @@ private fun AppRoot(viewModel: MainViewModel) {
                     onOpenReview      = viewModel::openProfileReview,
                     onCloseReview     = viewModel::closeProfileReview,
                     onPinchOut        = viewModel::pinchOutFromProfile,
-                    onSaveScroll      = viewModel::saveProfileScrollPosition
+                    onSaveScroll      = viewModel::saveProfileScrollPosition,
+                    isReviewSubscribed = currentProfileOverlay.author.did in subscribedReviewDids,
+                    isBlogSubscribed   = currentProfileOverlay.author.did in subscribedBlogDids,
+                    onToggleReviewSubscribe = { viewModel.toggleReviewSubscription(currentProfileOverlay.author) },
+                    onToggleBlogSubscribe   = { viewModel.toggleBlogSubscription(currentProfileOverlay.author) }
                 )
             }
         }

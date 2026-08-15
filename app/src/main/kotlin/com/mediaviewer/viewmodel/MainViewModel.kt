@@ -10,7 +10,6 @@ import coil.request.ImageRequest
 import com.mediaviewer.model.*
 import com.mediaviewer.repository.BlueskyRepository
 import com.mediaviewer.repository.E621Repository
-import com.mediaviewer.repository.FirehoseIndexer
 import com.mediaviewer.repository.StreamplaceRepository
 import com.mediaviewer.util.PreferencesManager
 import com.mediaviewer.worker.DownloadWorker
@@ -722,101 +721,100 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // inbox). Profiles just reuses that list directly for its avatar row;
     // Reviews needs its own fetch, done once lazily the first time the tab
     // is opened rather than eagerly on every Hub visit.
-    // Firehose-backed indexer (see its own doc comment) — replaces the old
-    // "fan out one listRecords call per followed account, every Hub visit"
-    // approach with a one-time hydration plus live Jetstream updates.
-    // Scope change (per feedback, this session): broadened from Mutuals to
-    // everyone the user follows, matching how Live/VODs already worked —
-    // only feasible speed-wise because the indexer no longer re-fetches on
-    // every visit.
-    val firehoseIndexer = FirehoseIndexer(bskyRepo, prefs)
-    val friendsReviews: StateFlow<List<FriendPopfeedReview>> = firehoseIndexer.friendReviews
-    val friendsBlogs: StateFlow<List<FriendLeafletBlog>> = firehoseIndexer.friendBlogs
+    // Item (this session): Reviews/Blogs are now sourced from local
+    // "Subscribe" lists (see the profile Reviews/Blogs tabs' sub-row, and
+    // PreferencesManager.SUBSCRIBED_REVIEW_DIDS/SUBSCRIBED_BLOG_DIDS) instead
+    // of the removed Jetstream/firehose "everyone you follow" pipeline —
+    // direct-per-account PDS fetches (see BlueskyRepository.
+    // getSubscribedReviews/getSubscribedBlogs), bounded to whatever the user
+    // actually opted into rather than their whole follow list. No firehose,
+    // no Jetstream, no listRecords fan-out beyond the subscribed set.
+    private val _subscribedReviewDids = MutableStateFlow<Set<String>>(emptySet())
+    val subscribedReviewDids: StateFlow<Set<String>> = _subscribedReviewDids
+    private val _subscribedBlogDids = MutableStateFlow<Set<String>>(emptySet())
+    val subscribedBlogDids: StateFlow<Set<String>> = _subscribedBlogDids
+
+    private val _friendsReviews = MutableStateFlow<List<FriendPopfeedReview>>(emptyList())
+    val friendsReviews: StateFlow<List<FriendPopfeedReview>> = _friendsReviews
+    private val _friendsBlogs = MutableStateFlow<List<FriendLeafletBlog>>(emptyList())
+    val friendsBlogs: StateFlow<List<FriendLeafletBlog>> = _friendsBlogs
 
     private val _friendsReviewsLoading = MutableStateFlow(false)
     val friendsReviewsLoading: StateFlow<Boolean> = _friendsReviewsLoading
-    private var firehoseIndexerStarted = false
-    // Bug fix (this session): loadFriendsReviewsIfNeeded() used to be
-    // guarded only by `firehoseIndexerStarted || _friendsReviewsLoading.
-    // value`, checked on the caller's thread and then set to true only
-    // *inside* the launched coroutine — a classic check-then-act race. Two
-    // near-simultaneous callers (this genuinely happens: startHubBackground
-    // Warmup's retry loop in init{} and AtProtocolPageContent's own
-    // LaunchedEffect(Unit) both call this, and can land within the same few
-    // milliseconds of a cold start if the Hub page is already the visible
-    // screen) could both pass the guard before either set the flag, both
-    // call FirehoseIndexer.start(), and since start() clears its cache
-    // before re-hydrating, the second call's clear() could stomp the first
-    // call's hydrate() coroutine mid-flight — losing all but whichever
-    // account or two had already been written back in by the time the wipe
-    // landed. That's what was behind "reviews only show up for one
-    // person": not a data bug, a startup race. AtomicBoolean.compareAndSet
-    // is what actually closes this (unlike the StateFlow check above, this
-    // one has no gap between "check" and "claim" for a second thread to
-    // land in).
-    private val firehoseIndexerStartClaimed = java.util.concurrent.atomic.AtomicBoolean(false)
+    private var reviewsBlogsLoaded = false
 
-    // ── Hub "New" indicators (see PreferencesManager.SEEN_HUB_ITEM_URIS) ──
-    private val _seenHubUris = MutableStateFlow<Set<String>>(emptySet())
-    val seenHubUris: StateFlow<Set<String>> = _seenHubUris
-
-    fun markHubItemSeen(uri: String) {
-        if (uri in _seenHubUris.value) return
-        _seenHubUris.value = _seenHubUris.value + uri
-        viewModelScope.launch(Dispatchers.IO) { prefs.markHubItemSeen(uri) }
-    }
-
-    /** "Clear Indicators" bubble — marks every review/blog currently in the
-     *  Hub as seen in one shot, whether or not it's actually still showing
-     *  a badge (idempotent, so this is cheap to just always pass the full
-     *  current lists rather than diffing first). */
-    fun clearHubIndicators() {
-        val uris = friendsReviews.value.map { it.review.uri } + friendsBlogs.value.map { it.blog.uri }
-        if (uris.isEmpty()) return
-        _seenHubUris.value = _seenHubUris.value + uris
-        viewModelScope.launch(Dispatchers.IO) { prefs.markHubItemsSeen(uris) }
-    }
-
-    /** Starts the firehose indexer (one-time getAllFollows + Jetstream
-     *  subscribe) the first time the Hub's AT Protocol page composes, same
-     *  entry-point shape as the old per-visit loader so callers don't need
-     *  to change. Subsequent calls are a no-op — after the first start, the
-     *  indexer's own StateFlows just stay live via the firehose. See
-     *  firehoseIndexerStartClaimed's comment for why this needs to be a
-     *  true atomic claim rather than the StateFlow check this used to use. */
-    fun loadFriendsReviewsIfNeeded() {
-        if (firehoseIndexerStarted) return
-        if (!firehoseIndexerStartClaimed.compareAndSet(false, true)) return
-        _friendsReviewsLoading.value = true
+    /** Toggles whether `author` is subscribed for the Hub's Reviews section
+     *  — called from the "Subscribe" button on their profile's Reviews tab.
+     *  Refetches immediately afterward so the Hub (and the button's own
+     *  state, read from subscribedReviewDids) reflects the change right
+     *  away rather than only on the next Hub visit. */
+    fun toggleReviewSubscription(author: AuthorInfo) {
         viewModelScope.launch(Dispatchers.IO) {
-            val follows = bskyRepo.getAllFollows(bskyToken, _bskyDid.value)
-            if (follows.isSuccess) {
-                firehoseIndexer.start(_bskyDid.value, follows.getOrDefault(emptyList()))
-                firehoseIndexerStarted = true
-            } else {
-                // Genuine failure (not "someone else already claimed it") —
-                // release the claim so the next retry from
-                // startHubBackgroundWarmup's backoff loop can actually try
-                // again, instead of being permanently locked out by its own
-                // failed attempt.
-                firehoseIndexerStartClaimed.set(false)
-            }
-            _friendsReviewsLoading.value = false
+            prefs.toggleSubscribedReviewDid(author.did)
+            reviewsBlogsLoaded = false
+            loadFriendsReviewsIfNeeded(force = true)
         }
     }
 
-    /** Bug fix (this session): the Hub's Reviews/Blogs/Live sections used to
-     *  only ever (re)connect once per app process — if the Jetstream
-     *  WebSocket died while backgrounded and failed to reconnect (Android
-     *  can throttle background threads under Doze/App Standby, which is
-     *  exactly what JetstreamClient's own backoff retry runs on), nothing
-     *  else ever prompted a retry, and the Hub would just silently go stale
-     *  until the user logged out and back in (which forces a brand new
-     *  FirehoseIndexer.start()). Called from MainActivity.onResume — a
-     *  much more reliable "we're back, check the connection" signal than
-     *  relying purely on the socket's own timer. */
-    fun onAppForegrounded() {
-        firehoseIndexer.onAppForegrounded()
+    /** Blogs-tab equivalent of [toggleReviewSubscription]. */
+    fun toggleBlogSubscription(author: AuthorInfo) {
+        viewModelScope.launch(Dispatchers.IO) {
+            prefs.toggleSubscribedBlogDid(author.did)
+            reviewsBlogsLoaded = false
+            loadFriendsReviewsIfNeeded(force = true)
+        }
+    }
+
+    /** Loads (or reloads) the Hub's Reviews/Blogs sections from the current
+     *  subscribed-DID sets. Cache-first, same instant-on-restart shape the
+     *  old firehose indexer had: the last persisted snapshot publishes
+     *  immediately, then a fresh fetch runs and overwrites/persists it.
+     *  `force = true` (subscribe/unsubscribe, or the Hub's manual refresh
+     *  bubble) bypasses the "already loaded this session" guard. */
+    fun loadFriendsReviewsIfNeeded(force: Boolean = false) {
+        if (reviewsBlogsLoaded && !force) return
+        if (_friendsReviewsLoading.value) return
+        _friendsReviewsLoading.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            if (!force) {
+                // Instant snapshot from disk before the network round-trip —
+                // never leave the Hub blank while the fetch below is in flight.
+                runCatching {
+                    val gson = com.google.gson.Gson()
+                    val reviewType = object : com.google.gson.reflect.TypeToken<List<FriendPopfeedReview>>() {}.type
+                    val blogType = object : com.google.gson.reflect.TypeToken<List<FriendLeafletBlog>>() {}.type
+                    val cachedReviews: List<FriendPopfeedReview> = gson.fromJson(prefs.hubReviewsCacheJson.first(), reviewType) ?: emptyList()
+                    val cachedBlogs: List<FriendLeafletBlog> = gson.fromJson(prefs.hubBlogsCacheJson.first(), blogType) ?: emptyList()
+                    if (cachedReviews.isNotEmpty()) _friendsReviews.value = cachedReviews
+                    if (cachedBlogs.isNotEmpty()) _friendsBlogs.value = cachedBlogs
+                }
+            }
+            val reviewDids = prefs.subscribedReviewDids.first()
+            val blogDids = prefs.subscribedBlogDids.first()
+            _subscribedReviewDids.value = reviewDids
+            _subscribedBlogDids.value = blogDids
+            val reviews = if (reviewDids.isEmpty()) emptyList() else bskyRepo.getSubscribedReviews(bskyToken, reviewDids.toList())
+            val blogs = if (blogDids.isEmpty()) emptyList() else bskyRepo.getSubscribedBlogs(bskyToken, blogDids.toList())
+            _friendsReviews.value = reviews
+            _friendsBlogs.value = blogs
+            reviewsBlogsLoaded = true
+            _friendsReviewsLoading.value = false
+            runCatching {
+                val gson = com.google.gson.Gson()
+                val reviewType = object : com.google.gson.reflect.TypeToken<List<FriendPopfeedReview>>() {}.type
+                val blogType = object : com.google.gson.reflect.TypeToken<List<FriendLeafletBlog>>() {}.type
+                prefs.setHubCache(gson.toJson(reviews, reviewType), gson.toJson(blogs, blogType), System.currentTimeMillis())
+            }
+        }
+    }
+
+    /** Hub refresh bubble — re-checks Mutuals, Reviews, and Blogs against
+     *  the network, bypassing every "already loaded" guard. Live sections
+     *  aren't included: they already refresh on their own visit-driven
+     *  loader and weren't part of what was asked for here. */
+    fun refreshHub() {
+        loadDmRecipients(force = true)
+        loadFriendsReviewsIfNeeded(force = true)
     }
 
     // ── Item 8/19: Hub "Livestreams" section ─────────────────────────────────
@@ -832,14 +830,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val liveFriendsLoading: StateFlow<Boolean> = _liveFriendsLoading
     private var liveFriendsLoaded = false
 
-    /** Every followed DID, preferring the firehose indexer's live-updated
-     *  set (no network call at all, and already current) once it's warm;
-     *  falls back to a one-off getAllFollows if the indexer hasn't started
-     *  yet (e.g. this Hub section composes before the Reviews one has). */
-    private suspend fun followedDidsForLiveSections(): Result<Set<String>> {
-        firehoseIndexer.followedDids.value.takeIf { it.isNotEmpty() }?.let { return Result.success(it) }
-        return bskyRepo.getAllFollows(bskyToken, _bskyDid.value).map { list -> list.map { it.did }.toSet() }
-    }
+    /** Every followed DID — used only by the Live sections (Streamplace +
+     *  Bluesky Live Now), which are still scoped to "everyone you follow"
+     *  (unlike Reviews/Blogs, which moved to the Subscribe-list model this
+     *  session — see loadFriendsReviewsIfNeeded). No indexer/cache to check
+     *  first anymore, just a direct call. */
+    private suspend fun followedDidsForLiveSections(): Result<Set<String>> =
+        bskyRepo.getAllFollows(bskyToken, _bskyDid.value).map { list -> list.map { it.did }.toSet() }
 
     fun loadLiveFriendsIfNeeded() {
         if (liveFriendsLoaded || _liveFriendsLoading.value) return
@@ -867,7 +864,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // just "forget what we loaded and load again" — exposed separately from
     // the *IfNeeded functions so a future refresh gesture has something to
     // call without duplicating the fetch logic.
-    fun refreshFriendsReviews() { firehoseIndexerStarted = false; firehoseIndexerStartClaimed.set(false); loadFriendsReviewsIfNeeded() }
+    fun refreshFriendsReviews() = loadFriendsReviewsIfNeeded(force = true)
     fun refreshLiveFriends() { liveFriendsLoaded = false; loadLiveFriendsIfNeeded() }
 
     // Feature (this session): Bluesky's own native "Live Now" badge —
@@ -902,13 +899,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun refreshBlueskyLiveNow() { blueskyLiveNowLoaded = false; loadBlueskyLiveNowIfNeeded() }
 
-    // Which Bluesky Live Now stream (if any) is currently expanded into the
-    // inline embed player overlay — see LiveNowPlayerOverlay in
-    // SettingsSheet.kt. Only one at a time, same pattern as sendPopupTarget.
-    private val _playingLiveNow = MutableStateFlow<BlueskyLiveNowStream?>(null)
-    val playingLiveNow: StateFlow<BlueskyLiveNowStream?> = _playingLiveNow
-    fun openLiveNowPlayer(stream: BlueskyLiveNowStream) { _playingLiveNow.value = stream }
-    fun closeLiveNowPlayer() { _playingLiveNow.value = null }
+    /** A live stream currently expanded into the inline WebView player
+     *  overlay (see LiveNowPlayerOverlay in SettingsSheet.kt) — generic over
+     *  BOTH Live sources now (Streamplace and Bluesky Live Now both open the
+     *  real stream link in an in-app WebView, per this session's change; the
+     *  ViewModel doesn't need to know which source it came from, just the
+     *  URL and label to show). Only one at a time, same pattern as
+     *  sendPopupTarget. */
+    data class PlayingLiveStream(val url: String, val title: String, val subtitle: String)
+    private val _playingLive = MutableStateFlow<PlayingLiveStream?>(null)
+    val playingLive: StateFlow<PlayingLiveStream?> = _playingLive
+    fun openLivePlayer(url: String, title: String, subtitle: String) { _playingLive.value = PlayingLiveStream(url, title, subtitle) }
+    fun closeLivePlayer() { _playingLive.value = null }
 
     fun sendDmThreadReply(text: String) {
         val thread = _dmThread.value ?: return
@@ -994,7 +996,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { prefs.translateTargetLang.collect { _translationTargetLang.value = it } }
         viewModelScope.launch { prefs.customFontPath.collect { _customFontPath.value = it } }
         viewModelScope.launch { prefs.customFontName.collect { _customFontName.value = it } }
-        viewModelScope.launch { prefs.seenHubItemUris.collect { _seenHubUris.value = it } }
+        viewModelScope.launch { prefs.subscribedReviewDids.collect { _subscribedReviewDids.value = it } }
+        viewModelScope.launch { prefs.subscribedBlogDids.collect { _subscribedBlogDids.value = it } }
         loadHistoryFromPrefs()
         trackHistoryAutomatically()
         viewModelScope.launch {
@@ -1079,18 +1082,19 @@ _bskyDid.value          = session.did
             _selfProfile.value = null
             // Bug fix (this session): none of this used to be reset on
             // logout, so a subsequent login within the same app process
-            // (ViewModel/FirehoseIndexer instances survive logout — they're
-            // only recreated on a fresh process) would find
-            // firehoseIndexerStarted/liveFriendsLoaded/etc. still true from
-            // the PREVIOUS account and treat the Hub as already warm,
-            // silently keeping the old account's cached data around and
-            // never re-hydrating for the new one. Also stops the firehose
-            // connection and DM polling loop rather than leaving them
+            // (the ViewModel instance survives logout — it's only recreated
+            // on a fresh process) would find reviewsBlogsLoaded/
+            // liveFriendsLoaded/etc. still true from the PREVIOUS account and
+            // treat the Hub as already warm, silently keeping the old
+            // account's cached data around and never re-hydrating for the
+            // new one. Also stops the DM polling loop rather than leaving it
             // running against a session that's no longer valid.
-            firehoseIndexer.stop()
-            firehoseIndexerStarted = false
-            firehoseIndexerStartClaimed.set(false)
+            reviewsBlogsLoaded = false
             _friendsReviewsLoading.value = false
+            _friendsReviews.value = emptyList()
+            _friendsBlogs.value = emptyList()
+            _subscribedReviewDids.value = emptySet()
+            _subscribedBlogDids.value = emptySet()
             liveFriendsLoaded = false
             _liveFriends.value = emptyList()
             blueskyLiveNowLoaded = false
@@ -1166,11 +1170,12 @@ _bskyDid.value          = session.did
      *  "Feed 429: ..." and leave the main feed empty/stuck until the user
      *  manually retried — the primary fix for that is not repeating the
      *  request storm that was causing it in the first place (see
-     *  FirehoseIndexer's doc comment), but this adds a safety net on top:
-     *  a single short delayed retry specifically for 429s, since even a
-     *  well-behaved client can occasionally get rate limited by something
-     *  outside its control (another device on the same account, a shared
-     *  IP, etc.) and shouldn't need a manual pull-to-refresh to recover.
+     *  BlueskyRepository.getSubscribedReviews's doc comment on pacing), but
+     *  this adds a safety net on top: a single short delayed retry
+     *  specifically for 429s, since even a well-behaved client can
+     *  occasionally get rate limited by something outside its control
+     *  (another device on the same account, a shared IP, etc.) and
+     *  shouldn't need a manual pull-to-refresh to recover.
      */
     private fun isRateLimitError(message: String?): Boolean = message?.contains("429") == true
 
@@ -1640,13 +1645,11 @@ _bskyDid.value          = session.did
      *  same way it does when opening one on someone's profile." */
     fun openMutualReview(fr: FriendPopfeedReview) {
         openProfile(fr.author, initialTab = ProfileTab.REVIEWS, review = fr.review)
-        markHubItemSeen(fr.review.uri)
     }
 
     /** Hub Blogs section equivalent of [openMutualReview] above. */
     fun openMutualBlog(fb: FriendLeafletBlog) {
         openProfile(fb.author, initialTab = ProfileTab.BLOGS, blog = fb.blog)
-        markHubItemSeen(fb.blog.uri)
     }
     fun closeProfileBlog() { _profileOverlay.value = _profileOverlay.value?.copy(openBlog = null) }
     fun openProfileReview(review: PopfeedReview) { _profileOverlay.value = _profileOverlay.value?.copy(openReview = review) }
@@ -2125,7 +2128,7 @@ _bskyDid.value          = session.did
             }
         }
         viewModelScope.launch(Dispatchers.IO) {
-            retryWithBackoff(isDone = { firehoseIndexerStarted || !_bskyLoggedIn.value }) {
+            retryWithBackoff(isDone = { reviewsBlogsLoaded || !_bskyLoggedIn.value }) {
                 // loadFriendsReviewsIfNeeded() launches its own coroutine and
                 // returns immediately (it's the same public entry point the
                 // Hub page's LaunchedEffect calls) — wait for that in-flight

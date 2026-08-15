@@ -681,7 +681,7 @@ enum class LiveNowPlatform { TWITCH, YOUTUBE, OTHER }
 data class FriendPopfeedReview(val author: AuthorInfo, val review: PopfeedReview)
 
 /** Hub "Blogs" section: one followed account's recent Leaflet blog, mirroring
- *  FriendPopfeedReview's shape — see FirehoseIndexer. */
+ *  FriendPopfeedReview's shape — see BlueskyRepository.getSubscribedReviews. */
 data class FriendLeafletBlog(val author: AuthorInfo, val blog: LeafletBlog)
 
 data class DmEmbeddedPost(

@@ -19,6 +19,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Star
@@ -114,30 +116,71 @@ private fun ReviewKindFilter.matchesReview(review: PopfeedReview) = this == Revi
 private fun ReviewKindFilter.matchesBacklog(item: PopfeedBacklogItem) = this == ReviewKindFilter.ALL || categoryBucket(item.mediaCategory) == this
 
 @Composable
-private fun <T> ProfileSubFilterRow(options: List<T>, selected: T, liquidGlass: Boolean, tint: Color, labelOf: (T) -> String, onSelect: (T) -> Unit) {
+private fun <T> ProfileSubFilterRow(
+    options: List<T>, selected: T, liquidGlass: Boolean, tint: Color, labelOf: (T) -> String, onSelect: (T) -> Unit,
+    trailing: (@Composable () -> Unit)? = null
+) {
     Row(
-        Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 12.dp, vertical = 5.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        options.forEach { option ->
-            val isSelected = option == selected
-            val shape = RoundedCornerShape(12.dp)
-            Box(
-                Modifier
-                    .then(
-                        if (liquidGlass) Modifier.glassPanel(true, tint = if (isSelected) tint else tint.copy(alpha = 0.4f), shape = shape)
-                        else Modifier.clip(shape).background(if (isSelected) Color.White.copy(0.15f) else Color.White.copy(0.06f))
-                    )
-                    .clickable { onSelect(option) }
-                    .padding(horizontal = 9.dp, vertical = 4.dp)
-            ) {
-                Text(labelOf(option), color = if (isSelected) Color.White else DimGray, fontSize = 11.sp,
-                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal)
+        Row(
+            Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            options.forEach { option ->
+                val isSelected = option == selected
+                val shape = RoundedCornerShape(12.dp)
+                Box(
+                    Modifier
+                        .then(
+                            if (liquidGlass) Modifier.glassPanel(true, tint = if (isSelected) tint else tint.copy(alpha = 0.4f), shape = shape)
+                            else Modifier.clip(shape).background(if (isSelected) Color.White.copy(0.15f) else Color.White.copy(0.06f))
+                        )
+                        .clickable { onSelect(option) }
+                        .padding(horizontal = 9.dp, vertical = 4.dp)
+                ) {
+                    Text(labelOf(option), color = if (isSelected) Color.White else DimGray, fontSize = 11.sp,
+                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal)
+                }
             }
         }
+        // Item (this session): "Subscribe" button — pinned to the row's far
+        // right, outside the horizontally-scrolling chip list (so it never
+        // scrolls out of view alongside All/Movies/TV/etc, and never
+        // overlaps them either).
+        if (trailing != null) {
+            Spacer(Modifier.width(8.dp))
+            trailing()
+        }
+    }
+}
+
+/** Local-only "Subscribe" toggle — adds/removes this profile from the Hub's
+ *  Reviews or Blogs source list (see MainViewModel.toggleReviewSubscription/
+ *  toggleBlogSubscription). A filled bookmark once subscribed, outline
+ *  otherwise — same compact pill treatment as the filter chips next to it. */
+@Composable
+private fun SubscribeBubble(subscribed: Boolean, liquidGlass: Boolean, tint: Color, onToggle: () -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
+    Row(
+        Modifier
+            .then(
+                if (liquidGlass) Modifier.glassPanel(true, tint = if (subscribed) tint else tint.copy(alpha = 0.4f), shape = shape)
+                else Modifier.clip(shape).background(if (subscribed) Color.White.copy(0.15f) else Color.White.copy(0.06f))
+            )
+            .clickable(onClick = onToggle)
+            .padding(horizontal = 9.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Icon(
+            if (subscribed) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
+            contentDescription = if (subscribed) "Subscribed" else "Subscribe",
+            tint = if (subscribed) Color.White else DimGray, modifier = Modifier.size(13.dp)
+        )
+        Text(if (subscribed) "Subscribed" else "Subscribe", color = if (subscribed) Color.White else DimGray,
+            fontSize = 11.sp, fontWeight = if (subscribed) FontWeight.SemiBold else FontWeight.Normal)
     }
 }
 
@@ -179,7 +222,15 @@ fun ProfileOverlay(
     // Bug fix: captures the current scroll position into the ViewModel right
     // before this profile is hidden (see ProfileOverlayState.scrollIndex/
     // scrollOffset doc comment) so it can be force-restored on the way back.
-    onSaveScroll: (Int, Int) -> Unit
+    onSaveScroll: (Int, Int) -> Unit,
+    // Item (this session): profile-level "Subscribe" toggle for the Hub's
+    // Reviews/Blogs sections — see PreferencesManager.SUBSCRIBED_REVIEW_DIDS/
+    // SUBSCRIBED_BLOG_DIDS. Two independent lists: subscribing to someone's
+    // Reviews doesn't imply their Blogs, or vice versa.
+    isReviewSubscribed: Boolean = false,
+    isBlogSubscribed: Boolean = false,
+    onToggleReviewSubscribe: () -> Unit = {},
+    onToggleBlogSubscribe: () -> Unit = {}
 ) {
     val author  = state.author
     val profile = state.profile
@@ -329,11 +380,29 @@ fun ProfileOverlay(
                                 onSelect = { mediaKindFilter = it }
                             )
                         }
-                        MainViewModel.ProfileTab.REVIEWS, MainViewModel.ProfileTab.BACKLOG -> {
+                        MainViewModel.ProfileTab.REVIEWS -> {
+                            ProfileSubFilterRow(
+                                options = ReviewKindFilter.entries.toList(), selected = reviewKindFilter,
+                                liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
+                                onSelect = { reviewKindFilter = it },
+                                trailing = { SubscribeBubble(isReviewSubscribed, liquidGlass, blended, onToggleReviewSubscribe) }
+                            )
+                        }
+                        MainViewModel.ProfileTab.BACKLOG -> {
                             ProfileSubFilterRow(
                                 options = ReviewKindFilter.entries.toList(), selected = reviewKindFilter,
                                 liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
                                 onSelect = { reviewKindFilter = it }
+                            )
+                        }
+                        // Item (this session): Blogs has no type filter chips
+                        // (unlike Reviews/Backlog), so this row exists purely
+                        // to host the Subscribe button in the same place.
+                        MainViewModel.ProfileTab.BLOGS -> {
+                            ProfileSubFilterRow(
+                                options = emptyList<Unit>(), selected = Unit,
+                                liquidGlass = liquidGlass, tint = blended, labelOf = { "" }, onSelect = {},
+                                trailing = { SubscribeBubble(isBlogSubscribed, liquidGlass, blended, onToggleBlogSubscribe) }
                             )
                         }
                         else -> {}
