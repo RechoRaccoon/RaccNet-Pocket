@@ -729,7 +729,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // everyone the user follows, matching how Live/VODs already worked —
     // only feasible speed-wise because the indexer no longer re-fetches on
     // every visit.
-    val firehoseIndexer = FirehoseIndexer(bskyRepo)
+    val firehoseIndexer = FirehoseIndexer(bskyRepo, prefs)
     val friendsReviews: StateFlow<List<FriendPopfeedReview>> = firehoseIndexer.friendReviews
     val friendsBlogs: StateFlow<List<FriendLeafletBlog>> = firehoseIndexer.friendBlogs
 
@@ -1162,6 +1162,18 @@ _bskyDid.value          = session.did
         return message.contains("400") || message.contains("401") || message.contains("ExpiredToken", true) || message.contains("InvalidToken", true)
     }
 
+    /** Bug fix (this session): rate limiting (HTTP 429) used to just show
+     *  "Feed 429: ..." and leave the main feed empty/stuck until the user
+     *  manually retried — the primary fix for that is not repeating the
+     *  request storm that was causing it in the first place (see
+     *  FirehoseIndexer's doc comment), but this adds a safety net on top:
+     *  a single short delayed retry specifically for 429s, since even a
+     *  well-behaved client can occasionally get rate limited by something
+     *  outside its control (another device on the same account, a shared
+     *  IP, etc.) and shouldn't need a manual pull-to-refresh to recover.
+     */
+    private fun isRateLimitError(message: String?): Boolean = message?.contains("429") == true
+
     fun loadFeed(reset: Boolean = true) {
         // Bug fix (Outstanding Issue #1 — diagnostic, temporary): see
         // setMode()'s matching Log.d for why this is here. Logs a stack
@@ -1191,6 +1203,10 @@ _bskyDid.value          = session.did
             var result = attempt()
             if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
                 if (refreshBskyTokenIfPossible()) result = attempt()
+            }
+            if (result.isFailure && isRateLimitError(result.exceptionOrNull()?.message)) {
+                delay(4000)
+                result = attempt()
             }
             result.onSuccess { (items, cursor) ->
                 feedCursor = cursor

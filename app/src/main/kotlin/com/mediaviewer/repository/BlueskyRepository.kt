@@ -318,8 +318,27 @@ class BlueskyRepository {
      *  legacy one so older/un-migrated accounts still show their blogs. Returns
      *  an empty list (never an error) if the account has no Leaflet documents —
      *  callers use that to decide whether the Blogs tab appears at all. */
+    @Volatile private var knownLeafletCollection: String? = null
+
     suspend fun getLeafletBlogs(did: String): List<LeafletBlog> {
-        for (collection in LEAFLET_COLLECTIONS) {
+        // Same known-collection fast path as getPopfeedReviews below — once
+        // any account's blogs are found under one of the two candidate
+        // collection names, try that one first for every other account,
+        // cutting the common case down to 1 request instead of up to 2.
+        // Rate limiting is the whole reason this matters now: see
+        // FirehoseIndexer's hydrate() doc comment.
+        knownLeafletCollection?.let { known ->
+            val resp = runCatching { api.listRecords(null, did, known, 50, null) }.getOrNull()
+            val body = resp?.takeIf { it.isSuccessful }?.body()
+            if (body != null && body.records.isNotEmpty()) {
+                val blogs = body.records.mapNotNull { rec ->
+                    val obj = rec.value?.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+                    parseLeafletBlogRecord(did, rec.uri, obj)
+                }
+                if (blogs.isNotEmpty()) return blogs.sortedByDescending { it.createdAt }
+            }
+        }
+        for (collection in LEAFLET_COLLECTIONS.filterNot { it == knownLeafletCollection }) {
             val resp = runCatching { api.listRecords(null, did, collection, 50, null) }.getOrNull()
             val body = resp?.takeIf { it.isSuccessful }?.body() ?: continue
             if (body.records.isEmpty()) continue
@@ -327,7 +346,7 @@ class BlueskyRepository {
                 val obj = rec.value?.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
                 parseLeafletBlogRecord(did, rec.uri, obj)
             }
-            if (blogs.isNotEmpty()) return blogs.sortedByDescending { it.createdAt }
+            if (blogs.isNotEmpty()) { knownLeafletCollection = collection; return blogs.sortedByDescending { it.createdAt } }
         }
         return emptyList()
     }
@@ -436,7 +455,7 @@ class BlueskyRepository {
         )
     }
 
-    suspend fun getPopfeedReviews(did: String): List<PopfeedReview> = coroutineScope {
+    suspend fun getPopfeedReviews(did: String): List<PopfeedReview> {
         suspend fun tryCollection(collection: String): List<PopfeedReview>? {
             val resp = runCatching { api.listRecords(null, did, collection, 50, null) }.getOrNull()
             val body = resp?.takeIf { it.isSuccessful }?.body() ?: return null
@@ -453,20 +472,29 @@ class BlueskyRepository {
         // Fast path: we already know which collection this Popfeed
         // deployment uses — a single request, no fan-out.
         knownPopfeedCollection?.let { known ->
-            tryCollection(known)?.let { return@coroutineScope it.sortedByDescending { r -> r.createdAt } }
+            tryCollection(known)?.let { return it.sortedByDescending { r -> r.createdAt } }
         }
 
         // Otherwise (first lookup this session, or this specific account
         // just has no reviews under the known collection) check the rest
-        // in parallel rather than one-at-a-time.
-        val remaining = allCollections.filterNot { it == knownPopfeedCollection }
-        val hit = remaining.map { collection -> async { collection to tryCollection(collection) } }
-            .awaitAll().firstOrNull { it.second != null }
-        if (hit != null) {
-            knownPopfeedCollection = hit.first
-            return@coroutineScope hit.second!!.sortedByDescending { it.createdAt }
+        // one at a time, not in parallel — this used to fire all of them
+        // simultaneously, which meant every account still in "unknown
+        // collection" state during a hydration burst (see FirehoseIndexer)
+        // was contributing up to 3 concurrent requests instead of 1, right
+        // when the whole point was to keep that burst small enough not to
+        // trip Bluesky's rate limiting. Once any account resolves this,
+        // knownPopfeedCollection short-circuits every account after it back
+        // down to a single request, so this sequential fallback path is
+        // only ever actually slow for the very first few accounts of a
+        // session, not the whole follow list.
+        for (collection in allCollections.filterNot { it == knownPopfeedCollection }) {
+            val hit = tryCollection(collection)
+            if (hit != null) {
+                knownPopfeedCollection = collection
+                return hit.sortedByDescending { it.createdAt }
+            }
         }
-        emptyList()
+        return emptyList()
     }
 
     /** Every account the user follows (not just mutuals/DM contacts) — used by
@@ -499,29 +527,17 @@ class BlueskyRepository {
         out.values.toList()
     }
 
-    /** Item 8: "Latest Reviews" section — same aggregation approach Popfeed's
-     *  own "Reviews from Friends" homepage section uses (confirmed via their
-     *  public writeups: it's a client-side aggregate across your following
-     *  list, not a dedicated feed endpoint) — fetches each followed
-     *  account's Reviews tab in parallel (same getPopfeedReviews call the
-     *  profile page itself uses) and merges/sorts the results. Bug fix: this
-     *  used to be scoped to DM/mutual "friends" specifically and, separately,
-     *  was fed from a `dmConversations` list that hadn't necessarily loaded
-     *  yet when the Hub page mounted (DMs are lazy-loaded only once the DM
-     *  inbox is opened) — so it silently saw zero accounts and never
-     *  actually fetched anything. Renamed the caller-facing param to
-     *  `accounts` to reflect that this is intentionally general-purpose now;
-     *  the person following someone with no reviews (the common case —
-     *  Popfeed is a niche third-party lexicon) just contributes nothing to
-     *  the result, not an error. */
-    suspend fun getFriendsPopfeedReviews(accounts: List<AuthorInfo>): List<FriendPopfeedReview> = coroutineScope {
-        accounts.distinctBy { it.did }.map { account ->
-            async {
-                runCatching { getPopfeedReviews(account.did) }.getOrDefault(emptyList())
-                    .map { FriendPopfeedReview(account, it) }
-            }
-        }.awaitAll().flatten().sortedByDescending { it.review.createdAt }
-    }
+    // getFriendsPopfeedReviews (the old N-parallel-requests-per-follow fan-out
+    // for the Hub's "Latest Reviews" section) has been removed — it was dead
+    // code with zero call sites (superseded by FirehoseIndexer, which hydrates
+    // the same data with bounded/staggered per-account requests once, caches
+    // it to disk, and keeps it live afterward via a single filtered Jetstream
+    // subscription instead of ever re-running a full fan-out). Purged per the
+    // architecture note's "remove legacy PDS-loop caches that run parallel to
+    // the new pipeline" instruction — see FirehoseIndexer's class doc comment
+    // for why a literal single "batched" REST call isn't possible here (no
+    // such bulk endpoint exists for third-party lexicons like Popfeed/Leaflet)
+    // and why Jetstream is the correct replacement instead.
 
     /** Feature (this session): Bluesky's native "Live Now" badge — checks a
      *  set of accounts' profile `status` (app.bsky.actor.defs#statusView,

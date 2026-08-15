@@ -35,6 +35,21 @@ object PrefKeys {
     val GLASS_RIM_INTENSITY    = floatPreferencesKey("glass_rim_intensity")
     val HIDE_TEXT_ONLY_POSTS  = booleanPreferencesKey("hide_text_only_posts")
     val HISTORY_JSON          = stringPreferencesKey("history_json")
+    // Firehose indexer cache (see FirehoseIndexer.kt) — persisted so a cold
+    // restart can show the Hub's Reviews/Blogs instantly from disk instead
+    // of re-running the full per-followed-account fetch burst that used to
+    // fire on every single app launch. That burst is what was tripping
+    // Bluesky's rate limiting (429s) on frequent restarts — this cache is
+    // the fix, not just a nice-to-have.
+    val HUB_REVIEWS_CACHE_JSON = stringPreferencesKey("hub_reviews_cache_json")
+    val HUB_BLOGS_CACHE_JSON   = stringPreferencesKey("hub_blogs_cache_json")
+    val HUB_CACHE_HYDRATED_AT  = longPreferencesKey("hub_cache_hydrated_at")
+    // Jetstream catch-up cursor (time_us) — see JetstreamClient's
+    // `initialCursor` doc comment. Persisted periodically while connected so
+    // the NEXT app launch can ask Jetstream to replay everything missed
+    // since last seen, instead of either (a) missing it entirely or (b)
+    // needing a full per-account REST re-fetch just to catch up.
+    val JETSTREAM_CURSOR       = longPreferencesKey("jetstream_cursor")
     // Phase 4 — on-device translation
     val TRANSLATE_ENABLED     = booleanPreferencesKey("translate_enabled")
     val TRANSLATE_TARGET_LANG = stringPreferencesKey("translate_target_lang")
@@ -81,6 +96,10 @@ class PreferencesManager(private val context: Context) {
     val hideTextOnlyPosts: Flow<Boolean>       = context.dataStore.data.map { it[PrefKeys.HIDE_TEXT_ONLY_POSTS] ?: false }
     // Settings Update: raw JSON array of HistoryEntry, newest first, capped at write time.
     val historyJson: Flow<String>              = context.dataStore.data.map { it[PrefKeys.HISTORY_JSON] ?: "[]" }
+    val hubReviewsCacheJson: Flow<String>       = context.dataStore.data.map { it[PrefKeys.HUB_REVIEWS_CACHE_JSON] ?: "[]" }
+    val hubBlogsCacheJson: Flow<String>         = context.dataStore.data.map { it[PrefKeys.HUB_BLOGS_CACHE_JSON] ?: "[]" }
+    val hubCacheHydratedAt: Flow<Long>          = context.dataStore.data.map { it[PrefKeys.HUB_CACHE_HYDRATED_AT] ?: 0L }
+    val jetstreamCursor: Flow<Long?>            = context.dataStore.data.map { it[PrefKeys.JETSTREAM_CURSOR] }
     // Phase 4: on-device translation toggle + preferred target language (BCP-47 tag).
     // Defaults to the device's own language so a fresh install "just works" without
     // the user having to hunt for the setting first.
@@ -135,6 +154,21 @@ class PreferencesManager(private val context: Context) {
 
     suspend fun setHistoryJson(json: String) {
         context.dataStore.edit { prefs -> prefs[PrefKeys.HISTORY_JSON] = json }
+    }
+
+    /** See HUB_REVIEWS_CACHE_JSON's comment — one write covers both lists
+     *  plus the hydration timestamp so a caller never ends up with a
+     *  timestamp that's newer than the data it's supposed to describe. */
+    suspend fun setHubCache(reviewsJson: String, blogsJson: String, hydratedAt: Long) {
+        context.dataStore.edit { prefs ->
+            prefs[PrefKeys.HUB_REVIEWS_CACHE_JSON] = reviewsJson
+            prefs[PrefKeys.HUB_BLOGS_CACHE_JSON] = blogsJson
+            prefs[PrefKeys.HUB_CACHE_HYDRATED_AT] = hydratedAt
+        }
+    }
+
+    suspend fun setJetstreamCursor(cursor: Long) {
+        context.dataStore.edit { prefs -> prefs[PrefKeys.JETSTREAM_CURSOR] = cursor }
     }
 
     suspend fun setLiquidGlass(enabled: Boolean) {

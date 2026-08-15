@@ -40,6 +40,18 @@ data class JetstreamCommitEvent(
  */
 class JetstreamClient(
     private val wantedCollections: List<String>,
+    // Bug fix (this session): the whole point of Jetstream's cursor is
+    // catch-up replay — reconnecting with a `cursor` from a previous
+    // session tells the server "send me everything I missed since this
+    // point", via the same single streaming connection, no REST fan-out
+    // involved. This class was already using `cursor` to survive a
+    // mid-session reconnect, but never seeded it from a PREVIOUS session,
+    // so every fresh app launch started listening from "now" — anything
+    // posted while the app was closed was silently missed. Passing in a
+    // persisted cursor here (see FirehoseIndexer.start) is what actually
+    // closes that gap, without ever needing a per-account REST re-fetch to
+    // "catch up".
+    initialCursor: Long? = null,
     private val host: String = "jetstream2.us-east.bsky.network"
 ) {
     companion object { private const val TAG = "JetstreamClient" }
@@ -50,13 +62,18 @@ class JetstreamClient(
         .build()
 
     private var socket: WebSocket? = null
-    @Volatile private var cursor: Long? = null
+    @Volatile private var cursor: Long? = initialCursor
     @Volatile private var stopped = true
     @Volatile private var reconnectAttempt = 0
     @Volatile private var connected = false
 
     private val _events = MutableSharedFlow<JetstreamCommitEvent>(extraBufferCapacity = 512)
     val events: SharedFlow<JetstreamCommitEvent> = _events
+
+    /** Latest cursor position seen so far — FirehoseIndexer polls this
+     *  periodically to persist it, so the NEXT app launch can resume from
+     *  here instead of from "now". */
+    fun currentCursor(): Long? = cursor
 
     fun start() {
         stopped = false
