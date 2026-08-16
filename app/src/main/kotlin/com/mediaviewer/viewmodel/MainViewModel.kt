@@ -776,34 +776,72 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_friendsReviewsLoading.value) return
         _friendsReviewsLoading.value = true
         viewModelScope.launch(Dispatchers.IO) {
-            if (!force) {
-                // Instant snapshot from disk before the network round-trip —
-                // never leave the Hub blank while the fetch below is in flight.
+            // Bug fix (reviews/blogs getting stuck on "not loading"): the
+            // actual network fetch below used to run un-guarded — any
+            // exception from it (a real network failure, a malformed
+            // record, anything) skipped straight past
+            // `_friendsReviewsLoading.value = false`, leaving the Hub
+            // permanently stuck showing its loading state (every future
+            // call short-circuits on the loading-guard above, and there's
+            // no other path that resets it) until the process restarts.
+            // try/finally now guarantees that flag always clears, and a
+            // failed fetch keeps whatever was already showing (cache or
+            // the previous successful fetch) instead of wiping it to
+            // empty — better to show slightly-stale content than none.
+            try {
+                if (!force) {
+                    // Instant snapshot from disk before the network round-trip —
+                    // never leave the Hub blank while the fetch below is in flight.
+                    runCatching {
+                        // Bug fix: LeafletBlog gained a `blocks` field this
+                        // session that older on-disk caches (written before
+                        // it existed) don't have — see LeafletBlog.blocks'
+                        // own doc comment for why a missing key can't just
+                        // fall back to that field's declared default under
+                        // Gson's normal reflective deserialization. This
+                        // explicit deserializer sidesteps the whole
+                        // problem by never asking Gson to populate `blocks`
+                        // from cached JSON at all; the live fetch below
+                        // supplies real block data moments later anyway.
+                        val gson = com.google.gson.GsonBuilder()
+                            .registerTypeAdapter(LeafletBlog::class.java, com.google.gson.JsonDeserializer { json, _, _ ->
+                                val o = json.asJsonObject
+                                LeafletBlog(
+                                    uri = o.get("uri")?.takeIf { !it.isJsonNull }?.asString ?: "",
+                                    title = o.get("title")?.takeIf { !it.isJsonNull }?.asString ?: "",
+                                    bodyText = o.get("bodyText")?.takeIf { !it.isJsonNull }?.asString ?: "",
+                                    createdAt = o.get("createdAt")?.takeIf { !it.isJsonNull }?.asString ?: "",
+                                    description = o.get("description")?.takeIf { !it.isJsonNull }?.asString,
+                                    thumbnailUrl = o.get("thumbnailUrl")?.takeIf { !it.isJsonNull }?.asString
+                                    // blocks intentionally omitted — always emptyList() from cache.
+                                )
+                            })
+                            .create()
+                        val reviewType = object : com.google.gson.reflect.TypeToken<List<FriendPopfeedReview>>() {}.type
+                        val blogType = object : com.google.gson.reflect.TypeToken<List<FriendLeafletBlog>>() {}.type
+                        val cachedReviews: List<FriendPopfeedReview> = gson.fromJson(prefs.hubReviewsCacheJson.first(), reviewType) ?: emptyList()
+                        val cachedBlogs: List<FriendLeafletBlog> = gson.fromJson(prefs.hubBlogsCacheJson.first(), blogType) ?: emptyList()
+                        if (cachedReviews.isNotEmpty()) _friendsReviews.value = cachedReviews
+                        if (cachedBlogs.isNotEmpty()) _friendsBlogs.value = cachedBlogs
+                    }
+                }
+                val reviewDids = prefs.subscribedReviewDids.first()
+                val blogDids = prefs.subscribedBlogDids.first()
+                _subscribedReviewDids.value = reviewDids
+                _subscribedBlogDids.value = blogDids
+                val reviews = if (reviewDids.isEmpty()) emptyList() else bskyRepo.getSubscribedReviews(bskyToken, reviewDids.toList())
+                val blogs = if (blogDids.isEmpty()) emptyList() else bskyRepo.getSubscribedBlogs(bskyToken, blogDids.toList())
+                _friendsReviews.value = reviews
+                _friendsBlogs.value = blogs
+                reviewsBlogsLoaded = true
                 runCatching {
                     val gson = com.google.gson.Gson()
                     val reviewType = object : com.google.gson.reflect.TypeToken<List<FriendPopfeedReview>>() {}.type
                     val blogType = object : com.google.gson.reflect.TypeToken<List<FriendLeafletBlog>>() {}.type
-                    val cachedReviews: List<FriendPopfeedReview> = gson.fromJson(prefs.hubReviewsCacheJson.first(), reviewType) ?: emptyList()
-                    val cachedBlogs: List<FriendLeafletBlog> = gson.fromJson(prefs.hubBlogsCacheJson.first(), blogType) ?: emptyList()
-                    if (cachedReviews.isNotEmpty()) _friendsReviews.value = cachedReviews
-                    if (cachedBlogs.isNotEmpty()) _friendsBlogs.value = cachedBlogs
+                    prefs.setHubCache(gson.toJson(reviews, reviewType), gson.toJson(blogs, blogType), System.currentTimeMillis())
                 }
-            }
-            val reviewDids = prefs.subscribedReviewDids.first()
-            val blogDids = prefs.subscribedBlogDids.first()
-            _subscribedReviewDids.value = reviewDids
-            _subscribedBlogDids.value = blogDids
-            val reviews = if (reviewDids.isEmpty()) emptyList() else bskyRepo.getSubscribedReviews(bskyToken, reviewDids.toList())
-            val blogs = if (blogDids.isEmpty()) emptyList() else bskyRepo.getSubscribedBlogs(bskyToken, blogDids.toList())
-            _friendsReviews.value = reviews
-            _friendsBlogs.value = blogs
-            reviewsBlogsLoaded = true
-            _friendsReviewsLoading.value = false
-            runCatching {
-                val gson = com.google.gson.Gson()
-                val reviewType = object : com.google.gson.reflect.TypeToken<List<FriendPopfeedReview>>() {}.type
-                val blogType = object : com.google.gson.reflect.TypeToken<List<FriendLeafletBlog>>() {}.type
-                prefs.setHubCache(gson.toJson(reviews, reviewType), gson.toJson(blogs, blogType), System.currentTimeMillis())
+            } finally {
+                _friendsReviewsLoading.value = false
             }
         }
     }

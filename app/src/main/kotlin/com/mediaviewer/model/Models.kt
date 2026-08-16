@@ -492,6 +492,24 @@ data class LeafletBlog(
     // [bodyText]'s flattened plain text. Empty when the record's block tree
     // didn't yield anything recognizable, in which case the reader falls
     // back to bodyText so no content is lost.
+    // Bug fix (reviews/blogs stopped rendering after an app update): this
+    // field is new as of this session, so any LeafletBlog written to the
+    // Hub's on-disk JSON cache by a previous app version has no "blocks"
+    // key at all. Gson's default reflective deserializer bypasses the
+    // Kotlin constructor entirely for data classes like this one, so a
+    // missing key doesn't fall back to this property's Kotlin-declared
+    // default (emptyList()) the way a real constructor call would — it's
+    // left as a raw null in memory despite the non-null Kotlin type,
+    // which crashes the first time anything touches it (blog.blocks.
+    // isNotEmpty(), etc.). @Transient makes Gson skip this field
+    // entirely in both directions (never written to the cache, never
+    // read back from it) — MainViewModel.loadFriendsReviewsIfNeeded also
+    // guards this same class of gap with a small custom deserializer, but
+    // this annotation is the actual fix: it means cached blogs simply
+    // don't carry rich content until the live fetch (moments later)
+    // replaces them with a properly-constructed object, instead of ever
+    // holding a not-really-non-null null.
+    @Transient
     val blocks: List<LeafletBlock> = emptyList()
 )
 

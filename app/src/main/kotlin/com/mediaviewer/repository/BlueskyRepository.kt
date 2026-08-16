@@ -388,25 +388,36 @@ class BlueskyRepository {
      *  images all render as themselves now (item: blog rich formatting)
      *  instead of collapsing into [extractLeafletBodyText]'s flattened
      *  plain text. Leaflet's block schema keeps evolving and isn't fully
-     *  published, so block types are matched by substring on their
-     *  `$type` (e.g. containing "header", "image") rather than an exact
-     *  enum, the same defensive spirit as [extractLeafletBodyText] and the
-     *  rest of this file's Popfeed/Leaflet field guessing. Pages -> blocks
-     *  is the confirmed shape (pub.leaflet.pages.linearDocument); anything
-     *  deeper (list/outliner containers) is walked recursively via a small
-     *  set of likely child-array keys so nested content (e.g. checklist
-     *  items inside a list block) still surfaces instead of vanishing. */
+     *  published, so this walks the whole tree the same way
+     *  [extractLeafletBodyText] already does (same root-resolution
+     *  precedence, same text-key names) rather than assuming one fixed
+     *  pages[].blocks[].block nesting — a node is recognized as a leaf
+     *  block by its `$type` substring or by carrying a text/checked field
+     *  directly, wherever in the tree it actually sits. */
     private suspend fun parseLeafletBlocks(did: String, root: com.google.gson.JsonObject): List<LeafletBlock> {
         val out = mutableListOf<LeafletBlock>()
+        // Same text-carrying key names extractLeafletBodyText already
+        // confirmed work against real records (including the camelCase
+        // "plainText" variant) — kept in sync with that function rather
+        // than re-guessing a separate set here.
+        val textKeys = listOf("plaintext", "plainText", "text")
+
+        fun rawTextOf(block: com.google.gson.JsonObject): String? {
+            for (key in textKeys) {
+                val v = block.get(key)
+                if (v != null && v.isJsonPrimitive && v.asJsonPrimitive.isString) {
+                    val s = v.asString
+                    if (s.isNotBlank()) return s
+                }
+            }
+            return null
+        }
 
         // Splits one text-bearing block's plaintext into bold/non-bold runs
         // using its `facets` (byte-offset ranges + feature list), the same
         // richtext-facet shape Bluesky posts themselves use.
         fun textSpansOf(block: com.google.gson.JsonObject): List<LeafletTextSpan> {
-            val plaintext = block.get("plaintext")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
-                ?: block.get("text")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
-                ?: return emptyList()
-            if (plaintext.isBlank()) return emptyList()
+            val plaintext = rawTextOf(block) ?: return emptyList()
             val bytes = plaintext.toByteArray(Charsets.UTF_8)
             val boldRanges = mutableListOf<IntRange>()
             val facets = block.getAsJsonArray("facets")
@@ -445,7 +456,7 @@ class BlueskyRepository {
             val checkedField = block.get("checked")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isBoolean }
             return when {
                 type.contains("header", ignoreCase = true) -> {
-                    val text = block.get("plaintext")?.takeIf { it.isJsonPrimitive }?.asString?.takeIf { it.isNotBlank() } ?: return null
+                    val text = rawTextOf(block) ?: return null
                     val level = block.get("level")?.takeIf { it.isJsonPrimitive }?.asInt ?: 2
                     LeafletBlock.Header(text, level.coerceIn(1, 4))
                 }
@@ -454,13 +465,12 @@ class BlueskyRepository {
                     val alt = firstStringField(block, "alt", "caption", "altText")
                     LeafletBlock.ImageBlock(url, alt)
                 }
-                checkedField != null -> {
+                checkedField != null && rawTextOf(block) != null -> {
                     val checked = checkedField.asBoolean
                     val text = textSpansOf(block).joinToString("") { it.text }
-                        .ifBlank { firstStringField(block, "plaintext", "text") ?: "" }
                     if (text.isBlank()) null else LeafletBlock.ChecklistItem(text, checked)
                 }
-                type.contains("text", ignoreCase = true) || block.has("plaintext") -> {
+                rawTextOf(block) != null -> {
                     val spans = textSpansOf(block)
                     if (spans.isEmpty()) null else LeafletBlock.Paragraph(spans)
                 }
@@ -468,32 +478,30 @@ class BlueskyRepository {
             }
         }
 
-        suspend fun walkEntry(entry: com.google.gson.JsonObject) {
-            val inner = entry.getAsJsonObject("block") ?: entry
-            val parsed = parseLeaf(inner)
-            if (parsed != null) { out.add(parsed); return }
-            // Not a recognized leaf block — may be a list/outliner
-            // container with nested children (e.g. a checklist's items);
-            // recurse into any array of objects under a likely
-            // child-array key instead of dropping this block's content.
-            for (key in listOf("children", "items", "blocks")) {
-                val arr = inner.getAsJsonArray(key) ?: continue
-                for (childEl in arr) {
-                    val childObj = childEl.takeIf { it.isJsonObject }?.asJsonObject ?: continue
-                    walkEntry(childObj)
-                }
-            }
+        // Bug fix (blogs not rendering rich formatting): this used to only
+        // look under a rigid pages[].blocks[].block path, silently
+        // returning nothing (and falling back to plain bodyText) for any
+        // record shaped differently. extractLeafletBodyText — which does
+        // demonstrably find real text in real records — resolves its root
+        // as `content ?? pages ?? root itself` and then walks the *entire*
+        // tree rather than assuming one fixed nesting; this now does the
+        // same instead of assuming "pages" is the only valid root or that
+        // blocks are strictly one level deep under it. A node is emitted
+        // as a leaf block the moment it looks like one (recognized $type,
+        // or a text/checked field); anything else is walked field-by-field
+        // so content isn't lost just because it sits one level deeper (or
+        // shallower) than expected.
+        suspend fun walk(el: com.google.gson.JsonElement?) {
+            if (el == null || el.isJsonNull) return
+            if (el.isJsonArray) { el.asJsonArray.forEach { walk(it) }; return }
+            if (!el.isJsonObject) return
+            val obj = el.asJsonObject
+            val leaf = parseLeaf(obj)
+            if (leaf != null) { out.add(leaf); return }
+            for ((_, v) in obj.entrySet()) walk(v)
         }
 
-        val pages = root.getAsJsonArray("pages") ?: return out
-        for (pageEl in pages) {
-            val page = pageEl.takeIf { it.isJsonObject }?.asJsonObject ?: continue
-            val blocksArr = page.getAsJsonArray("blocks") ?: continue
-            for (entryEl in blocksArr) {
-                val entry = entryEl.takeIf { it.isJsonObject }?.asJsonObject ?: continue
-                walkEntry(entry)
-            }
-        }
+        walk(root.get("content") ?: root.get("pages") ?: root)
         return out
     }
 
@@ -720,11 +728,26 @@ class BlueskyRepository {
         val missing = distinct.filterNot { it in found }
         if (missing.isEmpty()) return@coroutineScope found
 
+        // Bug fix (reviews/blogs going empty instead of just missing a few
+        // cards): if the batched pass above failed wholesale (a network
+        // blip affecting every batch, not just one bad account), `missing`
+        // is every requested did — this recovery pass used to fire that
+        // many individual requests with no concurrency limit at all, which
+        // can itself trigger rate limiting that makes the recovery pass
+        // fail too, leaving `authors` mostly empty and, in turn,
+        // getSubscribedReviews/getSubscribedBlogs filtering nearly
+        // everything out (see their own doc comments). Gating it behind
+        // the same SUBSCRIBED_FETCH_CONCURRENCY the rest of this file's
+        // per-account fan-outs already respect keeps this pass from being
+        // the thing that causes the failure it's trying to recover from.
+        val recoveryGate = Semaphore(SUBSCRIBED_FETCH_CONCURRENCY)
         val recovered = missing.map { did ->
             async {
-                val resp = runCatching { retryOnce { api.getProfiles("Bearer $token", listOf(did)) } }.getOrNull()
-                resp?.takeIf { it.isSuccessful }?.body()?.profiles.orEmpty().map { p ->
-                    AuthorInfo(did = p.did, handle = p.handle, displayName = p.displayName ?: p.handle, avatarUrl = p.avatar)
+                recoveryGate.withPermit {
+                    val resp = runCatching { retryOnce { api.getProfiles("Bearer $token", listOf(did)) } }.getOrNull()
+                    resp?.takeIf { it.isSuccessful }?.body()?.profiles.orEmpty().map { p ->
+                        AuthorInfo(did = p.did, handle = p.handle, displayName = p.displayName ?: p.handle, avatarUrl = p.avatar)
+                    }
                 }
             }
         }.awaitAll().flatten().associateBy { it.did }
