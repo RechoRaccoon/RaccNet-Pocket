@@ -47,6 +47,7 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -55,7 +56,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.mediaviewer.model.AuthorInfo
+import com.mediaviewer.model.LeafletBlock
 import com.mediaviewer.model.LeafletBlog
+import com.mediaviewer.model.LeafletTextSpan
 import com.mediaviewer.model.MediaItem
 import com.mediaviewer.model.PopfeedBacklogItem
 import com.mediaviewer.model.PopfeedReview
