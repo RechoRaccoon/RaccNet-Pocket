@@ -3,6 +3,7 @@ package com.mediaviewer.ui
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -19,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.filled.Close
@@ -928,7 +930,12 @@ private fun LazyListScope.profileResultsContent(
         }
         MainViewModel.ProfileTab.BLOGS -> {
             items(tabState?.blogs ?: emptyList(), key = { "blog_${it.uri}" }) { blog ->
-                BlogBubble(blog = blog, liquidGlass = liquidGlass, tint = profileTint, onOpenBlog = onOpenBlog,
+                // Item 7: rims/background reflect the blog's own thumbnail
+                // color when it has one, same as Reviews — falling back to
+                // this profile's own avatar color (via the shared
+                // fallbackAvatarUrl param) when the blog has no thumbnail
+                // of its own to pull a color from.
+                BlogBubble(blog = blog, liquidGlass = liquidGlass, fallbackAvatarUrl = state.author.avatarUrl, onOpenBlog = onOpenBlog,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp))
             }
         }
@@ -1143,50 +1150,91 @@ private fun TextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, o
 
 // ─── Blogs (Leaflet) ─────────────────────────────────────────────────────────
 
-/** A single blog card: the Leaflet thumbnail filling the whole card (falling
- *  back to a flat tinted panel if the blog has none), title pill top-right
- *  with the date pill directly under it — mirrors the blog reader's own
- *  header layout so opening a card feels like a continuation of it — and,
- *  if the blog has a description, a bubble bottom-left. That bubble is just
- *  Box(Alignment.BottomStart) around a wrap-content Text: its bottom edge
- *  stays anchored to the card's bottom edge, so a longer (more-lines)
- *  description naturally pushes the bubble's top edge upward instead of
- *  overflowing the card — no extra layout logic needed for that behavior.
+/** A single blog card.
  *
- *  Bug fix (this session): thumbnails used to be force-cropped to a fixed
- *  card [height] via ContentScale.Crop, which chopped off the top/bottom (or
- *  sides) of whatever the actual image looked like. There's no fixed height
- *  anymore when a thumbnail exists — the card's width is set by [modifier]
- *  and the image is drawn at ContentScale.FillWidth, so the card's height
- *  just follows the thumbnail's own aspect ratio instead of the other way
- *  around. Only the no-thumbnail fallback panel still needs an explicit
- *  height, since a flat tinted panel with no image has nothing else to size
- *  itself by.
+ *  With a thumbnail: the image fills the card, title pill top-right with
+ *  the date pill directly under it — mirrors the blog reader's own header
+ *  layout — and, if the blog has a description, a bubble bottom-left.
+ *  Item 2 (bug fix): the title pill used to be capped at a small fixed
+ *  width regardless of how much wider the card actually was, truncating
+ *  titles that had plenty of room left to grow into — it's now measured
+ *  against the card's own real width (via BoxWithConstraints) instead.
+ *
+ *  Without a thumbnail (item 3): rather than reusing the same
+ *  overlaid-bubbles-on-a-blank-panel treatment, this is a compact two-row
+ *  layout — title on the far left and the date on the far right of one
+ *  row, with the description (if any) on its own row underneath, left
+ *  aligned. No thumbnail means no art for pills to float over, so a plain
+ *  compact block reads better than empty bubbles on a flat panel.
+ *
+ *  Item 7: the card's glass rim/background reflects the blog's own
+ *  thumbnail color, same as Review cards — falling back to [fallbackAvatarUrl]
+ *  (the posting account's own avatar color) when the blog has no thumbnail
+ *  of its own to pull a color from.
  *
  *  Not private — the Hub's Blogs section (item: Hub Blogs) reuses this same
- *  card at a narrower [modifier] width, the same way profiles' review-star
- *  pill is shared with the Hub's review cards. */
+ *  card, passing [fixedHeight] (item 5) so every Hub blog card shares one
+ *  height instead of one width, with width instead following each
+ *  thumbnail's own aspect ratio at that height — the same way a plain
+ *  Image/AsyncImage auto-sizes when only one dimension is constrained. */
 @Composable
 fun BlogBubble(
-    blog: LeafletBlog, liquidGlass: Boolean, tint: Color, onOpenBlog: (LeafletBlog) -> Unit,
+    blog: LeafletBlog, liquidGlass: Boolean, onOpenBlog: (LeafletBlog) -> Unit,
     modifier: Modifier = Modifier,
-    titleFontSize: androidx.compose.ui.unit.TextUnit = 13.sp, pillMaxWidth: androidx.compose.ui.unit.Dp = 220.dp
+    fallbackAvatarUrl: String? = null,
+    titleFontSize: androidx.compose.ui.unit.TextUnit = 13.sp,
+    fixedHeight: androidx.compose.ui.unit.Dp? = null
 ) {
     val shape = RoundedCornerShape(16.dp)
     val dateText = formatCreatedAt(blog.createdAt)
-    Box(
+    val tint = rememberDominantColor(blog.thumbnailUrl ?: fallbackAvatarUrl ?: "")
+    // Item 5: the Hub passes fixedHeight, which also means smaller/tighter
+    // pills than the profile's full-size ones — same visual language, just
+    // scaled down to fit a shorter horizontally-scrolling card.
+    val compact = fixedHeight != null
+    val dateFontSize = if (compact) 9.sp else 11.sp
+    val descFontSize = if (compact) 9.sp else 11.sp
+    val pillPadH = if (compact) 7.dp else 10.dp
+    val pillPadV = if (compact) 3.dp else 5.dp
+    val cardPad = if (compact) 6.dp else 10.dp
+
+    BoxWithConstraints(
         modifier
+            .then(if (fixedHeight != null && blog.thumbnailUrl != null) Modifier.height(fixedHeight) else Modifier)
             .clip(shape)
             .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.background(Color.White.copy(0.06f)))
             .clickable { onOpenBlog(blog) }
     ) {
+        // Item 2: title pill can grow to use the card's actual measured
+        // width (minus the row's own edge padding) instead of a small
+        // fixed cap. Bug avoidance: this only reads maxWidth on the
+        // profile's non-fixedHeight cards, which sit in a fillMaxWidth
+        // column and so get a real finite constraint here — the Hub's
+        // fixedHeight cards sit in a horizontally-scrolling row, where the
+        // incoming width constraint is unbounded (the row itself decides
+        // width per-child from content, i.e. from the image's own aspect
+        // ratio at a fixed height) — maxWidth in that case would read as
+        // effectively infinite and wouldn't actually cap anything, so a
+        // fixed heuristic proportional to the card's own height is used
+        // there instead.
+        val availableTitleWidth = if (fixedHeight != null) (fixedHeight * 1.15f) else (maxWidth - cardPad * 2).coerceAtLeast(40.dp)
+
         if (blog.thumbnailUrl != null) {
-            // No forced height here — FillWidth scales the image to the
-            // card's width while preserving its native aspect ratio, and
-            // with no height constraint of its own the Box (and therefore
-            // the whole card) just wraps to whatever height that produces.
-            AsyncImage(model = blog.thumbnailUrl, contentDescription = null, contentScale = ContentScale.FillWidth,
-                modifier = Modifier.fillMaxWidth())
+            if (fixedHeight != null) {
+                // Height fixed by the outer BoxWithConstraints above; width
+                // follows the image's own aspect ratio at that height,
+                // exactly like a plain Image constrained on one axis only.
+                AsyncImage(model = blog.thumbnailUrl, contentDescription = null, contentScale = ContentScale.FillHeight,
+                    modifier = Modifier.fillMaxHeight())
+            } else {
+                // No forced height here — FillWidth scales the image to the
+                // card's width while preserving its native aspect ratio,
+                // and with no height constraint of its own the Box (and
+                // therefore the whole card) just wraps to whatever height
+                // that produces.
+                AsyncImage(model = blog.thumbnailUrl, contentDescription = null, contentScale = ContentScale.FillWidth,
+                    modifier = Modifier.fillMaxWidth())
+            }
             // Scrim so the title/date/description bubbles stay legible over
             // busy thumbnail art — same idea used for media-post captions.
             Box(
@@ -1194,40 +1242,67 @@ fun BlogBubble(
                     Brush.verticalGradient(listOf(Color.Black.copy(0.05f), Color.Black.copy(0.4f)))
                 )
             )
-        } else {
-            // Only the no-thumbnail case needs an explicit height — a flat
-            // tinted panel has nothing of its own to size the card by.
-            Box(Modifier.fillMaxWidth().height(140.dp))
-        }
 
-        Column(Modifier.align(Alignment.TopEnd).padding(10.dp), horizontalAlignment = Alignment.End) {
-            ProfileGlassPill(text = blog.title, liquidGlass = liquidGlass, tint = tint, fontSize = titleFontSize, bold = true,
-                modifier = Modifier.widthIn(max = pillMaxWidth))
-            if (dateText.isNotBlank()) {
-                Spacer(Modifier.height(6.dp))
-                val pillShape = RoundedCornerShape(12.dp)
-                Box(
-                    Modifier
-                        .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = pillShape) else Modifier.clip(pillShape).background(Color.White.copy(0.08f)))
-                        .padding(horizontal = 10.dp, vertical = 5.dp)
-                ) {
-                    Text(dateText, color = Color.White.copy(0.85f), fontSize = 11.sp)
+            Column(Modifier.align(Alignment.TopEnd).padding(cardPad), horizontalAlignment = Alignment.End) {
+                ProfileGlassPill(text = blog.title, liquidGlass = liquidGlass, tint = tint, fontSize = titleFontSize, bold = true,
+                    modifier = Modifier.widthIn(max = availableTitleWidth))
+                if (dateText.isNotBlank()) {
+                    Spacer(Modifier.height(if (compact) 4.dp else 6.dp))
+                    val pillShape = RoundedCornerShape(12.dp)
+                    Box(
+                        Modifier
+                            .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = pillShape) else Modifier.clip(pillShape).background(Color.White.copy(0.08f)))
+                            .padding(horizontal = pillPadH, vertical = pillPadV)
+                    ) {
+                        Text(dateText, color = Color.White.copy(0.85f), fontSize = dateFontSize)
+                    }
                 }
             }
-        }
 
-        if (!blog.description.isNullOrBlank()) {
-            val descShape = RoundedCornerShape(12.dp)
-            Box(
+            if (!blog.description.isNullOrBlank()) {
+                val descShape = RoundedCornerShape(12.dp)
+                Box(
+                    Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(cardPad)
+                        .widthIn(max = availableTitleWidth)
+                        .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = descShape) else Modifier.clip(descShape).background(Color.White.copy(0.08f)))
+                        .padding(horizontal = pillPadH, vertical = if (compact) 6.dp else 8.dp)
+                ) {
+                    Text(blog.description, color = Color.White.copy(0.9f), fontSize = descFontSize, lineHeight = (descFontSize.value * 1.35f).sp,
+                        maxLines = if (compact) 2 else 4, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        } else {
+            // Item 3: compact no-thumbnail layout. No art means no reason
+            // to keep the overlaid-pills-on-a-blank-panel treatment — this
+            // is just title/date on one row and (optional) description on
+            // the next, both left-anchored, inside the same glass card.
+            Column(
                 Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(10.dp)
-                    .widthIn(max = 200.dp)
-                    .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = descShape) else Modifier.clip(descShape).background(Color.White.copy(0.08f)))
-                    .padding(horizontal = 10.dp, vertical = 8.dp)
+                    .then(if (fixedHeight != null) Modifier.height(fixedHeight).width(150.dp) else Modifier.fillMaxWidth())
+                    .padding(cardPad),
+                verticalArrangement = if (fixedHeight != null) Arrangement.Center else Arrangement.Top
             ) {
-                Text(blog.description, color = Color.White.copy(0.9f), fontSize = 11.sp, lineHeight = 15.sp,
-                    maxLines = 4, overflow = TextOverflow.Ellipsis)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        blog.title, color = Color.White, fontSize = titleFontSize, fontWeight = FontWeight.Bold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (dateText.isNotBlank()) {
+                        Spacer(Modifier.width(8.dp))
+                        Text(dateText, color = Color.White.copy(0.6f), fontSize = dateFontSize, maxLines = 1)
+                    }
+                }
+                if (!blog.description.isNullOrBlank()) {
+                    Spacer(Modifier.height(if (compact) 4.dp else 6.dp))
+                    Text(
+                        blog.description, color = Color.White.copy(0.75f), fontSize = descFontSize,
+                        lineHeight = (descFontSize.value * 1.35f).sp,
+                        maxLines = if (compact) 2 else 3, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
         }
     }
@@ -1382,9 +1457,111 @@ private fun BlogDetailOverlay(blog: LeafletBlog, author: AuthorInfo, liquidGlass
                     }
                     Spacer(Modifier.height(16.dp))
                 }
-                Text(blog.bodyText.ifBlank { "This blog has no readable text content." },
-                    color = Color.White.copy(0.92f), fontSize = 14.sp, lineHeight = 21.sp)
+                if (blog.blocks.isNotEmpty()) {
+                    // Item 8: real formatting — headers, bold text,
+                    // checklists, and inline images — instead of the
+                    // flattened plain-text fallback below. See
+                    // BlueskyRepository.parseLeafletBlocks' doc comment for
+                    // what block types this recognizes and how.
+                    LeafletBlocksContent(blocks = blog.blocks, liquidGlass = liquidGlass, tint = tint)
+                } else {
+                    Text(blog.bodyText.ifBlank { "This blog has no readable text content." },
+                        color = Color.White.copy(0.92f), fontSize = 14.sp, lineHeight = 21.sp)
+                }
                 Spacer(Modifier.height(40.dp))
+            }
+        }
+    }
+}
+
+/** Item 8: renders a Leaflet document's parsed block tree — headers, bold
+ *  runs, checklist items, and inline images — instead of just printing
+ *  [LeafletBlog.bodyText]'s flattened plain text. Consecutive
+ *  [LeafletBlock.ChecklistItem]s are grouped so they sit tight against each
+ *  other (a real checklist) rather than getting the same paragraph spacing
+ *  as everything else. */
+@Composable
+private fun LeafletBlocksContent(blocks: List<LeafletBlock>, liquidGlass: Boolean, tint: Color) {
+    var i = 0
+    Column(Modifier.fillMaxWidth()) {
+        while (i < blocks.size) {
+            val block = blocks[i]
+            when (block) {
+                is LeafletBlock.Header -> {
+                    val fontSize = when (block.level) { 1 -> 22.sp; 2 -> 19.sp; 3 -> 17.sp; else -> 15.sp }
+                    Text(block.text, color = Color.White, fontSize = fontSize, fontWeight = FontWeight.Bold,
+                        lineHeight = fontSize.value.times(1.3f).sp, modifier = Modifier.padding(top = 14.dp, bottom = 6.dp))
+                    i++
+                }
+                is LeafletBlock.Paragraph -> {
+                    Text(
+                        buildAnnotatedString {
+                            block.spans.forEach { span ->
+                                if (span.bold) {
+                                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(span.text) }
+                                } else {
+                                    append(span.text)
+                                }
+                            }
+                        },
+                        color = Color.White.copy(0.92f), fontSize = 14.sp, lineHeight = 21.sp,
+                        modifier = Modifier.padding(bottom = 10.dp)
+                    )
+                    i++
+                }
+                is LeafletBlock.ImageBlock -> {
+                    val shape = RoundedCornerShape(14.dp)
+                    Box(
+                        Modifier.fillMaxWidth().heightIn(min = 120.dp, max = 320.dp)
+                            .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.clip(shape))
+                            .padding(bottom = 10.dp)
+                    ) {
+                        AsyncImage(model = block.url, contentDescription = block.alt, contentScale = ContentScale.FillWidth,
+                            modifier = Modifier.fillMaxWidth().clip(shape))
+                    }
+                    i++
+                }
+                is LeafletBlock.ChecklistItem -> {
+                    val shape = RoundedCornerShape(12.dp)
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.clip(shape).background(Color.White.copy(0.06f)))
+                            .padding(vertical = 4.dp)
+                            .padding(bottom = 10.dp)
+                    ) {
+                        // Consume every consecutive checklist item here so
+                        // the whole run shares one glass panel instead of
+                        // one panel per line.
+                        while (i < blocks.size) {
+                            val item = blocks[i] as? LeafletBlock.ChecklistItem ?: break
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Box(
+                                    Modifier.size(18.dp).clip(RoundedCornerShape(5.dp))
+                                        .then(
+                                            if (item.checked) Modifier.background(tint.copy(alpha = (tint.alpha).coerceAtLeast(0.7f)))
+                                            else Modifier.border(1.5.dp, Color.White.copy(0.4f), RoundedCornerShape(5.dp))
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (item.checked) {
+                                        Icon(Icons.Filled.Check, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
+                                    }
+                                }
+                                Text(
+                                    item.text, color = if (item.checked) Color.White.copy(0.55f) else Color.White.copy(0.92f),
+                                    fontSize = 14.sp, lineHeight = 19.sp,
+                                    textDecoration = if (item.checked) TextDecoration.LineThrough else null
+                                )
+                            }
+                            i++
+                        }
+                    }
+                }
             }
         }
     }

@@ -484,8 +484,37 @@ data class LeafletBlog(
     // defensively the same way the rest of this record's fields are (see
     // BlueskyRepository.parseLeafletBlogRecord) — either can be absent.
     val description: String? = null,
-    val thumbnailUrl: String? = null
+    val thumbnailUrl: String? = null,
+    // Rich-formatting support (item: blog reader formatting) — a
+    // best-effort structural parse of the document's block tree (see
+    // BlueskyRepository.parseLeafletBlocks), used by BlogDetailOverlay to
+    // render real headers/bold text/checklists/images instead of just
+    // [bodyText]'s flattened plain text. Empty when the record's block tree
+    // didn't yield anything recognizable, in which case the reader falls
+    // back to bodyText so no content is lost.
+    val blocks: List<LeafletBlock> = emptyList()
 )
+
+/** One inline styled run of text within a [LeafletBlock.Paragraph] or
+ *  [LeafletBlock.Header] — currently only bold is modeled (Leaflet's
+ *  pub.leaflet.richtext.facet#bold), matching what blog rich-formatting
+ *  needs; any other/unknown facet feature just renders as a plain run. */
+data class LeafletTextSpan(val text: String, val bold: Boolean = false)
+
+/** One renderable unit of a Leaflet document's body. Leaflet's own block
+ *  schema (pub.leaflet.blocks.*) isn't fully published, so this is a
+ *  best-effort structural parse of the block types this app can confidently
+ *  recognize (see BlueskyRepository.parseLeafletBlocks) — in the same
+ *  defensive spirit as the rest of this file's Leaflet/Popfeed parsing.
+ *  Anything unrecognized is skipped rather than guessed at; [LeafletBlog.
+ *  bodyText] remains as a plain-text fallback for when [LeafletBlog.blocks]
+ *  ends up empty. */
+sealed class LeafletBlock {
+    data class Header(val text: String, val level: Int) : LeafletBlock()
+    data class Paragraph(val spans: List<LeafletTextSpan>) : LeafletBlock()
+    data class ChecklistItem(val text: String, val checked: Boolean) : LeafletBlock()
+    data class ImageBlock(val url: String, val alt: String? = null) : LeafletBlock()
+}
 
 /** A single Popfeed (social.popfeed.review, formerly app.popsky.review)
  *  review, reduced down to what the Reviews tab needs. Popfeed's exact field

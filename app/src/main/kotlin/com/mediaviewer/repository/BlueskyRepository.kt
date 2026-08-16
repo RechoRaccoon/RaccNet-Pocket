@@ -378,8 +378,123 @@ class BlueskyRepository {
         val thumbnailUrl = firstImageField(obj, did, "coverImage", "cover", "image", "thumb", "icon")
         return LeafletBlog(
             uri = uri, title = title, bodyText = extractLeafletBodyText(obj), createdAt = createdAt,
-            description = description, thumbnailUrl = thumbnailUrl
+            description = description, thumbnailUrl = thumbnailUrl,
+            blocks = runCatching { parseLeafletBlocks(did, obj) }.getOrDefault(emptyList())
         )
+    }
+
+    /** Best-effort structural parse of a Leaflet document's block tree into
+     *  [LeafletBlock]s — headers, bold runs, checklist items, and inline
+     *  images all render as themselves now (item: blog rich formatting)
+     *  instead of collapsing into [extractLeafletBodyText]'s flattened
+     *  plain text. Leaflet's block schema keeps evolving and isn't fully
+     *  published, so block types are matched by substring on their
+     *  `$type` (e.g. containing "header", "image") rather than an exact
+     *  enum, the same defensive spirit as [extractLeafletBodyText] and the
+     *  rest of this file's Popfeed/Leaflet field guessing. Pages -> blocks
+     *  is the confirmed shape (pub.leaflet.pages.linearDocument); anything
+     *  deeper (list/outliner containers) is walked recursively via a small
+     *  set of likely child-array keys so nested content (e.g. checklist
+     *  items inside a list block) still surfaces instead of vanishing. */
+    private suspend fun parseLeafletBlocks(did: String, root: com.google.gson.JsonObject): List<LeafletBlock> {
+        val out = mutableListOf<LeafletBlock>()
+
+        // Splits one text-bearing block's plaintext into bold/non-bold runs
+        // using its `facets` (byte-offset ranges + feature list), the same
+        // richtext-facet shape Bluesky posts themselves use.
+        fun textSpansOf(block: com.google.gson.JsonObject): List<LeafletTextSpan> {
+            val plaintext = block.get("plaintext")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
+                ?: block.get("text")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
+                ?: return emptyList()
+            if (plaintext.isBlank()) return emptyList()
+            val bytes = plaintext.toByteArray(Charsets.UTF_8)
+            val boldRanges = mutableListOf<IntRange>()
+            val facets = block.getAsJsonArray("facets")
+            if (facets != null) {
+                for (facetEl in facets) {
+                    val facet = facetEl.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+                    val features = facet.getAsJsonArray("features") ?: continue
+                    val isBold = features.any { f ->
+                        f.isJsonObject && (f.asJsonObject.get("\$type")?.takeIf { it.isJsonPrimitive }?.asString
+                            ?.contains("bold", ignoreCase = true) == true)
+                    }
+                    if (!isBold) continue
+                    val idx = facet.getAsJsonObject("index") ?: continue
+                    val start = idx.get("byteStart")?.takeIf { it.isJsonPrimitive }?.asInt ?: continue
+                    val end = idx.get("byteEnd")?.takeIf { it.isJsonPrimitive }?.asInt ?: continue
+                    if (start in 0..bytes.size && end in start..bytes.size && end > start) boldRanges += start until end
+                }
+            }
+            if (boldRanges.isEmpty()) return listOf(LeafletTextSpan(plaintext, bold = false))
+            val cuts = sortedSetOf(0, bytes.size)
+            boldRanges.forEach { cuts.add(it.first); cuts.add(it.last + 1) }
+            val sortedCuts = cuts.sorted()
+            val spans = mutableListOf<LeafletTextSpan>()
+            for (i in 0 until sortedCuts.size - 1) {
+                val s = sortedCuts[i]; val e = sortedCuts[i + 1]
+                if (s >= e) continue
+                val runText = runCatching { String(bytes, s, e - s, Charsets.UTF_8) }.getOrNull() ?: continue
+                val isBold = boldRanges.any { s >= it.first && e <= it.last + 1 }
+                if (runText.isNotEmpty()) spans += LeafletTextSpan(runText, isBold)
+            }
+            return spans.ifEmpty { listOf(LeafletTextSpan(plaintext, bold = false)) }
+        }
+
+        suspend fun parseLeaf(block: com.google.gson.JsonObject): LeafletBlock? {
+            val type = block.get("\$type")?.takeIf { it.isJsonPrimitive }?.asString ?: ""
+            val checkedField = block.get("checked")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isBoolean }
+            return when {
+                type.contains("header", ignoreCase = true) -> {
+                    val text = block.get("plaintext")?.takeIf { it.isJsonPrimitive }?.asString?.takeIf { it.isNotBlank() } ?: return null
+                    val level = block.get("level")?.takeIf { it.isJsonPrimitive }?.asInt ?: 2
+                    LeafletBlock.Header(text, level.coerceIn(1, 4))
+                }
+                type.contains("image", ignoreCase = true) -> {
+                    val url = firstImageField(block, did, "image", "src", "media", "thumb") ?: return null
+                    val alt = firstStringField(block, "alt", "caption", "altText")
+                    LeafletBlock.ImageBlock(url, alt)
+                }
+                checkedField != null -> {
+                    val checked = checkedField.asBoolean
+                    val text = textSpansOf(block).joinToString("") { it.text }
+                        .ifBlank { firstStringField(block, "plaintext", "text") ?: "" }
+                    if (text.isBlank()) null else LeafletBlock.ChecklistItem(text, checked)
+                }
+                type.contains("text", ignoreCase = true) || block.has("plaintext") -> {
+                    val spans = textSpansOf(block)
+                    if (spans.isEmpty()) null else LeafletBlock.Paragraph(spans)
+                }
+                else -> null
+            }
+        }
+
+        suspend fun walkEntry(entry: com.google.gson.JsonObject) {
+            val inner = entry.getAsJsonObject("block") ?: entry
+            val parsed = parseLeaf(inner)
+            if (parsed != null) { out.add(parsed); return }
+            // Not a recognized leaf block — may be a list/outliner
+            // container with nested children (e.g. a checklist's items);
+            // recurse into any array of objects under a likely
+            // child-array key instead of dropping this block's content.
+            for (key in listOf("children", "items", "blocks")) {
+                val arr = inner.getAsJsonArray(key) ?: continue
+                for (childEl in arr) {
+                    val childObj = childEl.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+                    walkEntry(childObj)
+                }
+            }
+        }
+
+        val pages = root.getAsJsonArray("pages") ?: return out
+        for (pageEl in pages) {
+            val page = pageEl.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+            val blocksArr = page.getAsJsonArray("blocks") ?: continue
+            for (entryEl in blocksArr) {
+                val entry = entryEl.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+                walkEntry(entry)
+            }
+        }
+        return out
     }
 
     /** Leaflet documents are block-based (pages -> blocks -> nested content),
@@ -532,11 +647,18 @@ class BlueskyRepository {
         if (dids.isEmpty()) return@coroutineScope emptyList()
         val authors = fetchAuthorInfos(token, dids)
         val gate = Semaphore(SUBSCRIBED_FETCH_CONCURRENCY)
-        dids.distinct().map { did ->
+        dids.distinct().mapNotNull { did ->
+            // Bug fix (item 4): an account fetchAuthorInfos genuinely
+            // couldn't resolve (even after its own individual-retry pass)
+            // used to fall back to a placeholder AuthorInfo with the raw
+            // DID as its displayName and no avatar — rendering as a
+            // broken-looking card with no icon or real name. Skipping that
+            // account's reviews entirely instead means the Hub only ever
+            // shows cards it can actually put a name and icon on.
+            val author = authors[did] ?: return@mapNotNull null
             async {
                 delay((dids.indexOf(did) % SUBSCRIBED_FETCH_CONCURRENCY) * SUBSCRIBED_FETCH_STAGGER_MS)
                 gate.withPermit {
-                    val author = authors[did] ?: AuthorInfo(did = did, handle = did, displayName = did, avatarUrl = null)
                     runCatching { getPopfeedReviews(did) }.getOrDefault(emptyList())
                         .map { FriendPopfeedReview(author, it) }
                 }
@@ -551,11 +673,13 @@ class BlueskyRepository {
         if (dids.isEmpty()) return@coroutineScope emptyList()
         val authors = fetchAuthorInfos(token, dids)
         val gate = Semaphore(SUBSCRIBED_FETCH_CONCURRENCY)
-        dids.distinct().map { did ->
+        dids.distinct().mapNotNull { did ->
+            // See getSubscribedReviews' matching comment (item 4) — skip
+            // rather than render a broken did-as-name/no-icon card.
+            val author = authors[did] ?: return@mapNotNull null
             async {
                 delay((dids.indexOf(did) % SUBSCRIBED_FETCH_CONCURRENCY) * SUBSCRIBED_FETCH_STAGGER_MS)
                 gate.withPermit {
-                    val author = authors[did] ?: AuthorInfo(did = did, handle = did, displayName = did, avatarUrl = null)
                     runCatching { getLeafletBlogs(did) }.getOrDefault(emptyList())
                         .map { FriendLeafletBlog(author, it) }
                 }
@@ -567,8 +691,24 @@ class BlueskyRepository {
      *  [getLiveNowStreams]) for display info (avatar/name) on a set of
      *  DIDs — this part genuinely does have a real bulk AppView endpoint,
      *  unlike the review/blog records themselves. */
+    /** Bug fix (item 4 — Hub Reviews/Blogs cards showing raw DIDs with no
+     *  avatar instead of a real name/icon): this used to be a single
+     *  getProfiles call per 25-account batch, with no recovery if that
+     *  batch came back missing some (or all) of the accounts it asked for
+     *  — a batch-level retryOnce covers a fully-failed request, but not a
+     *  successful response that's just missing a handful of accounts (a
+     *  deactivated account, a slow/unreachable third-party PDS, etc. can
+     *  each drop just that one profile out of an otherwise-fine batch).
+     *  Every gap like that silently fell through to getSubscribedReviews/
+     *  getSubscribedBlogs' did-as-displayName placeholder, which is exactly
+     *  the broken-looking card in the bug report. Now any dids still
+     *  missing after the batched pass get one more individual-request pass
+     *  each, so a single bad account in a batch doesn't take its healthy
+     *  batch-mates down with it, and only genuinely unresolvable accounts
+     *  still fall through to the caller's placeholder. */
     private suspend fun fetchAuthorInfos(token: String, dids: List<String>): Map<String, AuthorInfo> = coroutineScope {
-        dids.distinct().chunked(25).map { batch ->
+        val distinct = dids.distinct()
+        val found = distinct.chunked(25).map { batch ->
             async {
                 val resp = runCatching { retryOnce { api.getProfiles("Bearer $token", batch) } }.getOrNull()
                 resp?.takeIf { it.isSuccessful }?.body()?.profiles.orEmpty().map { p ->
@@ -576,6 +716,20 @@ class BlueskyRepository {
                 }
             }
         }.awaitAll().flatten().associateBy { it.did }
+
+        val missing = distinct.filterNot { it in found }
+        if (missing.isEmpty()) return@coroutineScope found
+
+        val recovered = missing.map { did ->
+            async {
+                val resp = runCatching { retryOnce { api.getProfiles("Bearer $token", listOf(did)) } }.getOrNull()
+                resp?.takeIf { it.isSuccessful }?.body()?.profiles.orEmpty().map { p ->
+                    AuthorInfo(did = p.did, handle = p.handle, displayName = p.displayName ?: p.handle, avatarUrl = p.avatar)
+                }
+            }
+        }.awaitAll().flatten().associateBy { it.did }
+
+        found + recovered
     }
 
     /** Every account the user follows (not just mutuals/DM contacts) — used by

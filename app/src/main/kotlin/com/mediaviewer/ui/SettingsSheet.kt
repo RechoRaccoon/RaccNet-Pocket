@@ -878,7 +878,16 @@ private fun AtProtocolPageContent(
     // this session's card/skeleton sizing no longer applies once this is
     // reverted, but the sizing itself is left as-is (still reasonable, no
     // reason to churn it further).
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+    // Bug fix (item 1): "Return to Feed" used to be the last child of this
+    // same scrolling Column, so it scrolled away with everything else
+    // instead of staying reachable — it's meant to replace a swipe-up
+    // gesture, which should work from anywhere on the page, not just the
+    // very bottom of a long scroll. The scrollable content now lives in
+    // its own Box layer with bottom padding reserved for the bar's height,
+    // and the bar itself is a second Box layer pinned to BottomCenter,
+    // fixed in place on screen the way the screenshot expects.
+    Box(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = RETURN_TO_FEED_BAR_RESERVED_HEIGHT)) {
 
         // Item: every setting that used to live below the 6-button grid
         // (Download When Liked, Merge Lists & Packs, Show Add To After
@@ -1129,7 +1138,7 @@ private fun AtProtocolPageContent(
             Spacer(Modifier.height(14.dp))
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
-                Text("Latest Reviews", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+                Text("Reviews", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.padding(horizontal = 10.dp))
                 HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
             }
@@ -1138,7 +1147,7 @@ private fun AtProtocolPageContent(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                friendsReviews.take(20).forEach { fr -> MutualReviewCard(fr, liquidGlass, dominantColor, onOpenReview) }
+                friendsReviews.take(20).forEach { fr -> MutualReviewCard(fr, liquidGlass, onOpenReview) }
             }
         }
 
@@ -1155,26 +1164,33 @@ private fun AtProtocolPageContent(
                 HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
             }
             Spacer(Modifier.height(8.dp))
-            // Item (this session): these used to be forced to REVIEW_CARD_
-            // WIDTH/HEIGHT — a fixed portrait aspect ratio that cropped
-            // every thumbnail to fit, making blog cards look like movie
-            // posters instead of blogs. Now they're the exact same card as
-            // on profiles (see BlogBubble's own doc comment) just narrower,
-            // so several fit in a row — each one's height follows its own
-            // thumbnail's aspect ratio instead of a fixed card shape, same
-            // as on profiles, just at a smaller width. Top-aligned since
-            // that natural per-card height varies from one blog to the next.
+            // Item 5: every Hub blog card now shares one HEIGHT
+            // (HUB_BLOG_CARD_HEIGHT) instead of one width — each card's
+            // width instead follows its own thumbnail's aspect ratio at
+            // that fixed height (see BlogBubble's fixedHeight param), the
+            // same way a plain Image auto-sizes when only one dimension is
+            // constrained. Pills inside each card are also scaled down
+            // (BlogBubble's compact mode) to actually look like a smaller
+            // version of the profile card instead of an oversized one.
+            // Each card also gets its own small author (icon + name) bubble
+            // above it — the Hub mixes posts from many different accounts
+            // in one row, unlike a profile's Blogs tab where the author is
+            // implicit, so each card needs to say whose it is.
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.Top
             ) {
                 friendsBlogs.take(20).forEach { fb ->
-                    BlogBubble(
-                        blog = fb.blog, liquidGlass = liquidGlass, tint = dominantColor,
-                        onOpenBlog = { onOpenBlog(fb) }, modifier = Modifier.width(HUB_BLOG_CARD_WIDTH),
-                        titleFontSize = 10.sp, pillMaxWidth = 90.dp
-                    )
+                    Column(horizontalAlignment = Alignment.Start) {
+                        HubAuthorBubble(author = fb.author, liquidGlass = liquidGlass, tint = dominantColor)
+                        Spacer(Modifier.height(6.dp))
+                        BlogBubble(
+                            blog = fb.blog, liquidGlass = liquidGlass, fallbackAvatarUrl = fb.author.avatarUrl,
+                            onOpenBlog = { onOpenBlog(fb) },
+                            titleFontSize = 10.sp, fixedHeight = HUB_BLOG_CARD_HEIGHT
+                        )
+                    }
                 }
             }
         }
@@ -1192,17 +1208,22 @@ private fun AtProtocolPageContent(
             }
         }
 
-        // Item (this session): "Return to Feed" — replaces the removed
-        // swipe-up gesture — with the Hub refresh bubble (moved down from
-        // the "Mutuals" divider above) sitting right beside it, matched to
-        // its height, so the two read as a single centered control group at
-        // the very bottom of the page rather than two separate button rows.
-        Spacer(Modifier.height(16.dp))
-        ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
-            onReturnToFeed = onReturnToFeed, onRefresh = onRefreshHub)
         Spacer(Modifier.height(8.dp))
     }
+    // Bug fix (item 1): pinned in its own Box layer above the scroll
+    // content instead of scrolling away with it — see the matching comment
+    // on this function's outer Box/Column split above.
+    Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 8.dp)) {
+        ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
+            onReturnToFeed = onReturnToFeed, onRefresh = onRefreshHub)
+    }
+    }
 }
+
+// Bug fix (item 1): the scrolling content's bottom padding reserved for the
+// pinned ReturnToFeedBar — kept a little larger than the bar's own visual
+// height so the last real section never sits flush against/behind it.
+private val RETURN_TO_FEED_BAR_RESERVED_HEIGHT = 72.dp
 
 // Feature (this session): skeleton-placeholder slot counts for the Hub's
 // horizontally-scrolling sections — chosen to fill a typical phone-width
@@ -1214,12 +1235,11 @@ private const val MUTUAL_SKELETON_SLOTS = 6
 private const val REVIEW_SKELETON_SLOTS = 3
 private const val LIVESTREAM_SKELETON_SLOTS = 3
 private val REVIEW_CARD_WIDTH = 108.dp
-// Item (this session): Hub Blogs used to reuse REVIEW_CARD_WIDTH/HEIGHT
-// (a fixed portrait card, cropped to fit) — now each card's height instead
-// follows its own thumbnail's aspect ratio (see BlogBubble), so only a
-// width is fixed here. Kept slightly wider than REVIEW_CARD_WIDTH since
-// blog thumbnails tend to run landscape rather than poster-shaped.
-private val HUB_BLOG_CARD_WIDTH = 140.dp
+// Item 5: every Hub blog card shares this one height — width instead
+// follows each card's own thumbnail aspect ratio at that height (see
+// BlogBubble's fixedHeight param), so cards no longer read as
+// uniformly-wide-but-randomly-tall poster tiles.
+private val HUB_BLOG_CARD_HEIGHT = 150.dp
 
 // Platform brand colors for Bluesky "Live Now" cards/badges — Twitch and
 // YouTube's own accent colors, so a glance at the card tint alone tells you
@@ -1502,17 +1522,22 @@ private fun ShimmerBox(shape: androidx.compose.ui.graphics.Shape, modifier: Modi
  *  independently with no awareness of each other. The rating pill now lives
  *  directly under the author bubble in the same top-left-anchored Column, so
  *  it's a second row instead of a competing corner. */
+/** Item 7: review cards' glass rim/background reflect the review's own
+ *  thumbnail color (falling back to the reviewing account's avatar color if
+ *  the review has no media image) instead of one shared [dominantColor] for
+ *  every card in the row — matching how a post's own glass panels reflect
+ *  its own dominant color rather than some page-wide constant. */
 @Composable
 private fun MutualReviewCard(
     fr: com.mediaviewer.model.FriendPopfeedReview,
     liquidGlass: Boolean,
-    dominantColor: Color,
     onOpenReview: (com.mediaviewer.model.FriendPopfeedReview) -> Unit
 ) {
     val shape = RoundedCornerShape(14.dp)
+    val tint = rememberDominantColor(fr.review.mediaImageUrl ?: fr.author.avatarUrl ?: "")
     Box(
         Modifier.width(REVIEW_CARD_WIDTH).aspectRatio(2f / 3f)
-            .then(if (liquidGlass) Modifier.glassPanel(true, tint = dominantColor, shape = shape) else Modifier.clip(shape).background(Color.White.copy(0.06f)))
+            .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.clip(shape).background(Color.White.copy(0.06f)))
             .clickable { onOpenReview(fr) }
     ) {
         if (fr.review.mediaImageUrl != null) {
@@ -1527,7 +1552,7 @@ private fun MutualReviewCard(
         ) {
             Row(
                 Modifier
-                    .then(if (liquidGlass) Modifier.glassPanel(true, tint = dominantColor, shape = RoundedCornerShape(10.dp)) else Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(0.55f)))
+                    .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = RoundedCornerShape(10.dp)) else Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(0.55f)))
                     .padding(horizontal = 5.dp, vertical = 3.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -1542,12 +1567,12 @@ private fun MutualReviewCard(
                     maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 72.dp))
             }
             StarRatingPill(
-                rating = fr.review.ratingOutOf5, liquidGlass = liquidGlass, tint = dominantColor
+                rating = fr.review.ratingOutOf5, liquidGlass = liquidGlass, tint = tint
             )
         }
         Box(
             Modifier.align(Alignment.BottomStart).padding(4.dp)
-                .then(if (liquidGlass) Modifier.glassPanel(true, tint = dominantColor, shape = RoundedCornerShape(10.dp)) else Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(0.55f)))
+                .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = RoundedCornerShape(10.dp)) else Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(0.55f)))
                 .padding(horizontal = 6.dp, vertical = 4.dp)
         ) {
             Text(
@@ -1555,6 +1580,34 @@ private fun MutualReviewCard(
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 92.dp)
             )
         }
+    }
+}
+
+/** Item 5: the small author (icon + name) bubble the Hub now shows above
+ *  each blog card — the Hub mixes cards from many different accounts in one
+ *  row, unlike a profile's own Blogs tab where the author is implicit from
+ *  context, so each card needs its own "whose is this" label. Deliberately
+ *  plain rather than tinted per-author (unlike the cards themselves, item
+ *  7) so the row of little author pills reads as one consistent strip
+ *  rather than a row of mismatched colors. */
+@Composable
+private fun HubAuthorBubble(author: com.mediaviewer.model.AuthorInfo, liquidGlass: Boolean, tint: Color) {
+    val shape = RoundedCornerShape(10.dp)
+    Row(
+        Modifier
+            .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.clip(shape).background(Color.Black.copy(0.55f)))
+            .padding(horizontal = 6.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        Box(Modifier.size(14.dp).clip(CircleShape).background(Color.White.copy(0.15f))) {
+            if (author.avatarUrl != null) {
+                AsyncImage(model = author.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().clip(CircleShape))
+            }
+        }
+        Text(author.displayName, color = Color.White, fontSize = 10.sp, lineHeight = 11.sp, fontWeight = FontWeight.Medium,
+            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 100.dp))
     }
 }
 
