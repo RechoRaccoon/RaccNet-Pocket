@@ -929,7 +929,7 @@ private fun LazyListScope.profileResultsContent(
         MainViewModel.ProfileTab.BLOGS -> {
             items(tabState?.blogs ?: emptyList(), key = { "blog_${it.uri}" }) { blog ->
                 BlogBubble(blog = blog, liquidGlass = liquidGlass, tint = profileTint, onOpenBlog = onOpenBlog,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp))
             }
         }
         MainViewModel.ProfileTab.REVIEWS -> {
@@ -1153,34 +1153,51 @@ private fun TextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, o
  *  description naturally pushes the bubble's top edge upward instead of
  *  overflowing the card — no extra layout logic needed for that behavior.
  *
+ *  Bug fix (this session): thumbnails used to be force-cropped to a fixed
+ *  card [height] via ContentScale.Crop, which chopped off the top/bottom (or
+ *  sides) of whatever the actual image looked like. There's no fixed height
+ *  anymore when a thumbnail exists — the card's width is set by [modifier]
+ *  and the image is drawn at ContentScale.FillWidth, so the card's height
+ *  just follows the thumbnail's own aspect ratio instead of the other way
+ *  around. Only the no-thumbnail fallback panel still needs an explicit
+ *  height, since a flat tinted panel with no image has nothing else to size
+ *  itself by.
+ *
  *  Not private — the Hub's Blogs section (item: Hub Blogs) reuses this same
- *  card at a smaller [height], the same way profiles' review-star pill is
- *  shared with the Hub's review cards. */
+ *  card at a narrower [modifier] width, the same way profiles' review-star
+ *  pill is shared with the Hub's review cards. */
 @Composable
 fun BlogBubble(
     blog: LeafletBlog, liquidGlass: Boolean, tint: Color, onOpenBlog: (LeafletBlog) -> Unit,
-    modifier: Modifier = Modifier, height: androidx.compose.ui.unit.Dp = 180.dp,
+    modifier: Modifier = Modifier,
     titleFontSize: androidx.compose.ui.unit.TextUnit = 13.sp, pillMaxWidth: androidx.compose.ui.unit.Dp = 220.dp
 ) {
     val shape = RoundedCornerShape(16.dp)
     val dateText = formatCreatedAt(blog.createdAt)
     Box(
         modifier
-            .fillMaxWidth()
-            .height(height)
             .clip(shape)
             .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.background(Color.White.copy(0.06f)))
             .clickable { onOpenBlog(blog) }
     ) {
         if (blog.thumbnailUrl != null) {
-            AsyncImage(model = blog.thumbnailUrl, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            // No forced height here — FillWidth scales the image to the
+            // card's width while preserving its native aspect ratio, and
+            // with no height constraint of its own the Box (and therefore
+            // the whole card) just wraps to whatever height that produces.
+            AsyncImage(model = blog.thumbnailUrl, contentDescription = null, contentScale = ContentScale.FillWidth,
+                modifier = Modifier.fillMaxWidth())
             // Scrim so the title/date/description bubbles stay legible over
             // busy thumbnail art — same idea used for media-post captions.
             Box(
-                Modifier.fillMaxSize().background(
+                Modifier.matchParentSize().background(
                     Brush.verticalGradient(listOf(Color.Black.copy(0.05f), Color.Black.copy(0.4f)))
                 )
             )
+        } else {
+            // Only the no-thumbnail case needs an explicit height — a flat
+            // tinted panel has nothing of its own to size the card by.
+            Box(Modifier.fillMaxWidth().height(140.dp))
         }
 
         Column(Modifier.align(Alignment.TopEnd).padding(10.dp), horizontalAlignment = Alignment.End) {

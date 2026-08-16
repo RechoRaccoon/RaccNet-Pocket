@@ -19,7 +19,6 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
@@ -46,12 +45,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
-import androidx.compose.ui.input.nestedscroll.NestedScrollSource
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -71,7 +65,6 @@ import com.mediaviewer.model.BskyFeedInfo
 import com.mediaviewer.model.DownloadProgress
 import com.mediaviewer.ui.theme.*
 import com.mediaviewer.viewmodel.MainViewModel
-import kotlin.math.abs
 
 // Item 5: which panel of the Hub is currently showing. This is purely local
 // UI state for the sheet itself — separate from `appMode`, which tracks
@@ -219,70 +212,38 @@ fun SettingsSheet(
     // page immediately flipped the active feed and triggered a load/refresh
     // — even if the user was just passing through and never actually
     // swiped up into that feed. Now this purely changes which Hub page is
-    // showing; see onSwipeUpToFeed below for where the actual mode switch
+    // showing; see onReturnToFeed below for where the actual mode switch
     // now happens.
     fun goToHubPage(target: HubPage, forward: Boolean = hubPages.indexOf(target) >= hubPages.indexOf(hubPage)) {
         hubPageForward = forward
         hubPage = target
     }
-    // Item 5: wraps around at either end — swiping past e621 lands back on
-    // Settings, and swiping back past Settings lands on e621.
-    fun advanceHubPage(forward: Boolean) {
-        val idx = hubPages.indexOf(hubPage)
-        val next = ((idx + if (forward) 1 else -1) + hubPages.size) % hubPages.size
-        goToHubPage(hubPages[next], forward = forward)
-    }
-
     // Bug fix (per feedback): the actual AppMode switch — and therefore any
     // feed load/refresh — now only happens right here, at the moment the
-    // user actually swipes up out of the Hub into the feed, based on
-    // whichever Hub page they're leaving from. Browsing between Hub pages
-    // itself (including landing on e621, even by accident) never touches
-    // the feed. Settings has no corresponding mode, so swiping up from
-    // Settings leaves whatever mode was already active untouched — it was
-    // never changed just by visiting Settings in the first place.
-    fun onSwipeUpToFeed() {
+    // user actually leaves the Hub for the feed, based on whichever Hub
+    // page they're leaving from. Browsing between Hub pages itself
+    // (including landing on e621, even by accident) never touches the
+    // feed. Settings has no corresponding mode, so returning to the feed
+    // from Settings leaves whatever mode was already active untouched — it
+    // was never changed just by visiting Settings in the first place.
+    //
+    // Item (this session): this used to fire from a swipe-up gesture
+    // (detected both via a raw pointerInput drag on the outer Box and via
+    // NestedScrollConnection so it kept working on scrollable pages). Per
+    // feedback, both the swipe-up-to-feed gesture and the swipe-left/right
+    // page-switch gesture have been removed entirely to avoid accidental
+    // triggers — this same logic now runs from the explicit "Return to
+    // Feed" button at the bottom of each Hub page instead (see
+    // ReturnToFeedBar below). Hub-page switching is unaffected: it was
+    // always also reachable via the HubChip taps at the top, which this
+    // doesn't touch.
+    fun onReturnToFeed() {
         when (hubPage) {
             HubPage.AT_PROTOCOL -> onSwitchMode(AppMode.BLUESKY)
             HubPage.E621         -> onSwitchMode(AppMode.E621)
             HubPage.SETTINGS     -> {}
         }
         onSwipeToFeed()
-    }
-
-    // Item: swipe-up-to-feed needs to keep working even on pages that
-    // scroll (Settings and, as of item 8, AT Protocol). A plain pointerInput
-    // drag detector on the outer Box alone stops getting vertical drags
-    // once a scrollable child exists — the child's own scroll gesture
-    // claims them first — so it can't reach every page uniformly on its
-    // own; NestedScrollConnection is what makes this work everywhere.
-    //
-    // Bug fix (regression): this used to key off onPostFling's leftover
-    // *velocity*, which can't tell "a fast scroll's momentum happened to
-    // run out right at the bottom of the list" apart from "the user is
-    // deliberately dragging past the edge to leave" — both produce leftover
-    // fling velocity, so ordinary scrolling on a scrollable page kept
-    // punting the user back to the feed. The fix after that overcorrected
-    // by disabling the gesture entirely on any scrollable page, which broke
-    // swipe-up-to-feed there completely instead of just fixing the false
-    // trigger.
-    //
-    // The actual fix: onPostScroll's `source` parameter says whether the
-    // leftover delta came from an active drag (a finger still down on
-    // screen, continuing to pull past the edge) or a fling (a momentum
-    // animation coasting to a stop, which is what a fast scroll settling at
-    // the bottom looks like). Only NestedScrollSource.Drag means "the user
-    // is right now, deliberately, still dragging past the edge" — reacting
-    // only to that and ignoring Fling leftover gives a gesture that fires
-    // on a genuine pull-past-the-edge on every page, scrollable or not,
-    // without ever mistaking momentum-from-scrolling for it.
-    val nestedScrollConnection = remember(onSwipeToFeed) {
-        object : NestedScrollConnection {
-            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-                if (source == NestedScrollSource.Drag && available.y < -24f) onSwipeUpToFeed()
-                return Offset.Zero
-            }
-        }
     }
 
     Box(
@@ -296,30 +257,6 @@ fun SettingsSheet(
                 if (liquidGlass) Modifier.background(postBackgroundBrush(dominantColor))
                 else Modifier.background(OledBlack)
             )
-            .nestedScroll(nestedScrollConnection)
-            .pointerInput(hubPage) {
-                var totalX = 0f; var totalY = 0f
-                detectDragGestures(
-                    onDragStart  = { totalX = 0f; totalY = 0f },
-                    onDragEnd    = {
-                        when {
-                            abs(totalY) > 80f && abs(totalY) > abs(totalX) * 1.2f && totalY < 0 -> onSwipeUpToFeed()
-                            abs(totalX) > 80f && abs(totalX) > abs(totalY) * 1.2f -> advanceHubPage(forward = totalX < 0)
-                        }
-                    },
-                    onDragCancel = { }
-                ) { change, dragAmount ->
-                    // Only claim horizontal-dominant moves here — vertical
-                    // ones are left unconsumed so a scrollable page (the
-                    // Settings page) can still scroll normally; the
-                    // nestedScrollConnection above picks up swipe-up-to-feed
-                    // for that case instead.
-                    if (abs(dragAmount.x) > abs(dragAmount.y)) {
-                        change.consume()
-                    }
-                    totalX += dragAmount.x; totalY += dragAmount.y
-                }
-            }
     ) {
         Column(
             modifier = Modifier
@@ -372,7 +309,8 @@ fun SettingsSheet(
                             combineListsAndPacks = combineListsAndPacks, onToggleCombineListsPacks = onToggleCombineListsPacks,
                             autoAddToOnFollow = autoAddToOnFollow, onToggleAutoAddToOnFollow = onToggleAutoAddToOnFollow,
                             onLogoutBluesky = onLogoutBluesky, onLogoutE621 = onLogoutE621,
-                            dominantColor = dominantColor, backdrop = backdrop
+                            dominantColor = dominantColor, backdrop = backdrop,
+                            onReturnToFeed = { onReturnToFeed() }
                         )
                         HubPage.AT_PROTOCOL -> AtProtocolPageContent(
                             bskyLoggedIn = bskyLoggedIn, bskyHandle = bskyHandle,
@@ -393,14 +331,16 @@ fun SettingsSheet(
                             onLoadBlueskyLiveNow = onLoadBlueskyLiveNow, onOpenLivePlayer = onOpenLivePlayer,
                             onEnsureFriends = onEnsureFriends,
                             friendsBlogs = friendsBlogs, onOpenBlog = onOpenBlog,
-                            onRefreshHub = onRefreshHub
+                            onRefreshHub = onRefreshHub,
+                            onReturnToFeed = { onReturnToFeed() }
                         )
                         HubPage.E621 -> E621PageContent(
                             e621LoggedIn = e621LoggedIn, e621SearchTags = e621SearchTags,
                             onSearchE621 = onSearchE621,
                             onShowE621Favorites = onShowE621Favorites, onShowE621Following = onShowE621Following,
                             isLoading = isLoading, onSaveE621Credentials = onSaveE621Credentials,
-                            liquidGlass = liquidGlass, dominantColor = dominantColor, backdrop = backdrop
+                            liquidGlass = liquidGlass, dominantColor = dominantColor, backdrop = backdrop,
+                            onReturnToFeed = { onReturnToFeed() }
                         )
                     }
                 }
@@ -466,7 +406,9 @@ private fun SettingsPageContent(
     onLogoutBluesky: () -> Unit,
     onLogoutE621: () -> Unit,
     dominantColor: Color,
-    backdrop: GlassBackdrop?
+    backdrop: GlassBackdrop?,
+    // Item (this session): replaces the removed swipe-up-to-feed gesture.
+    onReturnToFeed: () -> Unit = {}
 ) {
     @Composable
     fun CompactRow(content: @Composable RowScope.() -> Unit) {
@@ -551,13 +493,12 @@ private fun SettingsPageContent(
         // used to be a non-scrolling Column with a comment explaining that
         // scroll had been removed to avoid fighting the swipe gesture. The
         // user has since reconsidered and wants the Hub scrollable again.
-        // The nestedScrollConnection on the shared outer Box (see the
-        // swipe-handling code above) was deliberately left fully intact the
-        // whole time specifically so an inner scrollable Column here could
-        // coexist with swipe-up-to-feed/page-switch — re-adding
-        // verticalScroll is all that's needed. Order matters: scroll comes
-        // before padding so the padding scrolls with the content rather
-        // than staying fixed.
+        // Item (this session): the swipe-up-to-feed/swipe-to-switch-page
+        // gestures this comment used to reference are gone entirely now (see
+        // onReturnToFeed above), so this scrollable Column no longer needs
+        // to coexist with anything competing for the same drag gestures.
+        // Order matters: scroll comes before padding so the padding scrolls
+        // with the content rather than staying fixed.
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -822,6 +763,8 @@ private fun SettingsPageContent(
             }
         }
 
+        Spacer(Modifier.height(16.dp))
+        ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop, onReturnToFeed = onReturnToFeed)
         Spacer(Modifier.height(8.dp))
     }
 }
@@ -872,7 +815,9 @@ private fun AtProtocolPageContent(
     friendsBlogs: List<com.mediaviewer.model.FriendLeafletBlog> = emptyList(),
     onOpenBlog: (com.mediaviewer.model.FriendLeafletBlog) -> Unit = {},
     // Item (this session): Hub refresh bubble.
-    onRefreshHub: () -> Unit = {}
+    onRefreshHub: () -> Unit = {},
+    // Item (this session): replaces the removed swipe-up-to-feed gesture.
+    onReturnToFeed: () -> Unit = {}
 ) {
     // Item 8: both of the new sections' fetches are lazy — kick them off once
     // when this page first composes rather than eagerly for every Hub visit
@@ -1056,13 +1001,6 @@ private fun AtProtocolPageContent(
             Text("Mutuals", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(horizontal = 10.dp))
             HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
-            Spacer(Modifier.width(8.dp))
-            // Item (this session): Hub refresh — a small circular glass
-            // bubble that re-checks Mutuals, Reviews, and Blogs against the
-            // network, bypassing every "already loaded this session" guard.
-            // Replaces the old "Clear Indicators" bubble now that the
-            // indicator system is gone entirely.
-            HubRefreshBubble(liquidGlass, dominantColor, onRefreshHub)
         }
         Spacer(Modifier.height(8.dp))
 
@@ -1217,18 +1155,26 @@ private fun AtProtocolPageContent(
                 HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
             }
             Spacer(Modifier.height(8.dp))
+            // Item (this session): these used to be forced to REVIEW_CARD_
+            // WIDTH/HEIGHT — a fixed portrait aspect ratio that cropped
+            // every thumbnail to fit, making blog cards look like movie
+            // posters instead of blogs. Now they're the exact same card as
+            // on profiles (see BlogBubble's own doc comment) just narrower,
+            // so several fit in a row — each one's height follows its own
+            // thumbnail's aspect ratio instead of a fixed card shape, same
+            // as on profiles, just at a smaller width. Top-aligned since
+            // that natural per-card height varies from one blog to the next.
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.Top
             ) {
                 friendsBlogs.take(20).forEach { fb ->
-                    Box(Modifier.width(REVIEW_CARD_WIDTH)) {
-                        BlogBubble(
-                            blog = fb.blog, liquidGlass = liquidGlass, tint = dominantColor,
-                            onOpenBlog = { onOpenBlog(fb) }, height = REVIEW_CARD_HEIGHT,
-                            titleFontSize = 10.sp, pillMaxWidth = 90.dp
-                        )
-                    }
+                    BlogBubble(
+                        blog = fb.blog, liquidGlass = liquidGlass, tint = dominantColor,
+                        onOpenBlog = { onOpenBlog(fb) }, modifier = Modifier.width(HUB_BLOG_CARD_WIDTH),
+                        titleFontSize = 10.sp, pillMaxWidth = 90.dp
+                    )
                 }
             }
         }
@@ -1245,7 +1191,16 @@ private fun AtProtocolPageContent(
                 "blogs" -> BlogsSectionContent()
             }
         }
+
+        // Item (this session): "Return to Feed" — replaces the removed
+        // swipe-up gesture — with the Hub refresh bubble (moved down from
+        // the "Mutuals" divider above) sitting right beside it, matched to
+        // its height, so the two read as a single centered control group at
+        // the very bottom of the page rather than two separate button rows.
         Spacer(Modifier.height(16.dp))
+        ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
+            onReturnToFeed = onReturnToFeed, onRefresh = onRefreshHub)
+        Spacer(Modifier.height(8.dp))
     }
 }
 
@@ -1259,13 +1214,12 @@ private const val MUTUAL_SKELETON_SLOTS = 6
 private const val REVIEW_SKELETON_SLOTS = 3
 private const val LIVESTREAM_SKELETON_SLOTS = 3
 private val REVIEW_CARD_WIDTH = 108.dp
-// Recomputed after halving the author-strip and title-row heights per
-// feedback: poster stays 108.dp * 3/2 = 162.dp, author strip is now
-// ~14.dp (was ~22.dp), title row is now ~17.dp (was ~21.dp). Keep this in
-// sync with MutualReviewCard/MutualReviewCardSkeleton if their padding or
-// font sizes change again — this is only used for the invisible "no more
-// reviews" empty-slot Spacer's footprint.
-private val REVIEW_CARD_HEIGHT = 193.dp
+// Item (this session): Hub Blogs used to reuse REVIEW_CARD_WIDTH/HEIGHT
+// (a fixed portrait card, cropped to fit) — now each card's height instead
+// follows its own thumbnail's aspect ratio (see BlogBubble), so only a
+// width is fixed here. Kept slightly wider than REVIEW_CARD_WIDTH since
+// blog thumbnails tend to run landscape rather than poster-shaped.
+private val HUB_BLOG_CARD_WIDTH = 140.dp
 
 // Platform brand colors for Bluesky "Live Now" cards/badges — Twitch and
 // YouTube's own accent colors, so a glance at the card tint alone tells you
@@ -1448,17 +1402,20 @@ private fun embedUrlFor(stream: com.mediaviewer.model.BlueskyLiveNowStream): Str
     }
 }
 
-/** Circular liquid-glass refresh button, next to the "Mutuals" divider —
- *  re-checks Mutuals, Reviews, and Blogs against the network on tap. Spins
- *  briefly on tap for feedback since the underlying fetch has no
- *  progress/loading state surfaced up to this button specifically. */
+/** Circular liquid-glass refresh button, now living beside the "Return to
+ *  Feed" bar at the bottom of the AT Protocol page (moved down from the
+ *  "Mutuals" divider) — re-checks Mutuals, Reviews, and Blogs against the
+ *  network on tap. Spins briefly on tap for feedback since the underlying
+ *  fetch has no progress/loading state surfaced up to this button
+ *  specifically. [size] lets it be matched to whatever it's sitting next to
+ *  (the Return to Feed bar's own height). */
 @Composable
-private fun HubRefreshBubble(liquidGlass: Boolean, tint: Color, onRefresh: () -> Unit) {
+private fun HubRefreshBubble(liquidGlass: Boolean, tint: Color, onRefresh: () -> Unit, size: androidx.compose.ui.unit.Dp = 26.dp) {
     val scope = rememberCoroutineScope()
     val rotation = remember { Animatable(0f) }
     val shape = CircleShape
     Box(
-        Modifier.size(26.dp)
+        Modifier.size(size)
             .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.clip(shape).background(Color.White.copy(0.10f)))
             .clickable {
                 onRefresh()
@@ -1471,6 +1428,51 @@ private fun HubRefreshBubble(liquidGlass: Boolean, tint: Color, onRefresh: () ->
     ) {
         Icon(Icons.Filled.Refresh, contentDescription = "Refresh Hub", tint = Color.White,
             modifier = Modifier.size(14.dp).graphicsLayer { rotationZ = rotation.value })
+    }
+}
+
+/** Bottom-of-page control group that replaces the removed swipe-up-to-feed
+ *  gesture: a centered "Return to Feed" glass pill that does exactly what
+ *  swiping up used to. When [onRefresh] is supplied (the AT Protocol page,
+ *  which owns the Hub refresh action), the refresh bubble sits immediately
+ *  to its right, height-matched to the pill, so the pair reads as one
+ *  centered group rather than two separate controls. */
+@Composable
+private fun ReturnToFeedBar(
+    liquidGlass: Boolean,
+    tint: Color,
+    backdrop: GlassBackdrop?,
+    onReturnToFeed: () -> Unit,
+    onRefresh: (() -> Unit)? = null
+) {
+    val barHeight = 40.dp
+    val shape = RoundedCornerShape(20.dp)
+
+    @Composable
+    fun ButtonContent() {
+        Row(
+            Modifier.fillMaxSize().clickable(onClick = onReturnToFeed).padding(horizontal = 20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Text("Return to Feed", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (liquidGlass) {
+            LiquidGlassSurface(Modifier.height(barHeight), shape = shape, tint = tint, backdrop = backdrop) { ButtonContent() }
+        } else {
+            Box(Modifier.height(barHeight).clip(shape).background(Color.White.copy(0.08f))) { ButtonContent() }
+        }
+        if (onRefresh != null) {
+            Spacer(Modifier.width(10.dp))
+            HubRefreshBubble(liquidGlass, tint, onRefresh, size = barHeight)
+        }
     }
 }
 
@@ -1491,8 +1493,15 @@ private fun ShimmerBox(shape: androidx.compose.ui.graphics.Shape, modifier: Modi
  *  old author-strip-above/title-row-below layout is gone — the poster now
  *  fills the entire card, with author (avatar + name) and title each as
  *  their own small glass bubble layered directly on the artwork, same
- *  visual language as the star-rating pill (top-right) already used —
- *  author bubble top-left, title bubble bottom-left, rating top-right. */
+ *  visual language as the star-rating pill already used — author bubble
+ *  top-left, title bubble bottom-left.
+ *
+ *  Bug fix (this session): the rating pill used to sit at TopEnd, which on
+ *  this card's narrow width overlapped the author bubble at TopStart once
+ *  the author's name pushed it wide enough — the two were laid out
+ *  independently with no awareness of each other. The rating pill now lives
+ *  directly under the author bubble in the same top-left-anchored Column, so
+ *  it's a second row instead of a competing corner. */
 @Composable
 private fun MutualReviewCard(
     fr: com.mediaviewer.model.FriendPopfeedReview,
@@ -1512,25 +1521,29 @@ private fun MutualReviewCard(
         } else {
             Box(Modifier.fillMaxSize().clip(shape).background(Color.White.copy(0.10f)))
         }
-        StarRatingPill(
-            rating = fr.review.ratingOutOf5, liquidGlass = liquidGlass, tint = dominantColor,
-            modifier = Modifier.align(Alignment.TopEnd).padding(4.dp)
-        )
-        Row(
-            Modifier.align(Alignment.TopStart).padding(4.dp)
-                .then(if (liquidGlass) Modifier.glassPanel(true, tint = dominantColor, shape = RoundedCornerShape(10.dp)) else Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(0.55f)))
-                .padding(horizontal = 5.dp, vertical = 3.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        Column(
+            Modifier.align(Alignment.TopStart).padding(4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            Box(Modifier.size(10.dp).clip(CircleShape).background(Color.White.copy(0.15f))) {
-                if (fr.author.avatarUrl != null) {
-                    AsyncImage(model = fr.author.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize().clip(CircleShape))
+            Row(
+                Modifier
+                    .then(if (liquidGlass) Modifier.glassPanel(true, tint = dominantColor, shape = RoundedCornerShape(10.dp)) else Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(0.55f)))
+                    .padding(horizontal = 5.dp, vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Box(Modifier.size(10.dp).clip(CircleShape).background(Color.White.copy(0.15f))) {
+                    if (fr.author.avatarUrl != null) {
+                        AsyncImage(model = fr.author.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize().clip(CircleShape))
+                    }
                 }
+                Text(fr.author.displayName, color = Color.White, fontSize = 9.sp, lineHeight = 10.sp, fontWeight = FontWeight.Medium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 72.dp))
             }
-            Text(fr.author.displayName, color = Color.White, fontSize = 9.sp, lineHeight = 10.sp, fontWeight = FontWeight.Medium,
-                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 72.dp))
+            StarRatingPill(
+                rating = fr.review.ratingOutOf5, liquidGlass = liquidGlass, tint = dominantColor
+            )
         }
         Box(
             Modifier.align(Alignment.BottomStart).padding(4.dp)
@@ -1558,7 +1571,9 @@ private fun E621PageContent(
     onSaveE621Credentials: (String, String) -> Unit,
     liquidGlass: Boolean,
     dominantColor: Color,
-    backdrop: GlassBackdrop?
+    backdrop: GlassBackdrop?,
+    // Item (this session): replaces the removed swipe-up-to-feed gesture.
+    onReturnToFeed: () -> Unit = {}
 ) {
     var e621User by remember { mutableStateOf("") }
     var e621Key by remember { mutableStateOf("") }
@@ -1672,6 +1687,9 @@ private fun E621PageContent(
                     Box(Modifier.weight(1f).height(46.dp).clip(RoundedCornerShape(20.dp)).background(Color.White.copy(0.08f))) { FollowingContent() }
                 }
             }
+
+            Spacer(Modifier.height(8.dp))
+            ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop, onReturnToFeed = onReturnToFeed)
         }
     }
 }
