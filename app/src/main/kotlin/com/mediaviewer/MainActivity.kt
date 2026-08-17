@@ -156,6 +156,7 @@ private fun AppRoot(viewModel: MainViewModel) {
     val currentIndex       by viewModel.currentIndex.collectAsState()
     val currentItem        by viewModel.currentItem.collectAsState()
     val screenState        by viewModel.screenState.collectAsState()
+    val hasVisitedFeed     by viewModel.hasVisitedFeed.collectAsState()
     val appMode            by viewModel.appMode.collectAsState()
     val navDirection       by viewModel.navDirection.collectAsState()
     val reducedAnimations  by viewModel.reducedAnimations.collectAsState()
@@ -239,6 +240,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             currentIndex              = currentIndex,
             currentItem               = currentItem,
             screenState               = screenState,
+            hasVisitedFeed            = hasVisitedFeed,
             appMode                   = appMode,
             navDirection              = navDirection,
             reducedAnimations         = reducedAnimations,

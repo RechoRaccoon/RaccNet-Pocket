@@ -451,28 +451,28 @@ class BlueskyRepository {
             return spans.ifEmpty { listOf(LeafletTextSpan(plaintext, bold = false)) }
         }
 
-        suspend fun parseLeaf(block: com.google.gson.JsonObject): LeafletBlock? {
+        suspend fun parseLeaf(block: com.google.gson.JsonObject, alignment: LeafletAlign = LeafletAlign.START): LeafletBlock? {
             val type = block.get("\$type")?.takeIf { it.isJsonPrimitive }?.asString ?: ""
             val checkedField = block.get("checked")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isBoolean }
             return when {
                 type.contains("header", ignoreCase = true) -> {
                     val text = rawTextOf(block) ?: return null
                     val level = block.get("level")?.takeIf { it.isJsonPrimitive }?.asInt ?: 2
-                    LeafletBlock.Header(text, level.coerceIn(1, 4))
+                    LeafletBlock.Header(text, level.coerceIn(1, 4), alignment)
                 }
                 type.contains("image", ignoreCase = true) -> {
                     val url = firstImageField(block, did, "image", "src", "media", "thumb") ?: return null
                     val alt = firstStringField(block, "alt", "caption", "altText")
-                    LeafletBlock.ImageBlock(url, alt)
+                    LeafletBlock.ImageBlock(url, alt, alignment)
                 }
                 checkedField != null && rawTextOf(block) != null -> {
                     val checked = checkedField.asBoolean
                     val text = textSpansOf(block).joinToString("") { it.text }
-                    if (text.isBlank()) null else LeafletBlock.ChecklistItem(text, checked)
+                    if (text.isBlank()) null else LeafletBlock.ChecklistItem(text, checked, alignment)
                 }
                 rawTextOf(block) != null -> {
                     val spans = textSpansOf(block)
-                    if (spans.isEmpty()) null else LeafletBlock.Paragraph(spans)
+                    if (spans.isEmpty()) null else LeafletBlock.Paragraph(spans, alignment)
                 }
                 else -> null
             }
@@ -491,11 +491,40 @@ class BlueskyRepository {
         // or a text/checked field); anything else is walked field-by-field
         // so content isn't lost just because it sits one level deeper (or
         // shallower) than expected.
+        // Bug fix (blogs not honoring text alignment): Leaflet's block-list
+        // schema (pub.leaflet.pages.linearDocument#block) wraps each real
+        // block in a container shaped like { block: {...the actual block},
+        // alignment?: "text-align-left" | "text-align-center" |
+        // "text-align-right" } — alignment lives on this outer wrapper, a
+        // sibling of "block", not inside the block object itself. The
+        // generic walk below used to just recurse straight through this
+        // wrapper's fields (since the wrapper itself never looks like a
+        // leaf block to parseLeaf) — which does eventually find and parse
+        // the nested block fine, but by the time it gets there the
+        // wrapper's own "alignment" field is a sibling that's already been
+        // stepped past, not an ancestor of anything walk() still has a
+        // handle on. This wrapper shape is now detected explicitly so
+        // alignment can be read here and carried into the parsed leaf,
+        // before generic recursion ever has a chance to lose that context.
+        fun alignmentOf(obj: com.google.gson.JsonObject): LeafletAlign {
+            val raw = obj.get("alignment")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString ?: return LeafletAlign.START
+            return when {
+                raw.contains("center", ignoreCase = true) -> LeafletAlign.CENTER
+                raw.contains("right", ignoreCase = true) || raw.contains("end", ignoreCase = true) -> LeafletAlign.END
+                else -> LeafletAlign.START
+            }
+        }
+
         suspend fun walk(el: com.google.gson.JsonElement?) {
             if (el == null || el.isJsonNull) return
             if (el.isJsonArray) { el.asJsonArray.forEach { walk(it) }; return }
             if (!el.isJsonObject) return
             val obj = el.asJsonObject
+            val wrappedBlock = obj.get("block")?.takeIf { it.isJsonObject }?.asJsonObject
+            if (wrappedBlock != null) {
+                val leaf = parseLeaf(wrappedBlock, alignmentOf(obj))
+                if (leaf != null) { out.add(leaf); return }
+            }
             val leaf = parseLeaf(obj)
             if (leaf != null) { out.add(leaf); return }
             for ((_, v) in obj.entrySet()) walk(v)

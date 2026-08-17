@@ -122,6 +122,7 @@ fun MainFeedScreen(
     currentIndex: Int,
     currentItem: MediaItem?,
     screenState: ScreenState,
+    hasVisitedFeed: Boolean,
     appMode: AppMode,
     navDirection: Int,
     reducedAnimations: Boolean,
@@ -384,6 +385,7 @@ fun MainFeedScreen(
                     )
                     ScreenState.SETTINGS -> SettingsSheet(
                         appMode                   = appMode,
+                        hasVisitedFeed            = hasVisitedFeed,
                         bskyLoggedIn              = bskyLoggedIn,
                         e621LoggedIn              = e621LoggedIn,
                         bskyHandle                = bskyHandle,

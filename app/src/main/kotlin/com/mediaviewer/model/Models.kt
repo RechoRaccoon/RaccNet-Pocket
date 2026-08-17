@@ -527,11 +527,21 @@ data class LeafletTextSpan(val text: String, val bold: Boolean = false)
  *  Anything unrecognized is skipped rather than guessed at; [LeafletBlog.
  *  bodyText] remains as a plain-text fallback for when [LeafletBlog.blocks]
  *  ends up empty. */
+/** Text-row alignment for a block, mirroring Leaflet's own
+ *  `pub.leaflet.pages.linearDocument#block` wrapper, which carries an
+ *  optional `alignment: "text-align-left" | "text-align-center" |
+ *  "text-align-right"` alongside each block rather than inside it — see
+ *  BlueskyRepository.parseLeafletBlocks' `alignmentOf` for where this gets
+ *  read off that wrapper. Kept as this app's own small enum (rather than
+ *  reusing Compose's TextAlign directly here) so the model layer doesn't
+ *  need a Compose UI dependency; UI code maps it to a real TextAlign. */
+enum class LeafletAlign { START, CENTER, END }
+
 sealed class LeafletBlock {
-    data class Header(val text: String, val level: Int) : LeafletBlock()
-    data class Paragraph(val spans: List<LeafletTextSpan>) : LeafletBlock()
-    data class ChecklistItem(val text: String, val checked: Boolean) : LeafletBlock()
-    data class ImageBlock(val url: String, val alt: String? = null) : LeafletBlock()
+    data class Header(val text: String, val level: Int, val alignment: LeafletAlign = LeafletAlign.START) : LeafletBlock()
+    data class Paragraph(val spans: List<LeafletTextSpan>, val alignment: LeafletAlign = LeafletAlign.START) : LeafletBlock()
+    data class ChecklistItem(val text: String, val checked: Boolean, val alignment: LeafletAlign = LeafletAlign.START) : LeafletBlock()
+    data class ImageBlock(val url: String, val alt: String? = null, val alignment: LeafletAlign = LeafletAlign.START) : LeafletBlock()
 }
 
 /** A single Popfeed (social.popfeed.review, formerly app.popsky.review)

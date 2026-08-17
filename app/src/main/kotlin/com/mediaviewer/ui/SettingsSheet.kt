@@ -42,7 +42,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
@@ -83,6 +88,13 @@ private enum class HubPage { SETTINGS, AT_PROTOCOL, E621 }
 @Composable
 fun SettingsSheet(
     appMode: AppMode,
+    // Feature (this session): drives the Hub's Return to Feed button's
+    // label — see MainViewModel.hasVisitedFeed's doc comment for why this
+    // is tracked centrally in the ViewModel rather than as local state
+    // here (this whole sheet gets torn down and rebuilt across Hub/feed
+    // screen switches, so any state kept only in this composable would
+    // reset on every round-trip).
+    hasVisitedFeed: Boolean,
     bskyLoggedIn: Boolean,
     e621LoggedIn: Boolean,
     bskyHandle: String,
@@ -309,8 +321,7 @@ fun SettingsSheet(
                             combineListsAndPacks = combineListsAndPacks, onToggleCombineListsPacks = onToggleCombineListsPacks,
                             autoAddToOnFollow = autoAddToOnFollow, onToggleAutoAddToOnFollow = onToggleAutoAddToOnFollow,
                             onLogoutBluesky = onLogoutBluesky, onLogoutE621 = onLogoutE621,
-                            dominantColor = dominantColor, backdrop = backdrop,
-                            onReturnToFeed = { onReturnToFeed() }
+                            dominantColor = dominantColor, backdrop = backdrop
                         )
                         HubPage.AT_PROTOCOL -> AtProtocolPageContent(
                             bskyLoggedIn = bskyLoggedIn, bskyHandle = bskyHandle,
@@ -332,7 +343,8 @@ fun SettingsSheet(
                             onEnsureFriends = onEnsureFriends,
                             friendsBlogs = friendsBlogs, onOpenBlog = onOpenBlog,
                             onRefreshHub = onRefreshHub,
-                            onReturnToFeed = { onReturnToFeed() }
+                            onReturnToFeed = { onReturnToFeed() },
+                            hasVisitedFeed = hasVisitedFeed
                         )
                         HubPage.E621 -> E621PageContent(
                             e621LoggedIn = e621LoggedIn, e621SearchTags = e621SearchTags,
@@ -340,7 +352,8 @@ fun SettingsSheet(
                             onShowE621Favorites = onShowE621Favorites, onShowE621Following = onShowE621Following,
                             isLoading = isLoading, onSaveE621Credentials = onSaveE621Credentials,
                             liquidGlass = liquidGlass, dominantColor = dominantColor, backdrop = backdrop,
-                            onReturnToFeed = { onReturnToFeed() }
+                            onReturnToFeed = { onReturnToFeed() },
+                            hasVisitedFeed = hasVisitedFeed
                         )
                     }
                 }
@@ -406,9 +419,7 @@ private fun SettingsPageContent(
     onLogoutBluesky: () -> Unit,
     onLogoutE621: () -> Unit,
     dominantColor: Color,
-    backdrop: GlassBackdrop?,
-    // Item (this session): replaces the removed swipe-up-to-feed gesture.
-    onReturnToFeed: () -> Unit = {}
+    backdrop: GlassBackdrop?
 ) {
     @Composable
     fun CompactRow(content: @Composable RowScope.() -> Unit) {
@@ -764,8 +775,6 @@ private fun SettingsPageContent(
         }
 
         Spacer(Modifier.height(16.dp))
-        ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop, onReturnToFeed = onReturnToFeed)
-        Spacer(Modifier.height(8.dp))
     }
 }
 
@@ -817,7 +826,8 @@ private fun AtProtocolPageContent(
     // Item (this session): Hub refresh bubble.
     onRefreshHub: () -> Unit = {},
     // Item (this session): replaces the removed swipe-up-to-feed gesture.
-    onReturnToFeed: () -> Unit = {}
+    onReturnToFeed: () -> Unit = {},
+    hasVisitedFeed: Boolean = false
 ) {
     // Item 8: both of the new sections' fetches are lazy — kick them off once
     // when this page first composes rather than eagerly for every Hub visit
@@ -886,8 +896,44 @@ private fun AtProtocolPageContent(
     // its own Box layer with bottom padding reserved for the bar's height,
     // and the bar itself is a second Box layer pinned to BottomCenter,
     // fixed in place on screen the way the screenshot expects.
+    // Bug fix (per feedback — Return to Feed bar didn't reflect anything):
+    // the `backdrop` param this whole page receives is the *feed's* last
+    // captured frame (see MainFeedScreen's `onBackdropChanged`, only fed by
+    // the FEED screen's own posts) — frozen at whatever it last was before
+    // leaving the feed, and genuinely null on a cold app start now that the
+    // app opens on the Hub first (see this session's init{} change), since
+    // no feed post has ever been composed yet to capture one from. The
+    // Return to Feed bar is supposed to read as glass over the Hub's own
+    // content behind it, not a stale picture of a feed post — so it now
+    // gets its own live backdrop, re-recorded from this page's own
+    // scrollable content every frame, the same "record this frame's real
+    // pixels into a shared layer" pattern PostContent uses for feed posts
+    // (see backdropLayer.record there). Crash-avoidance note (matching
+    // that same file's QuickActionMenu/video-controls comment): the bar
+    // itself must stay OUTSIDE the Box being recorded below — it reads
+    // from hubBackdropLayer via LiquidGlassSurface's drawLayer(...), and a
+    // GraphicsLayer can't be drawn while it's still in the middle of being
+    // recorded into.
+    val hubBackdropLayer = rememberGraphicsLayer()
+    var hubBackdropOrigin by remember { mutableStateOf(Offset.Zero) }
+    val hubBackdrop = remember(liquidGlass, hubBackdropLayer) {
+        if (liquidGlass) GlassBackdrop(hubBackdropLayer) { hubBackdropOrigin } else null
+    }
+
     Box(Modifier.fillMaxSize()) {
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = RETURN_TO_FEED_BAR_RESERVED_HEIGHT)) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .then(if (liquidGlass) Modifier.onGloballyPositioned { hubBackdropOrigin = it.positionInRoot() } else Modifier)
+            .then(
+                if (liquidGlass) Modifier.drawWithContent {
+                    hubBackdropLayer.record { this@drawWithContent.drawContent() }
+                    drawContent()
+                } else Modifier
+            )
+            .verticalScroll(rememberScrollState())
+            .padding(bottom = RETURN_TO_FEED_BAR_RESERVED_HEIGHT)
+    ) {
 
         // Item: every setting that used to live below the 6-button grid
         // (Download When Liked, Merge Lists & Packs, Show Add To After
@@ -1182,8 +1228,18 @@ private fun AtProtocolPageContent(
                 verticalAlignment = Alignment.Top
             ) {
                 friendsBlogs.take(20).forEach { fb ->
-                    Column(horizontalAlignment = Alignment.Start) {
-                        HubAuthorBubble(author = fb.author, liquidGlass = liquidGlass, tint = dominantColor)
+                    // Bug fix (per feedback): the author bubble now (a)
+                    // centers horizontally over its own blog card instead
+                    // of hugging the card's left edge — Column defaults to
+                    // Start alignment, which left the bubble stranded off
+                    // to one side whenever it was narrower than the card
+                    // below it — and (b) reflects that same blog's own
+                    // thumbnail color (falling back to the author's avatar
+                    // color) instead of the page-wide dominantColor, so it
+                    // visually matches the card it belongs to.
+                    val blogTint = rememberDominantColor(fb.blog.thumbnailUrl ?: fb.author.avatarUrl ?: "")
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        HubAuthorBubble(author = fb.author, liquidGlass = liquidGlass, tint = blogTint)
                         Spacer(Modifier.height(6.dp))
                         BlogBubble(
                             blog = fb.blog, liquidGlass = liquidGlass, fallbackAvatarUrl = fb.author.avatarUrl,
@@ -1214,8 +1270,8 @@ private fun AtProtocolPageContent(
     // content instead of scrolling away with it — see the matching comment
     // on this function's outer Box/Column split above.
     Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 8.dp)) {
-        ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
-            onReturnToFeed = onReturnToFeed, onRefresh = onRefreshHub)
+        ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = hubBackdrop,
+            onReturnToFeed = onReturnToFeed, onRefresh = onRefreshHub, hasVisitedFeed = hasVisitedFeed)
     }
     }
 }
@@ -1463,19 +1519,39 @@ private fun ReturnToFeedBar(
     tint: Color,
     backdrop: GlassBackdrop?,
     onReturnToFeed: () -> Unit,
-    onRefresh: (() -> Unit)? = null
+    onRefresh: (() -> Unit)? = null,
+    // Feature (this session): "Open Feed" the very first time (before the
+    // person has ever been to the feed this session — the app now opens
+    // straight on the Hub, see MainViewModel's init{} change), "Return to
+    // Feed" from then on — see MainViewModel.hasVisitedFeed's own doc
+    // comment for why this is tracked centrally rather than as local
+    // per-button state.
+    hasVisitedFeed: Boolean = false
 ) {
     val barHeight = 40.dp
     val shape = RoundedCornerShape(20.dp)
+    val label = if (hasVisitedFeed) "Return to Feed" else "Open Feed"
 
     @Composable
     fun ButtonContent() {
+        // Bug fix (pill takes up the whole row, refresh bubble has no room
+        // beside it): this used to be Modifier.fillMaxSize(), which — since
+        // neither this Row nor its LiquidGlassSurface/Box parent otherwise
+        // constrains width — greedily claims the *entire* available row
+        // width for the pill (Compose sizes a Box from its non-matchParent
+        // -Size children, and fillMaxSize() on this Row reports "I want all
+        // of it" as that measurement), leaving nothing for the refresh
+        // bubble to be placed into. fillMaxHeight() still fills the fixed
+        // barHeight vertically (so the glass panel's full height keeps
+        // getting the clickable/padding treatment) while letting width
+        // size naturally to the Text content + its own padding, the way a
+        // pill button actually should.
         Row(
-            Modifier.fillMaxSize().clickable(onClick = onReturnToFeed).padding(horizontal = 20.dp),
+            Modifier.fillMaxHeight().clickable(onClick = onReturnToFeed).padding(horizontal = 20.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center
         ) {
-            Text("Return to Feed", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
         }
     }
 
@@ -1566,10 +1642,19 @@ private fun MutualReviewCard(
                 Text(fr.author.displayName, color = Color.White, fontSize = 9.sp, lineHeight = 10.sp, fontWeight = FontWeight.Medium,
                     maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 72.dp))
             }
-            StarRatingPill(
-                rating = fr.review.ratingOutOf5, liquidGlass = liquidGlass, tint = tint
-            )
         }
+        // Bug fix (per feedback): the star-rating bubble is supposed to sit
+        // at the right side of its row, not stacked under the author bubble
+        // on the left. It now anchors to its own TopEnd corner instead of
+        // living inside the author bubble's TopStart-anchored Column, so it
+        // reads as the right-hand counterpart to the author bubble on the
+        // left — same idea as the title/star pair on profile review rows,
+        // just split across the two top corners here instead of one row,
+        // since the author bubble already owns the top-left corner.
+        StarRatingPill(
+            rating = fr.review.ratingOutOf5, liquidGlass = liquidGlass, tint = tint,
+            modifier = Modifier.align(Alignment.TopEnd).padding(4.dp)
+        )
         Box(
             Modifier.align(Alignment.BottomStart).padding(4.dp)
                 .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = RoundedCornerShape(10.dp)) else Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(0.55f)))
@@ -1626,13 +1711,38 @@ private fun E621PageContent(
     dominantColor: Color,
     backdrop: GlassBackdrop?,
     // Item (this session): replaces the removed swipe-up-to-feed gesture.
-    onReturnToFeed: () -> Unit = {}
+    onReturnToFeed: () -> Unit = {},
+    hasVisitedFeed: Boolean = false
 ) {
     var e621User by remember { mutableStateOf("") }
     var e621Key by remember { mutableStateOf("") }
     var localE621Tags by remember(e621SearchTags) { mutableStateOf(e621SearchTags) }
 
-    Column(Modifier.fillMaxSize()) {
+    // Bug fix (per feedback — Return to Feed bar didn't reflect anything):
+    // same fix as AtProtocolPageContent's own `hubBackdrop` — see that
+    // composable's matching comment for the full reasoning. This page's
+    // Hot/Favorites/Following buttons keep using the feed-level `backdrop`
+    // param as before (unaffected either way, since this page's Return to
+    // Feed bar is the one actually called out), but the bar itself now
+    // reads from a live recording of this page's own content instead.
+    val e621BackdropLayer = rememberGraphicsLayer()
+    var e621BackdropOrigin by remember { mutableStateOf(Offset.Zero) }
+    val e621Backdrop = remember(liquidGlass, e621BackdropLayer) {
+        if (liquidGlass) GlassBackdrop(e621BackdropLayer) { e621BackdropOrigin } else null
+    }
+
+    Box(Modifier.fillMaxSize()) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .then(if (liquidGlass) Modifier.onGloballyPositioned { e621BackdropOrigin = it.positionInRoot() } else Modifier)
+            .then(
+                if (liquidGlass) Modifier.drawWithContent {
+                    e621BackdropLayer.record { this@drawWithContent.drawContent() }
+                    drawContent()
+                } else Modifier
+            )
+    ) {
         if (!e621LoggedIn) {
             Column(
                 modifier = Modifier.fillMaxSize().padding(horizontal = 36.dp),
@@ -1742,8 +1852,13 @@ private fun E621PageContent(
             }
 
             Spacer(Modifier.height(8.dp))
-            ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop, onReturnToFeed = onReturnToFeed)
         }
+    }
+    if (e621LoggedIn) {
+        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 8.dp)) {
+            ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = e621Backdrop, onReturnToFeed = onReturnToFeed, hasVisitedFeed = hasVisitedFeed)
+        }
+    }
     }
 }
 

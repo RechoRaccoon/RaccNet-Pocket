@@ -16,6 +16,8 @@ import com.mediaviewer.worker.DownloadWorker
 import com.mediaviewer.worker.GifDownloadWorker
 import com.mediaviewer.worker.urlToDownloadInfo
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -209,6 +211,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _screenState = MutableStateFlow(ScreenState.SETTINGS)
     val screenState: StateFlow<ScreenState> = _screenState
+    // Feature (this session): the Hub's "Return to Feed" button reads "Open
+    // Feed" the very first time it's shown (the app now opens straight on
+    // the Hub, per feedback, instead of auto-jumping into the feed — see
+    // this session's init{} change), then switches to "Return to Feed"
+    // once the person has actually been to the feed at least once, exactly
+    // matching what tapping it will do at that point. Session-only by
+    // design (not persisted) — every fresh app launch opens on the Hub
+    // again, so "Open Feed" is the right label again too.
+    private val _hasVisitedFeed = MutableStateFlow(false)
+    val hasVisitedFeed: StateFlow<Boolean> = _hasVisitedFeed
 
     // Track swipe direction for animations (1=next/down, -1=prev/up, 0=other)
     private val _navDirection = MutableStateFlow(0)
@@ -829,16 +841,59 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val blogDids = prefs.subscribedBlogDids.first()
                 _subscribedReviewDids.value = reviewDids
                 _subscribedBlogDids.value = blogDids
-                val reviews = if (reviewDids.isEmpty()) emptyList() else bskyRepo.getSubscribedReviews(bskyToken, reviewDids.toList())
-                val blogs = if (blogDids.isEmpty()) emptyList() else bskyRepo.getSubscribedBlogs(bskyToken, blogDids.toList())
-                _friendsReviews.value = reviews
-                _friendsBlogs.value = blogs
-                reviewsBlogsLoaded = true
+                // Bug fix (reviews/blogs sections sometimes showing only
+                // one, or neither, despite being subscribed to both): this
+                // used to fetch `reviews` then `blogs` into two sequential
+                // `val`s and only ever published EITHER to state — and only
+                // cached them — once BOTH had finished without throwing.
+                // If the blogs fetch threw for any reason, the reviews
+                // result was silently discarded right along with it (and
+                // vice versa if reviews threw first, since `blogs` never
+                // even got a chance to run) — so a transient failure on
+                // just one side could wipe out a perfectly good result on
+                // the other, or leave both sections stuck on whatever
+                // (possibly incomplete) cache snapshot was loaded above.
+                // Each is now fetched, published to its own state, and
+                // cached independently and in parallel, so a failure in
+                // one no longer discards — or blocks — a success in the
+                // other, and each section updates the moment its own fetch
+                // resolves rather than waiting on its sibling.
+                var reviewsOk = true
+                var blogsOk = true
+                coroutineScope {
+                    val reviewsJob = async {
+                        if (reviewDids.isEmpty()) {
+                            _friendsReviews.value = emptyList()
+                        } else {
+                            runCatching { bskyRepo.getSubscribedReviews(bskyToken, reviewDids.toList()) }
+                                .onSuccess { _friendsReviews.value = it }
+                                .onFailure { reviewsOk = false }
+                        }
+                    }
+                    val blogsJob = async {
+                        if (blogDids.isEmpty()) {
+                            _friendsBlogs.value = emptyList()
+                        } else {
+                            runCatching { bskyRepo.getSubscribedBlogs(bskyToken, blogDids.toList()) }
+                                .onSuccess { _friendsBlogs.value = it }
+                                .onFailure { blogsOk = false }
+                        }
+                    }
+                    reviewsJob.await()
+                    blogsJob.await()
+                }
+                // Only counted as fully "loaded" (which stops the
+                // retryWithBackoff warmup loop in startHubBackgroundWarmup
+                // from retrying) once both sides have actually succeeded —
+                // a partial success still updated its own section above,
+                // but the loop keeps quietly retrying in the background
+                // until the other side catches up too.
+                reviewsBlogsLoaded = reviewsOk && blogsOk
                 runCatching {
                     val gson = com.google.gson.Gson()
                     val reviewType = object : com.google.gson.reflect.TypeToken<List<FriendPopfeedReview>>() {}.type
                     val blogType = object : com.google.gson.reflect.TypeToken<List<FriendLeafletBlog>>() {}.type
-                    prefs.setHubCache(gson.toJson(reviews, reviewType), gson.toJson(blogs, blogType), System.currentTimeMillis())
+                    prefs.setHubCache(gson.toJson(_friendsReviews.value, reviewType), gson.toJson(_friendsBlogs.value, blogType), System.currentTimeMillis())
                 }
             } finally {
                 _friendsReviewsLoading.value = false
@@ -1031,6 +1086,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── Init ──────────────────────────────────────────────────────────────────
     init {
+        // Feature (this session): a single collector, rather than touching
+        // every one of this file's many `_screenState.value =
+        // ScreenState.FEED` call sites individually (setScreen, login,
+        // showHistory, showSaves, and others) — whichever path actually
+        // lands the person on the feed, this reacts to the resulting state
+        // change and flips hasVisitedFeed once, for good, for the rest of
+        // the process's life (see hasVisitedFeed's own doc comment above).
+        viewModelScope.launch { screenState.collect { if (it == ScreenState.FEED) _hasVisitedFeed.value = true } }
         viewModelScope.launch { prefs.reducedAnimations.collect { _reducedAnimations.value = it } }
         viewModelScope.launch { prefs.liquidGlass.collect { _liquidGlass.value = it } }
         viewModelScope.launch { prefs.liquidGlassIntensity.collect { _liquidGlassIntensity.value = it } }
@@ -1071,14 +1134,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _bskyDid.value = did; bskyHandle = handle; _bskyLoggedIn.value = true
             }
 
-            // Restore last mode and go to feed if logged in for that mode
+            // Restore last mode, but stay on the Hub (SETTINGS) at app start
+            // instead of auto-jumping into the feed — the feed/Hub content
+            // below is still warmed in the background so it's ready the
+            // instant the user swipes/taps into it, but the Hub is always
+            // the first thing shown on launch (see feedback: "app should
+            // open on the Hub by default instead of automatically
+            // scrolling into the first feed").
             if (lastMode == "E621" && _e621LoggedIn.value) {
                 _appMode.value = AppMode.E621
-                _screenState.value = ScreenState.FEED
                 loadE621Posts()
             } else if (_bskyLoggedIn.value) {
                 _appMode.value = AppMode.BLUESKY
-                _screenState.value = ScreenState.FEED
                 loadFeed()
                 loadAvailableFeeds()
                 prefetchUserLists()   // preload so list picker opens instantly
@@ -1087,7 +1154,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 preloadFriendsFeed()  // item 7: warm the From Friends feed in the background too
                 loadSelfProfile()     // Settings Update: warm the Profile button's avatar/banner preview
             }
-            // else: stay on SETTINGS
+            // Stay on SETTINGS (the Hub) either way.
         }
     }
 
