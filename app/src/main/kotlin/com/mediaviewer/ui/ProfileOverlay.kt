@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.mediaviewer.model.AuthorInfo
+import com.mediaviewer.model.LeafletAlign
 import com.mediaviewer.model.LeafletBlock
 import com.mediaviewer.model.LeafletBlog
 import com.mediaviewer.model.LeafletTextSpan
