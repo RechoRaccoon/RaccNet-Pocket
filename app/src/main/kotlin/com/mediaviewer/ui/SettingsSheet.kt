@@ -1107,7 +1107,8 @@ private fun AtProtocolPageContent(
                                 }
                             }
                             Spacer(Modifier.height(4.dp))
-                            Text(friend.displayName, color = Color.White, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(friend.displayName, color = Color.White, fontSize = 10.sp, lineHeight = 11.sp,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         dmConversationsLoading -> {
                             ShimmerBox(avatarShape, Modifier.size(52.dp))
@@ -1159,7 +1160,16 @@ private fun AtProtocolPageContent(
         @Composable
         fun LiveSectionContent() {
             if (combinedLive.isEmpty()) return
-            Spacer(Modifier.height(14.dp))
+            // Bug fix (per feedback — too much space above whichever
+            // section lands right under Mutuals): tightened from 14dp to
+            // 6dp, matching the compact spacing used elsewhere between
+            // stacked Hub elements now that the friend-name Text just above
+            // (see the Mutuals row) also got its own explicit lineHeight
+            // fix — this was partly compensating for that same "Text's
+            // default line-height reserves more vertical space than its
+            // visible glyphs need" pattern already fixed for pills earlier
+            // this session.
+            Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
                 Text("Livestreams", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
@@ -1181,7 +1191,10 @@ private fun AtProtocolPageContent(
         @Composable
         fun ReviewsSectionContent() {
             if (friendsReviews.isEmpty()) return
-            Spacer(Modifier.height(14.dp))
+            // Bug fix (per feedback): see LiveSectionContent's matching
+            // comment just above — same tightened spacing applied here so
+            // it's consistent no matter which section ends up first.
+            Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
                 Text("Reviews", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
@@ -1202,7 +1215,10 @@ private fun AtProtocolPageContent(
         @Composable
         fun BlogsSectionContent() {
             if (friendsBlogs.isEmpty()) return
-            Spacer(Modifier.height(14.dp))
+            // Bug fix (per feedback): see LiveSectionContent's matching
+            // comment above — same tightened spacing applied here so it's
+            // consistent no matter which section ends up first.
+            Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
                 Text("Blogs", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
@@ -1321,12 +1337,26 @@ private sealed class LiveCardSource {
 @Composable
 private fun LiveCard(source: LiveCardSource, liquidGlass: Boolean, onOpenLivePlayer: (String, String, String) -> Unit) {
     val cardShape = RoundedCornerShape(12.dp)
+    // Bug fix (per feedback — tapping a live card opened a broken in-app
+    // player UI instead of the actual stream): `onOpenLivePlayer` (still
+    // kept as a param so callers/MainActivity wiring don't need touching)
+    // is no longer called here at all — both sources now hand their real,
+    // direct stream URL straight to the system via LocalUriHandler, the
+    // same as any other outbound link in this app, opening in the user's
+    // actual Twitch/YouTube/Streamplace app or browser instead of this
+    // app's own WebView-based LiveNowPlayerOverlay. Bluesky Live Now
+    // specifically uses the stream's own `uri` here (its real page) rather
+    // than embedUrlFor's *embeddable-player* URL — that conversion only
+    // ever made sense for loading the stream inside this app's WebView, not
+    // for handing off to an external app/browser that already knows how to
+    // open the real page correctly on its own.
+    val uriHandler = LocalUriHandler.current
     val (thumbUrl, title, accountName, accountAvatarUrl, tint, badgeText, onClick) = when (source) {
         is LiveCardSource.Streamplace -> {
             val s = source.stream
             val name = s.authorDisplayName ?: s.authorHandle
             SevenTuple(s.thumbUrl, s.title.ifBlank { "Untitled stream" }, name, s.authorAvatarUrl, LikeRed, "LIVE") {
-                onOpenLivePlayer("https://stream.place/${s.authorHandle}", s.title.ifBlank { "Untitled stream" }, name)
+                uriHandler.openUri("https://stream.place/${s.authorHandle}")
             }
         }
         is LiveCardSource.BlueskyLive -> {
@@ -1342,44 +1372,87 @@ private fun LiveCard(source: LiveCardSource, liquidGlass: Boolean, onOpenLivePla
                 com.mediaviewer.model.LiveNowPlatform.OTHER -> "LIVE"
             }
             SevenTuple(s.thumbUrl, s.title, s.author.displayName, s.author.avatarUrl, tint, badge) {
-                onOpenLivePlayer(embedUrlFor(s), s.title, s.author.displayName)
+                uriHandler.openUri(s.uri)
             }
         }
     }
-    // Item (this session): the old bottom title/subtitle text strip below
-    // the thumbnail is gone — the thumbnail now fills the whole card, with
-    // just a small glass bubble (account avatar + name) pinned to its
-    // bottom-left corner, same visual language as the star-rating pill on
-    // Review cards.
+    // Bug fix (per feedback — author bubble needs to be reflective, like
+    // every other glass panel that sits over real content): this bubble
+    // used to use the plain `Modifier.glassPanel(...)` treatment, which by
+    // design (see that modifier's own doc comment in GlassTheme.kt) never
+    // reflects anything — only LiquidGlassSurface's `backdrop` param
+    // actually samples and blurs live content in real time. Each card now
+    // records its own thumbnail into a small per-card GraphicsLayer (the
+    // same "record every frame, read it back through a GlassBackdrop"
+    // pattern used for feed posts and the Hub's Return to Feed bar) so the
+    // author bubble can sit on top of it as genuine live glass instead of
+    // a flat tint. Crash-avoidance note (same as those other call sites):
+    // the bubble itself has to stay OUTSIDE the Box being recorded, since a
+    // GraphicsLayer can't be drawn from while it's still being recorded
+    // into.
+    val cardBackdropLayer = rememberGraphicsLayer()
+    var cardBackdropOrigin by remember { mutableStateOf(Offset.Zero) }
+    val cardBackdrop = remember(liquidGlass, cardBackdropLayer) {
+        if (liquidGlass) GlassBackdrop(cardBackdropLayer) { cardBackdropOrigin } else null
+    }
     Box(
         Modifier.width(140.dp).height(140.dp)
             .then(if (liquidGlass) Modifier.glassPanel(true, shape = cardShape, tint = tint) else Modifier.clip(cardShape).background(tint.copy(0.18f)))
             .clickable(onClick = onClick)
     ) {
-        if (thumbUrl != null) {
-            AsyncImage(model = thumbUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize().clip(cardShape))
-        } else {
-            Box(Modifier.fillMaxSize().clip(cardShape).background(Color.White.copy(0.08f)))
-        }
-        Box(Modifier.align(Alignment.TopStart).padding(6.dp).clip(RoundedCornerShape(4.dp)).background(tint).padding(horizontal = 5.dp, vertical = 2.dp)) {
-            Text(badgeText, color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-        }
-        Row(
-            Modifier.align(Alignment.BottomStart).padding(6.dp)
-                .then(if (liquidGlass) Modifier.glassPanel(true, shape = RoundedCornerShape(14.dp), tint = tint) else Modifier.clip(RoundedCornerShape(14.dp)).background(Color.Black.copy(0.55f)))
-                .padding(horizontal = 6.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Box(
+            Modifier.fillMaxSize()
+                .then(if (liquidGlass) Modifier.onGloballyPositioned { cardBackdropOrigin = it.positionInRoot() } else Modifier)
+                .then(
+                    if (liquidGlass) Modifier.drawWithContent {
+                        cardBackdropLayer.record { this@drawWithContent.drawContent() }
+                        drawContent()
+                    } else Modifier
+                )
         ) {
-            if (accountAvatarUrl != null) {
-                AsyncImage(model = accountAvatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                    modifier = Modifier.size(16.dp).clip(CircleShape))
+            if (thumbUrl != null) {
+                AsyncImage(model = thumbUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().clip(cardShape))
             } else {
-                Box(Modifier.size(16.dp).clip(CircleShape).background(Color.White.copy(0.2f)))
+                Box(Modifier.fillMaxSize().clip(cardShape).background(Color.White.copy(0.08f)))
             }
-            Spacer(Modifier.width(4.dp))
-            Text(accountName, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
-                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 96.dp))
+            Box(Modifier.align(Alignment.TopStart).padding(6.dp).clip(RoundedCornerShape(4.dp)).background(tint).padding(horizontal = 5.dp, vertical = 2.dp)) {
+                Text(badgeText, color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        // Bug fix (per feedback — needs to be half the height): avatar
+        // shrunk and padding/line-height tightened together — the old
+        // vertical padding (4dp top+bottom) plus Text's default,
+        // un-set line-height (which, like the pill bug fixed earlier this
+        // session, reserves noticeably more vertical space than the
+        // visible glyphs actually need) added up to roughly double what
+        // a compact avatar+name chip needs.
+        val authorBubbleShape = RoundedCornerShape(10.dp)
+        @Composable
+        fun AuthorBubbleContent() {
+            Row(
+                Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (accountAvatarUrl != null) {
+                    AsyncImage(model = accountAvatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                        modifier = Modifier.size(11.dp).clip(CircleShape))
+                } else {
+                    Box(Modifier.size(11.dp).clip(CircleShape).background(Color.White.copy(0.2f)))
+                }
+                Spacer(Modifier.width(3.dp))
+                Text(accountName, color = Color.White, fontSize = 9.sp, lineHeight = 9.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 90.dp))
+            }
+        }
+        if (liquidGlass) {
+            LiquidGlassSurface(
+                Modifier.align(Alignment.BottomStart).padding(6.dp), shape = authorBubbleShape, tint = tint, backdrop = cardBackdrop
+            ) { AuthorBubbleContent() }
+        } else {
+            Box(
+                Modifier.align(Alignment.BottomStart).padding(6.dp).clip(authorBubbleShape).background(Color.Black.copy(0.55f))
+            ) { AuthorBubbleContent() }
         }
     }
 }
@@ -1486,24 +1559,44 @@ private fun embedUrlFor(stream: com.mediaviewer.model.BlueskyLiveNowStream): Str
  *  specifically. [size] lets it be matched to whatever it's sitting next to
  *  (the Return to Feed bar's own height). */
 @Composable
-private fun HubRefreshBubble(liquidGlass: Boolean, tint: Color, onRefresh: () -> Unit, size: androidx.compose.ui.unit.Dp = 26.dp) {
+private fun HubRefreshBubble(
+    liquidGlass: Boolean, tint: Color, onRefresh: () -> Unit, size: androidx.compose.ui.unit.Dp = 26.dp,
+    modifier: Modifier = Modifier,
+    // Bug fix (per feedback — refresh button needs the same real-time
+    // reflections as the Return to Feed bar beside it): this used to be
+    // plain Modifier.glassPanel, which never reflects anything (see that
+    // modifier's own doc comment in GlassTheme.kt) — only
+    // LiquidGlassSurface's `backdrop` param actually does. Callers now pass
+    // through the exact same live backdrop (hubBackdrop/e621Backdrop) they
+    // already hand to ReturnToFeedBar, so both buttons sitting side by side
+    // reflect the same live content underneath them.
+    backdrop: GlassBackdrop? = null
+) {
     val scope = rememberCoroutineScope()
     val rotation = remember { Animatable(0f) }
     val shape = CircleShape
-    Box(
-        Modifier.size(size)
-            .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.clip(shape).background(Color.White.copy(0.10f)))
-            .clickable {
-                onRefresh()
-                scope.launch {
-                    rotation.snapTo(0f)
-                    rotation.animateTo(360f, animationSpec = tween(600, easing = LinearEasing))
-                }
-            },
-        contentAlignment = Alignment.Center
-    ) {
-        Icon(Icons.Filled.Refresh, contentDescription = "Refresh Hub", tint = Color.White,
-            modifier = Modifier.size(14.dp).graphicsLayer { rotationZ = rotation.value })
+    val clickModifier = Modifier
+        .size(size)
+        .clickable {
+            onRefresh()
+            scope.launch {
+                rotation.snapTo(0f)
+                rotation.animateTo(360f, animationSpec = tween(600, easing = LinearEasing))
+            }
+        }
+
+    @Composable
+    fun IconContent() {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Icon(Icons.Filled.Refresh, contentDescription = "Refresh Hub", tint = Color.White,
+                modifier = Modifier.size(14.dp).graphicsLayer { rotationZ = rotation.value })
+        }
+    }
+
+    if (liquidGlass) {
+        LiquidGlassSurface(modifier.then(clickModifier), shape = shape, tint = tint, backdrop = backdrop) { IconContent() }
+    } else {
+        Box(modifier.then(clickModifier).clip(shape).background(Color.White.copy(0.10f))) { IconContent() }
     }
 }
 
@@ -1531,43 +1624,39 @@ private fun ReturnToFeedBar(
     val barHeight = 40.dp
     val shape = RoundedCornerShape(20.dp)
     val label = if (hasVisitedFeed) "Return to Feed" else "Open Feed"
+    // Bug fix (per feedback): the pill used to shrink-wrap its own text
+    // and sit centered as a small standalone group with the refresh bubble
+    // — not the wide, left-anchored bar it used to be. The pill itself now
+    // spans the full row again (from the actual left edge), just with its
+    // right side trimmed back by the refresh bubble's own width so the two
+    // never overlap; the refresh bubble is a sibling pinned to CenterEnd
+    // instead of trailing after the pill in a Row. The label text is a
+    // second sibling of both, aligned to Center of this *whole* Box (the
+    // full row width) rather than centered within the pill's own —
+    // trimmed, therefore off-center — bounds, so it reads as centered on
+    // the screen the way a plain "Return to Feed" button always did,
+    // regardless of how much room the refresh bubble eats out of the right
+    // side.
+    val refreshReserve = if (onRefresh != null) (barHeight + 10.dp) else 0.dp
 
-    @Composable
-    fun ButtonContent() {
-        // Bug fix (pill takes up the whole row, refresh bubble has no room
-        // beside it): this used to be Modifier.fillMaxSize(), which — since
-        // neither this Row nor its LiquidGlassSurface/Box parent otherwise
-        // constrains width — greedily claims the *entire* available row
-        // width for the pill (Compose sizes a Box from its non-matchParent
-        // -Size children, and fillMaxSize() on this Row reports "I want all
-        // of it" as that measurement), leaving nothing for the refresh
-        // bubble to be placed into. fillMaxHeight() still fills the fixed
-        // barHeight vertically (so the glass panel's full height keeps
-        // getting the clickable/padding treatment) while letting width
-        // size naturally to the Text content + its own padding, the way a
-        // pill button actually should.
-        Row(
-            Modifier.fillMaxHeight().clickable(onClick = onReturnToFeed).padding(horizontal = 20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
-        ) {
-            Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-        }
-    }
-
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
         if (liquidGlass) {
-            LiquidGlassSurface(Modifier.height(barHeight), shape = shape, tint = tint, backdrop = backdrop) { ButtonContent() }
+            LiquidGlassSurface(
+                Modifier.fillMaxWidth().padding(end = refreshReserve).height(barHeight).clickable(onClick = onReturnToFeed),
+                shape = shape, tint = tint, backdrop = backdrop
+            ) {}
         } else {
-            Box(Modifier.height(barHeight).clip(shape).background(Color.White.copy(0.08f))) { ButtonContent() }
+            Box(
+                Modifier.fillMaxWidth().padding(end = refreshReserve).height(barHeight)
+                    .clip(shape).background(Color.White.copy(0.08f)).clickable(onClick = onReturnToFeed)
+            )
         }
+        Text(
+            label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.align(Alignment.Center)
+        )
         if (onRefresh != null) {
-            Spacer(Modifier.width(10.dp))
-            HubRefreshBubble(liquidGlass, tint, onRefresh, size = barHeight)
+            HubRefreshBubble(liquidGlass, tint, onRefresh, size = barHeight, modifier = Modifier.align(Alignment.CenterEnd), backdrop = backdrop)
         }
     }
 }
@@ -1623,7 +1712,7 @@ private fun MutualReviewCard(
             Box(Modifier.fillMaxSize().clip(shape).background(Color.White.copy(0.10f)))
         }
         Column(
-            Modifier.align(Alignment.TopStart).padding(4.dp),
+            Modifier.align(Alignment.TopStart).fillMaxWidth().padding(4.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Row(
@@ -1642,19 +1731,22 @@ private fun MutualReviewCard(
                 Text(fr.author.displayName, color = Color.White, fontSize = 9.sp, lineHeight = 10.sp, fontWeight = FontWeight.Medium,
                     maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 72.dp))
             }
+            // Bug fix (per feedback): the star-rating bubble was
+            // independently corner-anchored to TopEnd while the author
+            // bubble above it was anchored to TopStart — fine on a wide
+            // card, but this card is only REVIEW_CARD_WIDTH (108dp) wide,
+            // so the two bubbles' own natural widths (author avatar +
+            // up-to-72dp name, plus the star row) routinely add up to more
+            // than the card's width and visibly overlap in the middle. The
+            // star pill now lives in the same Column as the author row,
+            // right-aligned on its own line underneath instead of a
+            // separately-anchored corner, so the two can never occupy the
+            // same horizontal space.
+            StarRatingPill(
+                rating = fr.review.ratingOutOf5, liquidGlass = liquidGlass, tint = tint,
+                modifier = Modifier.align(Alignment.End)
+            )
         }
-        // Bug fix (per feedback): the star-rating bubble is supposed to sit
-        // at the right side of its row, not stacked under the author bubble
-        // on the left. It now anchors to its own TopEnd corner instead of
-        // living inside the author bubble's TopStart-anchored Column, so it
-        // reads as the right-hand counterpart to the author bubble on the
-        // left — same idea as the title/star pair on profile review rows,
-        // just split across the two top corners here instead of one row,
-        // since the author bubble already owns the top-left corner.
-        StarRatingPill(
-            rating = fr.review.ratingOutOf5, liquidGlass = liquidGlass, tint = tint,
-            modifier = Modifier.align(Alignment.TopEnd).padding(4.dp)
-        )
         Box(
             Modifier.align(Alignment.BottomStart).padding(4.dp)
                 .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = RoundedCornerShape(10.dp)) else Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(0.55f)))

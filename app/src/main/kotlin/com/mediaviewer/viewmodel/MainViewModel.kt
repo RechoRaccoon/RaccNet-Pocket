@@ -342,9 +342,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun loadSelfProfile() {
         if (!_bskyLoggedIn.value) return
-        viewModelScope.launch(Dispatchers.IO) {
-            bskyRepo.getFullProfile(bskyToken, _bskyDid.value).onSuccess { _selfProfile.value = it }
-        }
+        viewModelScope.launch(Dispatchers.IO) { loadSelfProfileSuspend() }
+    }
+
+    // Bug fix (per feedback — Hub's reflective profile colors don't show
+    // until the feed is opened and returned from): the only other place
+    // that ever retried a failed/still-in-flight loadSelfProfile() was
+    // setScreen()'s own `if (screen == ScreenState.SETTINGS && ...)` check
+    // below — which only fires on an actual *navigation* to Settings via
+    // setScreen(). The app now opens directly on the Hub (ScreenState
+    // starts as SETTINGS, see this session's init{} change) without ever
+    // calling setScreen(SETTINGS) at all, so that retry path never ran on
+    // a cold start — if the one-shot loadSelfProfile() call in init{}
+    // happened to race the network coming up (very plausible right at
+    // process start) and failed silently, nothing on the Hub would ever
+    // retry it until the person actually left for the feed and came back
+    // (which DOES go through setScreen(SETTINGS)). This suspend version
+    // lets startHubBackgroundWarmup's own retryWithBackoff loop (below)
+    // cover this the same reliable way it already covers Mutuals/Reviews/
+    // Blogs/Livestreams, independent of navigation entirely.
+    private suspend fun loadSelfProfileSuspend() {
+        if (!_bskyLoggedIn.value) return
+        bskyRepo.getFullProfile(bskyToken, _bskyDid.value).onSuccess { _selfProfile.value = it }
     }
 
     /** Opens the logged-in user's own Profile Overlay — used by the Settings
@@ -785,8 +804,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      *  bubble) bypasses the "already loaded this session" guard. */
     fun loadFriendsReviewsIfNeeded(force: Boolean = false) {
         if (reviewsBlogsLoaded && !force) return
-        if (_friendsReviewsLoading.value) return
-        _friendsReviewsLoading.value = true
+        // Bug fix (per feedback — Hub reviews/blogs briefly show cached
+        // content on app start, then disappear a few seconds later): this
+        // used to be two separate lines — `if (_friendsReviewsLoading.value)
+        // return` immediately followed by `_friendsReviewsLoading.value =
+        // true` — which is a classic check-then-act race. This function is
+        // no longer only ever called from one place at a time: on a
+        // Hub-first cold start (this session's change), the Hub's own
+        // LaunchedEffect(Unit) calls this the instant AtProtocolPageContent
+        // composes (on the Main thread) at essentially the same moment
+        // startHubBackgroundWarmup's retry loop (this session's earlier
+        // fix) also calls it — from Dispatchers.IO, a genuinely
+        // multi-threaded dispatcher. Both can read `_friendsReviewsLoading`
+        // as false before either has had a chance to set it true, so both
+        // proceed: two independent coroutines both re-run the "load cache
+        // from disk" step, both do their own network fetch, and whichever
+        // of the two finishes (and clears the loading flag) *first* lets
+        // the retry loop's `while (_friendsReviewsLoading.value) delay(300)`
+        // wait exit and re-check `isDone` while the *other* copy is still
+        // mid-flight — exactly the kind of overlapping-attempt scenario
+        // that can end with a still-running older fetch's later, unluckier
+        // result (or a subscribed-DID snapshot read mid-race) landing after
+        // a newer one and stomping good data with stale/incomplete data.
+        // `compareAndSet` makes the whole check-and-claim a single atomic
+        // operation — whichever caller sees `false` and swaps it to `true`
+        // is the only one that proceeds; every other concurrent caller's
+        // compareAndSet fails (sees `true` already) and returns immediately,
+        // the same guarantee `if` + separate assignment was only *supposed*
+        // to provide.
+        if (!_friendsReviewsLoading.compareAndSet(false, true)) return
         viewModelScope.launch(Dispatchers.IO) {
             // Bug fix (reviews/blogs getting stuck on "not loading"): the
             // actual network fetch below used to run un-guarded — any
@@ -940,9 +986,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         bskyRepo.getAllFollows(bskyToken, _bskyDid.value).map { list -> list.map { it.did }.toSet() }
 
     fun loadLiveFriendsIfNeeded() {
-        if (liveFriendsLoaded || _liveFriendsLoading.value) return
+        if (liveFriendsLoaded) return
+        // Bug fix: same check-then-act race as loadFriendsReviewsIfNeeded's
+        // own compareAndSet fix above — see that function's comment for the
+        // full reasoning, which applies identically here now that this is
+        // also called both from startHubBackgroundWarmup's retry loop (IO
+        // dispatcher) and the Hub's own composition (Main dispatcher) at
+        // essentially the same moment on a Hub-first cold start.
+        if (!_liveFriendsLoading.compareAndSet(false, true)) return
         viewModelScope.launch(Dispatchers.IO) {
-            _liveFriendsLoading.value = true
             // Bug fix + roadmap: same dmConversations-not-loaded-yet issue as
             // Reviews above, and broadened to everyone the user follows
             // rather than just DM contacts, per feedback.
@@ -983,9 +1035,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var blueskyLiveNowLoaded = false
 
     fun loadBlueskyLiveNowIfNeeded() {
-        if (blueskyLiveNowLoaded || _blueskyLiveNowLoading.value) return
+        if (blueskyLiveNowLoaded) return
+        // Bug fix: same check-then-act race as loadFriendsReviewsIfNeeded's
+        // own compareAndSet fix above — see that function's comment.
+        if (!_blueskyLiveNowLoading.compareAndSet(false, true)) return
         viewModelScope.launch(Dispatchers.IO) {
-            _blueskyLiveNowLoading.value = true
             // Same "don't cache a transient failure as done" principle as
             // Reviews/Streamplace above — only latch loaded on genuine success.
             val followsResult = followedDidsForLiveSections()
@@ -2262,6 +2316,11 @@ _bskyDid.value          = session.did
             retryWithBackoff(isDone = { blueskyLiveNowLoaded || !_bskyLoggedIn.value }) {
                 loadBlueskyLiveNowIfNeeded()
                 while (_blueskyLiveNowLoading.value) delay(300)
+            }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            retryWithBackoff(isDone = { _selfProfile.value != null || !_bskyLoggedIn.value }) {
+                loadSelfProfileSuspend()
             }
         }
     }

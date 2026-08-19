@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
 import com.mediaviewer.model.AuthorInfo
 import com.mediaviewer.model.LeafletAlign
 import com.mediaviewer.model.LeafletBlock
@@ -844,7 +845,19 @@ private fun ProfileGlassPill(
     // it actually needed. `compact` tightens both the padding and the
     // text's line-height together so the pill hugs its (smaller) text the
     // same way the profile's full-size pill hugs its (larger) text.
-    compact: Boolean = false
+    compact: Boolean = false,
+    // Feature (per feedback): blog titles need to be able to wrap onto
+    // more than one line instead of always truncating to a single
+    // ellipsized line — callers that want that pass a higher maxLines (and
+    // usually textAlign = TextAlign.Start alongside it, see below).
+    maxLines: Int = 1,
+    // When non-null, the Text inside actually gets `Modifier.fillMaxWidth()`
+    // — textAlign is a no-op otherwise, since a Text that only wraps to its
+    // own content width has no extra room on either side to align *within*.
+    // This is opt-in (only when a caller passes a non-null value) so every
+    // other existing caller keeps its old shrink-to-fit-content sizing
+    // unchanged.
+    textAlign: TextAlign? = null
 ) {
     val shape = RoundedCornerShape(14.dp)
     val padH = if (compact) 8.dp else 12.dp
@@ -853,7 +866,8 @@ private fun ProfileGlassPill(
     fun Label() {
         Text(text, color = Color.White, fontSize = fontSize, fontWeight = if (bold) FontWeight.Bold else FontWeight.Medium,
             lineHeight = if (compact) fontSize else androidx.compose.ui.unit.TextUnit.Unspecified,
-            maxLines = 1, overflow = TextOverflow.Ellipsis)
+            maxLines = maxLines, overflow = TextOverflow.Ellipsis, textAlign = textAlign,
+            modifier = if (textAlign != null) Modifier.fillMaxWidth() else Modifier)
     }
     if (liquidGlass) {
         LiquidGlassSurface(modifier = modifier, shape = shape, tint = tint, backdrop = backdrop) {
@@ -1261,13 +1275,37 @@ fun BlogBubble(
         val availableTitleWidth = if (fixedHeight != null) (fixedHeight * 1.15f) else (maxWidth - cardPad * 2).coerceAtLeast(40.dp)
 
         if (useArtLayout) {
+            // Bug fix (per feedback — inconsistent card shapes among
+            // "thumbnailless" Hub cards): `hasThumbnail` above only checks
+            // whether the blog record HAS a thumbnailUrl at all, not
+            // whether that URL actually resolves to a real image. A blog
+            // whose thumbnail blob is missing, private, or otherwise fails
+            // to load doesn't fall back to the square placeholder used for
+            // an actually-absent thumbnail — it stays on this branch and
+            // renders through AsyncImage, which (with no successfully
+            // loaded intrinsic size to scale from) has no reliable, shared
+            // fallback width, so different failed thumbnails end up
+            // differently — and non-square — sized instead of all matching
+            // the same square footprint. SubcomposeAsyncImage's loading/
+            // error slots let the *exact* square placeholder used for a
+            // truly-absent thumbnail also render for one that's merely
+            // failing to load, so every non-image card in the row ends up
+            // the same shape regardless of which of those two cases it is.
+            @Composable
+            fun ThumbnailPlaceholder() {
+                Box(Modifier.fillMaxHeight().aspectRatio(1f).background(Color.White.copy(0.10f)))
+            }
             if (hasThumbnail) {
                 if (fixedHeight != null) {
                     // Height fixed by the outer BoxWithConstraints above; width
                     // follows the image's own aspect ratio at that height,
                     // exactly like a plain Image constrained on one axis only.
-                    AsyncImage(model = blog.thumbnailUrl, contentDescription = null, contentScale = ContentScale.FillHeight,
-                        modifier = Modifier.fillMaxHeight())
+                    SubcomposeAsyncImage(
+                        model = blog.thumbnailUrl, contentDescription = null, contentScale = ContentScale.FillHeight,
+                        modifier = Modifier.fillMaxHeight(),
+                        loading = { ThumbnailPlaceholder() },
+                        error = { ThumbnailPlaceholder() }
+                    )
                 } else {
                     // No forced height here — FillWidth scales the image to the
                     // card's width while preserving its native aspect ratio,
@@ -1283,7 +1321,7 @@ fun BlogBubble(
                 // plain 1x1 square one — same footprint a thumbnail would
                 // have at this card height, so it lines up with its
                 // neighbors in the row instead of standing out.
-                Box(Modifier.fillMaxHeight().aspectRatio(1f).background(Color.White.copy(0.10f)))
+                ThumbnailPlaceholder()
             }
             // Scrim so the title/date/description bubbles stay legible over
             // busy thumbnail art — same idea used for media-post captions.
@@ -1293,14 +1331,33 @@ fun BlogBubble(
                 )
             )
 
-            Column(Modifier.align(Alignment.TopEnd).padding(cardPad), horizontalAlignment = Alignment.End) {
-                ProfileGlassPill(text = blog.title, liquidGlass = liquidGlass, tint = tint, fontSize = titleFontSize, bold = true,
-                    compact = compact, modifier = Modifier.widthIn(max = availableTitleWidth))
+            // Bug fix (per feedback — long titles left dead space on the
+            // left instead of reaching it, and got cut off to one
+            // ellipsized line instead of wrapping): this header used to be
+            // a hug-content Column pinned to TopEnd, so the title pill
+            // could only ever grow (or shrink) from the right edge inward
+            // — a long, truncated title still only claimed however much
+            // width its single ellipsized line measured out to, leaving a
+            // gap between it and the card's left edge instead of using
+            // that space. The title pill now spans the card's full width
+            // (fillMaxWidth, left-aligned text, wrapping up to 3 lines
+            // before it ever needs to ellipsize) so it reaches both edges
+            // exactly when it actually needs the room; the date pill stays
+            // on its own line underneath, still right-aligned via its own
+            // Modifier.align(Alignment.End) rather than the whole column's
+            // alignment.
+            Column(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(cardPad)) {
+                ProfileGlassPill(
+                    text = blog.title, liquidGlass = liquidGlass, tint = tint, fontSize = titleFontSize, bold = true,
+                    compact = compact, maxLines = 3, textAlign = TextAlign.Start,
+                    modifier = Modifier.fillMaxWidth()
+                )
                 if (dateText.isNotBlank()) {
                     Spacer(Modifier.height(if (compact) 4.dp else 6.dp))
                     val pillShape = RoundedCornerShape(12.dp)
                     Box(
                         Modifier
+                            .align(Alignment.End)
                             .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = pillShape) else Modifier.clip(pillShape).background(Color.White.copy(0.08f)))
                             .padding(horizontal = pillPadH, vertical = pillPadV)
                     ) {
