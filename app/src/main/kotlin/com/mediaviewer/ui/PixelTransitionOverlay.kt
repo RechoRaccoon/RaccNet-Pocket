@@ -4,11 +4,12 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
-import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -17,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -56,8 +58,18 @@ class PixelTransitionController {
     /** The color currently painted across the whole matrix. [updateColor]
      *  re-targets this with a real (non-instant) animateTo, producing the
      *  "smoothly hue-shift" requirement whenever new theme data resolves —
-     *  including mid-wipe or mid-loading, at whatever moment that happens. */
-    val color = Animatable(Color.White, Color.VectorConverter)
+     *  including mid-wipe or mid-loading, at whatever moment that happens.
+     *
+     *  Implementation note: this is a manual from/to Color lerp driven by a
+     *  plain Float Animatable rather than `Animatable<Color, ...>` —
+     *  Compose's built-in Color vector converter isn't a plain property
+     *  (`Color.Companion.VectorConverter` requires a ColorSpace argument),
+     *  so this sidesteps that entirely while behaving identically from the
+     *  caller's point of view. */
+    private var colorFrom by mutableStateOf(Color.White)
+    private var colorTo by mutableStateOf(Color.White)
+    private val colorProgress = Animatable(1f)
+    val color: State<Color> = derivedStateOf { lerp(colorFrom, colorTo, colorProgress.value) }
 
     /** Increments on a fixed tick while LOADING — the discrete "hop" driving
      *  the conveyor-belt motion. Deliberately NOT an Animatable/smoothly
@@ -79,7 +91,9 @@ class PixelTransitionController {
     suspend fun start(scope: CoroutineScope, baseColor: Color) {
         val myGeneration = ++generation
         conveyorJob?.cancel()
-        color.snapTo(baseColor)
+        colorFrom = baseColor
+        colorTo = baseColor
+        colorProgress.snapTo(1f)
         wipeProgress.snapTo(0f)
         phase = PixelPhase.WIPE_IN
         wipeProgress.animateTo(1f, tween(WIPE_IN_MS, easing = FastOutSlowInEasing))
@@ -100,7 +114,10 @@ class PixelTransitionController {
      *  Re-entrant: each call just re-targets the in-flight animation, so
      *  calling it repeatedly as better color data trickles in is fine. */
     suspend fun updateColor(target: Color) {
-        color.animateTo(target, tween(THEME_SHIFT_MS, easing = LinearOutSlowInEasing))
+        colorFrom = color.value
+        colorTo = target
+        colorProgress.snapTo(0f)
+        colorProgress.animateTo(1f, tween(THEME_SHIFT_MS, easing = LinearOutSlowInEasing))
     }
 
     /** Phase 4: runs the fast diagonal exit wipe and returns to HIDDEN. Call
