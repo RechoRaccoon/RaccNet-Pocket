@@ -45,7 +45,11 @@ import com.mediaviewer.ui.DmInboxOverlay
 import com.mediaviewer.ui.ListPickerDialog
 import com.mediaviewer.ui.LiveNowPlayerOverlay
 import com.mediaviewer.ui.MainFeedScreen
+import com.mediaviewer.ui.PixelMatrixOverlay
+import com.mediaviewer.ui.PixelPhase
 import com.mediaviewer.ui.ProfileOverlay
+import com.mediaviewer.ui.rememberDominantColor
+import com.mediaviewer.ui.rememberPixelTransitionController
 import com.mediaviewer.ui.QuoteRepostDialog
 import com.mediaviewer.ui.ReplyDialog
 import com.mediaviewer.ui.SearchOverlay
@@ -194,6 +198,7 @@ private fun AppRoot(viewModel: MainViewModel) {
     val friendsFeedLoadingOverlay by viewModel.friendsFeedLoadingOverlay.collectAsState()
     val profileOverlay         by viewModel.profileOverlay.collectAsState()
     val selfProfile            by viewModel.selfProfile.collectAsState()
+    val appInitialized         by viewModel.appInitialized.collectAsState()
     val hideTextOnlyPosts      by viewModel.hideTextOnlyPosts.collectAsState()
     val bskyDid                by viewModel.bskyDid.collectAsState()
     val dmInboxOpen            by viewModel.dmInboxOpen.collectAsState()
@@ -226,6 +231,52 @@ private fun AppRoot(viewModel: MainViewModel) {
     // static tint.
     var currentBackdrop by remember { mutableStateOf<GlassBackdrop?>(null) }
     var currentDominantColor by remember { mutableStateOf(NeutralGlassTint) }
+
+    // ── Retro pixel-matrix transition/loading overlay ──────────────────────
+    // One shared controller drives both scenarios described in the design
+    // spec: the cold-boot splash (Scenario A) and profile-navigation
+    // transitions (Scenario B). See PixelTransitionOverlay.kt for the state
+    // machine and rendering; everything below is just real app events
+    // (never artificial timers) driving it.
+    val pixelController = rememberPixelTransitionController()
+    val selfThemeColor = rememberDominantColor(selfProfile?.author?.avatarUrl ?: "")
+
+    // Scenario A — cold boot: wipe in white/neutral the instant the app
+    // launches, hue-shift to the logged-in user's own color the instant
+    // it's fetched (selfThemeColor resolving), then wipe out the instant
+    // the auth-restore/init sequence has actually finished (appInitialized)
+    // — not before, and not a fixed delay after.
+    LaunchedEffect(Unit) {
+        pixelController.start(this, Color(0xFFF2F2F2))
+    }
+    LaunchedEffect(selfThemeColor) {
+        if (!selfProfile?.author?.avatarUrl.isNullOrBlank() &&
+            (pixelController.phase == PixelPhase.WIPE_IN || pixelController.phase == PixelPhase.LOADING)
+        ) {
+            pixelController.updateColor(selfThemeColor)
+        }
+    }
+    LaunchedEffect(appInitialized) {
+        if (appInitialized && pixelController.phase != PixelPhase.HIDDEN) pixelController.finish()
+    }
+
+    // Scenario B — profile navigation: the instant a *new* profile overlay
+    // opens, wipe in using the viewer's own theme color; hue-shift to the
+    // target profile's color as soon as its avatar resolves; wipe out the
+    // instant that profile's data has actually finished loading
+    // (loadingProfile flips false).
+    var trackedProfileDid by remember { mutableStateOf<String?>(null) }
+    val openedProfileTargetColor = rememberDominantColor(profileOverlay?.author?.avatarUrl ?: "")
+    LaunchedEffect(profileOverlay?.author?.did, profileOverlay?.loadingProfile, profileOverlay?.hidden) {
+        val overlay = profileOverlay
+        if (overlay == null || overlay.hidden) { trackedProfileDid = null; return@LaunchedEffect }
+        if (overlay.author.did != trackedProfileDid) {
+            trackedProfileDid = overlay.author.did
+            pixelController.start(this, selfThemeColor)
+        }
+        if (!overlay.author.avatarUrl.isNullOrBlank()) pixelController.updateColor(openedProfileTargetColor)
+        if (!overlay.loadingProfile) pixelController.finish()
+    }
 
     // Item 26: makes the glass-intensity dial reach every LiquidGlassSurface/
     // glassPanel below without threading a Float through every composable's
@@ -506,6 +557,11 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onDismiss     = { viewModel.dismissListPicker() }
             )
         }
+
+        // Retro pixel-matrix transition overlay — last child so it draws
+        // above every other layer (feed, Hub, profile, dialogs) while a
+        // transition is in progress; renders nothing once HIDDEN.
+        PixelMatrixOverlay(controller = pixelController, modifier = Modifier.fillMaxSize())
     }
     }
 

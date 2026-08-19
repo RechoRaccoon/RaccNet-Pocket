@@ -1331,22 +1331,36 @@ fun BlogBubble(
                 )
             )
 
-            // Bug fix (per feedback — long titles left dead space on the
-            // left instead of reaching it, and got cut off to one
-            // ellipsized line instead of wrapping): this header used to be
-            // a hug-content Column pinned to TopEnd, so the title pill
-            // could only ever grow (or shrink) from the right edge inward
-            // — a long, truncated title still only claimed however much
-            // width its single ellipsized line measured out to, leaving a
-            // gap between it and the card's left edge instead of using
-            // that space. The title pill now spans the card's full width
-            // (fillMaxWidth, left-aligned text, wrapping up to 3 lines
-            // before it ever needs to ellipsize) so it reaches both edges
-            // exactly when it actually needs the room; the date pill stays
-            // on its own line underneath, still right-aligned via its own
-            // Modifier.align(Alignment.End) rather than the whole column's
-            // alignment.
-            Column(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(cardPad)) {
+            // Bug fix (Hub blog cards stretching way past a square/the
+            // image's real width, long titles left dead space or got
+            // clipped to one line): this header used to be a hug-content
+            // Column pinned to TopEnd with `.fillMaxWidth()`. Two problems
+            // with that: (1) a long title could only grow from the right
+            // edge inward, leaving a gap on the left instead of using that
+            // space, and (2) fillMaxWidth() sizes against this
+            // BoxWithConstraints's own INCOMING constraints — but the Hub
+            // renders these cards inside a horizontally-scrolling Row (see
+            // BlogsSectionContent), which measures its children with an
+            // effectively unbounded max width so the whole row can scroll.
+            // fillMaxWidth() under an unbounded max width blows up to that
+            // huge value instead of the card's real (bounded) width — set
+            // by the OTHER child here (the square ThumbnailPlaceholder, or
+            // the loaded image's own aspect-ratio-derived width) — so the
+            // title pill, and with it the whole card (Box sizes to its
+            // widest child), stretched out far past the square shape a
+            // thumbnailless card is supposed to have.
+            //
+            // matchParentSize() (already used correctly by the scrim Box
+            // right above) fixes both: it sizes this Column to whatever the
+            // Box actually resolved to from its real, bounded children —
+            // exactly the square/image width, no more and no less — so the
+            // title pill reaches both true edges and wraps up to 3 lines
+            // instead of overflowing or leaving dead space. The profile's
+            // own Blogs tab is a normal fillMaxWidth column (never
+            // unbounded) and is unaffected either way. The date pill stays
+            // on its own line underneath, right-aligned via its own
+            // Modifier.align(Alignment.End).
+            Column(Modifier.matchParentSize().padding(cardPad), horizontalAlignment = Alignment.Start) {
                 ProfileGlassPill(
                     text = blog.title, liquidGlass = liquidGlass, tint = tint, fontSize = titleFontSize, bold = true,
                     compact = compact, maxLines = 3, textAlign = TextAlign.Start,

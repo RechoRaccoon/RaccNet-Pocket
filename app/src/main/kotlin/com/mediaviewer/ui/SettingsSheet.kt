@@ -1285,7 +1285,14 @@ private fun AtProtocolPageContent(
     // Bug fix (item 1): pinned in its own Box layer above the scroll
     // content instead of scrolling away with it — see the matching comment
     // on this function's outer Box/Column split above.
-    Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 8.dp)) {
+    // Bug fix (per feedback — Return to Feed/Refresh should sit flush with
+    // the Settings/AT Protocol/e621 chips above, not further inset): this
+    // Box used to have no horizontal padding of its own, so it spanned the
+    // literal screen edge — LESS inset than the header chip row, which
+    // uses 14.dp (see the HubChip Row above) — leaving the two rows
+    // visually misaligned. Matching that same 14.dp here lines this bar's
+    // left/right edges up exactly with the chips'.
+    Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 14.dp).padding(bottom = 8.dp)) {
         ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = hubBackdrop,
             onReturnToFeed = onReturnToFeed, onRefresh = onRefreshHub, hasVisitedFeed = hasVisitedFeed)
     }
@@ -1947,7 +1954,9 @@ private fun E621PageContent(
         }
     }
     if (e621LoggedIn) {
-        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 8.dp)) {
+        // Bug fix: same edge-alignment fix as the AT Protocol page's
+        // ReturnToFeedBar above — 14.dp matches the header chip row.
+        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 14.dp).padding(bottom = 8.dp)) {
             ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = e621Backdrop, onReturnToFeed = onReturnToFeed, hasVisitedFeed = hasVisitedFeed)
         }
     }

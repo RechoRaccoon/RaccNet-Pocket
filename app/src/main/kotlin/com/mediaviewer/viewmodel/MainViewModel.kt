@@ -774,6 +774,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val friendsReviewsLoading: StateFlow<Boolean> = _friendsReviewsLoading
     private var reviewsBlogsLoaded = false
 
+    // Feature (this session): a real, non-artificial "cold start finished
+    // restoring session state" signal for the app-launch pixel transition
+    // (see PixelMatrixOverlay/PixelTransitionController and AppRoot's
+    // wiring) — flips true once the init{} auth-restore coroutine below has
+    // actually read every stored preference and kicked off whichever
+    // initial load applies, not after some guessed/fixed delay.
+    private val _appInitialized = MutableStateFlow(false)
+    val appInitialized: StateFlow<Boolean> = _appInitialized
+
     /** Toggles whether `author` is subscribed for the Hub's Reviews section
      *  — called from the "Subscribe" button on their profile's Reviews tab.
      *  Refetches immediately afterward so the Hub (and the button's own
@@ -1209,6 +1218,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 loadSelfProfile()     // Settings Update: warm the Profile button's avatar/banner preview
             }
             // Stay on SETTINGS (the Hub) either way.
+            _appInitialized.value = true
         }
     }
 

@@ -683,6 +683,21 @@ class BlueskyRepository {
     suspend fun getSubscribedReviews(token: String, dids: List<String>): List<FriendPopfeedReview> = coroutineScope {
         if (dids.isEmpty()) return@coroutineScope emptyList()
         val authors = fetchAuthorInfos(token, dids)
+        // Bug fix (Hub Reviews flashing in then disappearing on app start):
+        // fetchAuthorInfos can fail WHOLESALE (cold-start network storm, an
+        // auth token that isn't ready yet, a rate limit) and, since it
+        // swallows its own per-batch/per-account errors, returns an empty
+        // (or near-empty) map with no exception at all. The mapNotNull
+        // below used to treat every one of those as "this specific account
+        // has nothing to show" and skip it — so a wholesale failure quietly
+        // produced an empty-but-"successful" list, which
+        // loadFriendsReviewsIfNeeded then happily wrote over perfectly good
+        // cached data, and (since no exception means reviewsOk stays true)
+        // permanently stopped the background retry loop from ever trying
+        // again. A real "we asked for N accounts and resolved none of
+        // them" is a failure, not an empty result, and must propagate as
+        // one so the caller keeps the cache and keeps retrying instead.
+        if (authors.isEmpty()) throw java.io.IOException("Couldn't resolve any subscribed author profiles")
         val gate = Semaphore(SUBSCRIBED_FETCH_CONCURRENCY)
         dids.distinct().mapNotNull { did ->
             // Bug fix (item 4): an account fetchAuthorInfos genuinely
@@ -709,6 +724,9 @@ class BlueskyRepository {
     suspend fun getSubscribedBlogs(token: String, dids: List<String>): List<FriendLeafletBlog> = coroutineScope {
         if (dids.isEmpty()) return@coroutineScope emptyList()
         val authors = fetchAuthorInfos(token, dids)
+        // See getSubscribedReviews' matching comment just above — same
+        // wholesale-failure-vs-genuinely-empty distinction applies here.
+        if (authors.isEmpty()) throw java.io.IOException("Couldn't resolve any subscribed author profiles")
         val gate = Semaphore(SUBSCRIBED_FETCH_CONCURRENCY)
         dids.distinct().mapNotNull { did ->
             // See getSubscribedReviews' matching comment (item 4) — skip
