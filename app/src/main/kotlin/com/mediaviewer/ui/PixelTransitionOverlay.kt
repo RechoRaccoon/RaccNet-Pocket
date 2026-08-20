@@ -6,6 +6,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
@@ -19,6 +20,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -81,11 +83,13 @@ class PixelTransitionController {
     private var conveyorJob: Job? = null
     private var generation = 0
 
-    /** Phase 1 + 2: snaps to [baseColor], runs the fast diagonal wipe-in,
-     *  then settles into the LOADING conveyor loop. Suspends only for the
-     *  wipe-in's own short fixed duration — returns once the matrix is
-     *  fully in its idle looping LOADING state, ready for the caller's real
-     *  work to proceed in parallel. Safe to call again before a prior
+    /** Phase 1 + 2: snaps to [baseColor], starts the conveyor loop running
+     *  immediately (so the "digital marquee" motion is visible from the
+     *  very first frame of the wipe-in, not just once LOADING begins), runs
+     *  the fast diagonal wipe-in, then settles into LOADING. Suspends only
+     *  for the wipe-in's own short fixed duration — returns once the matrix
+     *  is fully in its idle looping LOADING state, ready for the caller's
+     *  real work to proceed in parallel. Safe to call again before a prior
      *  transition finished (e.g. rapid profile-to-profile navigation) —
      *  the new call's generation supersedes the old one's background loop. */
     suspend fun start(scope: CoroutineScope, baseColor: Color) {
@@ -96,9 +100,6 @@ class PixelTransitionController {
         colorProgress.snapTo(1f)
         wipeProgress.snapTo(0f)
         phase = PixelPhase.WIPE_IN
-        wipeProgress.animateTo(1f, tween(WIPE_IN_MS, easing = FastOutSlowInEasing))
-        if (myGeneration != generation) return
-        phase = PixelPhase.LOADING
         conveyorJob = scope.launch {
             var tick = 0
             while (isActive) {
@@ -106,6 +107,9 @@ class PixelTransitionController {
                 delay(CONVEYOR_STEP_MS)
             }
         }
+        wipeProgress.animateTo(1f, tween(WIPE_IN_MS, easing = FastOutSlowInEasing))
+        if (myGeneration != generation) return
+        phase = PixelPhase.LOADING
     }
 
     /** Phase 3: smoothly hue-shifts the running matrix to [target]. Call
@@ -120,18 +124,20 @@ class PixelTransitionController {
         colorProgress.animateTo(1f, tween(THEME_SHIFT_MS, easing = LinearOutSlowInEasing))
     }
 
-    /** Phase 4: runs the fast diagonal exit wipe and returns to HIDDEN. Call
-     *  this the instant — and only the instant — all target content is
-     *  actually mounted and ready to show; this is what makes the whole
-     *  overlay's total on-screen time track real load time exactly. */
+    /** Phase 4: runs the fast diagonal exit wipe — conveyor motion keeps
+     *  running the whole time this plays too — and returns to HIDDEN once
+     *  it's actually finished. Call this the instant — and only the
+     *  instant — all target content is actually mounted and ready to show;
+     *  this is what makes the whole overlay's total on-screen time track
+     *  real load time exactly. */
     suspend fun finish() {
         val myGeneration = ++generation
-        conveyorJob?.cancel()
-        conveyorJob = null
         phase = PixelPhase.WIPE_OUT
         wipeProgress.snapTo(0f)
         wipeProgress.animateTo(1f, tween(WIPE_OUT_MS, easing = FastOutLinearInEasing))
         if (myGeneration != generation) return
+        conveyorJob?.cancel()
+        conveyorJob = null
         phase = PixelPhase.HIDDEN
     }
 
@@ -157,6 +163,17 @@ private fun hash01(x: Int, y: Int): Float {
     return (h and 0x7fffffff) / 2147483647f
 }
 
+// Scales a color's RGB channels by [factor] (​>1 brightens toward white,
+// <1 darkens toward black) while keeping it fully opaque. This is what
+// drives the conveyor-belt motion — a genuine color/brightness shift, not
+// an alpha change — so cells never look see-through because of it.
+private fun shade(c: Color, factor: Float): Color = Color(
+    red = (c.red * factor).coerceIn(0f, 1f),
+    green = (c.green * factor).coerceIn(0f, 1f),
+    blue = (c.blue * factor).coerceIn(0f, 1f),
+    alpha = 1f
+)
+
 /** Full-screen retro-digital pixel matrix used for both the app's cold-boot
  *  splash and profile-navigation transitions (see the two Scenario flows
  *  described in the design spec this implements):
@@ -180,9 +197,17 @@ fun PixelMatrixOverlay(controller: PixelTransitionController, modifier: Modifier
     val phase = controller.phase
     val step = controller.conveyorStep
 
-    Canvas(modifier.fillMaxSize()) {
+    Canvas(
+        modifier
+            .fillMaxSize()
+            // Absorbs taps/drags so nothing underneath (still-loading
+            // content, the screen being left) is reachable mid-transition —
+            // matches the old per-screen loading covers this overlay
+            // replaced (see ProfileOverlay's removed black loading cover).
+            .pointerInput(Unit) { detectTapGestures { } }
+    ) {
         val cellPx = cellDp.toPx()
-        val gap = cellPx * 0.08f
+        val gap = 0f
         val cols = ceil(size.width / cellPx).toInt() + 1
         val rows = ceil(size.height / cellPx).toInt() + 1
         val maxDiag = ((cols - 1) + (rows - 1)).coerceAtLeast(1)
@@ -218,33 +243,38 @@ fun PixelMatrixOverlay(controller: PixelTransitionController, modifier: Modifier
 
                 // Discrete conveyor-belt hop: a hard-edged triangular
                 // brightness band that steps diagonally one grid cell per
-                // tick (see conveyorStep) rather than sliding continuously.
+                // tick (see conveyorStep). Runs in every visible phase
+                // (WIPE_IN/LOADING/WIPE_OUT alike) — motion never pauses
+                // just because the wipe itself is mid-sweep.
                 val rawBand = ((gx + gy) - step) % BAND_PERIOD
                 val bandPos = if (rawBand < 0) rawBand + BAND_PERIOD else rawBand
-                val conveyorGlow = when {
-                    phase != PixelPhase.LOADING -> 1f
-                    bandPos == 0 -> 1f
-                    bandPos == 1 || bandPos == BAND_PERIOD - 1 -> 0.62f
-                    else -> 0.26f
+                val conveyorFactor = when (bandPos) {
+                    0 -> 1.45f
+                    1, BAND_PERIOD - 1 -> 1.15f
+                    else -> 0.82f
                 }
 
+                // Coverage stays essentially fully opaque at all times —
+                // only a hairline shade jitter for texture — so a "covered"
+                // cell never looks see-through. The conveyor's motion and
+                // the grid's depth/variance both come from color intensity
+                // (shade()) instead of alpha.
                 val shadeJitter = hash01(gx * 7 + 3, gy * 13 + 1)
                 val glowJitter = hash01(gx * 31 + 11, gy * 17 + 5)
-                val baseAlpha = 0.45f + shadeJitter * 0.4f
-                val a = (baseAlpha * conveyorGlow).coerceIn(0.05f, 1f)
+                val cellColor = shade(col, conveyorFactor * (0.96f + shadeJitter * 0.08f))
 
                 drawRect(
-                    color = col.copy(alpha = a),
+                    color = cellColor,
                     topLeft = Offset(gx * cellPx + gap / 2f, ry * cellPx + gap / 2f),
                     size = Size(cellPx - gap, cellPx - gap)
                 )
                 // Subtle glow: a faint, slightly larger, lower-alpha rect
-                // behind lively (bright-band) cells only — cheap stand-in
-                // for real bloom that keeps the "glow" requirement without
-                // an extra blur pass.
-                if (conveyorGlow > 0.9f && glowJitter > 0.5f) {
+                // behind the brightest (leading-band) cells only — cheap
+                // stand-in for real bloom that keeps the "glow" requirement
+                // without an extra blur pass.
+                if (conveyorFactor > 1.3f && glowJitter > 0.5f) {
                     drawRect(
-                        color = col.copy(alpha = (a * 0.25f).coerceAtMost(0.18f)),
+                        color = cellColor.copy(alpha = 0.22f),
                         topLeft = Offset(gx * cellPx - gap, ry * cellPx - gap),
                         size = Size(cellPx + gap * 2f, cellPx + gap * 2f)
                     )

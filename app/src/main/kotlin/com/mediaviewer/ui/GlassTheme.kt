@@ -41,6 +41,30 @@ import androidx.compose.ui.unit.sp
 import coil.request.ImageRequest
 import com.mediaviewer.ui.theme.DimGray
 
+/** The actual color-sampling work behind [rememberDominantColor], factored
+ *  out as a plain suspend function so non-composable call sites (the
+ *  app-launch and feed-open pixel transition wiring in AppRoot, which need
+ *  an explicit "done" signal to know when to reveal the real UI) can await
+ *  the same real fetch+sample work directly instead of only being able to
+ *  observe it asynchronously through composition. */
+suspend fun fetchDominantColor(context: android.content.Context, url: String): Color {
+    if (url.isBlank()) return Color(0xFF2A2A2E)
+    try {
+        val loader = coil.Coil.imageLoader(context)
+        val request = ImageRequest.Builder(context).data(url).size(16, 16).allowHardware(false).build()
+        val bmp = (loader.execute(request).drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap
+        if (bmp != null) {
+            var r = 0L; var g = 0L; var b = 0L; var n = 0
+            for (x in 0 until bmp.width) for (y in 0 until bmp.height) {
+                val p = bmp.getPixel(x, y)
+                r += (p shr 16) and 0xFF; g += (p shr 8) and 0xFF; b += p and 0xFF; n++
+            }
+            if (n > 0) return Color(r.toFloat() / n / 255f, g.toFloat() / n / 255f, b.toFloat() / n / 255f, 1f)
+        }
+    } catch (_: Exception) { /* fall through to default below */ }
+    return Color(0xFF2A2A2E)
+}
+
 /** Samples a low-res copy of the given media URL and returns its average
  *  color. This is the "color of the post" used to tint that post's
  *  background, its glass panels' rims, and to decide whether panel content
@@ -51,19 +75,7 @@ fun rememberDominantColor(url: String): Color {
     var color by remember(url) { mutableStateOf(Color(0xFF2A2A2E)) }
     LaunchedEffect(url) {
         if (url.isBlank()) return@LaunchedEffect
-        try {
-            val loader = coil.Coil.imageLoader(context)
-            val request = ImageRequest.Builder(context).data(url).size(16, 16).allowHardware(false).build()
-            val bmp = (loader.execute(request).drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap
-            if (bmp != null) {
-                var r = 0L; var g = 0L; var b = 0L; var n = 0
-                for (x in 0 until bmp.width) for (y in 0 until bmp.height) {
-                    val p = bmp.getPixel(x, y)
-                    r += (p shr 16) and 0xFF; g += (p shr 8) and 0xFF; b += p and 0xFF; n++
-                }
-                if (n > 0) color = Color(r.toFloat() / n / 255f, g.toFloat() / n / 255f, b.toFloat() / n / 255f, 1f)
-            }
-        } catch (_: Exception) { /* keep previous/default tint */ }
+        color = fetchDominantColor(context, url)
     }
     return color
 }

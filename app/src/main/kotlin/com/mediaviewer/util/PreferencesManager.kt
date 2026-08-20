@@ -42,6 +42,11 @@ object PrefKeys {
     val HUB_REVIEWS_CACHE_JSON = stringPreferencesKey("hub_reviews_cache_json")
     val HUB_BLOGS_CACHE_JSON   = stringPreferencesKey("hub_blogs_cache_json")
     val HUB_CACHE_HYDRATED_AT  = longPreferencesKey("hub_cache_hydrated_at")
+    // Item (this session): Mutuals row cache — same "instant from disk on
+    // cold start, then a fresh fetch replaces it" shape as the Reviews/Blogs
+    // cache just above, so the Mutuals row doesn't sit blank until
+    // dmConversations' own network fetch resolves.
+    val HUB_MUTUALS_CACHE_JSON = stringPreferencesKey("hub_mutuals_cache_json")
     // Phase 4 — on-device translation
     val TRANSLATE_ENABLED     = booleanPreferencesKey("translate_enabled")
     val TRANSLATE_TARGET_LANG = stringPreferencesKey("translate_target_lang")
@@ -91,6 +96,7 @@ class PreferencesManager(private val context: Context) {
     val historyJson: Flow<String>              = context.dataStore.data.map { it[PrefKeys.HISTORY_JSON] ?: "[]" }
     val hubReviewsCacheJson: Flow<String>       = context.dataStore.data.map { it[PrefKeys.HUB_REVIEWS_CACHE_JSON] ?: "[]" }
     val hubBlogsCacheJson: Flow<String>         = context.dataStore.data.map { it[PrefKeys.HUB_BLOGS_CACHE_JSON] ?: "[]" }
+    val hubMutualsCacheJson: Flow<String>       = context.dataStore.data.map { it[PrefKeys.HUB_MUTUALS_CACHE_JSON] ?: "[]" }
     val hubCacheHydratedAt: Flow<Long>          = context.dataStore.data.map { it[PrefKeys.HUB_CACHE_HYDRATED_AT] ?: 0L }
     val subscribedReviewDids: Flow<Set<String>> = context.dataStore.data.map { it[PrefKeys.SUBSCRIBED_REVIEW_DIDS] ?: emptySet() }
     val subscribedBlogDids: Flow<Set<String>>   = context.dataStore.data.map { it[PrefKeys.SUBSCRIBED_BLOG_DIDS] ?: emptySet() }
@@ -160,6 +166,14 @@ class PreferencesManager(private val context: Context) {
             prefs[PrefKeys.HUB_BLOGS_CACHE_JSON] = blogsJson
             prefs[PrefKeys.HUB_CACHE_HYDRATED_AT] = hydratedAt
         }
+    }
+
+    /** Mutuals-row equivalent of [setHubCache]. Kept as its own write since
+     *  dmConversations loads on a different, earlier trigger than Reviews/
+     *  Blogs (see loadDmConversationsBlocking) and shouldn't need to wait
+     *  on — or block — that unrelated fetch. */
+    suspend fun setHubMutualsCache(mutualsJson: String) {
+        context.dataStore.edit { prefs -> prefs[PrefKeys.HUB_MUTUALS_CACHE_JSON] = mutualsJson }
     }
 
     suspend fun setLiquidGlass(enabled: Boolean) {

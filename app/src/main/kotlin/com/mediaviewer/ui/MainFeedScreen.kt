@@ -408,7 +408,15 @@ fun MainFeedScreen(
                         onLogoutBluesky           = onLogoutBluesky,
                         onSaveE621Credentials     = onSaveE621Credentials,
                         onLogoutE621              = onLogoutE621,
-                        onSelectFeed              = { uri -> onSelectFeed(uri); onSetScreen(ScreenState.FEED) },
+                        // Bug fix (item 4 — feed opened before it had
+                        // loaded): this used to call onSetScreen(FEED)
+                        // immediately, scrolling into the feed pager before
+                        // any of its data existed. onSelectFeed (wired from
+                        // AppRoot as handleSelectFeed) now owns the whole
+                        // sequence itself — start the pixel transition,
+                        // load, THEN switch to FEED once that's actually
+                        // done — so this is just a passthrough now.
+                        onSelectFeed              = onSelectFeed,
                         onToggleDownloadOnLike    = onToggleDownloadOnLike,
                         onDownloadAllLiked        = onDownloadAllLiked,
                         onCancelDownload          = onCancelDownload,

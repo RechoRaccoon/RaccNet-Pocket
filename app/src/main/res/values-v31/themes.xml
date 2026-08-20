@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Item (this session, "remove the app icon splash screen"): API 31+
+         (targetSdk 34 here, well above that) automatically shows a system
+         splash screen — background color + centered animated icon — before
+         an app's first frame is ready, using the launcher icon unless a
+         theme explicitly says otherwise. These three attributes only exist
+         from API 31 onward, hence this separate values-v31 override rather
+         than adding them straight to the base themes.xml (which every API
+         level reads, including ones where these attributes don't exist).
+         windowSplashScreenAnimatedIcon points at a fully transparent 1x1
+         shape (see drawable/splash_transparent.xml) instead of the real
+         launcher icon, and the background matches the app's own black
+         windowBackground, so the whole splash phase reads as a plain black
+         screen with nothing on it — exactly what should be showing right
+         up until the pixel-matrix transition (see PixelTransitionOverlay.kt
+         and AppRoot's cold-launch wiring) takes over and starts its own
+         wipe-in animation. -->
+    <style name="Theme.MediaViewer" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#FF000000</item>
+        <item name="android:navigationBarColor">#FF000000</item>
+        <item name="android:windowBackground">#FF000000</item>
+        <item name="android:windowSplashScreenBackground">#FF000000</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_transparent</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">#FF000000</item>
+        <item name="android:windowSplashScreenBrandingImage">@android:color/transparent</item>
+    </style>
+</resources>

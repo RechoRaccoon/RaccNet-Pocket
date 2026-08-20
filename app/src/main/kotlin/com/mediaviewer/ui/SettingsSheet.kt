@@ -61,6 +61,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.sp
@@ -1255,7 +1256,13 @@ private fun AtProtocolPageContent(
                     // visually matches the card it belongs to.
                     val blogTint = rememberDominantColor(fb.blog.thumbnailUrl ?: fb.author.avatarUrl ?: "")
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        HubAuthorBubble(author = fb.author, liquidGlass = liquidGlass, tint = blogTint)
+                        // Item 11: blog cards don't have one fixed width
+                        // (it follows each thumbnail's own aspect ratio at
+                        // HUB_BLOG_CARD_HEIGHT — see BlogBubble), so that
+                        // height doubles as this bubble's width budget. It's
+                        // exact for the common thumbnailless/square case and
+                        // a reasonable cap for thumbnail cards otherwise.
+                        HubAuthorBubble(displayName = fb.author.displayName, avatarUrl = fb.author.avatarUrl, liquidGlass = liquidGlass, tint = blogTint, cardWidth = HUB_BLOG_CARD_HEIGHT)
                         Spacer(Modifier.height(6.dp))
                         BlogBubble(
                             blog = fb.blog, liquidGlass = liquidGlass, fallbackAvatarUrl = fb.author.avatarUrl,
@@ -1383,84 +1390,30 @@ private fun LiveCard(source: LiveCardSource, liquidGlass: Boolean, onOpenLivePla
             }
         }
     }
-    // Bug fix (per feedback — author bubble needs to be reflective, like
-    // every other glass panel that sits over real content): this bubble
-    // used to use the plain `Modifier.glassPanel(...)` treatment, which by
-    // design (see that modifier's own doc comment in GlassTheme.kt) never
-    // reflects anything — only LiquidGlassSurface's `backdrop` param
-    // actually samples and blurs live content in real time. Each card now
-    // records its own thumbnail into a small per-card GraphicsLayer (the
-    // same "record every frame, read it back through a GlassBackdrop"
-    // pattern used for feed posts and the Hub's Return to Feed bar) so the
-    // author bubble can sit on top of it as genuine live glass instead of
-    // a flat tint. Crash-avoidance note (same as those other call sites):
-    // the bubble itself has to stay OUTSIDE the Box being recorded, since a
-    // GraphicsLayer can't be drawn from while it's still being recorded
-    // into.
-    val cardBackdropLayer = rememberGraphicsLayer()
-    var cardBackdropOrigin by remember { mutableStateOf(Offset.Zero) }
-    val cardBackdrop = remember(liquidGlass, cardBackdropLayer) {
-        if (liquidGlass) GlassBackdrop(cardBackdropLayer) { cardBackdropOrigin } else null
-    }
+    // Bug fix (per feedback — matches Blogs/Reviews now): the author
+    // icon+name used to float INSIDE the card as a BottomStart overlay,
+    // reflective via its own per-card GraphicsLayer backdrop recording. It
+    // now sits in its own small (non-reflective, same as Blogs/Reviews'
+    // HubAuthorBubble) bubble above the card instead, so that recording
+    // setup — nothing else in this card ever read from it — is gone too.
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    HubAuthorBubble(displayName = accountName, avatarUrl = accountAvatarUrl, liquidGlass = liquidGlass, tint = tint, cardWidth = 140.dp)
+    Spacer(Modifier.height(6.dp))
     Box(
         Modifier.width(140.dp).height(140.dp)
             .then(if (liquidGlass) Modifier.glassPanel(true, shape = cardShape, tint = tint) else Modifier.clip(cardShape).background(tint.copy(0.18f)))
             .clickable(onClick = onClick)
     ) {
-        Box(
-            Modifier.fillMaxSize()
-                .then(if (liquidGlass) Modifier.onGloballyPositioned { cardBackdropOrigin = it.positionInRoot() } else Modifier)
-                .then(
-                    if (liquidGlass) Modifier.drawWithContent {
-                        cardBackdropLayer.record { this@drawWithContent.drawContent() }
-                        drawContent()
-                    } else Modifier
-                )
-        ) {
-            if (thumbUrl != null) {
-                AsyncImage(model = thumbUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize().clip(cardShape))
-            } else {
-                Box(Modifier.fillMaxSize().clip(cardShape).background(Color.White.copy(0.08f)))
-            }
-            Box(Modifier.align(Alignment.TopStart).padding(6.dp).clip(RoundedCornerShape(4.dp)).background(tint).padding(horizontal = 5.dp, vertical = 2.dp)) {
-                Text(badgeText, color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-            }
-        }
-        // Bug fix (per feedback — needs to be half the height): avatar
-        // shrunk and padding/line-height tightened together — the old
-        // vertical padding (4dp top+bottom) plus Text's default,
-        // un-set line-height (which, like the pill bug fixed earlier this
-        // session, reserves noticeably more vertical space than the
-        // visible glyphs actually need) added up to roughly double what
-        // a compact avatar+name chip needs.
-        val authorBubbleShape = RoundedCornerShape(10.dp)
-        @Composable
-        fun AuthorBubbleContent() {
-            Row(
-                Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                if (accountAvatarUrl != null) {
-                    AsyncImage(model = accountAvatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                        modifier = Modifier.size(11.dp).clip(CircleShape))
-                } else {
-                    Box(Modifier.size(11.dp).clip(CircleShape).background(Color.White.copy(0.2f)))
-                }
-                Spacer(Modifier.width(3.dp))
-                Text(accountName, color = Color.White, fontSize = 9.sp, lineHeight = 9.sp, fontWeight = FontWeight.SemiBold,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 90.dp))
-            }
-        }
-        if (liquidGlass) {
-            LiquidGlassSurface(
-                Modifier.align(Alignment.BottomStart).padding(6.dp), shape = authorBubbleShape, tint = tint, backdrop = cardBackdrop
-            ) { AuthorBubbleContent() }
+        if (thumbUrl != null) {
+            AsyncImage(model = thumbUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize().clip(cardShape))
         } else {
-            Box(
-                Modifier.align(Alignment.BottomStart).padding(6.dp).clip(authorBubbleShape).background(Color.Black.copy(0.55f))
-            ) { AuthorBubbleContent() }
+            Box(Modifier.fillMaxSize().clip(cardShape).background(Color.White.copy(0.08f)))
         }
+        Box(Modifier.align(Alignment.TopStart).padding(6.dp).clip(RoundedCornerShape(4.dp)).background(tint).padding(horizontal = 5.dp, vertical = 2.dp)) {
+            Text(badgeText, color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+        }
+    }
     }
 }
 
@@ -1707,91 +1660,101 @@ private fun MutualReviewCard(
 ) {
     val shape = RoundedCornerShape(14.dp)
     val tint = rememberDominantColor(fr.review.mediaImageUrl ?: fr.author.avatarUrl ?: "")
-    Box(
-        Modifier.width(REVIEW_CARD_WIDTH).aspectRatio(2f / 3f)
-            .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.clip(shape).background(Color.White.copy(0.06f)))
-            .clickable { onOpenReview(fr) }
-    ) {
-        if (fr.review.mediaImageUrl != null) {
-            AsyncImage(model = fr.review.mediaImageUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize().clip(shape))
-        } else {
-            Box(Modifier.fillMaxSize().clip(shape).background(Color.White.copy(0.10f)))
-        }
-        Column(
-            Modifier.align(Alignment.TopStart).fillMaxWidth().padding(4.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+    // Bug fix (per feedback): the author icon+name used to float INSIDE the
+    // card as a TopStart overlay, competing for the same corner as the star
+    // rating pill — the two routinely overlapped on this card's narrow
+    // (REVIEW_CARD_WIDTH) width. It now sits in its own small bubble above
+    // the card, exactly like Blogs' HubAuthorBubble treatment, and the star
+    // rating moved into the room that freed up at the card's top-right.
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        HubAuthorBubble(displayName = fr.author.displayName, avatarUrl = fr.author.avatarUrl, liquidGlass = liquidGlass, tint = tint, cardWidth = REVIEW_CARD_WIDTH)
+        Spacer(Modifier.height(6.dp))
+        Box(
+            Modifier.width(REVIEW_CARD_WIDTH).aspectRatio(2f / 3f)
+                .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.clip(shape).background(Color.White.copy(0.06f)))
+                .clickable { onOpenReview(fr) }
         ) {
-            Row(
-                Modifier
-                    .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = RoundedCornerShape(10.dp)) else Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(0.55f)))
-                    .padding(horizontal = 5.dp, vertical = 3.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Box(Modifier.size(10.dp).clip(CircleShape).background(Color.White.copy(0.15f))) {
-                    if (fr.author.avatarUrl != null) {
-                        AsyncImage(model = fr.author.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize().clip(CircleShape))
-                    }
-                }
-                Text(fr.author.displayName, color = Color.White, fontSize = 9.sp, lineHeight = 10.sp, fontWeight = FontWeight.Medium,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 72.dp))
+            if (fr.review.mediaImageUrl != null) {
+                AsyncImage(model = fr.review.mediaImageUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().clip(shape))
+            } else {
+                Box(Modifier.fillMaxSize().clip(shape).background(Color.White.copy(0.10f)))
             }
-            // Bug fix (per feedback): the star-rating bubble was
-            // independently corner-anchored to TopEnd while the author
-            // bubble above it was anchored to TopStart — fine on a wide
-            // card, but this card is only REVIEW_CARD_WIDTH (108dp) wide,
-            // so the two bubbles' own natural widths (author avatar +
-            // up-to-72dp name, plus the star row) routinely add up to more
-            // than the card's width and visibly overlap in the middle. The
-            // star pill now lives in the same Column as the author row,
-            // right-aligned on its own line underneath instead of a
-            // separately-anchored corner, so the two can never occupy the
-            // same horizontal space.
             StarRatingPill(
                 rating = fr.review.ratingOutOf5, liquidGlass = liquidGlass, tint = tint,
-                modifier = Modifier.align(Alignment.End)
+                modifier = Modifier.align(Alignment.TopEnd).padding(4.dp)
             )
-        }
-        Box(
-            Modifier.align(Alignment.BottomStart).padding(4.dp)
-                .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = RoundedCornerShape(10.dp)) else Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(0.55f)))
-                .padding(horizontal = 6.dp, vertical = 4.dp)
-        ) {
-            Text(
-                fr.review.mediaTitle, color = Color.White, fontSize = 10.sp, lineHeight = 11.sp, fontWeight = FontWeight.SemiBold,
-                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 92.dp)
-            )
+            Box(
+                Modifier.align(Alignment.BottomStart).padding(4.dp)
+                    .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = RoundedCornerShape(10.dp)) else Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(0.55f)))
+                    .padding(horizontal = 6.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    fr.review.mediaTitle, color = Color.White, fontSize = 10.sp, lineHeight = 11.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 92.dp)
+                )
+            }
         }
     }
 }
 
-/** Item 5: the small author (icon + name) bubble the Hub now shows above
- *  each blog card — the Hub mixes cards from many different accounts in one
- *  row, unlike a profile's own Blogs tab where the author is implicit from
- *  context, so each card needs its own "whose is this" label. Deliberately
- *  plain rather than tinted per-author (unlike the cards themselves, item
- *  7) so the row of little author pills reads as one consistent strip
- *  rather than a row of mismatched colors. */
+/** Item 5: the small author (icon + name) bubble the Hub shows above each
+ *  Blog/Review/Livestream card — the Hub mixes cards from many different
+ *  accounts in one row, unlike a profile's own tabs where the author is
+ *  implicit from context, so each card needs its own "whose is this" label.
+ *  Deliberately plain rather than tinted per-author (unlike the cards
+ *  themselves) so the row of little author pills reads as one consistent
+ *  strip rather than a row of mismatched colors. Takes plain strings rather
+ *  than a whole AuthorInfo so non-Bluesky sources (e.g. a livestream's
+ *  platform-native account name) can use it too.
+ *
+ *  [cardWidth] is the exact width of the card this bubble sits above (the
+ *  same value each call site already uses to size that card) — item 11:
+ *  rather than a fixed max-width truncating long names with an ellipsis,
+ *  the name's own font size now shrinks (down to a sane floor) until the
+ *  whole bubble fits within that width, so its rounded ends land flush
+ *  with the card's own edges instead of overhanging them. Short names are
+ *  unaffected — they just render at the normal size, narrower than the
+ *  card, exactly as before. */
 @Composable
-private fun HubAuthorBubble(author: com.mediaviewer.model.AuthorInfo, liquidGlass: Boolean, tint: Color) {
+private fun HubAuthorBubble(displayName: String, avatarUrl: String?, liquidGlass: Boolean, tint: Color, cardWidth: Dp) {
     val shape = RoundedCornerShape(10.dp)
+    val avatarSize = 14.dp
+    val spacing = 5.dp
+    val horizontalPad = 6.dp
+    // Budget left for the name text alone once the avatar, the gap between
+    // it and the text, and the bubble's own left/right padding are all
+    // subtracted from the card's width — this is what actually gets
+    // measured/shrunk against, not the bubble's total outer width.
+    val textBudget = (cardWidth - avatarSize - spacing - horizontalPad * 2).coerceAtLeast(20.dp)
+    var fontSizeSp by remember(displayName, cardWidth) { mutableStateOf(10f) }
     Row(
         Modifier
             .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.clip(shape).background(Color.Black.copy(0.55f)))
-            .padding(horizontal = 6.dp, vertical = 4.dp),
+            .padding(horizontal = horizontalPad, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp)
+        horizontalArrangement = Arrangement.spacedBy(spacing)
     ) {
-        Box(Modifier.size(14.dp).clip(CircleShape).background(Color.White.copy(0.15f))) {
-            if (author.avatarUrl != null) {
-                AsyncImage(model = author.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
+        Box(Modifier.size(avatarSize).clip(CircleShape).background(Color.White.copy(0.15f))) {
+            if (avatarUrl != null) {
+                AsyncImage(model = avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize().clip(CircleShape))
             }
         }
-        Text(author.displayName, color = Color.White, fontSize = 10.sp, lineHeight = 11.sp, fontWeight = FontWeight.Medium,
-            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 100.dp))
+        Text(
+            displayName, color = Color.White, fontSize = fontSizeSp.sp, lineHeight = (fontSizeSp + 1f).sp,
+            fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false, overflow = TextOverflow.Clip,
+            modifier = Modifier.widthIn(max = textBudget),
+            onTextLayout = { result ->
+                // Item 11: one step down per overflowing layout pass — each
+                // shrink triggers a fresh measure/onTextLayout call, so this
+                // settles within a handful of frames rather than needing an
+                // explicit measuring loop of its own. 6sp floor keeps it
+                // legible instead of shrinking to nothing for pathologically
+                // long names.
+                if (result.didOverflowWidth && fontSizeSp > 6f) fontSizeSp = (fontSizeSp - 0.5f).coerceAtLeast(6f)
+            }
+        )
     }
 }
 

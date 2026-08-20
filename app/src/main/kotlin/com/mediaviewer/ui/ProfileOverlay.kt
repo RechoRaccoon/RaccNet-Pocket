@@ -286,16 +286,14 @@ fun ProfileOverlay(
     // we've passed the bottom of the tabs — show the "scroll to top" bubble.
     val pastTabs by remember { derivedStateOf { listState.firstVisibleItemIndex >= 2 } }
 
-    // Loading screen: "content ready" means both the profile fetch (bio,
-    // counts, banner/avatar) and the initially-selected tab's first page are
-    // done — either succeeded or failed, loadProfileTab sets `loaded = true`
-    // either way, so this can't get stuck if a fetch errors out. Gated by
-    // hasShownContentOnce so this only covers the very first open, not every
-    // subsequent tab switch (those already have their own small in-line
-    // spinner — a full black screen every tab switch would be jarring).
-    val contentReady = !state.loadingProfile && state.tabStates[state.selectedTab]?.loaded == true
-    var hasShownContentOnce by remember(author.did) { mutableStateOf(false) }
-    LaunchedEffect(contentReady) { if (contentReady) hasShownContentOnce = true }
+    // Bug fix (per feedback): the old black full-screen "content ready"
+    // cover + spinner used to live here, shown until the profile's first
+    // fetch/tab finished. It's now fully superseded by the app-level
+    // pixel-matrix transition overlay (see PixelTransitionOverlay.kt and
+    // AppRoot's profile-navigation wiring), which already covers the
+    // screen for exactly this same window (from tapping a profile until
+    // state.loadingProfile clears) — so this one was just a redundant
+    // second loading screen stacked underneath it.
 
     // Profile tabs sub-filter row state — purely local/display-only (not
     // round-tripped through the ViewModel, since it never needs to survive
@@ -453,25 +451,9 @@ fun ProfileOverlay(
             }
         }
 
-        // ── Loading screen — covers the staggered pop-in of the banner,
-        // buttons, and first tab's results while they're still loading, then
-        // fades away once everything's ready. Consumes touches so nothing
-        // underneath is tappable while it's up (a plain .background() alone
-        // isn't hit-testable in Compose and would otherwise let taps pass
-        // straight through to whatever's rendered beneath it).
-        AnimatedVisibility(
-            visible = !hasShownContentOnce,
-            enter = EnterTransition.None,
-            exit = fadeOut(tween(280))
-        ) {
-            Box(
-                Modifier.fillMaxSize().background(Color.Black)
-                    .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null) {},
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(36.dp))
-            }
-        }
+        // (Old black full-screen loading cover + CircularProgressIndicator
+        // removed here — see the comment near this composable's top; the
+        // app-level pixel transition now owns this loading window.)
 
         // ── Scroll-to-top bubble — appears once scrolled past the tabs ──
         AnimatedVisibility(
@@ -1272,7 +1254,29 @@ fun BlogBubble(
         // effectively infinite and wouldn't actually cap anything, so a
         // fixed heuristic proportional to the card's own height is used
         // there instead.
-        val availableTitleWidth = if (fixedHeight != null) (fixedHeight * 1.15f) else (maxWidth - cardPad * 2).coerceAtLeast(40.dp)
+        //
+        // Bug fix (per feedback — one thumbnailless Hub card still wasn't
+        // square): that "* 1.15f" heuristic is deliberately generous for a
+        // REAL thumbnail's card (its true width, set by the image's own
+        // aspect ratio, isn't knowable synchronously here, so this only
+        // needs to be a safe outer cap). But the no-thumbnail placeholder
+        // is a true, exact 1:1 square (fillMaxHeight + aspectRatio(1f)) —
+        // its width is fixedHeight, known exactly — and this same value
+        // also bounds the bottom description pill (still a non-
+        // matchParentSize child, so it still participates in sizing this
+        // BoxWithConstraints). Capping it at `fixedHeight * 1.15f` let a
+        // card with a long-enough description grow ~15% wider than its own
+        // square thumbnail placeholder whenever that description's
+        // natural wrapped width happened to want that room. Using the
+        // square's exact width instead (minus this pill's own padding, so
+        // its outer footprint — not just its inner content — stays within
+        // the square) makes every thumbnailless Hub card square no matter
+        // what its description says.
+        val availableTitleWidth = when {
+            fixedHeight != null && !hasThumbnail -> (fixedHeight - cardPad * 2).coerceAtLeast(24.dp)
+            fixedHeight != null -> fixedHeight * 1.15f
+            else -> (maxWidth - cardPad * 2).coerceAtLeast(40.dp)
+        }
 
         if (useArtLayout) {
             // Bug fix (per feedback — inconsistent card shapes among

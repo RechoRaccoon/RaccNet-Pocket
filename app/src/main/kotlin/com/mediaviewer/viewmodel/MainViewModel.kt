@@ -2418,10 +2418,32 @@ _bskyDid.value          = session.did
         }
     }
 
+    /** Item (this session): the Mutuals row now has the same "instant from
+     *  disk on cold start, live fetch replaces it" cache shape Reviews/Blogs
+     *  already had (see loadFriendsReviewsIfNeeded's matching comment) —
+     *  it used to just sit blank until this fetch resolved. `_dmConversations
+     *  .value = it` on success is already a full replace (not a merge), so a
+     *  mutual who's since been removed (unfollowed each other, blocked,
+     *  etc.) already correctly drops out of both the in-memory state AND
+     *  this cache the next time a fetch succeeds — nothing further needed
+     *  for that half of the behavior. */
     private suspend fun loadDmConversationsBlocking(silent: Boolean = false) {
         _dmConversationsLoading.value = true
+        if (_dmConversations.value.isEmpty()) {
+            runCatching {
+                val type = object : com.google.gson.reflect.TypeToken<List<DmConversation>>() {}.type
+                val cached: List<DmConversation> = com.google.gson.Gson().fromJson(prefs.hubMutualsCacheJson.first(), type) ?: emptyList()
+                if (cached.isNotEmpty()) _dmConversations.value = cached
+            }
+        }
         bskyRepo.loadDmRecipients(bskyToken, _bskyDid.value)
-            .onSuccess { _dmConversations.value = it }
+            .onSuccess {
+                _dmConversations.value = it
+                runCatching {
+                    val type = object : com.google.gson.reflect.TypeToken<List<DmConversation>>() {}.type
+                    prefs.setHubMutualsCache(com.google.gson.Gson().toJson(it, type))
+                }
+            }
             .onFailure {
                 // Only surface an error when the user is actively, visibly waiting on this
                 // (opening the share sheet). Background warm-ups (app open, From Friends

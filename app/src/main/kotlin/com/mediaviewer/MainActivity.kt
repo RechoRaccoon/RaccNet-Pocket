@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
@@ -37,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material3.Text
 import com.mediaviewer.model.AppMode
+import com.mediaviewer.model.ScreenState
 import com.mediaviewer.ui.GlassBackdrop
 import com.mediaviewer.ui.LocalGlassIntensity
 import com.mediaviewer.ui.LocalGlassRimIntensity
@@ -48,8 +50,12 @@ import com.mediaviewer.ui.MainFeedScreen
 import com.mediaviewer.ui.PixelMatrixOverlay
 import com.mediaviewer.ui.PixelPhase
 import com.mediaviewer.ui.ProfileOverlay
+import com.mediaviewer.ui.fetchDominantColor
 import com.mediaviewer.ui.rememberDominantColor
 import com.mediaviewer.ui.rememberPixelTransitionController
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import com.mediaviewer.ui.QuoteRepostDialog
 import com.mediaviewer.ui.ReplyDialog
 import com.mediaviewer.ui.SearchOverlay
@@ -233,31 +239,54 @@ private fun AppRoot(viewModel: MainViewModel) {
     var currentDominantColor by remember { mutableStateOf(NeutralGlassTint) }
 
     // ── Retro pixel-matrix transition/loading overlay ──────────────────────
-    // One shared controller drives both scenarios described in the design
-    // spec: the cold-boot splash (Scenario A) and profile-navigation
-    // transitions (Scenario B). See PixelTransitionOverlay.kt for the state
-    // machine and rendering; everything below is just real app events
-    // (never artificial timers) driving it.
+    // One shared controller drives every scenario described in the design
+    // spec: the cold-boot splash, profile-navigation transitions, and
+    // opening a feed from the Feeds row. See PixelTransitionOverlay.kt for
+    // the state machine and rendering; everything below is just real app
+    // events (never artificial timers) driving it.
     val pixelController = rememberPixelTransitionController()
-    val selfThemeColor = rememberDominantColor(selfProfile?.author?.avatarUrl ?: "")
+    val context = LocalContext.current
+    val rootScope = rememberCoroutineScope()
 
     // Scenario A — cold boot: wipe in white/neutral the instant the app
     // launches, hue-shift to the logged-in user's own color the instant
-    // it's fetched (selfThemeColor resolving), then wipe out the instant
-    // the auth-restore/init sequence has actually finished (appInitialized)
-    // — not before, and not a fixed delay after.
+    // it's fetched, then wipe out only once BOTH the auth-restore/init
+    // sequence has actually finished (appInitialized) AND that color fetch
+    // has actually resolved and been applied — not before either one.
+    //
+    // Bug fix (per feedback — transition used to end way too early): this
+    // used to gate purely on `appInitialized`, and used the composable
+    // `rememberDominantColor` helper for the color itself — that helper has
+    // no "I'm done" signal of its own (it just silently keeps whatever
+    // color it last had until a fetch resolves), so there was no way to
+    // actually know the color was ready before calling finish(). This now
+    // calls the same underlying fetch as a plain suspend function
+    // (fetchDominantColor) directly, so `selfColorReady` only flips once
+    // that real fetch has genuinely completed (or there's truly nothing to
+    // fetch — no avatar at all).
+    var selfThemeColor by remember { mutableStateOf(Color(0xFFF2F2F2)) }
+    var selfColorReady by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         pixelController.start(this, Color(0xFFF2F2F2))
     }
-    LaunchedEffect(selfThemeColor) {
-        if (!selfProfile?.author?.avatarUrl.isNullOrBlank() &&
-            (pixelController.phase == PixelPhase.WIPE_IN || pixelController.phase == PixelPhase.LOADING)
-        ) {
-            pixelController.updateColor(selfThemeColor)
+    LaunchedEffect(selfProfile, appInitialized) {
+        val url = selfProfile?.author?.avatarUrl
+        if (!url.isNullOrBlank()) {
+            val c = fetchDominantColor(context, url)
+            selfThemeColor = c
+            if (pixelController.phase == PixelPhase.WIPE_IN || pixelController.phase == PixelPhase.LOADING) {
+                pixelController.updateColor(c)
+            }
+            selfColorReady = true
+        } else if (appInitialized) {
+            // Logged out, or genuinely no avatar to fetch — don't block the
+            // launch transition forever waiting for something that will
+            // never arrive.
+            selfColorReady = true
         }
     }
-    LaunchedEffect(appInitialized) {
-        if (appInitialized && pixelController.phase != PixelPhase.HIDDEN) pixelController.finish()
+    LaunchedEffect(appInitialized, selfColorReady) {
+        if (appInitialized && selfColorReady && pixelController.phase != PixelPhase.HIDDEN) pixelController.finish()
     }
 
     // Scenario B — profile navigation: the instant a *new* profile overlay
@@ -265,17 +294,60 @@ private fun AppRoot(viewModel: MainViewModel) {
     // target profile's color as soon as its avatar resolves; wipe out the
     // instant that profile's data has actually finished loading
     // (loadingProfile flips false).
+    //
+    // Bug fix (per feedback — playing on an already-loaded profile): a
+    // profile overlay is also reused, hidden rather than torn down, when
+    // the user pinches into a post from it (see ProfileOverlayState.hidden)
+    // — un-hiding it to go back is instant, nothing to load, so it must NOT
+    // replay the transition. This used to reset `trackedProfileDid` to null
+    // any time the overlay was hidden, which made un-hiding the SAME
+    // profile look identical to opening a brand new one next time this
+    // effect ran. It's now left untouched while hidden, and this effect
+    // exits immediately whenever hidden is true, so the transition only
+    // ever plays for a `did` that's genuinely never been tracked before.
     var trackedProfileDid by remember { mutableStateOf<String?>(null) }
     val openedProfileTargetColor = rememberDominantColor(profileOverlay?.author?.avatarUrl ?: "")
     LaunchedEffect(profileOverlay?.author?.did, profileOverlay?.loadingProfile, profileOverlay?.hidden) {
         val overlay = profileOverlay
-        if (overlay == null || overlay.hidden) { trackedProfileDid = null; return@LaunchedEffect }
+        if (overlay == null) { trackedProfileDid = null; return@LaunchedEffect }
+        if (overlay.hidden) return@LaunchedEffect
         if (overlay.author.did != trackedProfileDid) {
             trackedProfileDid = overlay.author.did
             pixelController.start(this, selfThemeColor)
         }
         if (!overlay.author.avatarUrl.isNullOrBlank()) pixelController.updateColor(openedProfileTargetColor)
-        if (!overlay.loadingProfile) pixelController.finish()
+        if (!overlay.loadingProfile && pixelController.phase != PixelPhase.HIDDEN) pixelController.finish()
+    }
+
+    // Scenario C — opening a feed from the Feeds row (item 4/7): tapping a
+    // *different* feed chip plays the same transition while the feed
+    // actually loads, then hue-shifts to that feed's own first post before
+    // revealing it — and, per feedback, the screen no longer switches to
+    // FEED until that load has genuinely finished (it used to switch
+    // immediately, scrolling into a feed that hadn't loaded yet). Tapping
+    // "Return to Feed"/swipe-up (onSwipeToFeed, wired separately in
+    // MainFeedScreen — never routes through this function) is deliberately
+    // NOT wrapped here: that's just scrolling into an already-loaded feed
+    // and should stay instant.
+    val handleSelectFeed: (String?) -> Unit = { uri ->
+        rootScope.launch {
+            pixelController.start(this, currentDominantColor)
+            viewModel.selectFeedFromAnyContext(uri)
+            // selectFeedFromAnyContext's "same feed, restore exactly from
+            // cache" fast-path (see its own doc comment) never flips
+            // isLoading at all — this short timeout only disambiguates
+            // that real, instant code path from a genuine network fetch;
+            // it is not standing in for network latency itself.
+            withTimeoutOrNull(300) { viewModel.isLoading.first { it } }
+            viewModel.isLoading.first { !it }
+            val firstMedia = viewModel.mediaItems.value.firstOrNull()
+            val feedColor = if (firstMedia != null) {
+                fetchDominantColor(context, firstMedia.thumbUrl.ifBlank { firstMedia.mediaUrl })
+            } else currentDominantColor
+            pixelController.updateColor(feedColor)
+            viewModel.setScreen(ScreenState.FEED)
+            pixelController.finish()
+        }
     }
 
     // Item 26: makes the glass-intensity dial reach every LiquidGlassSurface/
@@ -348,7 +420,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             onVoteComment             = viewModel::voteComment,
             // All feed-chip selections route through selectFeedFromAnyContext so that
             // selecting the previous feed while in an author overlay restores scroll position
-            onSelectFeed              = viewModel::selectFeedFromAnyContext,
+            onSelectFeed              = handleSelectFeed,
             onToggleDownloadOnLike    = viewModel::setDownloadOnLike,
             onDownloadAllLiked        = viewModel::downloadAllLiked,
             onCancelDownload          = viewModel::cancelDownloadAll,
