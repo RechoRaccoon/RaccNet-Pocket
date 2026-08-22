@@ -70,6 +70,14 @@ fun DmInboxOverlay(
     // every post shared in this conversation.
     onOpenSharedPostsFeed: () -> Unit = {}
 ) {
+    // Item 8: background/chrome now reflect the logged-in user's own
+    // profile color, the same pattern the Hub uses (see SettingsSheet's
+    // `dominantColor` shadow) — instead of the flat NeutralGlassTint this
+    // page used everywhere before. DmThreadView's own `myTint` already did
+    // this for "my" message bubbles specifically; this extends the same
+    // color to the page background and every other glass surface here.
+    val profileTint = if (selfAvatarUrl != null) rememberDominantColor(selfAvatarUrl) else NeutralGlassTint
+
     // Item 12 follow-up: the input box, send button, and shared-post cards
     // now sample a live recording of this page's own background — the same
     // technique SearchOverlay uses — instead of a flat rectangular fill.
@@ -89,7 +97,7 @@ fun DmInboxOverlay(
             Modifier.fillMaxSize()
                 .onGloballyPositioned { backdropOrigin = it.positionInRoot() }
                 .then(
-                    if (liquidGlass) Modifier.background(postBackgroundBrush(NeutralGlassTint)).drawWithContent {
+                    if (liquidGlass) Modifier.background(postBackgroundBrush(profileTint)).drawWithContent {
                         backdropLayer.record { this@drawWithContent.drawContent() }
                         drawContent()
                     } else Modifier.background(OledBlack)
@@ -106,7 +114,7 @@ fun DmInboxOverlay(
                 val shape = CircleShape
                 Box(
                     Modifier.size(32.dp)
-                        .then(if (liquidGlass) Modifier.glassPanel(true, shape = shape, tint = NeutralGlassTint) else Modifier.clip(shape).background(Color.White.copy(0.14f)))
+                        .then(if (liquidGlass) Modifier.glassPanel(true, shape = shape, tint = profileTint) else Modifier.clip(shape).background(Color.White.copy(0.14f)))
                         .clickable(onClick = if (thread != null) onCloseThread else onClose),
                     contentAlignment = Alignment.Center
                 ) {
@@ -135,10 +143,11 @@ fun DmInboxOverlay(
             HorizontalDivider(color = Color.White.copy(0.08f), thickness = 0.5.dp)
 
             if (thread == null) {
-                DmConversationPicker(conversations = conversations, loading = loading, liquidGlass = liquidGlass, onSelectConvo = onSelectConvo)
+                DmConversationPicker(conversations = conversations, loading = loading, liquidGlass = liquidGlass, tint = profileTint, onSelectConvo = onSelectConvo)
             } else {
                 DmThreadView(
                     thread = thread, liquidGlass = liquidGlass, selfAvatarUrl = selfAvatarUrl,
+                    profileTint = profileTint,
                     backdrop = dmBackdrop, onSendReply = onSendReply,
                     onLoadMoreMessages = onLoadMoreMessages, onOpenSharedPostsFeed = onOpenSharedPostsFeed
                 )
@@ -152,6 +161,7 @@ private fun DmConversationPicker(
     conversations: List<DmConversation>,
     loading: Boolean,
     liquidGlass: Boolean,
+    tint: Color = NeutralGlassTint,
     onSelectConvo: (DmConversation) -> Unit
 ) {
     // Only accounts we actually have history with — a mutual with no convo yet
@@ -176,7 +186,7 @@ private fun DmConversationPicker(
                         val shape = RoundedCornerShape(14.dp)
                         Row(
                             Modifier.fillMaxWidth()
-                                .then(if (liquidGlass) Modifier.glassPanel(true, shape = shape, tint = NeutralGlassTint) else Modifier.clip(shape).background(Color.White.copy(0.06f)))
+                                .then(if (liquidGlass) Modifier.glassPanel(true, shape = shape, tint = tint) else Modifier.clip(shape).background(Color.White.copy(0.06f)))
                                 .clickable { onSelectConvo(convo) }
                                 .padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -205,6 +215,10 @@ private fun DmThreadView(
     thread: MainViewModel.DmThreadState,
     liquidGlass: Boolean,
     selfAvatarUrl: String?,
+    // Item 8: page-wide profile color (see DmInboxOverlay's own doc
+    // comment) — used for the message field/send button glass, distinct
+    // from `myTint` below which stays specific to "my" chat bubbles.
+    profileTint: Color = NeutralGlassTint,
     backdrop: GlassBackdrop?,
     onSendReply: (String) -> Unit,
     onLoadMoreMessages: () -> Unit,
@@ -320,7 +334,7 @@ private fun DmThreadView(
                 }
             }
             if (liquidGlass) {
-                LiquidGlassSurface(Modifier.weight(1f).height(46.dp), shape = fieldShape, tint = NeutralGlassTint, backdrop = backdrop) { MessageFieldContent() }
+                LiquidGlassSurface(Modifier.weight(1f).height(46.dp), shape = fieldShape, tint = profileTint, backdrop = backdrop) { MessageFieldContent() }
             } else {
                 Box(Modifier.weight(1f).height(46.dp).clip(fieldShape).background(Color.White.copy(0.08f))) { MessageFieldContent() }
             }
@@ -337,7 +351,7 @@ private fun DmThreadView(
                 onSendReply(text.trim()); text = ""
             }
             if (liquidGlass) {
-                LiquidGlassSurface(sendModifier, shape = sendShape, tint = NeutralGlassTint, backdrop = backdrop) { SendButtonContent() }
+                LiquidGlassSurface(sendModifier, shape = sendShape, tint = profileTint, backdrop = backdrop) { SendButtonContent() }
             } else {
                 Box(sendModifier.clip(sendShape).background(Color.White.copy(0.14f))) { SendButtonContent() }
             }

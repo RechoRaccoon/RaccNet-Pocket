@@ -28,6 +28,10 @@ data class MediaItem(
     val videoBlobCid: String? = null,
     val postUri: String = "",
     val postCid: String = "",
+    // Item 4: see BskyFeedItem.feedContext — carried onto the flattened
+    // MediaItem so the "More" menu's Show more/less like this actions can
+    // send it back with the interaction.
+    val feedContext: String? = null,
     val author: AuthorInfo,
     val likeUri: String? = null,
     val repostUri: String? = null,
@@ -126,7 +130,12 @@ data class BskyTimelineResponse(val feed: List<BskyFeedItem>, val cursor: String
 data class BskyFeedItem(
     val post: BskyPost,
     val reply: BskyReply? = null,
-    val reason: BskyReason? = null
+    val reason: BskyReason? = null,
+    // Item 4: opaque token a feed generator attaches to its own skeleton
+    // items, passed straight through by the AppView — round-tripped back on
+    // sendInteractions calls (Show more/less like this) so the generator can
+    // tell which of its own feeds/algorithms the interaction is about.
+    val feedContext: String? = null
 )
 
 data class BskyPost(
@@ -393,6 +402,19 @@ data class BskyStarterPackRecord(
 // ── Batch post hydration (for "From Friends") ────────────────────────────────
 
 data class BskyGetPostsResponse(val posts: List<BskyPost>)
+
+// ── Item 4: "Show more/less like this" — Bluesky's own feed-personalization
+// interaction signal (app.bsky.feed.sendInteractions), sent back to whichever
+// feed generator supplied the post so it can fine-tune what it serves this
+// account next. `event` is one of the feed defs' known interaction event
+// strings — only requestMore/requestLess are used here (the "clickthrough"/
+// "interactionSeen" family covers passive view-tracking this app doesn't do).
+data class BskySendInteractionsRequest(val interactions: List<BskyInteraction>)
+data class BskyInteraction(
+    val item: String,
+    val event: String,
+    @SerializedName("feedContext") val feedContext: String? = null
+)
 
 data class BskyProfileBasic(
     val did: String,

@@ -2192,6 +2192,44 @@ _bskyDid.value          = session.did
         }
     }
 
+    // ── "Show more/less like this" (item 4) ─────────────────────────────────
+    // Sends Bluesky's own feed-personalization interaction signal for
+    // whichever post is currently on screen back to the AppView, which
+    // forwards it on to the feed generator that actually supplied it.
+    // Fire-and-forget from the UI's point of view — there's no per-post state
+    // to reflect back (unlike like/repost/bookmark), so a failure here is
+    // silent aside from the error banner; nothing needs reverting.
+    fun sendShowMoreLikeThisForCurrentItem() {
+        val item = currentItem.value ?: return
+        if (_appMode.value != AppMode.BLUESKY) return
+        viewModelScope.launch(Dispatchers.IO) {
+            bskyRepo.sendFeedInteraction(bskyToken, item.postUri, wantMore = true, feedContext = item.feedContext)
+                .onSuccess { showToast("Showing more like this") }
+                .onFailure { _errorMessage.value = "Couldn't send feedback: ${it.message}" }
+        }
+    }
+
+    fun sendShowLessLikeThisForCurrentItem() {
+        val item = currentItem.value ?: return
+        if (_appMode.value != AppMode.BLUESKY) return
+        viewModelScope.launch(Dispatchers.IO) {
+            bskyRepo.sendFeedInteraction(bskyToken, item.postUri, wantMore = false, feedContext = item.feedContext)
+                .onSuccess { showToast("Showing less like this") }
+                .onFailure { _errorMessage.value = "Couldn't send feedback: ${it.message}" }
+        }
+    }
+
+    // ── "Add account to list" from the interaction bar's More menu (item 4) ──
+    // Same underlying picker/flow as the existing auto-add-on-follow feature
+    // (see openListPicker above) — just manually triggered for whichever
+    // post's author is currently on screen, instead of automatically after a
+    // follow.
+    fun openListPickerForCurrentAuthor() {
+        val item = currentItem.value ?: return
+        if (_appMode.value != AppMode.BLUESKY) return
+        openListPicker(item.author.did)
+    }
+
     // ── Quote repost (item 5) ──────────────────────────────────────────────────
 
     fun openQuoteRepost() {

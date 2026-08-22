@@ -56,6 +56,10 @@ import com.mediaviewer.viewmodel.MainViewModel
 fun SearchOverlay(
     state: MainViewModel.SearchState,
     liquidGlass: Boolean,
+    // Item 8: the logged-in user's own avatar, so this page's background
+    // and glass surfaces reflect their profile color — same pattern the
+    // Hub (SettingsSheet's `dominantColor` shadow) and DM inbox use.
+    selfAvatarUrl: String? = null,
     onQueryChange: (String) -> Unit,
     onSelectFilter: (MainViewModel.SearchFilter) -> Unit,
     onOpenPost: (Int) -> Unit,
@@ -66,6 +70,10 @@ fun SearchOverlay(
     androidx.activity.compose.BackHandler(onBack = onClose)
     val focusRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
+
+    // Item 8: same profile-color pattern as the Hub/DM inbox — falls back
+    // to the shared neutral tint when there's no avatar yet.
+    val profileTint = if (selfAvatarUrl != null) rememberDominantColor(selfAvatarUrl) else NeutralGlassTint
 
     // Bug fix/roadmap: the search bar, its buttons, and the filter row now
     // float directly over this page's own background gradient — sampling it
@@ -97,7 +105,7 @@ fun SearchOverlay(
             Modifier.fillMaxSize()
                 .onGloballyPositioned { backdropOrigin = it.positionInRoot() }
                 .then(
-                    if (liquidGlass) Modifier.background(postBackgroundBrush(NeutralGlassTint)).drawWithContent {
+                    if (liquidGlass) Modifier.background(postBackgroundBrush(profileTint)).drawWithContent {
                         backdropLayer.record { this@drawWithContent.drawContent() }
                         drawContent()
                     } else Modifier.background(OledBlack)
@@ -113,7 +121,7 @@ fun SearchOverlay(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                SearchCloseBubble(liquidGlass = liquidGlass, backdrop = searchBackdrop, onClick = onClose)
+                SearchCloseBubble(liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop, onClick = onClose)
                 val fieldShape = RoundedCornerShape(24.dp)
                 @Composable
                 fun SearchFieldContent() {
@@ -132,7 +140,7 @@ fun SearchOverlay(
                     }
                 }
                 if (liquidGlass) {
-                    LiquidGlassSurface(Modifier.weight(1f).height(44.dp), shape = fieldShape, tint = NeutralGlassTint, backdrop = searchBackdrop) { SearchFieldContent() }
+                    LiquidGlassSurface(Modifier.weight(1f).height(44.dp), shape = fieldShape, tint = profileTint, backdrop = searchBackdrop) { SearchFieldContent() }
                 } else {
                     Box(Modifier.weight(1f).height(44.dp).clip(fieldShape).background(Color.White.copy(0.08f))) { SearchFieldContent() }
                 }
@@ -146,11 +154,11 @@ fun SearchOverlay(
             // live backdrop, instead of a fixed SpaceEvenly row between two
             // dividers.
             Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 14.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 5.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 MainViewModel.SearchFilter.entries.forEach { filter ->
-                    FilterChip(label = filter.label(), active = state.filter == filter, liquidGlass = liquidGlass, backdrop = searchBackdrop) { onSelectFilter(filter) }
+                    FilterChip(label = filter.label(), active = state.filter == filter, liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop) { onSelectFilter(filter) }
                 }
             }
             Spacer(Modifier.height(10.dp))
@@ -333,27 +341,34 @@ private fun FeedResultRow(feed: SearchFeedResult, liquidGlass: Boolean, onAdd: (
 // with a proper pill shape and glass rim, rather than plain Text with a
 // small-radius background, so this filter row visually matches the Hub's
 // "Feeds" row style the person asked for.
+// Item 7: restyled to match the profile pages' own sub-filter chips
+// (ProfileSubFilterRow in ProfileOverlay.kt — e.g. the Media tab's All/
+// Images/Videos row) instead of the bigger, more prominent tab-style pills
+// this used before: smaller corner radius, smaller/tighter text, and a
+// lower-alpha tint on the unselected state, so Search reads as visually
+// consistent with the rest of the app's filter rows rather than a heavier,
+// one-off treatment.
 @Composable
-private fun FilterChip(label: String, active: Boolean, liquidGlass: Boolean, backdrop: GlassBackdrop? = null, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(20.dp)
+private fun FilterChip(label: String, active: Boolean, liquidGlass: Boolean, tint: Color = NeutralGlassTint, backdrop: GlassBackdrop? = null, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
     @Composable
     fun ChipLabel() {
         Text(
-            label, color = if (active) Color.White else DimGray, fontSize = 13.sp,
+            label, color = if (active) Color.White else DimGray, fontSize = 11.sp,
             fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal
         )
     }
     if (liquidGlass) {
         LiquidGlassSurface(
             modifier = Modifier.clickable(onClick = onClick),
-            shape = shape, tint = if (active) NeutralGlassTint else NeutralGlassTint.copy(alpha = 0.5f), backdrop = backdrop
+            shape = shape, tint = if (active) tint else tint.copy(alpha = 0.4f), backdrop = backdrop
         ) {
-            Box(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) { ChipLabel() }
+            Box(Modifier.padding(horizontal = 9.dp, vertical = 4.dp)) { ChipLabel() }
         }
     } else {
         Box(
             Modifier.clip(shape).background(if (active) Color.White.copy(0.15f) else Color.White.copy(0.06f))
-                .clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 8.dp)
+                .clickable(onClick = onClick).padding(horizontal = 9.dp, vertical = 4.dp)
         ) { ChipLabel() }
     }
 }
@@ -363,10 +378,10 @@ private fun FilterChip(label: String, active: Boolean, liquidGlass: Boolean, bac
  *  "Close profile" content description, so it's mirrored here rather than
  *  reused. */
 @Composable
-private fun SearchCloseBubble(liquidGlass: Boolean, backdrop: GlassBackdrop? = null, onClick: () -> Unit) {
+private fun SearchCloseBubble(liquidGlass: Boolean, tint: Color = NeutralGlassTint, backdrop: GlassBackdrop? = null, onClick: () -> Unit) {
     val shape = CircleShape
     if (liquidGlass) {
-        LiquidGlassSurface(modifier = Modifier.size(30.dp).clickable(onClick = onClick), shape = shape, tint = NeutralGlassTint, backdrop = backdrop) {
+        LiquidGlassSurface(modifier = Modifier.size(30.dp).clickable(onClick = onClick), shape = shape, tint = tint, backdrop = backdrop) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Icon(Icons.Default.Close, contentDescription = "Close search", tint = Color.White, modifier = Modifier.size(16.dp))
             }

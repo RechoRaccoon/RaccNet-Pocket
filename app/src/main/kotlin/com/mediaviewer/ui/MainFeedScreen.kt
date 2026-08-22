@@ -224,6 +224,10 @@ fun MainFeedScreen(
     onQuoteRepost: () -> Unit,
     onBlockAccount: () -> Unit,
     onDownloadGif: () -> Unit,
+    // Item 4: "More" menu actions on the interaction bar.
+    onShowMoreLikeThis: () -> Unit = {},
+    onShowLessLikeThis: () -> Unit = {},
+    onAddAccountToList: () -> Unit = {},
     sentByExpanded: Boolean,
     onToggleSentByExpanded: () -> Unit,
     onOpenReplyToSender: () -> Unit,
@@ -348,6 +352,9 @@ fun MainFeedScreen(
                         onQuoteRepost     = onQuoteRepost,
                         onBlockAccount    = onBlockAccount,
                         onDownloadGif     = onDownloadGif,
+                        onShowMoreLikeThis = onShowMoreLikeThis,
+                        onShowLessLikeThis = onShowLessLikeThis,
+                        onAddAccountToList = onAddAccountToList,
                         sentByExpanded         = sentByExpanded,
                         onToggleSentByExpanded = onToggleSentByExpanded,
                         onOpenReplyToSender    = onOpenReplyToSender,
@@ -674,6 +681,10 @@ private fun FeedView(
     onQuoteRepost: () -> Unit,
     onBlockAccount: () -> Unit,
     onDownloadGif: () -> Unit,
+    // Item 4: "More" menu actions on the interaction bar.
+    onShowMoreLikeThis: () -> Unit = {},
+    onShowLessLikeThis: () -> Unit = {},
+    onAddAccountToList: () -> Unit = {},
     sentByExpanded: Boolean,
     onToggleSentByExpanded: () -> Unit,
     onOpenReplyToSender: () -> Unit,
@@ -739,6 +750,9 @@ private fun FeedView(
                     onQuoteRepost    = onQuoteRepost,
                     onBlockAccount   = onBlockAccount,
                     onDownloadGif    = onDownloadGif,
+                    onShowMoreLikeThis = onShowMoreLikeThis,
+                    onShowLessLikeThis = onShowLessLikeThis,
+                    onAddAccountToList = onAddAccountToList,
                     sentByExpanded         = sentByExpanded,
                     onToggleSentByExpanded = onToggleSentByExpanded,
                     onOpenReplyToSender    = onOpenReplyToSender,
@@ -777,6 +791,10 @@ private fun PostContent(
     onTapAuthor: () -> Unit,
     onSendPost: () -> Unit, onQuoteRepost: () -> Unit,
     onBlockAccount: () -> Unit, onDownloadGif: () -> Unit,
+    // Item 4: "More" menu actions on the interaction bar.
+    onShowMoreLikeThis: () -> Unit = {},
+    onShowLessLikeThis: () -> Unit = {},
+    onAddAccountToList: () -> Unit = {},
     sentByExpanded: Boolean, onToggleSentByExpanded: () -> Unit,
     onOpenReplyToSender: () -> Unit,
     onTapSentByAuthor: (AuthorInfo) -> Unit = {},
@@ -1141,7 +1159,21 @@ private fun PostContent(
                 VideoPlayer(
                     item.videoPlaylistUrl, mediaModifier,
                     controlsVisible = videoControlsVisible,
-                    onToggleControls = { videoControlsVisible = !videoControlsVisible },
+                    // Item 11: while zoomed in, a tap just pauses/plays
+                    // instead of toggling the transport controls — those
+                    // stay hidden entirely at this zoom level (see the
+                    // `scale <= 1.05f` gate below on where they're actually
+                    // rendered), so there'd be nothing for a tap to reveal
+                    // that wouldn't immediately end up mispositioned by the
+                    // zoom/pan transform anyway (the bug this whole item is
+                    // fixing).
+                    onToggleControls = {
+                        if (scale > 1.05f) {
+                            videoPlayerRef?.let { p -> if (p.isPlaying) p.pause() else p.play() }
+                        } else {
+                            videoControlsVisible = !videoControlsVisible
+                        }
+                    },
                     isBlocked = item.isBlocked,
                     thumbUrl = item.thumbUrl,
                     onPlayerReady = { videoPlayerRef = it },
@@ -1205,7 +1237,17 @@ private fun PostContent(
         // the recorded box too (see the doc comment on VideoPlayer). Positioned
         // by converting the video's reported root-relative bounds back into this
         // Box's own local coordinate space via `postBoxRootOrigin`.
-        if (item.isVideo && !item.isBlocked && videoControlsVisible && videoBoundsSize != IntSize.Zero) {
+        // Item 11: also gated on `scale <= 1.05f` — while zoomed in, this bar's
+        // position was computed from the video's *unzoomed* on-screen bounds
+        // (videoBoundsOrigin/Size, reported by VideoPlayer's own
+        // onGloballyPositioned before the zoom graphicsLayer transform is
+        // applied to it), so once the video itself was scaled/panned via
+        // pinch, this bar just sat at its old, now-wrong position — reading
+        // as "the UI breaks and moves off screen". Simplest correct fix:
+        // don't show it at all while zoomed (matches the tap-to-pause
+        // replacement above), rather than trying to keep a second transform
+        // in sync with the first.
+        if (item.isVideo && !item.isBlocked && scale <= 1.05f && videoControlsVisible && videoBoundsSize != IntSize.Zero) {
             val density = LocalDensity.current
             val localOrigin = videoBoundsOrigin - postBoxRootOrigin
             val vbx = with(density) { localOrigin.x.toDp() }
@@ -1431,7 +1473,10 @@ private fun PostContent(
                         .height(if (liquidGlass) 60.dp else 52.dp),
                     liquidGlass = liquidGlass,
                     dominantColor = dominantColor,
-                    backdrop = glassBackdrop
+                    backdrop = glassBackdrop,
+                    onShowMoreLikeThis = onShowMoreLikeThis,
+                    onShowLessLikeThis = onShowLessLikeThis,
+                    onAddAccountToList = onAddAccountToList
                 )
             }
         }
@@ -1979,39 +2024,54 @@ private fun ActionRow(
     onToggleBookmark: () -> Unit, onE621Vote: (Int) -> Unit,
     onQuoteRepost: () -> Unit, onDownload: () -> Unit,
     onDownloadGif: () -> Unit, onBlockAccount: () -> Unit, onShare: () -> Unit,
-    modifier: Modifier, liquidGlass: Boolean, dominantColor: Color, backdrop: GlassBackdrop?
+    modifier: Modifier, liquidGlass: Boolean, dominantColor: Color, backdrop: GlassBackdrop?,
+    // Item 4: the "More" menu that replaced the old fixed Block button.
+    onShowMoreLikeThis: () -> Unit = {},
+    onShowLessLikeThis: () -> Unit = {},
+    onAddAccountToList: () -> Unit = {}
 ) {
     @Composable
     fun RowContent() {
         if (appMode == AppMode.BLUESKY) {
-            // Item 1: like / upload / block are the three fixed anchors —
-            // left, middle, right. The two triples in between (save/repost/
-            // quote-repost, and share/download/GIF) each live in their own
-            // equal-weight Row with SpaceEvenly, so they automatically
-            // distribute themselves across whatever room is left between the
-            // anchors instead of ever overlapping — and since both weighted
-            // Rows get identical width (equal weight, and Like/Block are the
-            // same fixed size), the upload button naturally lands dead-center.
+            // Item 9: blocking collapses the whole bar down to a single
+            // centered "Unblock" button — every normal action is hidden
+            // while an account is blocked, since none of them apply to a
+            // blocked account's posts. Tapping anywhere on the bar unblocks.
+            if (item.isBlocked) {
+                Box(
+                    Modifier.fillMaxSize().clickable(onClick = onBlockAccount),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("Unblock", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
+                return
+            }
+            // Item 3: with the old upload placeholder removed from this bar
+            // (it moved to the Hub's Return to Feed bar — see
+            // ReturnToFeedBar/HubUploadBubble in SettingsSheet.kt), every
+            // remaining button is just spread evenly across the full row —
+            // the same single flat SpaceEvenly Row the e621 branch below
+            // already used, now with Like as the first anchor and the new
+            // "More" button (item 4) as the last.
             Row(modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
-                verticalAlignment = Alignment.CenterVertically) {
+                horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                 ActionButton(if (item.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
                     if (item.isLiked) LikeRed else Color.White, null, onToggleLike)
-                Row(Modifier.weight(1f).fillMaxHeight(),
-                    horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                    ActionButton(if (item.isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
-                        if (item.isBookmarked) BookmarkYellow else Color.White, null, onToggleBookmark)
-                    ActionButton(Icons.Default.Repeat,
-                        if (item.isReposted) RepostGreen else Color.White, null, onToggleRepost)
-                    ActionButton(Icons.Default.EditNote, if (item.isQuoteReposted) RepostGreen else Color.White, null, onQuoteRepost)
-                }
-                UploadPlaceholderButton(liquidGlass, dominantColor = dominantColor, backdrop = backdrop)
-                Row(Modifier.weight(1f).fillMaxHeight(),
-                    horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                    ActionButton(Icons.Default.Send, Color.White, null, onShare)
-                    ActionButton(Icons.Default.Download, if (item.isDownloaded) BookmarkYellow else Color.White, null, onDownload)
-                    GifActionButton(onDownloadGif, if (item.isGifDownloaded) BookmarkYellow else Color.White)
-                }
-                ActionButton(Icons.Default.Block, if (item.isBlocked) Color(0xFFE0245E) else Color.White, null, onBlockAccount)
+                ActionButton(if (item.isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
+                    if (item.isBookmarked) BookmarkYellow else Color.White, null, onToggleBookmark)
+                ActionButton(Icons.Default.Repeat,
+                    if (item.isReposted) RepostGreen else Color.White, null, onToggleRepost)
+                ActionButton(Icons.Default.EditNote, if (item.isQuoteReposted) RepostGreen else Color.White, null, onQuoteRepost)
+                ActionButton(Icons.Default.Send, Color.White, null, onShare)
+                ActionButton(Icons.Default.Download, if (item.isDownloaded) BookmarkYellow else Color.White, null, onDownload)
+                GifActionButton(onDownloadGif, if (item.isGifDownloaded) BookmarkYellow else Color.White)
+                MoreButton(
+                    liquidGlass = liquidGlass, tint = dominantColor,
+                    onShowMoreLikeThis = onShowMoreLikeThis,
+                    onShowLessLikeThis = onShowLessLikeThis,
+                    onAddAccountToList = onAddAccountToList,
+                    onBlock = onBlockAccount
+                )
             }
         } else {
             // Item 15: matches the AT Protocol bar's layout language — no raw score
@@ -2041,6 +2101,38 @@ private fun ActionRow(
         ) { content() }
     } else {
         Box(modifier.background(Color.Black.copy(0.55f))) { content() }
+    }
+}
+
+/** Item 4: replaces the old fixed Block button — a hamburger-style "More"
+ *  icon (three stacked horizontal lines) that opens a small right-aligned
+ *  glass menu of text actions above the bar (see [GlassDropdownMenu] in
+ *  GlassTheme.kt, also reused by the Hub's upload button — item 5). "Add
+ *  account to list" opens the app's existing Add To sheet; "Show more/less
+ *  like this" send Bluesky's own feed-personalization interaction signal
+ *  (see MainViewModel.sendShowMoreLikeThis/sendShowLessLikeThis); "Block"
+ *  is the same block/unblock action the old fixed button used to trigger
+ *  directly. */
+@Composable
+private fun MoreButton(
+    liquidGlass: Boolean, tint: Color,
+    onShowMoreLikeThis: () -> Unit, onShowLessLikeThis: () -> Unit,
+    onAddAccountToList: () -> Unit, onBlock: () -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        ActionButton(Icons.Default.Menu, Color.White, null) { expanded = true }
+        GlassDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            items = listOf(
+                GlassMenuItem("Show more like this") { onShowMoreLikeThis() },
+                GlassMenuItem("Show less like this") { onShowLessLikeThis() },
+                GlassMenuItem("Add account to list") { onAddAccountToList() },
+                GlassMenuItem("Block", destructive = true) { onBlock() }
+            ),
+            liquidGlass = liquidGlass, tint = tint
+        )
     }
 }
 
@@ -2204,7 +2296,13 @@ private fun VideoPlayer(
                     // show up in the live backdrop-blur capture.
                     (android.view.LayoutInflater.from(ctx).inflate(com.mediaviewer.R.layout.player_view_texture, null) as PlayerView).apply {
                         this.player = player; useController = false
-                        setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                        // Item 10: PlayerView's own native buffering spinner
+                        // used to show WHEN_PLAYING, stacked directly on top
+                        // of the Compose-drawn white CircularProgressIndicator
+                        // below — two loading indicators overlapping every
+                        // time a video buffered. Only the Compose one (styled
+                        // to match the rest of this app's UI) should show.
+                        setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
                         setBackgroundColor(android.graphics.Color.TRANSPARENT)
                     }
                 },
@@ -2235,19 +2333,68 @@ private fun VideoSeekBar(
     onSeekFinish: () -> Unit
 ) {
     val shape = RoundedCornerShape(16.dp)
+    // Item 12: a fully custom track/thumb, replacing Material3's Slider.
+    // Slider's built-in thumb reserves extra horizontal touch-target
+    // padding on both ends — the reported gaps flanking the visible track
+    // inside this bar — always paints a second, lower-alpha "inactive"
+    // track spanning the remaining duration, and draws a small
+    // stop-indicator dot at the track's far end. This custom version has
+    // none of that: the track genuinely spans this bar's full inner width
+    // (no reserved end padding), only the watched portion draws anything
+    // (no grey inactive segment), and the small circle marks the *current*
+    // position rather than a fixed track endpoint (no end dot).
+    var dragProgress by remember { mutableStateOf<Float?>(null) }
+    val committedProgress = if (durationMs > 0) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
+    val shownProgress = dragProgress ?: committedProgress
+    var trackWidthPx by remember { mutableStateOf(0) }
+    val density = LocalDensity.current
+    val thumbSizePx = with(density) { 12.dp.roundToPx() }
+
     val barContent: @Composable BoxScope.() -> Unit = {
-        Slider(
-            value = if (durationMs > 0) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f,
-            onValueChange = { frac -> onSeeking((frac * durationMs).toLong()) },
-            onValueChangeFinished = onSeekFinish,
-            enabled = durationMs > 0,
-            colors = SliderDefaults.colors(
-                thumbColor = Color.White,
-                activeTrackColor = Color.White.copy(alpha = 0.9f),
-                inactiveTrackColor = Color.White.copy(alpha = 0.25f)
-            ),
-            modifier = Modifier.fillMaxWidth().height(20.dp).padding(horizontal = 14.dp, vertical = 8.dp)
-        )
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(20.dp)
+                .padding(horizontal = 14.dp, vertical = 8.dp)
+                .onSizeChanged { trackWidthPx = it.width }
+                .pointerInput(durationMs) {
+                    if (durationMs <= 0) return@pointerInput
+                    detectTapGestures(onTap = { offset ->
+                        onSeeking(((offset.x / size.width).coerceIn(0f, 1f) * durationMs).toLong())
+                        onSeekFinish()
+                    })
+                }
+                .pointerInput(durationMs) {
+                    if (durationMs <= 0) return@pointerInput
+                    detectDragGestures(
+                        onDragStart = { offset -> dragProgress = (offset.x / size.width).coerceIn(0f, 1f) },
+                        onDrag = { change, _ ->
+                            change.consume()
+                            val frac = (change.position.x / size.width).coerceIn(0f, 1f)
+                            dragProgress = frac
+                            onSeeking((frac * durationMs).toLong())
+                        },
+                        onDragEnd = { dragProgress = null; onSeekFinish() },
+                        onDragCancel = { dragProgress = null }
+                    )
+                },
+            contentAlignment = Alignment.CenterStart
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth(shownProgress)
+                    .height(3.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Color.White.copy(alpha = 0.9f))
+            )
+            Box(
+                Modifier
+                    .size(12.dp)
+                    .offset { IntOffset((shownProgress * trackWidthPx).toInt() - thumbSizePx / 2, 0) }
+                    .clip(CircleShape)
+                    .background(Color.White)
+            )
+        }
     }
     if (liquidGlass) {
         LiquidGlassSurface(

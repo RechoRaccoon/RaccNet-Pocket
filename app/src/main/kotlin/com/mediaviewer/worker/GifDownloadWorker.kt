@@ -38,7 +38,7 @@ class GifDownloadWorker(private val context: Context, params: WorkerParameters) 
         // playlist) isn't itself a downloadable file — resolve the real blob.
         const val KEY_BLOB_DID = "blob_did"
         const val KEY_BLOB_CID = "blob_cid"
-        const val FOLDER_NAME  = "SimpleOSFeed"
+        const val FOLDER_NAME  = "RaccNet Pocket"
         private const val FRAME_INTERVAL_US = 100_000L   // 100ms between frames
         private const val MAX_CAPTURE_US    = 20_000_000L // cap at 20s of source video
 

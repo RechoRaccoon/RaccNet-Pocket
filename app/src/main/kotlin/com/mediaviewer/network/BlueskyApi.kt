@@ -72,6 +72,15 @@ interface BlueskyApi {
         @Query("cursor") cursor: String? = null
     ): Response<BskySearchStarterPacksResponse>
 
+    // Item 4: "Show more/less like this" — Bluesky's own feed-personalization
+    // signal, forwarded by the AppView to whichever feed generator supplied
+    // the post.
+    @POST("xrpc/app.bsky.feed.sendInteractions")
+    suspend fun sendInteractions(
+        @Header("Authorization") token: String,
+        @Body request: BskySendInteractionsRequest
+    ): Response<Unit>
+
     @POST("xrpc/com.atproto.repo.createRecord")
     suspend fun createRecord(
         @Header("Authorization") token: String,

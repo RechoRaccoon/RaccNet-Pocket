@@ -35,9 +35,14 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import coil.request.ImageRequest
 import com.mediaviewer.ui.theme.DimGray
 
@@ -428,6 +433,80 @@ fun UploadPlaceholderButton(
             contentAlignment = Alignment.Center
         ) {
             Icon(Icons.Default.Add, contentDescription = "Upload", tint = Color.White, modifier = Modifier.size(20.dp))
+        }
+    }
+}
+
+/** One row in a [GlassDropdownMenu]. [destructive] tints the label red
+ *  (used for "Block") — everything else stays plain white. */
+data class GlassMenuItem(
+    val label: String,
+    val destructive: Boolean = false,
+    val onClick: () -> Unit
+)
+
+/** A small right-aligned, text-only popup menu with dividers between rows —
+ *  shared by the feed interaction bar's "More" button (item 4: Show more/
+ *  less like this, Add account to list, Block) and the Hub's upload button
+ *  (item 5: Post/Blog/Review/Record/Go Live). Renders via [Popup] so it
+ *  floats in its own layer above everything else — it never has to worry
+ *  about the crash-prone "reading a GraphicsLayer while it's mid-recording"
+ *  restriction the rest of this file's live-backdrop panels are subject to
+ *  (see the comments on QuickActionMenu/video controls in MainFeedScreen),
+ *  since it's not a descendant of whatever Box is doing that recording.
+ *
+ *  Positioned with its TopEnd corner pinned to the anchor's TopEnd corner,
+ *  then nudged up by its own height plus a small gap — so it always opens
+ *  *above* the anchor (the interaction bar / upload button it belongs to),
+ *  right-aligned to it, regardless of where on screen that anchor sits.
+ *  Uses [glassPanel] (a still tint, not a live backdrop) since a floating
+ *  overlay like this isn't tied to any one patch of underlying media. */
+@Composable
+fun GlassDropdownMenu(
+    expanded: Boolean,
+    onDismissRequest: () -> Unit,
+    items: List<GlassMenuItem>,
+    liquidGlass: Boolean,
+    tint: Color = NeutralGlassTint,
+    modifier: Modifier = Modifier
+) {
+    if (!expanded) return
+    val density = LocalDensity.current
+    val itemHeightDp = 40.dp
+    val gapDp = 8.dp
+    val menuHeightPx = with(density) { (itemHeightDp * items.size + gapDp).roundToPx() }
+    val shape = RoundedCornerShape(14.dp)
+    Popup(
+        alignment = Alignment.TopEnd,
+        offset = IntOffset(0, -menuHeightPx),
+        onDismissRequest = onDismissRequest,
+        properties = PopupProperties(focusable = true)
+    ) {
+        Column(
+            modifier
+                .width(190.dp)
+                .then(
+                    if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
+                    else Modifier.clip(shape).background(Color(0xE6161616)).border(1.dp, Color.White.copy(0.12f), shape)
+                )
+        ) {
+            items.forEachIndexed { index, item ->
+                Box(
+                    Modifier.fillMaxWidth().height(itemHeightDp)
+                        .clickable { onDismissRequest(); item.onClick() },
+                    contentAlignment = Alignment.CenterEnd
+                ) {
+                    Text(
+                        item.label,
+                        color = if (item.destructive) Color(0xFFE0245E) else Color.White,
+                        fontSize = 13.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.End,
+                        modifier = Modifier.padding(horizontal = 14.dp)
+                    )
+                }
+                if (index != items.lastIndex) {
+                    Box(Modifier.fillMaxWidth().padding(horizontal = 10.dp).height(1.dp).background(Color.White.copy(alpha = 0.12f)))
+                }
+            }
         }
     }
 }

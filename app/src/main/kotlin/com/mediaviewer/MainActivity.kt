@@ -466,6 +466,10 @@ private fun AppRoot(viewModel: MainViewModel) {
             onQuoteRepost             = viewModel::openQuoteRepost,
             onBlockAccount            = viewModel::toggleBlockCurrentAuthor,
             onDownloadGif             = viewModel::downloadCurrentItemAsGif,
+            // Item 4: "More" menu on the interaction bar.
+            onShowMoreLikeThis        = viewModel::sendShowMoreLikeThisForCurrentItem,
+            onShowLessLikeThis        = viewModel::sendShowLessLikeThisForCurrentItem,
+            onAddAccountToList        = viewModel::openListPickerForCurrentAuthor,
             sentByExpanded            = sentByExpanded,
             onToggleSentByExpanded    = viewModel::toggleSentByExpanded,
             onOpenReplyToSender       = viewModel::openReplyToSender,
@@ -523,6 +527,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             SearchOverlay(
                 state           = searchState,
                 liquidGlass     = liquidGlass,
+                selfAvatarUrl   = selfProfile?.author?.avatarUrl,
                 onQueryChange   = viewModel::runSearch,
                 onSelectFilter  = viewModel::setSearchFilter,
                 onOpenPost      = viewModel::openPostFromSearch,

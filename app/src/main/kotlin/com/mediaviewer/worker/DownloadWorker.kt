@@ -24,7 +24,7 @@ class DownloadWorker(private val context: Context, params: WorkerParameters) : C
         const val KEY_BLOB_DID  = "blob_did"
         const val KEY_BLOB_CID  = "blob_cid"
         // ALL downloads (images + videos) go to the same DCIM folder
-        const val FOLDER_NAME   = "SimpleOSFeed"
+        const val FOLDER_NAME   = "RaccNet Pocket"
 
         fun enqueue(context: Context, url: String, filename: String, mimeType: String, postId: String = "") {
             if (isAlreadyDownloaded(context, postId)) return

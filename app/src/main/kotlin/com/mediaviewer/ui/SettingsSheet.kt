@@ -8,6 +8,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import kotlinx.coroutines.launch
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.animateFloat
@@ -277,7 +278,7 @@ fun SettingsSheet(
                 .windowInsetsPadding(WindowInsets.statusBars),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(8.dp))
 
             // ── Hub header: 3-way page switcher — same visual language as the
             // 3-button quick-access row (always-visible glass rim, equal
@@ -366,7 +367,7 @@ fun SettingsSheet(
                     withStyle(SpanStyle(color = Color(0xFF00FF07))) { append("Recho Raccoon") }
                 },
                 color = DimGray, fontSize = 11.sp, textAlign = TextAlign.Center,
-                modifier = Modifier.padding(bottom = 20.dp, top = 4.dp)
+                modifier = Modifier.padding(bottom = 20.dp, top = 2.dp)
             )
         }
     }
@@ -897,41 +898,21 @@ private fun AtProtocolPageContent(
     // its own Box layer with bottom padding reserved for the bar's height,
     // and the bar itself is a second Box layer pinned to BottomCenter,
     // fixed in place on screen the way the screenshot expects.
-    // Bug fix (per feedback — Return to Feed bar didn't reflect anything):
-    // the `backdrop` param this whole page receives is the *feed's* last
-    // captured frame (see MainFeedScreen's `onBackdropChanged`, only fed by
-    // the FEED screen's own posts) — frozen at whatever it last was before
-    // leaving the feed, and genuinely null on a cold app start now that the
-    // app opens on the Hub first (see this session's init{} change), since
-    // no feed post has ever been composed yet to capture one from. The
-    // Return to Feed bar is supposed to read as glass over the Hub's own
-    // content behind it, not a stale picture of a feed post — so it now
-    // gets its own live backdrop, re-recorded from this page's own
-    // scrollable content every frame, the same "record this frame's real
-    // pixels into a shared layer" pattern PostContent uses for feed posts
-    // (see backdropLayer.record there). Crash-avoidance note (matching
-    // that same file's QuickActionMenu/video-controls comment): the bar
-    // itself must stay OUTSIDE the Box being recorded below — it reads
-    // from hubBackdropLayer via LiquidGlassSurface's drawLayer(...), and a
-    // GraphicsLayer can't be drawn while it's still in the middle of being
-    // recorded into.
-    val hubBackdropLayer = rememberGraphicsLayer()
-    var hubBackdropOrigin by remember { mutableStateOf(Offset.Zero) }
-    val hubBackdrop = remember(liquidGlass, hubBackdropLayer) {
-        if (liquidGlass) GlassBackdrop(hubBackdropLayer) { hubBackdropOrigin } else null
-    }
+    // Bug fix (per feedback — Return to Feed/Refresh should read as a plain
+    // card like the Settings/AT Protocol/e621 chips above, not a live
+    // reflective panel): this bar used to read from its own live,
+    // every-frame-recorded backdrop layer (mirroring whatever was actually
+    // scrolling underneath it), which made it look and feel distinct from
+    // those chips. It's now passed `backdrop = null` at both call sites
+    // below, same as those chips effectively render — a still frosted tint
+    // + rim, no live capture — so the whole Hub reads as one consistent
+    // "card" visual language. The recording machinery that used to feed it
+    // is gone along with it.
 
     Box(Modifier.fillMaxSize()) {
     Column(
         Modifier
             .fillMaxSize()
-            .then(if (liquidGlass) Modifier.onGloballyPositioned { hubBackdropOrigin = it.positionInRoot() } else Modifier)
-            .then(
-                if (liquidGlass) Modifier.drawWithContent {
-                    hubBackdropLayer.record { this@drawWithContent.drawContent() }
-                    drawContent()
-                } else Modifier
-            )
             .verticalScroll(rememberScrollState())
             .padding(bottom = RETURN_TO_FEED_BAR_RESERVED_HEIGHT)
     ) {
@@ -1299,8 +1280,16 @@ private fun AtProtocolPageContent(
     // uses 14.dp (see the HubChip Row above) — leaving the two rows
     // visually misaligned. Matching that same 14.dp here lines this bar's
     // left/right edges up exactly with the chips'.
-    Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 14.dp).padding(bottom = 8.dp)) {
-        ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = hubBackdrop,
+    // Bug fix (per feedback — too much air between this bar and the
+    // "Created by" credit below it, more than between that credit and the
+    // gesture bar): this used to sit 8.dp off the bottom of the page's own
+    // fillMaxSize() Box, which — combined with the credit's own top
+    // padding — read as a bigger gap above the credit than below it.
+    // Dropped to 2.dp so the bar sits a little lower, right up against the
+    // credit, matching (rather than exceeding) the credit's own bottom
+    // margin.
+    Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 14.dp).padding(bottom = 2.dp)) {
+        ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = null,
             onReturnToFeed = onReturnToFeed, onRefresh = onRefreshHub, hasVisitedFeed = hasVisitedFeed)
     }
     }
@@ -1522,14 +1511,10 @@ private fun embedUrlFor(stream: com.mediaviewer.model.BlueskyLiveNowStream): Str
 private fun HubRefreshBubble(
     liquidGlass: Boolean, tint: Color, onRefresh: () -> Unit, size: androidx.compose.ui.unit.Dp = 26.dp,
     modifier: Modifier = Modifier,
-    // Bug fix (per feedback — refresh button needs the same real-time
-    // reflections as the Return to Feed bar beside it): this used to be
-    // plain Modifier.glassPanel, which never reflects anything (see that
-    // modifier's own doc comment in GlassTheme.kt) — only
-    // LiquidGlassSurface's `backdrop` param actually does. Callers now pass
-    // through the exact same live backdrop (hubBackdrop/e621Backdrop) they
-    // already hand to ReturnToFeedBar, so both buttons sitting side by side
-    // reflect the same live content underneath them.
+    // Item 2: no longer reflective — callers now pass `null` here (same as
+    // the Return to Feed bar beside it and the HubUploadBubble on its other
+    // side), so this reads as a plain glass card matching the Settings/AT
+    // Protocol/e621 chips above rather than a live-reflection panel.
     backdrop: GlassBackdrop? = null
 ) {
     val scope = rememberCoroutineScope()
@@ -1560,12 +1545,62 @@ private fun HubRefreshBubble(
     }
 }
 
+/** Item 3/5: the Hub's own upload placeholder — moved here from the feed's
+ *  interaction bar (that bar's old center [UploadPlaceholderButton] is gone;
+ *  see ActionRow in MainFeedScreen.kt). A circular "+" bubble, matching
+ *  [HubRefreshBubble]'s sizing/shape so the pair reads as symmetric anchors
+ *  on either end of the Return to Feed pill. Tapping it opens the same
+ *  [GlassDropdownMenu] the interaction bar's "More" button uses, with
+ *  upload-flavored placeholder entries (item 5: Post/Blog/Review/Record/Go
+ *  Live — none wired to real functionality yet). The "+" itself rotates 45°
+ *  clockwise while the menu is open (and back on close) as an open/close
+ *  affordance, same idea as a standard "+" -> "x" FAB transform. */
+@Composable
+private fun HubUploadBubble(
+    liquidGlass: Boolean, tint: Color, size: androidx.compose.ui.unit.Dp = 26.dp,
+    modifier: Modifier = Modifier, backdrop: GlassBackdrop? = null
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val rotation by animateFloatAsState(if (expanded) 45f else 0f, animationSpec = tween(220), label = "uploadPlusRotation")
+    val shape = CircleShape
+    val clickModifier = Modifier.size(size).clickable { expanded = !expanded }
+
+    @Composable
+    fun IconContent() {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Icon(Icons.Default.Add, contentDescription = "Upload", tint = Color.White,
+                modifier = Modifier.size(16.dp).graphicsLayer { rotationZ = rotation })
+        }
+    }
+
+    Box {
+        if (liquidGlass) {
+            LiquidGlassSurface(modifier.then(clickModifier), shape = shape, tint = tint, backdrop = backdrop) { IconContent() }
+        } else {
+            Box(modifier.then(clickModifier).clip(shape).background(Color.White.copy(0.10f))) { IconContent() }
+        }
+        GlassDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            items = listOf(
+                GlassMenuItem("Post") {},
+                GlassMenuItem("Blog") {},
+                GlassMenuItem("Review") {},
+                GlassMenuItem("Record") {},
+                GlassMenuItem("Go Live") {}
+            ),
+            liquidGlass = liquidGlass, tint = tint
+        )
+    }
+}
+
 /** Bottom-of-page control group that replaces the removed swipe-up-to-feed
  *  gesture: a centered "Return to Feed" glass pill that does exactly what
  *  swiping up used to. When [onRefresh] is supplied (the AT Protocol page,
- *  which owns the Hub refresh action), the refresh bubble sits immediately
- *  to its right, height-matched to the pill, so the pair reads as one
- *  centered group rather than two separate controls. */
+ *  which owns the Hub refresh action), a refresh bubble sits at its left
+ *  edge and the upload bubble (item 3/5) sits at its right edge — both
+ *  height-matched to the pill, so the group reads as one centered control
+ *  rather than several separate ones. */
 @Composable
 private fun ReturnToFeedBar(
     liquidGlass: Boolean,
@@ -1588,26 +1623,32 @@ private fun ReturnToFeedBar(
     // and sit centered as a small standalone group with the refresh bubble
     // — not the wide, left-anchored bar it used to be. The pill itself now
     // spans the full row again (from the actual left edge), just with its
-    // right side trimmed back by the refresh bubble's own width so the two
-    // never overlap; the refresh bubble is a sibling pinned to CenterEnd
-    // instead of trailing after the pill in a Row. The label text is a
-    // second sibling of both, aligned to Center of this *whole* Box (the
-    // full row width) rather than centered within the pill's own —
-    // trimmed, therefore off-center — bounds, so it reads as centered on
+    // sides trimmed back by the refresh/upload bubbles' own width so
+    // neither ever overlaps it; the two bubbles are siblings pinned to
+    // CenterStart/CenterEnd instead of trailing after the pill in a Row.
+    // The label text is a third sibling, aligned to Center of this *whole*
+    // Box (the full row width) rather than centered within the pill's own
+    // — trimmed, therefore off-center — bounds, so it reads as centered on
     // the screen the way a plain "Return to Feed" button always did,
-    // regardless of how much room the refresh bubble eats out of the right
-    // side.
+    // regardless of how much room the bubbles eat out of either side.
+    //
+    // Item 3: refresh moved from the right side to the left, and a new
+    // circular upload placeholder (item 5) now sits on the right in its
+    // place — both reserved independently since a caller could in theory
+    // supply one without the other (only [onRefresh] is actually optional
+    // today; the upload bubble always shows).
     val refreshReserve = if (onRefresh != null) (barHeight + 10.dp) else 0.dp
+    val uploadReserve = barHeight + 10.dp
 
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
         if (liquidGlass) {
             LiquidGlassSurface(
-                Modifier.fillMaxWidth().padding(end = refreshReserve).height(barHeight).clickable(onClick = onReturnToFeed),
+                Modifier.fillMaxWidth().padding(start = refreshReserve, end = uploadReserve).height(barHeight).clickable(onClick = onReturnToFeed),
                 shape = shape, tint = tint, backdrop = backdrop
             ) {}
         } else {
             Box(
-                Modifier.fillMaxWidth().padding(end = refreshReserve).height(barHeight)
+                Modifier.fillMaxWidth().padding(start = refreshReserve, end = uploadReserve).height(barHeight)
                     .clip(shape).background(Color.White.copy(0.08f)).clickable(onClick = onReturnToFeed)
             )
         }
@@ -1616,8 +1657,9 @@ private fun ReturnToFeedBar(
             modifier = Modifier.align(Alignment.Center)
         )
         if (onRefresh != null) {
-            HubRefreshBubble(liquidGlass, tint, onRefresh, size = barHeight, modifier = Modifier.align(Alignment.CenterEnd), backdrop = backdrop)
+            HubRefreshBubble(liquidGlass, tint, onRefresh, size = barHeight, modifier = Modifier.align(Alignment.CenterStart), backdrop = backdrop)
         }
+        HubUploadBubble(liquidGlass, tint, size = barHeight, modifier = Modifier.align(Alignment.CenterEnd), backdrop = backdrop)
     }
 }
 
@@ -1780,30 +1822,17 @@ private fun E621PageContent(
     var e621Key by remember { mutableStateOf("") }
     var localE621Tags by remember(e621SearchTags) { mutableStateOf(e621SearchTags) }
 
-    // Bug fix (per feedback — Return to Feed bar didn't reflect anything):
-    // same fix as AtProtocolPageContent's own `hubBackdrop` — see that
-    // composable's matching comment for the full reasoning. This page's
-    // Hot/Favorites/Following buttons keep using the feed-level `backdrop`
-    // param as before (unaffected either way, since this page's Return to
-    // Feed bar is the one actually called out), but the bar itself now
-    // reads from a live recording of this page's own content instead.
-    val e621BackdropLayer = rememberGraphicsLayer()
-    var e621BackdropOrigin by remember { mutableStateOf(Offset.Zero) }
-    val e621Backdrop = remember(liquidGlass, e621BackdropLayer) {
-        if (liquidGlass) GlassBackdrop(e621BackdropLayer) { e621BackdropOrigin } else null
-    }
-
+    // Bug fix (per feedback — Return to Feed/Refresh should read as a plain
+    // card like the Settings/AT Protocol/e621 chips above): same fix as
+    // AtProtocolPageContent's — the bar's live per-frame backdrop recording
+    // is gone; it's passed `backdrop = null` at the call site below instead,
+    // matching the chips' still-card look. This page's Hot/Favorites/
+    // Following buttons are unaffected — they keep using the feed-level
+    // `backdrop` param as before.
     Box(Modifier.fillMaxSize()) {
     Column(
         Modifier
             .fillMaxSize()
-            .then(if (liquidGlass) Modifier.onGloballyPositioned { e621BackdropOrigin = it.positionInRoot() } else Modifier)
-            .then(
-                if (liquidGlass) Modifier.drawWithContent {
-                    e621BackdropLayer.record { this@drawWithContent.drawContent() }
-                    drawContent()
-                } else Modifier
-            )
     ) {
         if (!e621LoggedIn) {
             Column(
@@ -1919,8 +1948,9 @@ private fun E621PageContent(
     if (e621LoggedIn) {
         // Bug fix: same edge-alignment fix as the AT Protocol page's
         // ReturnToFeedBar above — 14.dp matches the header chip row.
-        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 14.dp).padding(bottom = 8.dp)) {
-            ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = e621Backdrop, onReturnToFeed = onReturnToFeed, hasVisitedFeed = hasVisitedFeed)
+        // Bug fix: same lower-placement fix as the AT Protocol page's bar above.
+        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 14.dp).padding(bottom = 2.dp)) {
+            ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = null, onReturnToFeed = onReturnToFeed, hasVisitedFeed = hasVisitedFeed)
         }
     }
     }

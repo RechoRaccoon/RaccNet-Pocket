@@ -1142,6 +1142,21 @@ class BlueskyRepository {
 
     // ── Block (item 3) ────────────────────────────────────────────────────────
 
+    // ── Item 4: "Show more/less like this" ──────────────────────────────────
+    // Sends Bluesky's own feed-personalization interaction event
+    // (app.bsky.feed.defs#requestMore / #requestLess) for one post back to
+    // the AppView, which forwards it on to whichever feed generator actually
+    // supplied that post (via the post's own feedContext, if the generator
+    // set one) so it can fine-tune what it serves this account next.
+    suspend fun sendFeedInteraction(token: String, postUri: String, wantMore: Boolean, feedContext: String?): Result<Unit> = runCatching {
+        val event = if (wantMore) "app.bsky.feed.defs#requestMore" else "app.bsky.feed.defs#requestLess"
+        val resp = api.sendInteractions(
+            "Bearer $token",
+            BskySendInteractionsRequest(listOf(BskyInteraction(item = postUri, event = event, feedContext = feedContext)))
+        )
+        if (!resp.isSuccessful) error("sendInteractions ${resp.code()}")
+    }
+
     suspend fun blockUser(token: String, did: String, targetDid: String): Result<String> =
         createRecord(token, did, "app.bsky.graph.block", mapOf(
             "\$type" to "app.bsky.graph.block",
@@ -1618,7 +1633,7 @@ class BlueskyRepository {
             if (text.isBlank()) emptyList() else listOf(
                 MediaItem(
                     id = post.cid, mediaUrl = "", thumbUrl = "", isVideo = false,
-                    postUri = post.uri, postCid = post.cid,
+                    postUri = post.uri, postCid = post.cid, feedContext = item.feedContext,
                     author = author, likeUri = post.viewer?.like, repostUri = post.viewer?.repost,
                     isLiked = post.viewer?.like != null, isReposted = post.viewer?.repost != null,
                     likeCount = post.likeCount ?: 0, replyCount = post.replyCount ?: 0,
@@ -1686,7 +1701,7 @@ class BlueskyRepository {
                         listOf(
                             MediaItem(
                                 id = post.cid, mediaUrl = first.fullsize,
-                                thumbUrl = resolvedThumb(first), isVideo = false, postUri = post.uri, postCid = post.cid,
+                                thumbUrl = resolvedThumb(first), isVideo = false, postUri = post.uri, postCid = post.cid, feedContext = item.feedContext,
                                 author = author, likeUri = post.viewer?.like, repostUri = post.viewer?.repost,
                                 isLiked = post.viewer?.like != null, isReposted = post.viewer?.repost != null,
                                 likeCount = post.likeCount ?: 0, replyCount = post.replyCount ?: 0,
@@ -1703,7 +1718,7 @@ class BlueskyRepository {
                     MediaItem(
                         id = post.cid, mediaUrl = embed.thumbnail ?: "", thumbUrl = embed.thumbnail ?: "",
                         isVideo = true, videoPlaylistUrl = embed.playlist, videoBlobCid = embed.cid,
-                        postUri = post.uri, postCid = post.cid,
+                        postUri = post.uri, postCid = post.cid, feedContext = item.feedContext,
                         author = author, likeUri = post.viewer?.like, repostUri = post.viewer?.repost,
                         isLiked = post.viewer?.like != null, isReposted = post.viewer?.repost != null,
                         likeCount = post.likeCount ?: 0, replyCount = post.replyCount ?: 0,
@@ -1766,7 +1781,7 @@ class BlueskyRepository {
                                 // outer quote-repost post itself, not the quoted
                                 // one — same as tapping "repost" on a quote post
                                 // in the real Bluesky app.
-                                postUri = post.uri, postCid = post.cid,
+                                postUri = post.uri, postCid = post.cid, feedContext = item.feedContext,
                                 author = quotedAuthor,
                                 likeUri = post.viewer?.like, repostUri = post.viewer?.repost,
                                 isLiked = post.viewer?.like != null, isReposted = post.viewer?.repost != null,
