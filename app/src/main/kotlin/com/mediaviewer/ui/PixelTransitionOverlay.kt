@@ -14,6 +14,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -48,8 +49,26 @@ enum class PixelPhase { HIDDEN, WIPE_IN, LOADING, WIPE_OUT }
  *  4 — genuinely fast, crisp visual sweeps, not stand-ins for loading time).
  *  The LOADING phase's actual on-screen duration is entirely a function of
  *  how long the caller takes to call [updateColor]/[finish] — there is no
- *  `delay()` anywhere in this class gating that middle phase. */
-class PixelTransitionController {
+ *  `delay()` anywhere in this class gating that middle phase.
+ *
+ *  Bug fix — [scope] is now owned by the controller itself (supplied once,
+ *  at construction, by [rememberPixelTransitionController] via its own
+ *  `rememberCoroutineScope()`) instead of being passed in fresh by every
+ *  caller of [start]. It used to be passed in per-call, as the calling
+ *  composable's own `LaunchedEffect` scope — but that scope dies the instant
+ *  that particular effect gets cancelled (e.g. a `LaunchedEffect` whose keys
+ *  include a value that flips again moments later, which is a completely
+ *  normal thing to happen while a profile/feed is still loading), which
+ *  killed [conveyorJob] right along with it even though the transition
+ *  itself was logically still running — the "digital marquee" motion would
+ *  silently freeze for the rest of the transition (including all the way
+ *  through the Phase-4 exit wipe) while the wipe/color animations, driven
+ *  from whatever *new* effect execution picked up afterward, kept going.
+ *  Owning a stable scope up front means the conveyor loop's lifetime now
+ *  matches the controller's own logical start()→finish() lifetime exactly,
+ *  regardless of how many times or how erratically any particular call
+ *  site's own composition happens to recompose in between. */
+class PixelTransitionController(private val scope: CoroutineScope) {
     var phase by mutableStateOf(PixelPhase.HIDDEN)
         private set
 
@@ -92,7 +111,7 @@ class PixelTransitionController {
      *  real work to proceed in parallel. Safe to call again before a prior
      *  transition finished (e.g. rapid profile-to-profile navigation) —
      *  the new call's generation supersedes the old one's background loop. */
-    suspend fun start(scope: CoroutineScope, baseColor: Color) {
+    suspend fun start(baseColor: Color) {
         val myGeneration = ++generation
         conveyorJob?.cancel()
         colorFrom = baseColor
@@ -142,15 +161,24 @@ class PixelTransitionController {
     }
 
     companion object {
-        private const val WIPE_IN_MS = 260
-        private const val WIPE_OUT_MS = 220
+        // Item 5: both wipes slowed down a bit from their original 260/220 —
+        // still snappy, crisp sweeps, just a little more deliberate.
+        private const val WIPE_IN_MS = 380
+        private const val WIPE_OUT_MS = 340
         private const val THEME_SHIFT_MS = 420
         private const val CONVEYOR_STEP_MS = 90L
     }
 }
 
 @Composable
-fun rememberPixelTransitionController(): PixelTransitionController = remember { PixelTransitionController() }
+fun rememberPixelTransitionController(): PixelTransitionController {
+    // Bug fix: this scope is now handed to the controller once, at
+    // construction (see the class doc comment above) — it survives for as
+    // long as this composable stays in composition, independent of any
+    // particular call site's own LaunchedEffect churn.
+    val scope = rememberCoroutineScope()
+    return remember { PixelTransitionController(scope) }
+}
 
 // Stable, allocation-free pseudo-random hash — same cell coordinates always
 // produce the same jitter, so the "noisy scatter" pattern doesn't crawl/

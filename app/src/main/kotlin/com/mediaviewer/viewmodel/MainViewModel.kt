@@ -2203,7 +2203,7 @@ _bskyDid.value          = session.did
         val item = currentItem.value ?: return
         if (_appMode.value != AppMode.BLUESKY) return
         viewModelScope.launch(Dispatchers.IO) {
-            bskyRepo.sendFeedInteraction(bskyToken, item.postUri, wantMore = true, feedContext = item.feedContext)
+            bskyRepo.sendFeedInteraction(bskyToken, item.postUri, wantMore = true, feedContext = item.feedContext, feedUri = _selectedFeedUri.value)
                 .onSuccess { showToast("Showing more like this") }
                 .onFailure { _errorMessage.value = "Couldn't send feedback: ${it.message}" }
         }
@@ -2213,7 +2213,7 @@ _bskyDid.value          = session.did
         val item = currentItem.value ?: return
         if (_appMode.value != AppMode.BLUESKY) return
         viewModelScope.launch(Dispatchers.IO) {
-            bskyRepo.sendFeedInteraction(bskyToken, item.postUri, wantMore = false, feedContext = item.feedContext)
+            bskyRepo.sendFeedInteraction(bskyToken, item.postUri, wantMore = false, feedContext = item.feedContext, feedUri = _selectedFeedUri.value)
                 .onSuccess { showToast("Showing less like this") }
                 .onFailure { _errorMessage.value = "Couldn't send feedback: ${it.message}" }
         }

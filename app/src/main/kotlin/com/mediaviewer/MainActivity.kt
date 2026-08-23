@@ -248,42 +248,66 @@ private fun AppRoot(viewModel: MainViewModel) {
     val context = LocalContext.current
     val rootScope = rememberCoroutineScope()
 
-    // Scenario A — cold boot: wipe in white/neutral the instant the app
-    // launches, hue-shift to the logged-in user's own color the instant
-    // it's fetched, then wipe out only once BOTH the auth-restore/init
-    // sequence has actually finished (appInitialized) AND that color fetch
-    // has actually resolved and been applied — not before either one.
+    // Bug fix (item 3 — Login page/real UI flashing before the loading
+    // animation even starts): the real UI (MainFeedScreen, which shows the
+    // Login page until auth-restore from prefs finishes) used to be visible,
+    // uncovered, for however many frames elapsed between first composition
+    // and the pixel overlay's own LaunchedEffect(Unit) actually getting to
+    // run — plus however much further into the wipe-in sweep it takes for
+    // the pixel grid to reach full coverage (the sweep itself starts nearly
+    // empty and fills in gradually, so real content is still visible through
+    // its gaps for a portion of that animation too). This scrim is `true`
+    // from the very first frame with no LaunchedEffect required to set an
+    // initial value — nothing under it is ever reachable — and flips false
+    // exactly once, the moment the very first wipe-in genuinely finishes
+    // covering the whole screen (phase advancing past WIPE_IN), at which
+    // point the pixel grid's own full-opacity LOADING coverage takes over
+    // seamlessly with no gap in between.
+    var coldLaunchCovered by remember { mutableStateOf(true) }
+    LaunchedEffect(pixelController.phase) {
+        if (coldLaunchCovered && pixelController.phase != PixelPhase.HIDDEN && pixelController.phase != PixelPhase.WIPE_IN) {
+            coldLaunchCovered = false
+        }
+    }
+
+    // Scenario A — cold boot: wipe in black the instant the app launches,
+    // hue-shift to the logged-in user's own color the instant it's fetched,
+    // then wipe out only once BOTH the auth-restore/init sequence has
+    // actually finished (appInitialized) AND that color fetch has actually
+    // resolved and been applied — not before either one.
     //
-    // Bug fix (per feedback — transition used to end way too early): this
-    // used to gate purely on `appInitialized`, and used the composable
-    // `rememberDominantColor` helper for the color itself — that helper has
-    // no "I'm done" signal of its own (it just silently keeps whatever
-    // color it last had until a fetch resolves), so there was no way to
-    // actually know the color was ready before calling finish(). This now
-    // calls the same underlying fetch as a plain suspend function
-    // (fetchDominantColor) directly, so `selfColorReady` only flips once
-    // that real fetch has genuinely completed (or there's truly nothing to
-    // fetch — no avatar at all).
-    var selfThemeColor by remember { mutableStateOf(Color(0xFFF2F2F2)) }
+    // Bug fix (per feedback — transition used to end way too early / "seems
+    // to instantly stop after starting"): `appInitialized` flips true the
+    // moment local prefs have merely been *read* and the real loads kicked
+    // off (see MainViewModel's init{}) — well before those loads, including
+    // `loadSelfProfile()`, have actually finished. This used to gate
+    // `selfColorReady` on `appInitialized` directly and treat whatever
+    // `selfProfile` happened to be at that exact instant (usually still
+    // null) as "no avatar to fetch," unblocking the transition immediately
+    // instead of waiting for the real fetch. It now waits for `selfProfile`
+    // itself to genuinely settle — populated by startHubBackgroundWarmup's
+    // retry loop — before deciding one way or the other; a logged-out
+    // session (which never expects a selfProfile at all) still unblocks
+    // immediately once appInitialized, since there's truly nothing to wait
+    // for there.
+    var selfThemeColor by remember { mutableStateOf(Color.Black) }
     var selfColorReady by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
-        pixelController.start(this, Color(0xFFF2F2F2))
+        pixelController.start(Color.Black)
     }
-    LaunchedEffect(selfProfile, appInitialized) {
-        val url = selfProfile?.author?.avatarUrl
+    LaunchedEffect(appInitialized, bskyLoggedIn, selfProfile) {
+        if (!appInitialized) return@LaunchedEffect
+        if (!bskyLoggedIn) { selfColorReady = true; return@LaunchedEffect }
+        val profile = selfProfile ?: return@LaunchedEffect // still loading — wait for the real fetch
+        val url = profile.author.avatarUrl
         if (!url.isNullOrBlank()) {
             val c = fetchDominantColor(context, url)
             selfThemeColor = c
             if (pixelController.phase == PixelPhase.WIPE_IN || pixelController.phase == PixelPhase.LOADING) {
                 pixelController.updateColor(c)
             }
-            selfColorReady = true
-        } else if (appInitialized) {
-            // Logged out, or genuinely no avatar to fetch — don't block the
-            // launch transition forever waiting for something that will
-            // never arrive.
-            selfColorReady = true
         }
+        selfColorReady = true
     }
     LaunchedEffect(appInitialized, selfColorReady) {
         if (appInitialized && selfColorReady && pixelController.phase != PixelPhase.HIDDEN) pixelController.finish()
@@ -306,17 +330,54 @@ private fun AppRoot(viewModel: MainViewModel) {
     // exits immediately whenever hidden is true, so the transition only
     // ever plays for a `did` that's genuinely never been tracked before.
     var trackedProfileDid by remember { mutableStateOf<String?>(null) }
+    // Bug fix (per feedback — profile shows instantly, before the wipe-in
+    // has even covered the screen): the profile overlay used to mount at
+    // full size the instant `profileOverlay` became non-null, regardless of
+    // whether the wipe had actually finished covering the screen — so a
+    // still-loading profile was visible right through the wipe's gaps from
+    // its very first frame. This flag keeps a freshly-opened profile mounted
+    // at zero size (the same trick already used for `hidden` profiles below
+    // — so its data still loads in the background, just like the cold-boot
+    // scenario's "load what's underneath without it being visible") until
+    // the wipe-in has genuinely finished covering the whole screen for THIS
+    // open — only then is it swapped in behind the by-then fully opaque
+    // pixel curtain. Starts `true` so an already-open/un-hidden profile
+    // (nothing to animate) renders normally by default.
+    var profileRevealArmed by remember { mutableStateOf(true) }
     val openedProfileTargetColor = rememberDominantColor(profileOverlay?.author?.avatarUrl ?: "")
+    // Bug fix (per feedback — the loading animation stops moving partway
+    // through the color-change/swipe-away step): start()/updateColor()/
+    // finish() used to be suspended directly inside this LaunchedEffect's
+    // own body — but its key list includes `loadingProfile`, which flips
+    // false the instant the profile's data actually finishes loading. That
+    // is a change to one of THIS effect's own keys, so Compose cancels
+    // whichever call happened to be suspended at that exact moment (often
+    // exactly the wipe-out) and restarts the effect from scratch, visibly
+    // freezing the animation wherever it got cut off. Dispatching the real
+    // work onto the stable `rootScope` instead means this effect's body only
+    // ever makes a quick, synchronous decision and returns — nothing it
+    // kicks off can be cancelled by its own key changing underneath it.
     LaunchedEffect(profileOverlay?.author?.did, profileOverlay?.loadingProfile, profileOverlay?.hidden) {
         val overlay = profileOverlay
         if (overlay == null) { trackedProfileDid = null; return@LaunchedEffect }
         if (overlay.hidden) return@LaunchedEffect
-        if (overlay.author.did != trackedProfileDid) {
-            trackedProfileDid = overlay.author.did
-            pixelController.start(this, selfThemeColor)
+        val isNewProfile = overlay.author.did != trackedProfileDid
+        if (isNewProfile) trackedProfileDid = overlay.author.did
+        val avatarUrl = overlay.author.avatarUrl
+        val targetColor = openedProfileTargetColor
+        val stillLoading = overlay.loadingProfile
+        rootScope.launch {
+            if (isNewProfile) {
+                profileRevealArmed = false
+                pixelController.start(selfThemeColor)
+                // Wipe-in has now genuinely reached full coverage (start()
+                // only returns once phase has advanced past WIPE_IN) —
+                // safe to swap the real profile in behind it.
+                profileRevealArmed = true
+            }
+            if (!avatarUrl.isNullOrBlank()) pixelController.updateColor(targetColor)
+            if (!stillLoading && pixelController.phase != PixelPhase.HIDDEN) pixelController.finish()
         }
-        if (!overlay.author.avatarUrl.isNullOrBlank()) pixelController.updateColor(openedProfileTargetColor)
-        if (!overlay.loadingProfile && pixelController.phase != PixelPhase.HIDDEN) pixelController.finish()
     }
 
     // Scenario C — opening a feed from the Feeds row (item 4/7): tapping a
@@ -331,7 +392,7 @@ private fun AppRoot(viewModel: MainViewModel) {
     // and should stay instant.
     val handleSelectFeed: (String?) -> Unit = { uri ->
         rootScope.launch {
-            pixelController.start(this, currentDominantColor)
+            pixelController.start(currentDominantColor)
             viewModel.selectFeedFromAnyContext(uri)
             // selectFeedFromAnyContext's "same feed, restore exactly from
             // cache" fast-path (see its own doc comment) never flips
@@ -555,7 +616,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             // it can't be seen or hit-test any touches, so the pager
             // underneath is fully interactive again — pinching back in
             // (pinchInFromPost) just flips this back to full size.
-            Box(if (currentProfileOverlay.hidden) Modifier.size(0.dp) else Modifier.fillMaxSize()) {
+            Box(if (currentProfileOverlay.hidden || !profileRevealArmed) Modifier.size(0.dp) else Modifier.fillMaxSize()) {
                 ProfileOverlay(
                     state             = currentProfileOverlay,
                     liquidGlass       = liquidGlass,
@@ -633,6 +694,15 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onSelectList  = { listUri, additionalUri -> viewModel.addAccountToList(listUri, additionalUri) },
                 onDismiss     = { viewModel.dismissListPicker() }
             )
+        }
+
+        // Bug fix (item 3): unconditional opaque backing for the cold-boot
+        // window described above — sits above every other layer (matching
+        // PixelMatrixOverlay's own z-order) so nothing real is reachable
+        // until the very first wipe-in has genuinely finished covering the
+        // screen, regardless of how many frames that takes to kick off.
+        if (coldLaunchCovered) {
+            Box(Modifier.fillMaxSize().background(Color.Black))
         }
 
         // Retro pixel-matrix transition overlay — last child so it draws

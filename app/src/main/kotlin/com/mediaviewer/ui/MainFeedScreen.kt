@@ -59,6 +59,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.*
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.Player
@@ -75,6 +77,15 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.*
 
 private val SWIPE_ANIM = tween<IntOffset>(200, easing = FastOutSlowInEasing)
+
+// Item 11 follow-up: threshold used to decide whether the video transport
+// controls (bar + buttons) should be visible/interactive at all, and
+// whether a tap on the video pauses/plays instead of toggling them. Kept
+// just barely above `1f` rather than exactly `1f` purely to absorb
+// floating-point noise in the pinch math — in practice this behaves as "any
+// zoom at all" hides the UI, not a real deadzone the way the old 1.05f
+// threshold was.
+private const val VIDEO_UI_ZOOM_EPSILON = 1.001f
 private val FADE_ANIM  = tween<Float>(150)
 
 private enum class QuickAction { TOP, TOP_RIGHT, RIGHT, BOTTOM_RIGHT, BOTTOM, BOTTOM_LEFT, LEFT, TOP_LEFT }
@@ -1159,16 +1170,16 @@ private fun PostContent(
                 VideoPlayer(
                     item.videoPlaylistUrl, mediaModifier,
                     controlsVisible = videoControlsVisible,
-                    // Item 11: while zoomed in, a tap just pauses/plays
-                    // instead of toggling the transport controls — those
-                    // stay hidden entirely at this zoom level (see the
-                    // `scale <= 1.05f` gate below on where they're actually
-                    // rendered), so there'd be nothing for a tap to reveal
-                    // that wouldn't immediately end up mispositioned by the
-                    // zoom/pan transform anyway (the bug this whole item is
-                    // fixing).
+                    // Item 11 follow-up: was gated at `scale > 1.05f`, which
+                    // let a small window of zoom (1.0–1.05) through where the
+                    // controls were still visible but already stale/
+                    // mispositioned (the exact bug this item exists to fix)
+                    // before finally snapping hidden. Tightened to
+                    // `VIDEO_UI_ZOOM_EPSILON` (effectively "any zoom at all")
+                    // so the hide and the tap-to-pause switchover both kick
+                    // in together, right at the start of a pinch.
                     onToggleControls = {
-                        if (scale > 1.05f) {
+                        if (scale > VIDEO_UI_ZOOM_EPSILON) {
                             videoPlayerRef?.let { p -> if (p.isPlaying) p.pause() else p.play() }
                         } else {
                             videoControlsVisible = !videoControlsVisible
@@ -1247,7 +1258,14 @@ private fun PostContent(
         // don't show it at all while zoomed (matches the tap-to-pause
         // replacement above), rather than trying to keep a second transform
         // in sync with the first.
-        if (item.isVideo && !item.isBlocked && scale <= 1.05f && videoControlsVisible && videoBoundsSize != IntSize.Zero) {
+        // Item 11 follow-up: same tightened threshold as the tap-to-pause
+        // switchover above — was `scale <= 1.05f`, which is why the bar
+        // used to visibly slide/glitch off to the side for the first bit of
+        // a pinch before finally disappearing (its position is computed
+        // from the video's *unzoomed* bounds and doesn't track the zoom
+        // transform, so any zoom at all makes it stale). Now it disappears
+        // at the very start of a pinch instead of partway through one.
+        if (item.isVideo && !item.isBlocked && scale <= VIDEO_UI_ZOOM_EPSILON && videoControlsVisible && videoBoundsSize != IntSize.Zero) {
             val density = LocalDensity.current
             val localOrigin = videoBoundsOrigin - postBoxRootOrigin
             val vbx = with(density) { localOrigin.x.toDp() }
@@ -2053,20 +2071,35 @@ private fun ActionRow(
             // the same single flat SpaceEvenly Row the e621 branch below
             // already used, now with Like as the first anchor and the new
             // "More" button (item 4) as the last.
-            Row(modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                ActionButton(if (item.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-                    if (item.isLiked) LikeRed else Color.White, null, onToggleLike)
-                ActionButton(if (item.isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
-                    if (item.isBookmarked) BookmarkYellow else Color.White, null, onToggleBookmark)
-                ActionButton(Icons.Default.Repeat,
-                    if (item.isReposted) RepostGreen else Color.White, null, onToggleRepost)
-                ActionButton(Icons.Default.EditNote, if (item.isQuoteReposted) RepostGreen else Color.White, null, onQuoteRepost)
-                ActionButton(Icons.Default.Send, Color.White, null, onShare)
-                ActionButton(Icons.Default.Download, if (item.isDownloaded) BookmarkYellow else Color.White, null, onDownload)
-                GifActionButton(onDownloadGif, if (item.isGifDownloaded) BookmarkYellow else Color.White)
-                MoreButton(
-                    liquidGlass = liquidGlass, tint = dominantColor,
+            //
+            // Item 1: the More menu's popup needs to be anchored to the
+            // *whole bar's* right edge, not just the small hamburger icon's
+            // own position inside this SpaceEvenly row — so it's rendered
+            // as a sibling of the Row (both children of this wrapping Box,
+            // which shares the Row's exact fillMaxSize bounds) rather than
+            // nested inside the icon's own little click target. `expanded`
+            // is hoisted up to this Box's scope so the icon (inside the Row)
+            // and the popup (outside it) can share it.
+            var moreMenuExpanded by remember { mutableStateOf(false) }
+            Box(Modifier.fillMaxSize()) {
+                Row(modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                    ActionButton(if (item.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                        if (item.isLiked) LikeRed else Color.White, null, onToggleLike)
+                    ActionButton(if (item.isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
+                        if (item.isBookmarked) BookmarkYellow else Color.White, null, onToggleBookmark)
+                    ActionButton(Icons.Default.Repeat,
+                        if (item.isReposted) RepostGreen else Color.White, null, onToggleRepost)
+                    ActionButton(Icons.Default.EditNote, if (item.isQuoteReposted) RepostGreen else Color.White, null, onQuoteRepost)
+                    ActionButton(Icons.Default.Send, Color.White, null, onShare)
+                    ActionButton(Icons.Default.Download, if (item.isDownloaded) BookmarkYellow else Color.White, null, onDownload)
+                    GifActionButton(onDownloadGif, if (item.isGifDownloaded) BookmarkYellow else Color.White)
+                    ActionButton(Icons.Default.Menu, Color.White, null) { moreMenuExpanded = true }
+                }
+                MoreBubbleMenu(
+                    expanded = moreMenuExpanded,
+                    onDismissRequest = { moreMenuExpanded = false },
+                    liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
                     onShowMoreLikeThis = onShowMoreLikeThis,
                     onShowLessLikeThis = onShowLessLikeThis,
                     onAddAccountToList = onAddAccountToList,
@@ -2104,35 +2137,89 @@ private fun ActionRow(
     }
 }
 
-/** Item 4: replaces the old fixed Block button — a hamburger-style "More"
- *  icon (three stacked horizontal lines) that opens a small right-aligned
- *  glass menu of text actions above the bar (see [GlassDropdownMenu] in
- *  GlassTheme.kt, also reused by the Hub's upload button — item 5). "Add
+/** Item 1/4: the interaction bar's "More" menu — replaces the old fixed
+ *  Block button with a hamburger-style icon (three stacked horizontal
+ *  lines) whose popup is a stack of individually separate pill bubbles
+ *  (not one continuous panel like [GlassDropdownMenu] in GlassTheme.kt,
+ *  which is still used as-is for the Hub's unrelated upload button). "Add
  *  account to list" opens the app's existing Add To sheet; "Show more/less
- *  like this" send Bluesky's own feed-personalization interaction signal
+ *  like this" sends Bluesky's own feed-personalization interaction signal
  *  (see MainViewModel.sendShowMoreLikeThis/sendShowLessLikeThis); "Block"
  *  is the same block/unblock action the old fixed button used to trigger
- *  directly. */
+ *  directly.
+ *
+ *  Each bubble is its own compact, half-height [LiquidGlassSurface] — same
+ *  live-reflected backdrop and same rim weight the interaction bar itself
+ *  uses (both are literally the same composable, just with a much shorter,
+ *  pill-shaped bounding box) — rather than one shared panel, so they read
+ *  as a stack of separate buttons the way the rest of the bar's buttons do.
+ *  All four share one common width, `Modifier.width(IntrinsicSize.Max)` on
+ *  the wrapping [Column] sizing every `fillMaxWidth()` bubble to whichever
+ *  one's label is actually the widest, and the whole stack's shared right
+ *  edge is pinned flush with the bar's own right edge — this composable is
+ *  rendered as a direct sibling of the entire action-bar Row (not nested
+ *  inside the small hamburger icon's own tiny click target), so its TopEnd
+ *  anchor lines up with the true bar edge rather than wherever the icon
+ *  happens to sit inside the row's SpaceEvenly arrangement. */
 @Composable
-private fun MoreButton(
-    liquidGlass: Boolean, tint: Color,
+private fun MoreBubbleMenu(
+    expanded: Boolean,
+    onDismissRequest: () -> Unit,
+    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
     onShowMoreLikeThis: () -> Unit, onShowLessLikeThis: () -> Unit,
     onAddAccountToList: () -> Unit, onBlock: () -> Unit
 ) {
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        ActionButton(Icons.Default.Menu, Color.White, null) { expanded = true }
-        GlassDropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-            items = listOf(
-                GlassMenuItem("Show more like this") { onShowMoreLikeThis() },
-                GlassMenuItem("Show less like this") { onShowLessLikeThis() },
-                GlassMenuItem("Add account to list") { onAddAccountToList() },
-                GlassMenuItem("Block", destructive = true) { onBlock() }
-            ),
-            liquidGlass = liquidGlass, tint = tint
-        )
+    if (!expanded) return
+    val items = listOf(
+        GlassMenuItem("Show more like this") { onShowMoreLikeThis() },
+        GlassMenuItem("Show less like this") { onShowLessLikeThis() },
+        GlassMenuItem("Add account to list") { onAddAccountToList() },
+        GlassMenuItem("Block", destructive = true) { onBlock() }
+    )
+    val density = LocalDensity.current
+    val bubbleHeightDp = 20.dp   // half the old 40dp row height
+    val gapDp = 5.dp             // compact — a seam between bubbles, not a big gap
+    val stackHeightPx = with(density) {
+        (bubbleHeightDp * items.size + gapDp * (items.size - 1)).roundToPx()
+    }
+    val shape = RoundedCornerShape(bubbleHeightDp / 2)
+    Popup(
+        alignment = Alignment.TopEnd,
+        offset = IntOffset(0, -stackHeightPx - with(density) { 8.dp.roundToPx() }),
+        onDismissRequest = onDismissRequest,
+        properties = PopupProperties(focusable = true)
+    ) {
+        Column(
+            modifier = Modifier.width(IntrinsicSize.Max),
+            verticalArrangement = Arrangement.spacedBy(gapDp),
+            horizontalAlignment = Alignment.End
+        ) {
+            items.forEach { item ->
+                val bubbleModifier = Modifier
+                    .fillMaxWidth()
+                    .height(bubbleHeightDp)
+                    .clip(shape)
+                    .clickable { onDismissRequest(); item.onClick() }
+                val labelColor = if (item.destructive) Color(0xFFE0245E) else Color.White
+                if (liquidGlass) {
+                    LiquidGlassSurface(modifier = bubbleModifier, shape = shape, tint = tint, backdrop = backdrop) {
+                        Text(
+                            item.label, color = labelColor, fontSize = 11.sp, fontWeight = FontWeight.Medium,
+                            textAlign = TextAlign.Center, maxLines = 1,
+                            modifier = Modifier.align(Alignment.Center).padding(horizontal = 12.dp)
+                        )
+                    }
+                } else {
+                    Box(bubbleModifier.background(Color.Black.copy(alpha = 0.55f)), contentAlignment = Alignment.Center) {
+                        Text(
+                            item.label, color = labelColor, fontSize = 11.sp, fontWeight = FontWeight.Medium,
+                            textAlign = TextAlign.Center, maxLines = 1,
+                            modifier = Modifier.padding(horizontal = 12.dp)
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2341,14 +2428,27 @@ private fun VideoSeekBar(
     // stop-indicator dot at the track's far end. This custom version has
     // none of that: the track genuinely spans this bar's full inner width
     // (no reserved end padding), only the watched portion draws anything
-    // (no grey inactive segment), and the small circle marks the *current*
+    // (no grey inactive segment), and the thumb marks the *current*
     // position rather than a fixed track endpoint (no end dot).
+    //
+    // Bug fix: the thumb is a vertical bar (matching Slider's own default
+    // thumb shape, which this is otherwise a drop-in replacement for) —
+    // not the round dot an earlier pass here mistakenly used. And the tap
+    // and drag handling below is now a single gesture recognizer instead of
+    // two independent `pointerInput` blocks each separately calling
+    // `detectTapGestures`/`detectDragGestures` — those were competing to
+    // consume the same pointer events, which is what made the bar
+    // unreliable to tap or drag. One `awaitEachGesture` loop tracks a
+    // finger from first touch to release: it seeks immediately on touch
+    // down (covering a plain tap), keeps updating continuously if the
+    // finger moves (covering a drag), and commits via `onSeekFinish` once
+    // on release either way.
     var dragProgress by remember { mutableStateOf<Float?>(null) }
     val committedProgress = if (durationMs > 0) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
     val shownProgress = dragProgress ?: committedProgress
     var trackWidthPx by remember { mutableStateOf(0) }
     val density = LocalDensity.current
-    val thumbSizePx = with(density) { 12.dp.roundToPx() }
+    val thumbWidthPx = with(density) { 4.dp.roundToPx() }
 
     val barContent: @Composable BoxScope.() -> Unit = {
         Box(
@@ -2359,24 +2459,27 @@ private fun VideoSeekBar(
                 .onSizeChanged { trackWidthPx = it.width }
                 .pointerInput(durationMs) {
                     if (durationMs <= 0) return@pointerInput
-                    detectTapGestures(onTap = { offset ->
-                        onSeeking(((offset.x / size.width).coerceIn(0f, 1f) * durationMs).toLong())
-                        onSeekFinish()
-                    })
-                }
-                .pointerInput(durationMs) {
-                    if (durationMs <= 0) return@pointerInput
-                    detectDragGestures(
-                        onDragStart = { offset -> dragProgress = (offset.x / size.width).coerceIn(0f, 1f) },
-                        onDrag = { change, _ ->
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        down.consume()
+                        var frac = (down.position.x / size.width).coerceIn(0f, 1f)
+                        dragProgress = frac
+                        onSeeking((frac * durationMs).toLong())
+                        var pointerId = down.id
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == pointerId }
+                                ?: event.changes.firstOrNull() ?: break
+                            pointerId = change.id
+                            if (!change.pressed) break
                             change.consume()
-                            val frac = (change.position.x / size.width).coerceIn(0f, 1f)
+                            frac = (change.position.x / size.width).coerceIn(0f, 1f)
                             dragProgress = frac
                             onSeeking((frac * durationMs).toLong())
-                        },
-                        onDragEnd = { dragProgress = null; onSeekFinish() },
-                        onDragCancel = { dragProgress = null }
-                    )
+                        }
+                        onSeekFinish()
+                        dragProgress = null
+                    }
                 },
             contentAlignment = Alignment.CenterStart
         ) {
@@ -2389,9 +2492,9 @@ private fun VideoSeekBar(
             )
             Box(
                 Modifier
-                    .size(12.dp)
-                    .offset { IntOffset((shownProgress * trackWidthPx).toInt() - thumbSizePx / 2, 0) }
-                    .clip(CircleShape)
+                    .size(width = 4.dp, height = 16.dp)
+                    .offset { IntOffset((shownProgress * trackWidthPx).toInt() - thumbWidthPx / 2, 0) }
+                    .clip(RoundedCornerShape(2.dp))
                     .background(Color.White)
             )
         }

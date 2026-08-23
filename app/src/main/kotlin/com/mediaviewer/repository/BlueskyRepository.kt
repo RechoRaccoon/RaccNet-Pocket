@@ -1145,13 +1145,32 @@ class BlueskyRepository {
     // ── Item 4: "Show more/less like this" ──────────────────────────────────
     // Sends Bluesky's own feed-personalization interaction event
     // (app.bsky.feed.defs#requestMore / #requestLess) for one post back to
-    // the AppView, which forwards it on to whichever feed generator actually
-    // supplied that post (via the post's own feedContext, if the generator
-    // set one) so it can fine-tune what it serves this account next.
-    suspend fun sendFeedInteraction(token: String, postUri: String, wantMore: Boolean, feedContext: String?): Result<Unit> = runCatching {
+    // whichever feed generator actually supplied that post (via the post's
+    // own feedContext, if the generator set one) so it can fine-tune what it
+    // serves this account next.
+    //
+    // Bug fix: the default AppView host doesn't implement this endpoint
+    // itself for third-party feeds — it 501s ("Not Implemented") — because
+    // sendInteractions has to be proxied to the feed generator's own service,
+    // the same way chat.bsky.* calls are proxied to the chat service (see
+    // BlueskyApi's static atproto-proxy header on those). A feed generator's
+    // service DID is the authority segment of the *feed's* at:// URI (not
+    // the post's), so it's derived here from [feedUri] and sent as a dynamic
+    // atproto-proxy header targeting that generator's "#bsky_fg" service ID.
+    // When [feedUri] isn't a feed-generator URI (e.g. the chronological
+    // Following timeline, which isn't backed by one), the request just goes
+    // straight to the default AppView unproxied, same as before.
+    suspend fun sendFeedInteraction(token: String, postUri: String, wantMore: Boolean, feedContext: String?, feedUri: String?): Result<Unit> = runCatching {
         val event = if (wantMore) "app.bsky.feed.defs#requestMore" else "app.bsky.feed.defs#requestLess"
+        val generatorDid = feedUri
+            ?.takeIf { it.startsWith("at://") }
+            ?.removePrefix("at://")
+            ?.substringBefore("/")
+            ?.takeIf { it.startsWith("did:") }
+        val proxy = generatorDid?.let { "$it#bsky_fg" }
         val resp = api.sendInteractions(
             "Bearer $token",
+            proxy,
             BskySendInteractionsRequest(listOf(BskyInteraction(item = postUri, event = event, feedContext = feedContext)))
         )
         if (!resp.isSuccessful) error("sendInteractions ${resp.code()}")

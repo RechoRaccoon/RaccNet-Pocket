@@ -73,11 +73,21 @@ interface BlueskyApi {
     ): Response<BskySearchStarterPacksResponse>
 
     // Item 4: "Show more/less like this" — Bluesky's own feed-personalization
-    // signal, forwarded by the AppView to whichever feed generator supplied
-    // the post.
+    // signal. The main AppView doesn't implement this itself for third-party
+    // feeds (it 501s) — it only *proxies* the request on to whichever feed
+    // generator actually supplied the post, the same way chat.bsky.* calls
+    // above are proxied to the chat service. Unlike chat's fixed target
+    // though, the target here is a different DID per feed generator, so it
+    // can't be a static @Headers annotation — it's passed per-call as a
+    // regular @Header instead (see BlueskyRepository.sendFeedInteraction,
+    // which builds "did:...#bsky_fg" from the feed's own URI). Null/blank
+    // when there's no known feed generator to proxy to (e.g. a chronological
+    // timeline with no algorithm behind it), in which case the request goes
+    // straight to the default AppView, same as before.
     @POST("xrpc/app.bsky.feed.sendInteractions")
     suspend fun sendInteractions(
         @Header("Authorization") token: String,
+        @Header("atproto-proxy") proxy: String?,
         @Body request: BskySendInteractionsRequest
     ): Response<Unit>
 

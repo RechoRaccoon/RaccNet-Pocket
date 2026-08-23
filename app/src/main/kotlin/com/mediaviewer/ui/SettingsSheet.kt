@@ -1521,8 +1521,19 @@ private fun HubRefreshBubble(
     val scope = rememberCoroutineScope()
     val rotation = remember { Animatable(0f) }
     val shape = CircleShape
-    val clickModifier = Modifier
-        .size(size)
+    // Bug fix: this bubble sits over the Hub's own scrolling content
+    // (Reviews thumbnails, blog cards, etc.) rather than the more uniform
+    // background the top Settings/AT Protocol/e621 chips sit over, so the
+    // normal liquid-glass tint alone (deliberately low-alpha so live
+    // backdrops show through it) wasn't enough to read as a solid "card" —
+    // it looked like it was still just floating transparently over
+    // whatever happened to be scrolled underneath. A solid dark backing
+    // drawn first, clipped to the same shape, fixes that regardless of
+    // what's behind it; the normal glass tint/rim still draws on top of it
+    // exactly as before.
+    val cardBacking = Modifier.background(Color.Black.copy(alpha = 0.62f), shape)
+    val clickModifier = cardBacking
+        .then(Modifier.size(size))
         .clickable {
             onRefresh()
             scope.launch {
@@ -1564,7 +1575,9 @@ private fun HubUploadBubble(
     var expanded by remember { mutableStateOf(false) }
     val rotation by animateFloatAsState(if (expanded) 45f else 0f, animationSpec = tween(220), label = "uploadPlusRotation")
     val shape = CircleShape
-    val clickModifier = Modifier.size(size).clickable { expanded = !expanded }
+    // Bug fix: same solid-backing fix as HubRefreshBubble above — see its
+    // own comment for why the plain glass tint alone wasn't enough here.
+    val clickModifier = Modifier.background(Color.Black.copy(alpha = 0.62f), shape).size(size).clickable { expanded = !expanded }
 
     @Composable
     fun IconContent() {
@@ -1574,11 +1587,11 @@ private fun HubUploadBubble(
         }
     }
 
-    Box {
+    Box(modifier) {
         if (liquidGlass) {
-            LiquidGlassSurface(modifier.then(clickModifier), shape = shape, tint = tint, backdrop = backdrop) { IconContent() }
+            LiquidGlassSurface(clickModifier, shape = shape, tint = tint, backdrop = backdrop) { IconContent() }
         } else {
-            Box(modifier.then(clickModifier).clip(shape).background(Color.White.copy(0.10f))) { IconContent() }
+            Box(clickModifier.clip(shape).background(Color.White.copy(0.10f))) { IconContent() }
         }
         GlassDropdownMenu(
             expanded = expanded,
@@ -1642,9 +1655,18 @@ private fun ReturnToFeedBar(
     val uploadReserve = barHeight + 10.dp
 
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
+        // Bug fix: same solid-backing fix as HubRefreshBubble/HubUploadBubble
+        // (see HubRefreshBubble's own comment) — this pill sits over the
+        // same busy scrolling content they do, so it needs the same opaque
+        // dark backing under the glass tint to actually read as a card.
+        // (The background has to be chained AFTER the padding below, not
+        // before it, so it only paints the pill's own trimmed width —
+        // not the full row underneath the refresh/upload bubbles' reserved
+        // space on either end.)
         if (liquidGlass) {
             LiquidGlassSurface(
-                Modifier.fillMaxWidth().padding(start = refreshReserve, end = uploadReserve).height(barHeight).clickable(onClick = onReturnToFeed),
+                Modifier.fillMaxWidth().padding(start = refreshReserve, end = uploadReserve).height(barHeight)
+                    .background(Color.Black.copy(alpha = 0.62f), shape).clickable(onClick = onReturnToFeed),
                 shape = shape, tint = tint, backdrop = backdrop
             ) {}
         } else {
