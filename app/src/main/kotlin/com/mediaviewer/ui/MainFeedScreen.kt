@@ -2277,12 +2277,29 @@ private fun MoreBubbleMenu(
     val stackTopRightRoot = anchorOriginRoot +
         Offset(anchorSize.width.toFloat(), -(stackHeightPx + gapAboveAnchorPx).toFloat())
     val stackTopRightLocal = stackTopRightRoot - containerRootOrigin
-    val offsetX = with(density) { stackTopRightLocal.x.toDp() }
+    // Bug fix (item 1 — bubbles never appeared): `stackTopRightLocal` is the
+    // *right* edge the stack needs to end at, but `Modifier.offset(x, y)`
+    // positions this Column's own top-*left* corner. Using the right-edge
+    // coordinate directly as that left-corner offset shoved the whole stack
+    // one full stack-width further right than intended — since the anchor
+    // (the interaction bar) already spans nearly the full screen width, that
+    // pushed the entire menu off the right edge of the screen, so it was
+    // technically showing, just permanently off-screen and untappable. The
+    // stack's width isn't known until it's actually measured (it's sized to
+    // its widest child via IntrinsicSize.Max), so the true left-edge offset
+    // is only computed once `measuredWidthPx` comes back from
+    // `onSizeChanged` below; until then this renders invisibly (alpha 0) at
+    // a safe fallback position for exactly one layout pass instead of
+    // flashing at the wrong spot.
+    var measuredWidthPx by remember { mutableStateOf(0) }
+    val offsetX = with(density) { (stackTopRightLocal.x - measuredWidthPx).toDp() }
     val offsetY = with(density) { stackTopRightLocal.y.toDp() }
 
     Column(
         modifier = Modifier
             .offset(x = offsetX, y = offsetY)
+            .onSizeChanged { measuredWidthPx = it.width }
+            .alpha(if (measuredWidthPx > 0) 1f else 0f)
             .width(IntrinsicSize.Max)
             .zIndex(6f)
             // Item 8: swallows taps that land in the gaps between bubbles
@@ -2547,14 +2564,34 @@ private fun VideoSeekBar(
     val shownProgress = dragProgress ?: committedProgress
     var trackWidthPx by remember { mutableStateOf(0) }
     val density = LocalDensity.current
-    val thumbWidthPx = with(density) { 4.dp.roundToPx() }
+    // Bug fix (item 5 — seek bar very difficult to grab, current-position
+    // marker too small): the thumb is now a genuinely bigger, more visible
+    // marker (10dp x 22dp, up from 4dp x 16dp).
+    val thumbWidthPx = with(density) { 10.dp.roundToPx() }
 
     val barContent: @Composable BoxScope.() -> Unit = {
         Box(
+            // Bug fix (item 5 — bar very difficult to grab): `.padding(...)`
+            // used to sit *before* `.onSizeChanged`/`.pointerInput` in this
+            // modifier chain, so the gesture-registering area was measured
+            // AFTER that padding was subtracted — an 8dp vertical padding on
+            // a 20dp-tall box left only a ~4dp-tall strip that actually
+            // responded to touch, even though the visible bar looked taller.
+            // The touch target below is now a real 44dp-tall area (comfortably
+            // above Android's ~48dp recommended minimum once the surrounding
+            // glass padding is added back) with no vertical padding subtracted
+            // from it, so the whole tall area is grabbable, not just a thin
+            // sliver through the middle of it.
             Modifier
                 .fillMaxWidth()
-                .height(20.dp)
-                .padding(horizontal = 14.dp, vertical = 8.dp)
+                // Horizontal inset applied *before* the touch/measurement
+                // modifiers (unlike the old vertical padding this replaces),
+                // so it narrows the box once, consistently, for gesture math,
+                // size tracking, and the visual track/thumb below — they all
+                // read the same width, so the thumb's drawn position always
+                // matches where a touch on the same spot would seek to.
+                .padding(horizontal = 14.dp)
+                .height(44.dp)
                 .onSizeChanged { trackWidthPx = it.width }
                 .pointerInput(durationMs) {
                     if (durationMs <= 0) return@pointerInput
@@ -2591,9 +2628,9 @@ private fun VideoSeekBar(
             )
             Box(
                 Modifier
-                    .size(width = 4.dp, height = 16.dp)
+                    .size(width = 10.dp, height = 22.dp)
                     .offset { IntOffset((shownProgress * trackWidthPx).toInt() - thumbWidthPx / 2, 0) }
-                    .clip(RoundedCornerShape(2.dp))
+                    .clip(RoundedCornerShape(5.dp))
                     .background(Color.White)
             )
         }

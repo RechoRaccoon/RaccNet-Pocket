@@ -17,6 +17,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -152,6 +153,24 @@ class PixelTransitionController(private val scope: CoroutineScope) {
                 delay(CONVEYOR_STEP_MS)
             }
         }
+        // Bug fix (item 2 — cold launch: wipe-in skips straight to fully
+        // covered): `animateTo` times itself from the very first frame
+        // callback it's actually given via `withFrameNanos`. On a genuinely
+        // cold app launch this whole composable tree — the entire app,
+        // first time — is being composed for the first time on the same
+        // frame this runs, competing with class loading/JIT warm-up/disk
+        // reads for prefs. That can make the *first* frame callback this
+        // animation ever sees land a long time (well over 380ms) after it
+        // was requested, so the very first sample of the animation already
+        // reports "past its whole duration" — it renders as instantly
+        // finished, the sweep never visibly happens. Waiting for a couple
+        // of real frame callbacks up front (a few/several ms, effectively
+        // free) lets the worst of that cold-start jank pass before the
+        // timed tween actually starts counting, so it reliably plays out
+        // its full duration here exactly like it already does at every
+        // other, already-warmed-up call site (profile nav, feed switch).
+        withFrameNanos {}
+        withFrameNanos {}
         wipeProgress.animateTo(1f, tween(WIPE_IN_MS, easing = FastOutSlowInEasing))
         if (myGeneration != generation) return@withLock
         phase = PixelPhase.LOADING

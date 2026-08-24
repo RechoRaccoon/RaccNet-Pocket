@@ -51,7 +51,6 @@ import com.mediaviewer.ui.PixelMatrixOverlay
 import com.mediaviewer.ui.PixelPhase
 import com.mediaviewer.ui.ProfileOverlay
 import com.mediaviewer.ui.fetchDominantColor
-import com.mediaviewer.ui.rememberDominantColor
 import com.mediaviewer.ui.rememberPixelTransitionController
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -342,21 +341,49 @@ private fun AppRoot(viewModel: MainViewModel) {
     // exits immediately whenever hidden is true, so the transition only
     // ever plays for a `did` that's genuinely never been tracked before.
     var trackedProfileDid by remember { mutableStateOf<String?>(null) }
-    // Bug fix (per feedback — profile shows instantly, before the wipe-in
-    // has even covered the screen): the profile overlay used to mount at
-    // full size the instant `profileOverlay` became non-null, regardless of
-    // whether the wipe had actually finished covering the screen — so a
-    // still-loading profile was visible right through the wipe's gaps from
-    // its very first frame. This flag keeps a freshly-opened profile mounted
-    // at zero size (the same trick already used for `hidden` profiles below
-    // — so its data still loads in the background, just like the cold-boot
-    // scenario's "load what's underneath without it being visible") until
-    // the wipe-in has genuinely finished covering the whole screen for THIS
-    // open — only then is it swapped in behind the by-then fully opaque
-    // pixel curtain. Starts `true` so an already-open/un-hidden profile
-    // (nothing to animate) renders normally by default.
-    var profileRevealArmed by remember { mutableStateOf(true) }
-    val openedProfileTargetColor = rememberDominantColor(profileOverlay?.author?.avatarUrl ?: "")
+    // Bug fix (item 3 — profile flashes on screen, then shows the hub
+    // again, before the wipe-in curtain has covered it): this used to be a
+    // plain `mutableStateOf(true)` boolean, flipped to `false` and back to
+    // `true` from *inside* the LaunchedEffect below. That effect's body only
+    // runs *after* Compose has already completed the composition where
+    // `profileOverlay` first became non-null — so for exactly that first
+    // frame (and every frame until the effect's own `rootScope.launch` gets
+    // scheduled and actually runs), the flag was still sitting at its old
+    // value (`true`), so the Box below rendered the brand-new, still-loading
+    // profile at full size immediately. Only a moment later did the effect
+    // finally flip it to `false` (hiding it again, revealing the hub
+    // underneath) before the wipe curtain caught up and it reappeared for
+    // good — exactly the flash → hub → wipe → profile sequence reported.
+    //
+    // Fixed by making "armed" a synchronous, pure computation instead of an
+    // effect-driven one: a `did` is armed once it's in this set, and set
+    // membership is checked directly during composition — so the very first
+    // composition that ever sees a new `did` already computes "not armed"
+    // and renders at zero size, with no window for a flash. Cleared back to
+    // empty whenever the overlay fully closes (mirroring `trackedProfileDid`
+    // above) so reopening the same profile later replays the transition
+    // instead of skipping it.
+    var revealedProfileDids by remember { mutableStateOf<Set<String>>(emptySet()) }
+    val profileRevealArmed = profileOverlay?.author?.did?.let { it in revealedProfileDids } ?: true
+    // Bug fix (item 4 — color visibly detours through a dull blue-grey
+    // before settling on the profile's real color): this used to read
+    // `rememberDominantColor(...)`, a separately memoized Composable whose
+    // state resets to a hardcoded dark blue-grey placeholder (0xFF2A2A2E)
+    // the instant the avatar URL key changes, then updates asynchronously
+    // once its own fetch resolves. This effect below runs off the SAME
+    // recomposition as that reset and, being a plain state read rather than
+    // a suspend call, had no way to wait for the real fetch — it would
+    // usually still be showing that placeholder at the exact moment this
+    // effect captured `targetColor` and fired `pixelController.updateColor`
+    // with it. The genuinely correct color would only arrive later via a
+    // second, unrelated recomposition (when `loadingProfile` itself flips,
+    // re-running this same effect) — giving the on-screen sequence "viewer
+    // color -> blue-grey placeholder -> real color" instead of a single
+    // clean hue shift straight to the real color. Fetching the color
+    // directly with the same suspend function Scenario A/C already use,
+    // right here inside the coroutine that's about to consume it, removes
+    // the placeholder step entirely.
+    //
     // Bug fix (per feedback — the loading animation stops moving partway
     // through the color-change/swipe-away step): start()/updateColor()/
     // finish() used to be suspended directly inside this LaunchedEffect's
@@ -371,23 +398,24 @@ private fun AppRoot(viewModel: MainViewModel) {
     // kicks off can be cancelled by its own key changing underneath it.
     LaunchedEffect(profileOverlay?.author?.did, profileOverlay?.loadingProfile, profileOverlay?.hidden) {
         val overlay = profileOverlay
-        if (overlay == null) { trackedProfileDid = null; return@LaunchedEffect }
+        if (overlay == null) { trackedProfileDid = null; revealedProfileDids = emptySet(); return@LaunchedEffect }
         if (overlay.hidden) return@LaunchedEffect
         val isNewProfile = overlay.author.did != trackedProfileDid
         if (isNewProfile) trackedProfileDid = overlay.author.did
         val avatarUrl = overlay.author.avatarUrl
-        val targetColor = openedProfileTargetColor
         val stillLoading = overlay.loadingProfile
         rootScope.launch {
             if (isNewProfile) {
-                profileRevealArmed = false
                 pixelController.start(selfThemeColor)
                 // Wipe-in has now genuinely reached full coverage (start()
                 // only returns once phase has advanced past WIPE_IN) —
                 // safe to swap the real profile in behind it.
-                profileRevealArmed = true
+                revealedProfileDids = revealedProfileDids + overlay.author.did
             }
-            if (!avatarUrl.isNullOrBlank()) pixelController.updateColor(targetColor)
+            if (!avatarUrl.isNullOrBlank()) {
+                val targetColor = fetchDominantColor(context, avatarUrl)
+                pixelController.updateColor(targetColor)
+            }
             if (!stillLoading && pixelController.phase != PixelPhase.HIDDEN) pixelController.finish()
         }
     }
