@@ -298,7 +298,16 @@ data class BskyFeedGeneratorView(
     // Search page's Feeds filter shows "by @handle" — everything else that
     // already used this model (getSavedFeeds' batch resolution) ignores
     // this field, so adding it here is backward compatible.
-    val creator: BskyFeedCreator? = null
+    val creator: BskyFeedCreator? = null,
+    // Item 3 (rework): the feed generator's own declaration, from its
+    // app.bsky.feed.generator record, that it actually implements
+    // app.bsky.feed.sendInteractions — see MainViewModel.supportsFeedInteractions
+    // and BlueskyRepository.getFeedGeneratorInfo for how this gates the
+    // "Show more/less like this" menu items. Most feed generators never set
+    // this (it defaults to omitted/false), so defaulting to false here is
+    // the same "hidden unless a feed genuinely opts in" behavior the field
+    // itself is meant to express.
+    val acceptsInteractions: Boolean = false
 )
 
 data class BskyFeedCreator(val handle: String = "")
@@ -308,7 +317,8 @@ data class BskyGetFeedGeneratorsResponse(val feeds: List<BskyFeedGeneratorView>)
 data class BskyFeedInfo(
     val uri: String,
     val displayName: String,
-    val avatarUrl: String? = null
+    val avatarUrl: String? = null,
+    val acceptsInteractions: Boolean = false
 )
 
 // ── e621 ─────────────────────────────────────────────────────────────────────

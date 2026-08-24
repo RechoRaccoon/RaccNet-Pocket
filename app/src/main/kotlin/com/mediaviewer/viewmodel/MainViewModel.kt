@@ -1160,11 +1160,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // underlying selected feed happens to be. AT Protocol feed URIs for
     // actual custom feeds always live under the `app.bsky.feed.generator`
     // collection, which is what distinguishes them from e.g. list URIs.
+    // Item 3 (rework): "Show more/less like this" only makes sense — and,
+    // per the official app.bsky.feed lexicon, is only safe to actually send
+    // — for a feed whose generator has explicitly declared
+    // `acceptsInteractions: true` on its own app.bsky.feed.generator record.
+    // Checking just "is this URI shaped like a feed generator" (the old
+    // approach) let the buttons show up for plenty of feeds whose generator
+    // never implements the endpoint at all, so tapping them just proxied a
+    // request straight to that generator's own service and got a 501 back —
+    // see BlueskyRepository.getFeedGeneratorInfo's doc comment. This cache
+    // holds the real, per-feed answer once known — populated for every
+    // pinned/saved feed as soon as loadAvailableFeeds() resolves them (see
+    // its onSuccess below), and lazily filled in for any other feed the
+    // person navigates to (search results, a feed opened from a profile,
+    // etc.) by the resolver collector further down in this init block.
+    // Deliberately defaults to "unknown" (no entry) rather than assuming
+    // either true or false, so the button only ever appears once genuinely
+    // confirmed — see supportsFeedInteractions below.
+    private val _feedInteractionSupport = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+
     val supportsFeedInteractions: StateFlow<Boolean> = combine(
-        _selectedFeedUri, _authorFeedState, _appMode
-    ) { feedUri, authorState, mode ->
+        _selectedFeedUri, _authorFeedState, _appMode, _feedInteractionSupport
+    ) { feedUri, authorState, mode, cache ->
         mode == AppMode.BLUESKY && authorState == null &&
-            feedUri != null && feedUri.contains("app.bsky.feed.generator")
+            feedUri != null && feedUri.contains("app.bsky.feed.generator") &&
+            cache[feedUri] == true
     }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     // ── Init ──────────────────────────────────────────────────────────────────
@@ -1192,6 +1212,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { prefs.subscribedBlogDids.collect { _subscribedBlogDids.value = it } }
         loadHistoryFromPrefs()
         trackHistoryAutomatically()
+        // Item 3 (rework): fills in _feedInteractionSupport for any feed the
+        // person navigates to that loadAvailableFeeds()'s pinned/saved-feeds
+        // batch fetch didn't already resolve (a feed opened from search, a
+        // profile's own custom feed, etc.) — see that flow's own doc
+        // comment above. Only fetches for feeds not already known (either
+        // way), so this never re-fetches the same feed twice.
+        viewModelScope.launch {
+            _selectedFeedUri.collect { uri ->
+                if (uri != null && uri.contains("app.bsky.feed.generator") &&
+                    !_feedInteractionSupport.value.containsKey(uri) && bskyToken.isNotBlank()
+                ) {
+                    val accepts = bskyRepo.getFeedGeneratorInfo(bskyToken, uri).getOrNull()?.acceptsInteractions ?: false
+                    _feedInteractionSupport.value = _feedInteractionSupport.value + (uri to accepts)
+                }
+            }
+        }
         viewModelScope.launch {
             val accessJwt    = prefs.bskyAccessJwt.first()
             val refreshJwt   = prefs.bskyRefreshJwt.first()
@@ -1478,6 +1514,7 @@ _bskyDid.value          = session.did
             }
             result.onSuccess { feeds ->
                 _availableFeeds.value = feeds
+                _feedInteractionSupport.value = _feedInteractionSupport.value + feeds.associate { it.uri to it.acceptsInteractions }
                 // Bug fix (Outstanding Issue #1 — feed loses scroll position
                 // navigating Hub pages): this auto-select-a-default-feed
                 // fallback is only meant to cover the genuine "nothing has

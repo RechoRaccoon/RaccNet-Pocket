@@ -1544,15 +1544,13 @@ private fun PostContent(
                     onQuoteRepost, onDownload, onDownloadGif, onBlockAccount, onSendPost,
                     Modifier.fillMaxWidth()
                         .windowInsetsPadding(WindowInsets.navigationBars)
-                        .height(if (liquidGlass) 60.dp else 52.dp)
-                        .onGloballyPositioned { coords ->
-                            actionBarOrigin = coords.positionInRoot(); actionBarSize = coords.size
-                        },
+                        .height(if (liquidGlass) 60.dp else 52.dp),
                     liquidGlass = liquidGlass,
                     dominantColor = dominantColor,
                     backdrop = glassBackdrop,
                     moreMenuExpanded = moreMenuExpanded,
-                    onToggleMoreMenu = { moreMenuExpanded = !moreMenuExpanded }
+                    onToggleMoreMenu = { moreMenuExpanded = !moreMenuExpanded },
+                    onVisibleBoundsChanged = { origin, size -> actionBarOrigin = origin; actionBarSize = size }
                 )
             }
         }
@@ -2128,12 +2126,24 @@ private fun ActionRow(
     onQuoteRepost: () -> Unit, onDownload: () -> Unit,
     onDownloadGif: () -> Unit, onBlockAccount: () -> Unit, onShare: () -> Unit,
     modifier: Modifier, liquidGlass: Boolean, dominantColor: Color, backdrop: GlassBackdrop?,
-    // Items 5-8: the "More" menu's expanded/collapsed state and its toggle
+    // Items 5-8/1: the "More" menu's expanded/collapsed state and its toggle
     // now live in the caller (PostContent) instead of here — see the doc
     // comment on MoreBubbleMenu for why it's rendered as a sibling there
     // rather than nested inside this composable's own clipped surface.
     moreMenuExpanded: Boolean = false,
-    onToggleMoreMenu: () -> Unit = {}
+    onToggleMoreMenu: () -> Unit = {},
+    // Bug fix (item 4 — More stack's right edge didn't line up with the
+    // bar's own right edge): the caller used to track this bar's position
+    // via `onGloballyPositioned` attached to the *outside* of `modifier`,
+    // before the 12dp horizontal / 8dp vertical padding this composable
+    // then applies internally around the actual glass pill (in the
+    // liquidGlass branch only — see below). That reported the row's full,
+    // un-padded bounds, 12dp wider on the right than where the visible
+    // glass pill actually ends — exactly the gap the More stack's right
+    // edge was visibly missing by. Reporting bounds from *inside*, after
+    // that padding's been applied, gives the caller the pill's true visible
+    // edge to align against instead.
+    onVisibleBoundsChanged: (Offset, IntSize) -> Unit = { _, _ -> }
 ) {
     @Composable
     fun RowContent() {
@@ -2194,15 +2204,18 @@ private fun ActionRow(
     }
 
     val content: @Composable () -> Unit = { RowContent() }
+    val boundsModifier = Modifier.onGloballyPositioned { coords ->
+        onVisibleBoundsChanged(coords.positionInRoot(), coords.size)
+    }
 
     if (liquidGlass) {
         val shape = RoundedCornerShape(26.dp)
         LiquidGlassSurface(
-            modifier = modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            modifier = modifier.padding(horizontal = 12.dp, vertical = 8.dp).then(boundsModifier),
             shape = shape, tint = dominantColor, backdrop = backdrop
         ) { content() }
     } else {
-        Box(modifier.background(Color.Black.copy(0.55f))) { content() }
+        Box(modifier.then(boundsModifier).background(Color.Black.copy(0.55f))) { content() }
     }
 }
 
@@ -2271,7 +2284,13 @@ private fun MoreBubbleMenu(
     val stackHeightPx = with(density) {
         (bubbleHeightDp * items.size + gapDp * (items.size - 1)).roundToPx()
     }
-    val gapAboveAnchorPx = with(density) { 8.dp.roundToPx() }
+    // Bug fix (follow-up — spacing above the bar didn't match spacing
+    // between bubbles): this used to be a separate, larger 8dp constant,
+    // so the gap between the stack and the bar visibly didn't match the
+    // tighter 5dp seams between bubbles within the stack. Deriving it from
+    // the same `gapDp` makes every gap in the stack — between bubbles, and
+    // between the stack and the bar — exactly the same size.
+    val gapAboveAnchorPx = with(density) { gapDp.roundToPx() }
     // Stack's shared right edge pinned flush with the action bar's own
     // right edge, bottom edge sitting just above the bar's top edge.
     val stackTopRightRoot = anchorOriginRoot +
@@ -2564,35 +2583,67 @@ private fun VideoSeekBar(
     val shownProgress = dragProgress ?: committedProgress
     var trackWidthPx by remember { mutableStateOf(0) }
     val density = LocalDensity.current
-    // Bug fix (item 5 — seek bar very difficult to grab, current-position
-    // marker too small): the thumb is now a genuinely bigger, more visible
-    // marker (10dp x 22dp, up from 4dp x 16dp).
-    val thumbWidthPx = with(density) { 10.dp.roundToPx() }
+    // Bug fix (follow-up — only the grab zone and the thumb should grow,
+    // not the whole bar): the visible bar itself is back to its original
+    // footprint (20dp content height, 3dp track). The thumb — the "current
+    // point" marker the person actually needs to see/grab — is just a
+    // little bigger than the original (6dp x 18dp, up from 4dp x 16dp),
+    // not the much bigger 10dp x 22dp from the previous pass.
+    val thumbWidthPx = with(density) { 6.dp.roundToPx() }
 
     val barContent: @Composable BoxScope.() -> Unit = {
         Box(
-            // Bug fix (item 5 — bar very difficult to grab): `.padding(...)`
-            // used to sit *before* `.onSizeChanged`/`.pointerInput` in this
-            // modifier chain, so the gesture-registering area was measured
-            // AFTER that padding was subtracted — an 8dp vertical padding on
-            // a 20dp-tall box left only a ~4dp-tall strip that actually
-            // responded to touch, even though the visible bar looked taller.
-            // The touch target below is now a real 44dp-tall area (comfortably
-            // above Android's ~48dp recommended minimum once the surrounding
-            // glass padding is added back) with no vertical padding subtracted
-            // from it, so the whole tall area is grabbable, not just a thin
-            // sliver through the middle of it.
             Modifier
                 .fillMaxWidth()
-                // Horizontal inset applied *before* the touch/measurement
-                // modifiers (unlike the old vertical padding this replaces),
-                // so it narrows the box once, consistently, for gesture math,
-                // size tracking, and the visual track/thumb below — they all
-                // read the same width, so the thumb's drawn position always
-                // matches where a touch on the same spot would seek to.
-                .padding(horizontal = 14.dp)
-                .height(44.dp)
-                .onSizeChanged { trackWidthPx = it.width }
+                .height(20.dp)
+                .padding(horizontal = 14.dp, vertical = 8.dp)
+                .onSizeChanged { trackWidthPx = it.width },
+            contentAlignment = Alignment.CenterStart
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth(shownProgress)
+                    .height(3.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Color.White.copy(alpha = 0.9f))
+            )
+            Box(
+                Modifier
+                    .size(width = 6.dp, height = 18.dp)
+                    .offset { IntOffset((shownProgress * trackWidthPx).toInt() - thumbWidthPx / 2, 0) }
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(Color.White)
+            )
+        }
+    }
+    Box {
+        if (liquidGlass) {
+            LiquidGlassSurface(
+                modifier = Modifier.fillMaxWidth().padding(10.dp),
+                shape = shape, tint = dominantColor, backdrop = backdrop,
+                content = barContent
+            )
+        } else {
+            Box(
+                Modifier.fillMaxWidth().padding(10.dp).clip(shape).background(Color.Black.copy(alpha = 0.55f)),
+                content = barContent
+            )
+        }
+        // Bug fix (follow-up — bar very difficult to grab): a separate,
+        // invisible, genuinely bigger touch target laid on top of the
+        // visible bar rather than baked into it — this is what makes the
+        // bar easy to grab without changing how big it looks. Its
+        // horizontal inset (10dp glass padding + 14dp inner padding = 24dp
+        // each side) is deliberately the same inset the visible track above
+        // uses, so this box's width always matches `trackWidthPx` — a touch
+        // anywhere in it lands on exactly the position it visually lines up
+        // with, never off by the difference between two different insets.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(48.dp)
+                .align(Alignment.Center)
+                .padding(horizontal = 24.dp)
                 .pointerInput(durationMs) {
                     if (durationMs <= 0) return@pointerInput
                     awaitEachGesture {
@@ -2616,35 +2667,7 @@ private fun VideoSeekBar(
                         onSeekFinish()
                         dragProgress = null
                     }
-                },
-            contentAlignment = Alignment.CenterStart
-        ) {
-            Box(
-                Modifier
-                    .fillMaxWidth(shownProgress)
-                    .height(3.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(Color.White.copy(alpha = 0.9f))
-            )
-            Box(
-                Modifier
-                    .size(width = 10.dp, height = 22.dp)
-                    .offset { IntOffset((shownProgress * trackWidthPx).toInt() - thumbWidthPx / 2, 0) }
-                    .clip(RoundedCornerShape(5.dp))
-                    .background(Color.White)
-            )
-        }
-    }
-    if (liquidGlass) {
-        LiquidGlassSurface(
-            modifier = Modifier.fillMaxWidth().padding(10.dp),
-            shape = shape, tint = dominantColor, backdrop = backdrop,
-            content = barContent
-        )
-    } else {
-        Box(
-            Modifier.fillMaxWidth().padding(10.dp).clip(shape).background(Color.Black.copy(alpha = 0.55f)),
-            content = barContent
+                }
         )
     }
 }

@@ -211,7 +211,13 @@ class PixelTransitionController(private val scope: CoroutineScope) {
         private const val WIPE_IN_MS = 380
         private const val WIPE_OUT_MS = 340
         private const val THEME_SHIFT_MS = 420
-        private const val CONVEYOR_STEP_MS = 90L
+        // Bug fix (per feedback — conveyor a little too slow): wipe in/out
+        // speeds are confirmed good as-is, left untouched. This is just the
+        // per-tick rate of the diagonal color-band conveyor that runs across
+        // the covered cells while the curtain is up — was 90ms/tick, now a
+        // bit brisker at 65ms/tick (~40% faster) without changing anything
+        // else about the transition.
+        private const val CONVEYOR_STEP_MS = 65L
     }
 }
 

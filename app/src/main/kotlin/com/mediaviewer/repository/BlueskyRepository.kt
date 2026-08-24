@@ -179,13 +179,13 @@ class BlueskyRepository {
                 val batchResult = runCatching { api.getFeedGenerators("Bearer $token", batch) }
                 val batchBody = batchResult.getOrNull()?.takeIf { it.isSuccessful }?.body()
                 if (batchBody != null) {
-                    batchBody.feeds.forEach { infoByUri[it.uri] = BskyFeedInfo(it.uri, it.displayName, it.avatar) }
+                    batchBody.feeds.forEach { infoByUri[it.uri] = BskyFeedInfo(it.uri, it.displayName, it.avatar, it.acceptsInteractions) }
                 } else {
                     // One bad URI shouldn't sink the whole batch — retry individually
                     batch.forEach { uri ->
                         runCatching { api.getFeedGenerators("Bearer $token", listOf(uri)) }
                             .getOrNull()?.body()?.feeds?.firstOrNull()?.let {
-                                infoByUri[it.uri] = BskyFeedInfo(it.uri, it.displayName, it.avatar)
+                                infoByUri[it.uri] = BskyFeedInfo(it.uri, it.displayName, it.avatar, it.acceptsInteractions)
                             }
                     }
                 }
@@ -1174,6 +1174,26 @@ class BlueskyRepository {
             BskySendInteractionsRequest(listOf(BskyInteraction(item = postUri, event = event, feedContext = feedContext)))
         )
         if (!resp.isSuccessful) error("sendInteractions ${resp.code()}")
+    }
+
+    // ── Item 3 (rework): does the currently-viewed feed even support this? ──
+    // The AppView's own sendInteractions is proxied straight through to the
+    // feed generator's own service via the atproto-proxy header above — it's
+    // the generator's service, not the AppView, that has to actually
+    // implement handling for it. Most don't; a feed generator has to
+    // explicitly opt in by setting `acceptsInteractions: true` on its own
+    // app.bsky.feed.generator record for that to be safe to try (otherwise
+    // the proxied request typically comes back 501 from the generator's own
+    // service, exactly the failure this was hitting). This looks up that
+    // declaration for one specific feed via the same getFeedGenerators
+    // batch endpoint getSavedFeeds already uses, so MainViewModel can gate
+    // the "Show more/less like this" menu items on it per-feed instead of
+    // just on "is this a feed generator at all".
+    suspend fun getFeedGeneratorInfo(token: String, feedUri: String): Result<BskyFeedGeneratorView> = runCatching {
+        val resp = api.getFeedGenerators("Bearer $token", listOf(feedUri))
+        if (!resp.isSuccessful) error("getFeedGenerators ${resp.code()}")
+        val body = resp.body() ?: error("getFeedGenerators: empty body")
+        body.feeds.firstOrNull { it.uri == feedUri } ?: error("Feed generator not found: $feedUri")
     }
 
     suspend fun blockUser(token: String, did: String, targetDid: String): Result<String> =

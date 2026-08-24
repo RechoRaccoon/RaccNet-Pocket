@@ -25,7 +25,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -49,6 +49,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.graphics.graphicsLayer
@@ -261,18 +262,46 @@ fun SettingsSheet(
         onSwipeToFeed()
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .then(
-                // Item 3/11: the Hub's background gradient now reflects the
-                // currently-viewed post's own dominant color, same as the
-                // main feed's post background gradient, instead of a
-                // hardcoded neutral tint.
-                if (liquidGlass) Modifier.background(postBackgroundBrush(dominantColor))
-                else Modifier.background(OledBlack)
-            )
-    ) {
+    // Bug fix (item 5 — Hub upload bubbles need a genuine "cutout" look):
+    // a dedicated layer that paints — and, when liquidGlass, live-records
+    // into its own GraphicsLayer — *only* this plain background gradient,
+    // with nothing else ever drawn into it. Every other bit of the Hub
+    // (chips, cards, the scrollable page content) is a sibling drawn on top
+    // of this, never inside it, so this layer's recorded pixels are always
+    // just the flat gradient alone, never whatever happens to be visually
+    // on top of it at that spot on screen. Sampling this as a GlassBackdrop
+    // (see hubBackgroundBackdrop below) is what gives the new upload bubble
+    // stack (HubUploadBubble) an actual "hole punched through to the
+    // background" look even where it visually overlaps a card, instead of
+    // just a translucent tint over that card's own sharp pixels — the same
+    // effect ReturnToFeedBar gets "for free" by sitting below all the
+    // scrollable content instead, where there's simply nothing else to
+    // punch through in the first place.
+    val hubBackgroundLayer = rememberGraphicsLayer()
+    var hubBackgroundOrigin by remember { mutableStateOf(Offset.Zero) }
+    val hubBackgroundBackdrop = remember(liquidGlass, hubBackgroundLayer) {
+        if (liquidGlass) GlassBackdrop(hubBackgroundLayer) { hubBackgroundOrigin } else null
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(
+                    // Item 3/11: the Hub's background gradient now reflects the
+                    // currently-viewed post's own dominant color, same as the
+                    // main feed's post background gradient, instead of a
+                    // hardcoded neutral tint.
+                    if (liquidGlass) Modifier
+                        .background(postBackgroundBrush(dominantColor))
+                        .onGloballyPositioned { hubBackgroundOrigin = it.positionInRoot() }
+                        .drawWithContent {
+                            hubBackgroundLayer.record { this@drawWithContent.drawContent() }
+                            drawContent()
+                        }
+                    else Modifier.background(OledBlack)
+                )
+        )
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -386,6 +415,7 @@ fun SettingsSheet(
                 Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp).padding(top = 6.dp)) {
                     ReturnToFeedBar(
                         liquidGlass = liquidGlass, tint = dominantColor, backdrop = null,
+                        uploadBackdrop = hubBackgroundBackdrop,
                         onReturnToFeed = { onReturnToFeed() },
                         onRefresh = if (hubPage == HubPage.AT_PROTOCOL) onRefreshHub else null,
                         hasVisitedFeed = hasVisitedFeed
@@ -1549,22 +1579,36 @@ private fun HubRefreshBubble(
  *  interaction bar (that bar's old center [UploadPlaceholderButton] is gone;
  *  see ActionRow in MainFeedScreen.kt). A circular "+" bubble, matching
  *  [HubRefreshBubble]'s sizing/shape so the pair reads as symmetric anchors
- *  on either end of the Return to Feed pill. Tapping it opens the same
- *  [GlassDropdownMenu] the interaction bar's "More" button uses, with
- *  upload-flavored placeholder entries (item 5: Post/Blog/Review/Record/Go
- *  Live — none wired to real functionality yet). The "+" itself rotates 45°
+ *  on either end of the Return to Feed pill. The "+" itself rotates 45°
  *  clockwise while the menu is open (and back on close) as an open/close
- *  affordance, same idea as a standard "+" -> "x" FAB transform. */
+ *  affordance, same idea as a standard "+" -> "x" FAB transform.
+ *
+ *  Bug fix (follow-up — should use the same system as the feed's "More"
+ *  menu): this used to open a single, continuous [GlassDropdownMenu] panel
+ *  with all five entries stacked inside one shared glass surface. Now it's
+ *  a stack of individually separate pill bubbles — one glass surface per
+ *  entry, each with its own small gap — exactly like MainFeedScreen's
+ *  MoreBubbleMenu. Unlike that one, this stack doesn't need any root-
+ *  coordinate math to position itself: this bubble's own wrapping [Box] is
+ *  pinned to an exact [size] (so it can never grow/shift when the stack
+ *  beneath it expands — the stack is drawn *outside* those bounds, which
+ *  Compose allows without clipping), so the stack can just align itself to
+ *  that Box's own `TopEnd` corner and offset upward, entirely in local
+ *  coordinates. */
 @Composable
 private fun HubUploadBubble(
     liquidGlass: Boolean, tint: Color, size: androidx.compose.ui.unit.Dp = 26.dp,
-    modifier: Modifier = Modifier, backdrop: GlassBackdrop? = null
+    modifier: Modifier = Modifier, backdrop: GlassBackdrop? = null,
+    // Item 5 (rework): see ReturnToFeedBar's own doc comment on
+    // `uploadBackdrop` — this is that same background-only layer, used
+    // only for the popped-open menu bubbles below, never for the "+"
+    // circle itself (which keeps using [backdrop], same as before).
+    menuBackdrop: GlassBackdrop? = null
 ) {
     var expanded by remember { mutableStateOf(false) }
     val rotation by animateFloatAsState(if (expanded) 45f else 0f, animationSpec = tween(220), label = "uploadPlusRotation")
-    val shape = CircleShape
-    // Bug fix (item 11): same as HubRefreshBubble above — no more forced
-    // opaque backing now that this renders below the scrollable content.
+    val circleShape = CircleShape
+    val bubbleShape = RoundedCornerShape(26.dp) // item 5: same roundness as the interaction bar's More stack
     val clickModifier = Modifier.size(size).clickable { expanded = !expanded }
 
     @Composable
@@ -1575,24 +1619,65 @@ private fun HubUploadBubble(
         }
     }
 
-    Box(modifier) {
+    val items = remember {
+        listOf("Post", "Blog", "Review", "Record", "Go Live")
+    }
+    val bubbleHeightDp = 40.dp
+    val gapDp = 5.dp
+    val density = LocalDensity.current
+    val stackHeightPx = with(density) {
+        (bubbleHeightDp * items.size + gapDp * (items.size - 1)).roundToPx()
+    }
+    val gapAboveAnchorPx = with(density) { gapDp.roundToPx() }
+
+    // Pinned to an exact size so this Box can never grow/shift to
+    // accommodate the popped-open stack below — see the doc comment above.
+    Box(modifier.size(size)) {
         if (liquidGlass) {
-            LiquidGlassSurface(clickModifier, shape = shape, tint = tint, backdrop = backdrop) { IconContent() }
+            LiquidGlassSurface(clickModifier, shape = circleShape, tint = tint, backdrop = backdrop) { IconContent() }
         } else {
-            Box(clickModifier.clip(shape).background(Color.White.copy(0.10f))) { IconContent() }
+            Box(clickModifier.clip(circleShape).background(Color.White.copy(0.10f))) { IconContent() }
         }
-        GlassDropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-            items = listOf(
-                GlassMenuItem("Post") {},
-                GlassMenuItem("Blog") {},
-                GlassMenuItem("Review") {},
-                GlassMenuItem("Record") {},
-                GlassMenuItem("Go Live") {}
-            ),
-            liquidGlass = liquidGlass, tint = tint
-        )
+        if (expanded) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(y = with(density) { -(stackHeightPx + gapAboveAnchorPx).toDp() })
+                    .width(IntrinsicSize.Max)
+                    // Item 8 (same fix as the feed's MoreBubbleMenu):
+                    // swallows taps in the gaps between bubbles so they
+                    // don't fall through to the card underneath, without
+                    // closing the menu itself.
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {},
+                verticalArrangement = Arrangement.spacedBy(gapDp),
+                horizontalAlignment = Alignment.End
+            ) {
+                items.forEach { label ->
+                    val bubbleModifier = Modifier
+                        .fillMaxWidth()
+                        .height(bubbleHeightDp)
+                        .clip(bubbleShape)
+                        .clickable { expanded = false }
+                    if (liquidGlass) {
+                        LiquidGlassSurface(modifier = bubbleModifier, shape = bubbleShape, tint = tint, backdrop = menuBackdrop) {
+                            Text(
+                                label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                                textAlign = TextAlign.Center, maxLines = 1,
+                                modifier = Modifier.align(Alignment.Center).padding(horizontal = 14.dp)
+                            )
+                        }
+                    } else {
+                        Box(bubbleModifier.background(Color.Black.copy(alpha = 0.55f)), contentAlignment = Alignment.Center) {
+                            Text(
+                                label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                                textAlign = TextAlign.Center, maxLines = 1,
+                                modifier = Modifier.padding(horizontal = 14.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1610,6 +1695,15 @@ private fun ReturnToFeedBar(
     backdrop: GlassBackdrop?,
     onReturnToFeed: () -> Unit,
     onRefresh: (() -> Unit)? = null,
+    // Item 5 (rework): the dedicated background-only backdrop the upload
+    // bubble stack uses for its "cutout" look — see the doc comment where
+    // this is built, on the Hub's root `hubBackgroundLayer`. Deliberately a
+    // separate parameter from [backdrop] above: [backdrop] is `null`
+    // everywhere on this bar today (see its own comment), while this one
+    // is real and only ever feeds the upload menu's popped-open bubbles,
+    // which — unlike this bar itself — can end up visually overlapping the
+    // scrollable card content above when expanded.
+    uploadBackdrop: GlassBackdrop? = null,
     // Feature (this session): "Open Feed" the very first time (before the
     // person has ever been to the feed this session — the app now opens
     // straight on the Hub, see MainViewModel's init{} change), "Return to
@@ -1675,7 +1769,10 @@ private fun ReturnToFeedBar(
         if (onRefresh != null) {
             HubRefreshBubble(liquidGlass, tint, onRefresh, size = barHeight, modifier = Modifier.align(Alignment.CenterStart), backdrop = backdrop)
         }
-        HubUploadBubble(liquidGlass, tint, size = barHeight, modifier = Modifier.align(Alignment.CenterEnd), backdrop = backdrop)
+        HubUploadBubble(
+            liquidGlass, tint, size = barHeight, modifier = Modifier.align(Alignment.CenterEnd),
+            backdrop = backdrop, menuBackdrop = uploadBackdrop
+        )
     }
 }
 
