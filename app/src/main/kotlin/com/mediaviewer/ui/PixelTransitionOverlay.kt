@@ -1,5 +1,6 @@
 package com.mediaviewer.ui
 
+import android.graphics.Color as AndroidColor
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -20,7 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CoroutineScope
@@ -28,6 +29,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.math.ceil
 
 /** State machine phases for [PixelTransitionController]. HIDDEN renders
@@ -90,7 +93,14 @@ class PixelTransitionController(private val scope: CoroutineScope) {
     private var colorFrom by mutableStateOf(Color.White)
     private var colorTo by mutableStateOf(Color.White)
     private val colorProgress = Animatable(1f)
-    val color: State<Color> = derivedStateOf { lerp(colorFrom, colorTo, colorProgress.value) }
+    // Bug fix (item 3): plain RGB lerp cuts straight across color space, so a
+    // shift between two saturated hues visibly desaturates toward grey at the
+    // midpoint (e.g. red -> cyan passes through neutral grey at t=0.5, since
+    // that's exactly the RGB midpoint of two complementary colors). Rotating
+    // through HSV hue instead — see [lerpHsv] below — keeps saturation/value
+    // high the whole way through so this reads as a true hue shift, never a
+    // dip to grey.
+    val color: State<Color> = derivedStateOf { lerpHsv(colorFrom, colorTo, colorProgress.value) }
 
     /** Increments on a fixed tick while LOADING — the discrete "hop" driving
      *  the conveyor-belt motion. Deliberately NOT an Animatable/smoothly
@@ -102,6 +112,22 @@ class PixelTransitionController(private val scope: CoroutineScope) {
     private var conveyorJob: Job? = null
     private var generation = 0
 
+    // Bug fix (item 2): start()/updateColor()/finish() all drive the SAME
+    // wipeProgress/colorProgress Animatables. If two callers ever invoke
+    // these concurrently — e.g. a profile's network fetch resolving faster
+    // than the 380ms wipe-in, so a second effect run calls finish() while
+    // the first run is still suspended inside start()'s wipeProgress
+    // .animateTo(...) — the second call's snapTo/animateTo on that shared
+    // Animatable cancels the first with a CancellationException. That
+    // silently kills the first coroutine before it ever returns from
+    // start(), which (at the call site) means whatever was gated on
+    // start() completing — e.g. a "profileRevealArmed = true" right after
+    // it — never runs, leaving the UI stuck permanently "loading". Wrapping
+    // every call in the same Mutex fully serializes them: a call that
+    // arrives early just waits for the in-flight one to actually finish
+    // instead of yanking it out from under itself.
+    private val mutex = Mutex()
+
     /** Phase 1 + 2: snaps to [baseColor], starts the conveyor loop running
      *  immediately (so the "digital marquee" motion is visible from the
      *  very first frame of the wipe-in, not just once LOADING begins), runs
@@ -111,7 +137,7 @@ class PixelTransitionController(private val scope: CoroutineScope) {
      *  real work to proceed in parallel. Safe to call again before a prior
      *  transition finished (e.g. rapid profile-to-profile navigation) —
      *  the new call's generation supersedes the old one's background loop. */
-    suspend fun start(baseColor: Color) {
+    suspend fun start(baseColor: Color) = mutex.withLock {
         val myGeneration = ++generation
         conveyorJob?.cancel()
         colorFrom = baseColor
@@ -127,7 +153,7 @@ class PixelTransitionController(private val scope: CoroutineScope) {
             }
         }
         wipeProgress.animateTo(1f, tween(WIPE_IN_MS, easing = FastOutSlowInEasing))
-        if (myGeneration != generation) return
+        if (myGeneration != generation) return@withLock
         phase = PixelPhase.LOADING
     }
 
@@ -136,7 +162,7 @@ class PixelTransitionController(private val scope: CoroutineScope) {
      *  rest of the target content (profile assets, feed data) is ready.
      *  Re-entrant: each call just re-targets the in-flight animation, so
      *  calling it repeatedly as better color data trickles in is fine. */
-    suspend fun updateColor(target: Color) {
+    suspend fun updateColor(target: Color) = mutex.withLock {
         colorFrom = color.value
         colorTo = target
         colorProgress.snapTo(0f)
@@ -149,12 +175,12 @@ class PixelTransitionController(private val scope: CoroutineScope) {
      *  instant — all target content is actually mounted and ready to show;
      *  this is what makes the whole overlay's total on-screen time track
      *  real load time exactly. */
-    suspend fun finish() {
+    suspend fun finish() = mutex.withLock {
         val myGeneration = ++generation
         phase = PixelPhase.WIPE_OUT
         wipeProgress.snapTo(0f)
         wipeProgress.animateTo(1f, tween(WIPE_OUT_MS, easing = FastOutLinearInEasing))
-        if (myGeneration != generation) return
+        if (myGeneration != generation) return@withLock
         conveyorJob?.cancel()
         conveyorJob = null
         phase = PixelPhase.HIDDEN
@@ -168,6 +194,30 @@ class PixelTransitionController(private val scope: CoroutineScope) {
         private const val THEME_SHIFT_MS = 420
         private const val CONVEYOR_STEP_MS = 90L
     }
+}
+
+/** Interpolates through HSV space instead of straight RGB, taking the
+ *  shortest path around the hue wheel. Straight RGB lerp between two
+ *  saturated colors cuts through the middle of the color cube, which for
+ *  hues that are far apart (in the extreme, complementary — e.g. red to
+ *  cyan) passes directly through the neutral grey point at the midpoint.
+ *  Rotating hue instead keeps saturation/value high throughout, so this
+ *  always reads as "color one smoothly becoming color two", never as a dip
+ *  through grey along the way. */
+private fun lerpHsv(from: Color, to: Color, t: Float): Color {
+    val fromHsv = FloatArray(3)
+    val toHsv = FloatArray(3)
+    AndroidColor.colorToHSV(from.toArgb(), fromHsv)
+    AndroidColor.colorToHSV(to.toArgb(), toHsv)
+    var deltaHue = toHsv[0] - fromHsv[0]
+    if (deltaHue > 180f) deltaHue -= 360f
+    if (deltaHue < -180f) deltaHue += 360f
+    var hue = fromHsv[0] + deltaHue * t
+    if (hue < 0f) hue += 360f
+    if (hue >= 360f) hue -= 360f
+    val saturation = fromHsv[1] + (toHsv[1] - fromHsv[1]) * t
+    val value = fromHsv[2] + (toHsv[2] - fromHsv[2]) * t
+    return Color(AndroidColor.HSVToColor(floatArrayOf(hue, saturation, value)))
 }
 
 @Composable

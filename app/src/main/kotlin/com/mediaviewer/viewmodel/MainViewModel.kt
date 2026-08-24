@@ -1147,6 +1147,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } else item
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
+    // Item 9: "Show more/less like this" sends Bluesky's feed-personalization
+    // interaction signal to whichever feed generator actually supplied the
+    // current post (see sendFeedInteraction's own doc comment) — so it only
+    // makes sense to offer the button while genuinely viewing a real,
+    // feed-generator-backed feed. It's unsupported while: (a) viewing the
+    // plain chronological Following timeline (`_selectedFeedUri` null — not
+    // backed by any generator to proxy the signal to), or (b) temporarily
+    // viewing an author's posts / search results / bookmarks / any other
+    // override of the normal feed (`_authorFeedState` non-null — see its own
+    // doc comment for what that flag means), regardless of what the
+    // underlying selected feed happens to be. AT Protocol feed URIs for
+    // actual custom feeds always live under the `app.bsky.feed.generator`
+    // collection, which is what distinguishes them from e.g. list URIs.
+    val supportsFeedInteractions: StateFlow<Boolean> = combine(
+        _selectedFeedUri, _authorFeedState, _appMode
+    ) { feedUri, authorState, mode ->
+        mode == AppMode.BLUESKY && authorState == null &&
+            feedUri != null && feedUri.contains("app.bsky.feed.generator")
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     // ── Init ──────────────────────────────────────────────────────────────────
     init {
         // Feature (this session): a single collector, rather than touching

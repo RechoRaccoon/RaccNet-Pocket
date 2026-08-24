@@ -176,6 +176,9 @@ private fun AppRoot(viewModel: MainViewModel) {
     val availableFeeds     by viewModel.availableFeeds.collectAsState()
     val selectedFeed       by viewModel.selectedFeedUri.collectAsState()
     val authorFeedState    by viewModel.authorFeedState.collectAsState()
+    // Item 9: gates the More menu's "Show more/less like this" to only
+    // feeds that can actually act on the interaction signal.
+    val supportsFeedInteractions by viewModel.supportsFeedInteractions.collectAsState()
     val comments           by viewModel.comments.collectAsState()
     val commentsLoad       by viewModel.commentsLoading.collectAsState()
     val downloadOnLike     by viewModel.downloadOnLike.collectAsState()
@@ -293,7 +296,16 @@ private fun AppRoot(viewModel: MainViewModel) {
     var selfThemeColor by remember { mutableStateOf(Color.Black) }
     var selfColorReady by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
-        pixelController.start(Color.Black)
+        // Bug fix (item 1): this used to start from Color.Black. The wipe-in
+        // grid is drawn on top of an opaque black cold-launch scrim (see
+        // `coldLaunchCovered` below), so a black-on-black wipe is completely
+        // invisible — the screen just sits there looking static for the
+        // whole WIPE_IN duration, and by the time anything is visible the
+        // wipe has already silently finished. Starting from white instead
+        // means the "swiping in and covering it with white pixels" motion
+        // is actually visible against the black scrim, before it hue-shifts
+        // into the user's profile color once that's fetched.
+        pixelController.start(Color.White)
     }
     LaunchedEffect(appInitialized, bskyLoggedIn, selfProfile) {
         if (!appInitialized) return@LaunchedEffect
@@ -380,6 +392,18 @@ private fun AppRoot(viewModel: MainViewModel) {
         }
     }
 
+    // Item 12: set true right before handleSelectFeed switches to FEED, so
+    // MainFeedScreen's screenState AnimatedContent can skip its normal
+    // SETTINGS -> FEED slide transition for just that one switch (the pixel
+    // curtain is already covering the whole screen at that point, so a
+    // slide underneath it is pure redundant motion). Reset back to false
+    // once FEED has actually been reached, so the next genuine "Return to
+    // Feed" tap gets its slide animation back.
+    var skipFeedEntryAnim by remember { mutableStateOf(false) }
+    LaunchedEffect(screenState) {
+        if (screenState == ScreenState.FEED) skipFeedEntryAnim = false
+    }
+
     // Scenario C — opening a feed from the Feeds row (item 4/7): tapping a
     // *different* feed chip plays the same transition while the feed
     // actually loads, then hue-shifts to that feed's own first post before
@@ -392,7 +416,15 @@ private fun AppRoot(viewModel: MainViewModel) {
     // and should stay instant.
     val handleSelectFeed: (String?) -> Unit = { uri ->
         rootScope.launch {
-            pixelController.start(currentDominantColor)
+            // Bug fix (item 4): this used to start from `currentDominantColor`
+            // — the live backdrop color of whatever post happens to be on
+            // screen right now, which is essentially "the color the *previous*
+            // transition happened to end on" (it tracks whatever the last
+            // reveal settled the feed on). Every other transition after the
+            // cold-boot one is supposed to always start from the user's own
+            // profile color, same as Scenario B — so start from
+            // `selfThemeColor` here too.
+            pixelController.start(selfThemeColor)
             viewModel.selectFeedFromAnyContext(uri)
             // selectFeedFromAnyContext's "same feed, restore exactly from
             // cache" fast-path (see its own doc comment) never flips
@@ -406,6 +438,18 @@ private fun AppRoot(viewModel: MainViewModel) {
                 fetchDominantColor(context, firstMedia.thumbUrl.ifBlank { firstMedia.mediaUrl })
             } else currentDominantColor
             pixelController.updateColor(feedColor)
+            // Bug fix (item 12): the screen is already fully covered by the
+            // opaque pixel curtain at this point, so the FEED screen
+            // switching in underneath should be invisible either way — but
+            // MainFeedScreen's AnimatedContent normally plays a slide/scroll
+            // transition on every SETTINGS -> FEED switch, regardless of
+            // what triggered it. That's correct for the explicit "Return to
+            // Feed" button (which has no pixel curtain covering it), but for
+            // this feed-menu path it means a slide animation is quietly
+            // happening underneath — and sometimes bleeding through — the
+            // wipe. Flip this flag right before switching so MainFeedScreen
+            // skips the slide just this once.
+            skipFeedEntryAnim = true
             viewModel.setScreen(ScreenState.FEED)
             pixelController.finish()
         }
@@ -424,6 +468,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             currentIndex              = currentIndex,
             currentItem               = currentItem,
             screenState               = screenState,
+            skipFeedEntryAnim         = skipFeedEntryAnim,
             hasVisitedFeed            = hasVisitedFeed,
             appMode                   = appMode,
             navDirection              = navDirection,
@@ -531,6 +576,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             onShowMoreLikeThis        = viewModel::sendShowMoreLikeThisForCurrentItem,
             onShowLessLikeThis        = viewModel::sendShowLessLikeThisForCurrentItem,
             onAddAccountToList        = viewModel::openListPickerForCurrentAuthor,
+            supportsFeedInteractions  = supportsFeedInteractions,
             sentByExpanded            = sentByExpanded,
             onToggleSentByExpanded    = viewModel::toggleSentByExpanded,
             onOpenReplyToSender       = viewModel::openReplyToSender,

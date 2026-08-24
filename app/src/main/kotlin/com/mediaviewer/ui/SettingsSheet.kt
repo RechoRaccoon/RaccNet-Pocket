@@ -362,6 +362,37 @@ fun SettingsSheet(
                 }
             }
 
+            // Item 11: the Refresh/Return to Feed/Upload bar now renders
+            // once, here — outside and below the scrollable per-page
+            // content (the `weight(1f)` Box above) — instead of being
+            // pinned as an overlay layer on top of it inside each page.
+            // This Column has no scroll container of its own, so this bar
+            // sits on the exact same plain, un-scrolling background
+            // gradient the "Created by Recho Raccoon" credit right below it
+            // does — nothing can ever scroll behind it, which is why the
+            // old opaque-backing workaround inside ReturnToFeedBar/
+            // HubRefreshBubble/HubUploadBubble is gone too (see their own
+            // comments). Hidden on the Settings page, same as before (it
+            // has no corresponding feed mode to return to), and only shown
+            // for a page once its account is actually logged in — matching
+            // exactly what AtProtocolPageContent/E621PageContent used to
+            // gate on internally.
+            val showReturnBar = when (hubPage) {
+                HubPage.AT_PROTOCOL -> bskyLoggedIn
+                HubPage.E621 -> e621LoggedIn
+                HubPage.SETTINGS -> false
+            }
+            if (showReturnBar) {
+                Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp).padding(top = 6.dp)) {
+                    ReturnToFeedBar(
+                        liquidGlass = liquidGlass, tint = dominantColor, backdrop = null,
+                        onReturnToFeed = { onReturnToFeed() },
+                        onRefresh = if (hubPage == HubPage.AT_PROTOCOL) onRefreshHub else null,
+                        hasVisitedFeed = hasVisitedFeed
+                    )
+                }
+            }
+
             Text(
                 buildAnnotatedString {
                     append("Created by ")
@@ -891,31 +922,22 @@ private fun AtProtocolPageContent(
     // this session's card/skeleton sizing no longer applies once this is
     // reverted, but the sizing itself is left as-is (still reasonable, no
     // reason to churn it further).
-    // Bug fix (item 1): "Return to Feed" used to be the last child of this
-    // same scrolling Column, so it scrolled away with everything else
-    // instead of staying reachable — it's meant to replace a swipe-up
-    // gesture, which should work from anywhere on the page, not just the
-    // very bottom of a long scroll. The scrollable content now lives in
-    // its own Box layer with bottom padding reserved for the bar's height,
-    // and the bar itself is a second Box layer pinned to BottomCenter,
-    // fixed in place on screen the way the screenshot expects.
-    // Bug fix (per feedback — Return to Feed/Refresh should read as a plain
-    // card like the Settings/AT Protocol/e621 chips above, not a live
-    // reflective panel): this bar used to read from its own live,
-    // every-frame-recorded backdrop layer (mirroring whatever was actually
-    // scrolling underneath it), which made it look and feel distinct from
-    // those chips. It's now passed `backdrop = null` at both call sites
-    // below, same as those chips effectively render — a still frosted tint
-    // + rim, no live capture — so the whole Hub reads as one consistent
-    // "card" visual language. The recording machinery that used to feed it
-    // is gone along with it.
-
-    Box(Modifier.fillMaxSize()) {
+    // Bug fix (item 11): the Refresh/Return to Feed/Upload bar no longer
+    // lives inside this page's own Box at all — it used to be pinned here
+    // as a second layer directly on top of this scrollable Column, which is
+    // exactly why it needed a forced-opaque background to stay legible over
+    // whatever was scrolling underneath it (see the old comment on
+    // ReturnToFeedBar, now removed). It's rendered once, by the outer Hub
+    // composable, below the whole page-switching area — see the call site
+    // there — sitting on the same plain, un-scrolling background gradient
+    // the "Created by Recho Raccoon" credit does, so nothing ever scrolls
+    // behind it. This Column now just needs a small fixed bottom margin for
+    // breathing room, not a height reserved to avoid an overlay.
     Column(
         Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(bottom = RETURN_TO_FEED_BAR_RESERVED_HEIGHT)
+            .padding(bottom = 16.dp)
     ) {
 
         // Item: every setting that used to live below the 6-button grid
@@ -1271,35 +1293,7 @@ private fun AtProtocolPageContent(
 
         Spacer(Modifier.height(8.dp))
     }
-    // Bug fix (item 1): pinned in its own Box layer above the scroll
-    // content instead of scrolling away with it — see the matching comment
-    // on this function's outer Box/Column split above.
-    // Bug fix (per feedback — Return to Feed/Refresh should sit flush with
-    // the Settings/AT Protocol/e621 chips above, not further inset): this
-    // Box used to have no horizontal padding of its own, so it spanned the
-    // literal screen edge — LESS inset than the header chip row, which
-    // uses 14.dp (see the HubChip Row above) — leaving the two rows
-    // visually misaligned. Matching that same 14.dp here lines this bar's
-    // left/right edges up exactly with the chips'.
-    // Bug fix (per feedback — too much air between this bar and the
-    // "Created by" credit below it, more than between that credit and the
-    // gesture bar): this used to sit 8.dp off the bottom of the page's own
-    // fillMaxSize() Box, which — combined with the credit's own top
-    // padding — read as a bigger gap above the credit than below it.
-    // Dropped to 2.dp so the bar sits a little lower, right up against the
-    // credit, matching (rather than exceeding) the credit's own bottom
-    // margin.
-    Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 14.dp).padding(bottom = 2.dp)) {
-        ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = null,
-            onReturnToFeed = onReturnToFeed, onRefresh = onRefreshHub, hasVisitedFeed = hasVisitedFeed)
-    }
-    }
 }
-
-// Bug fix (item 1): the scrolling content's bottom padding reserved for the
-// pinned ReturnToFeedBar — kept a little larger than the bar's own visual
-// height so the last real section never sits flush against/behind it.
-private val RETURN_TO_FEED_BAR_RESERVED_HEIGHT = 72.dp
 
 // Feature (this session): skeleton-placeholder slot counts for the Hub's
 // horizontally-scrolling sections — chosen to fill a typical phone-width
@@ -1518,22 +1512,16 @@ private fun HubRefreshBubble(
     // Protocol/e621 chips above rather than a live-reflection panel.
     backdrop: GlassBackdrop? = null
 ) {
-    val scope = rememberCoroutineScope()
     val rotation = remember { Animatable(0f) }
     val shape = CircleShape
-    // Bug fix: this bubble sits over the Hub's own scrolling content
-    // (Reviews thumbnails, blog cards, etc.) rather than the more uniform
-    // background the top Settings/AT Protocol/e621 chips sit over, so the
-    // normal liquid-glass tint alone (deliberately low-alpha so live
-    // backdrops show through it) wasn't enough to read as a solid "card" —
-    // it looked like it was still just floating transparently over
-    // whatever happened to be scrolled underneath. A solid dark backing
-    // drawn first, clipped to the same shape, fixes that regardless of
-    // what's behind it; the normal glass tint/rim still draws on top of it
-    // exactly as before.
-    val cardBacking = Modifier.background(Color.Black.copy(alpha = 0.62f), shape)
-    val clickModifier = cardBacking
-        .then(Modifier.size(size))
+    val scope = rememberCoroutineScope()
+    // Bug fix (item 11): the forced opaque backing here (and on
+    // HubUploadBubble below) is gone — see ReturnToFeedBar's own comment.
+    // Both bubbles now render below the scrollable page content instead of
+    // on top of it, so there's nothing underneath for the plain glass tint
+    // to visually compete with anymore.
+    val clickModifier = Modifier
+        .size(size)
         .clickable {
             onRefresh()
             scope.launch {
@@ -1575,9 +1563,9 @@ private fun HubUploadBubble(
     var expanded by remember { mutableStateOf(false) }
     val rotation by animateFloatAsState(if (expanded) 45f else 0f, animationSpec = tween(220), label = "uploadPlusRotation")
     val shape = CircleShape
-    // Bug fix: same solid-backing fix as HubRefreshBubble above — see its
-    // own comment for why the plain glass tint alone wasn't enough here.
-    val clickModifier = Modifier.background(Color.Black.copy(alpha = 0.62f), shape).size(size).clickable { expanded = !expanded }
+    // Bug fix (item 11): same as HubRefreshBubble above — no more forced
+    // opaque backing now that this renders below the scrollable content.
+    val clickModifier = Modifier.size(size).clickable { expanded = !expanded }
 
     @Composable
     fun IconContent() {
@@ -1655,18 +1643,23 @@ private fun ReturnToFeedBar(
     val uploadReserve = barHeight + 10.dp
 
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
-        // Bug fix: same solid-backing fix as HubRefreshBubble/HubUploadBubble
-        // (see HubRefreshBubble's own comment) — this pill sits over the
-        // same busy scrolling content they do, so it needs the same opaque
-        // dark backing under the glass tint to actually read as a card.
-        // (The background has to be chained AFTER the padding below, not
-        // before it, so it only paints the pill's own trimmed width —
-        // not the full row underneath the refresh/upload bubbles' reserved
-        // space on either end.)
+        // Bug fix (item 11): this used to force an opaque
+        // Color.Black.copy(alpha = 0.62f) backing under the glass tint,
+        // because this bar used to be layered on top of the same busy
+        // scrolling content the page's cards live in — the extra opacity
+        // was a workaround to keep it legible over whatever happened to be
+        // scrolling underneath. Per feedback, that's undone here: this bar
+        // is no longer drawn as an overlay on top of scrolling content at
+        // all — the caller (see the outer Hub composable) now renders it
+        // below the scrollable page area entirely, over the same plain
+        // background gradient the "Created by Recho Raccoon" credit sits
+        // on, so there's nothing to visually fight with underneath it and
+        // no reason to force extra opacity. It now uses a completely
+        // normal LiquidGlassSurface, same as the HubChip row above it.
         if (liquidGlass) {
             LiquidGlassSurface(
                 Modifier.fillMaxWidth().padding(start = refreshReserve, end = uploadReserve).height(barHeight)
-                    .background(Color.Black.copy(alpha = 0.62f), shape).clickable(onClick = onReturnToFeed),
+                    .clickable(onClick = onReturnToFeed),
                 shape = shape, tint = tint, backdrop = backdrop
             ) {}
         } else {
@@ -1852,7 +1845,10 @@ private fun E621PageContent(
     // matching the chips' still-card look. This page's Hot/Favorites/
     // Following buttons are unaffected — they keep using the feed-level
     // `backdrop` param as before.
-    Box(Modifier.fillMaxSize()) {
+    // Bug fix (item 11): the Refresh/Return to Feed/Upload bar no longer
+    // renders inside this page at all — see the matching comment on
+    // AtProtocolPageContent above. It's rendered once, by the outer Hub
+    // composable, below the whole page-switching area.
     Column(
         Modifier
             .fillMaxSize()
@@ -1967,15 +1963,6 @@ private fun E621PageContent(
 
             Spacer(Modifier.height(8.dp))
         }
-    }
-    if (e621LoggedIn) {
-        // Bug fix: same edge-alignment fix as the AT Protocol page's
-        // ReturnToFeedBar above — 14.dp matches the header chip row.
-        // Bug fix: same lower-placement fix as the AT Protocol page's bar above.
-        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 14.dp).padding(bottom = 2.dp)) {
-            ReturnToFeedBar(liquidGlass = liquidGlass, tint = dominantColor, backdrop = null, onReturnToFeed = onReturnToFeed, hasVisitedFeed = hasVisitedFeed)
-        }
-    }
     }
 }
 

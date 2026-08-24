@@ -59,8 +59,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.*
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.Player
@@ -133,6 +131,11 @@ fun MainFeedScreen(
     currentIndex: Int,
     currentItem: MediaItem?,
     screenState: ScreenState,
+    // Item 12: true for exactly the one SETTINGS -> FEED switch triggered by
+    // picking a feed from the Feeds row (already covered by the pixel
+    // curtain), false for every other transition including the explicit
+    // "Return to Feed" button — which should keep its normal slide.
+    skipFeedEntryAnim: Boolean = false,
     hasVisitedFeed: Boolean,
     appMode: AppMode,
     navDirection: Int,
@@ -239,6 +242,10 @@ fun MainFeedScreen(
     onShowMoreLikeThis: () -> Unit = {},
     onShowLessLikeThis: () -> Unit = {},
     onAddAccountToList: () -> Unit = {},
+    // Item 9: only a real feed-generator-backed feed can act on the
+    // "Show more/less like this" signal — gates whether those two menu
+    // items appear at all.
+    supportsFeedInteractions: Boolean = false,
     sentByExpanded: Boolean,
     onToggleSentByExpanded: () -> Unit,
     onOpenReplyToSender: () -> Unit,
@@ -317,6 +324,15 @@ fun MainFeedScreen(
                         targetState == ScreenState.SETTINGS ->
                             slideInVertically(tween(220, easing = FastOutSlowInEasing)) { -it } togetherWith
                             slideOutVertically(tween(220, easing = FastOutSlowInEasing)) { it }
+                        // Item 12: picking a feed from the Feeds row switches
+                        // SETTINGS -> FEED while the pixel curtain already
+                        // fully covers the screen, so the normal slide here
+                        // would just be silent wasted motion (or worse,
+                        // bleed through the wipe) — skip it for just this
+                        // one switch. The explicit "Return to Feed" button
+                        // never sets this flag, so it keeps the slide below.
+                        initialState == ScreenState.SETTINGS && targetState == ScreenState.FEED && skipFeedEntryAnim ->
+                            EnterTransition.None togetherWith ExitTransition.None
                         initialState == ScreenState.SETTINGS ->
                             slideInVertically(tween(220, easing = FastOutSlowInEasing)) { it } togetherWith
                             slideOutVertically(tween(220, easing = FastOutSlowInEasing)) { -it }
@@ -366,6 +382,7 @@ fun MainFeedScreen(
                         onShowMoreLikeThis = onShowMoreLikeThis,
                         onShowLessLikeThis = onShowLessLikeThis,
                         onAddAccountToList = onAddAccountToList,
+                        supportsFeedInteractions = supportsFeedInteractions,
                         sentByExpanded         = sentByExpanded,
                         onToggleSentByExpanded = onToggleSentByExpanded,
                         onOpenReplyToSender    = onOpenReplyToSender,
@@ -696,6 +713,7 @@ private fun FeedView(
     onShowMoreLikeThis: () -> Unit = {},
     onShowLessLikeThis: () -> Unit = {},
     onAddAccountToList: () -> Unit = {},
+    supportsFeedInteractions: Boolean = false,
     sentByExpanded: Boolean,
     onToggleSentByExpanded: () -> Unit,
     onOpenReplyToSender: () -> Unit,
@@ -764,6 +782,7 @@ private fun FeedView(
                     onShowMoreLikeThis = onShowMoreLikeThis,
                     onShowLessLikeThis = onShowLessLikeThis,
                     onAddAccountToList = onAddAccountToList,
+                    supportsFeedInteractions = supportsFeedInteractions,
                     sentByExpanded         = sentByExpanded,
                     onToggleSentByExpanded = onToggleSentByExpanded,
                     onOpenReplyToSender    = onOpenReplyToSender,
@@ -806,6 +825,11 @@ private fun PostContent(
     onShowMoreLikeThis: () -> Unit = {},
     onShowLessLikeThis: () -> Unit = {},
     onAddAccountToList: () -> Unit = {},
+    // Item 9: only a real feed-generator-backed feed can act on the
+    // "Show more/less like this" interaction signal (chronological
+    // Following, profile grids, and search results have no feed generator
+    // to proxy it to) — gates whether those two menu items even appear.
+    supportsFeedInteractions: Boolean = false,
     sentByExpanded: Boolean, onToggleSentByExpanded: () -> Unit,
     onOpenReplyToSender: () -> Unit,
     onTapSentByAuthor: (AuthorInfo) -> Unit = {},
@@ -868,6 +892,18 @@ private fun PostContent(
     var indicatorPillSize    by remember(item.id) { mutableStateOf(IntSize.Zero) }
     var indicatorHoldActive  by remember(item.id) { mutableStateOf(false) }
     var indicatorHoverSide   by remember(item.id) { mutableStateOf(0) }
+
+    // Items 5-8: the "More" menu's own state, hoisted up here (out of
+    // ActionRow) for the same reason as the indicator pill's Next/Previous
+    // buttons above — it needs to render as a sibling of the recorded box,
+    // anchored to the action bar's own root-relative bounds, rather than as
+    // a Popup (a Popup opens its own separate Android window, whose
+    // positionInRoot() is relative to THAT window, not this one — which is
+    // exactly why its live blur backdrop never lined up correctly; see
+    // MoreBubbleMenu's own doc comment).
+    var moreMenuExpanded by remember(item.id) { mutableStateOf(false) }
+    var actionBarOrigin  by remember(item.id) { mutableStateOf<Offset?>(null) }
+    var actionBarSize    by remember(item.id) { mutableStateOf(IntSize.Zero) }
 
     // Big Update #1: sampled average color of the current post's media — feeds
     // the liquid-glass panels so their tint/"reflection" shifts with whatever
@@ -1131,9 +1167,29 @@ private fun PostContent(
                                         // grid detection above still works on text posts — only
                                         // the magnification itself is disabled.
                                         if (!item.isTextOnly) {
+                                            val oldScale = scale
                                             val newScale = rawNew.coerceIn(1f, 8f)
                                             scale = newScale
-                                            offset = clampOffset(if (newScale > 1.02f) offset + (centroid - prevCentroid) else Offset.Zero, newScale)
+                                            // Bug fix (item 10): this used to just add the pinch
+                                            // centroid's frame-to-frame movement to `offset` — a
+                                            // pure "follow the fingers" pan. It never corrected for
+                                            // the fact that graphicsLayer scales around the
+                                            // component's own center by default, so growth from
+                                            // any change in `scale` always visually expanded
+                                            // outward from dead center regardless of where the
+                                            // pinch actually was or where the user had since
+                                            // panned to. The `ratio`/`containerCenter` terms below
+                                            // solve for the translation that keeps the point
+                                            // currently under the fingers (`centroid`) fixed on
+                                            // screen as scale changes from oldScale to newScale —
+                                            // on top of the existing finger-follow pan, which still
+                                            // handles panning while scale itself stays constant.
+                                            offset = if (newScale > 1.02f) {
+                                                val containerCenter = Offset(containerSize.width / 2f, containerSize.height / 2f)
+                                                val ratio = if (oldScale != 0f) newScale / oldScale else 1f
+                                                val pivotCorrected = offset * ratio + (centroid - containerCenter) * (1f - ratio)
+                                                clampOffset(pivotCorrected + (centroid - prevCentroid), newScale)
+                                            } else Offset.Zero
                                         }
                                     }
                                     prevPinchDist = dist; prevCentroid = centroid
@@ -1488,15 +1544,44 @@ private fun PostContent(
                     onQuoteRepost, onDownload, onDownloadGif, onBlockAccount, onSendPost,
                     Modifier.fillMaxWidth()
                         .windowInsetsPadding(WindowInsets.navigationBars)
-                        .height(if (liquidGlass) 60.dp else 52.dp),
+                        .height(if (liquidGlass) 60.dp else 52.dp)
+                        .onGloballyPositioned { coords ->
+                            actionBarOrigin = coords.positionInRoot(); actionBarSize = coords.size
+                        },
                     liquidGlass = liquidGlass,
                     dominantColor = dominantColor,
                     backdrop = glassBackdrop,
-                    onShowMoreLikeThis = onShowMoreLikeThis,
-                    onShowLessLikeThis = onShowLessLikeThis,
-                    onAddAccountToList = onAddAccountToList
+                    moreMenuExpanded = moreMenuExpanded,
+                    onToggleMoreMenu = { moreMenuExpanded = !moreMenuExpanded }
                 )
             }
+        }
+
+        // Items 5-8: rendered as a sibling of the recorded backdrop box (same
+        // reasoning as PostIndicatorNavButtons above) so its live blur reads
+        // the same real-time backdrop the rest of the UI does, and so it's a
+        // completely normal composable — not a system Popup — meaning taps
+        // outside its own small footprint fall straight through to whatever
+        // is really there (swiping to another post, tapping other buttons,
+        // etc.) instead of being silently swallowed. It closes only via its
+        // own onToggleMoreMenu (the X button) or by this whole PostContent
+        // being disposed — which happens automatically the moment the user
+        // swipes to a different post, or navigates to the hub, comments, or
+        // grid — never from an outside tap.
+        val barOrigin = actionBarOrigin
+        if (moreMenuExpanded && barOrigin != null) {
+            MoreBubbleMenu(
+                anchorOriginRoot = barOrigin,
+                anchorSize = actionBarSize,
+                containerRootOrigin = postBoxRootOrigin,
+                onDismissRequest = { moreMenuExpanded = false },
+                liquidGlass = liquidGlass, tint = dominantColor, backdrop = glassBackdrop,
+                onShowMoreLikeThis = onShowMoreLikeThis,
+                onShowLessLikeThis = onShowLessLikeThis,
+                onAddAccountToList = onAddAccountToList,
+                onBlock = onBlockAccount,
+                supportsFeedInteractions = supportsFeedInteractions
+            )
         }
     }
 }
@@ -2043,10 +2128,12 @@ private fun ActionRow(
     onQuoteRepost: () -> Unit, onDownload: () -> Unit,
     onDownloadGif: () -> Unit, onBlockAccount: () -> Unit, onShare: () -> Unit,
     modifier: Modifier, liquidGlass: Boolean, dominantColor: Color, backdrop: GlassBackdrop?,
-    // Item 4: the "More" menu that replaced the old fixed Block button.
-    onShowMoreLikeThis: () -> Unit = {},
-    onShowLessLikeThis: () -> Unit = {},
-    onAddAccountToList: () -> Unit = {}
+    // Items 5-8: the "More" menu's expanded/collapsed state and its toggle
+    // now live in the caller (PostContent) instead of here — see the doc
+    // comment on MoreBubbleMenu for why it's rendered as a sibling there
+    // rather than nested inside this composable's own clipped surface.
+    moreMenuExpanded: Boolean = false,
+    onToggleMoreMenu: () -> Unit = {}
 ) {
     @Composable
     fun RowContent() {
@@ -2071,40 +2158,22 @@ private fun ActionRow(
             // the same single flat SpaceEvenly Row the e621 branch below
             // already used, now with Like as the first anchor and the new
             // "More" button (item 4) as the last.
-            //
-            // Item 1: the More menu's popup needs to be anchored to the
-            // *whole bar's* right edge, not just the small hamburger icon's
-            // own position inside this SpaceEvenly row — so it's rendered
-            // as a sibling of the Row (both children of this wrapping Box,
-            // which shares the Row's exact fillMaxSize bounds) rather than
-            // nested inside the icon's own little click target. `expanded`
-            // is hoisted up to this Box's scope so the icon (inside the Row)
-            // and the popup (outside it) can share it.
-            var moreMenuExpanded by remember { mutableStateOf(false) }
-            Box(Modifier.fillMaxSize()) {
-                Row(modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                    ActionButton(if (item.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-                        if (item.isLiked) LikeRed else Color.White, null, onToggleLike)
-                    ActionButton(if (item.isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
-                        if (item.isBookmarked) BookmarkYellow else Color.White, null, onToggleBookmark)
-                    ActionButton(Icons.Default.Repeat,
-                        if (item.isReposted) RepostGreen else Color.White, null, onToggleRepost)
-                    ActionButton(Icons.Default.EditNote, if (item.isQuoteReposted) RepostGreen else Color.White, null, onQuoteRepost)
-                    ActionButton(Icons.Default.Send, Color.White, null, onShare)
-                    ActionButton(Icons.Default.Download, if (item.isDownloaded) BookmarkYellow else Color.White, null, onDownload)
-                    GifActionButton(onDownloadGif, if (item.isGifDownloaded) BookmarkYellow else Color.White)
-                    ActionButton(Icons.Default.Menu, Color.White, null) { moreMenuExpanded = true }
-                }
-                MoreBubbleMenu(
-                    expanded = moreMenuExpanded,
-                    onDismissRequest = { moreMenuExpanded = false },
-                    liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
-                    onShowMoreLikeThis = onShowMoreLikeThis,
-                    onShowLessLikeThis = onShowLessLikeThis,
-                    onAddAccountToList = onAddAccountToList,
-                    onBlock = onBlockAccount
-                )
+            Row(modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                ActionButton(if (item.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                    if (item.isLiked) LikeRed else Color.White, null, onToggleLike)
+                ActionButton(if (item.isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
+                    if (item.isBookmarked) BookmarkYellow else Color.White, null, onToggleBookmark)
+                ActionButton(Icons.Default.Repeat,
+                    if (item.isReposted) RepostGreen else Color.White, null, onToggleRepost)
+                ActionButton(Icons.Default.EditNote, if (item.isQuoteReposted) RepostGreen else Color.White, null, onQuoteRepost)
+                ActionButton(Icons.Default.Send, Color.White, null, onShare)
+                ActionButton(Icons.Default.Download, if (item.isDownloaded) BookmarkYellow else Color.White, null, onDownload)
+                GifActionButton(onDownloadGif, if (item.isGifDownloaded) BookmarkYellow else Color.White)
+                // Item 6: the hamburger icon flips to an X while the menu is
+                // up, and back again once it closes — same button, same
+                // tap target, just toggling moreMenuExpanded either way.
+                ActionButton(if (moreMenuExpanded) Icons.Default.Close else Icons.Default.Menu, Color.White, null, onToggleMoreMenu)
             }
         } else {
             // Item 15: matches the AT Protocol bar's layout language — no raw score
@@ -2137,86 +2206,116 @@ private fun ActionRow(
     }
 }
 
-/** Item 1/4: the interaction bar's "More" menu — replaces the old fixed
- *  Block button with a hamburger-style icon (three stacked horizontal
- *  lines) whose popup is a stack of individually separate pill bubbles
- *  (not one continuous panel like [GlassDropdownMenu] in GlassTheme.kt,
- *  which is still used as-is for the Hub's unrelated upload button). "Add
- *  account to list" opens the app's existing Add To sheet; "Show more/less
- *  like this" sends Bluesky's own feed-personalization interaction signal
- *  (see MainViewModel.sendShowMoreLikeThis/sendShowLessLikeThis); "Block"
- *  is the same block/unblock action the old fixed button used to trigger
- *  directly.
+/** Items 1/4-9: the interaction bar's "More" menu — a hamburger-style icon
+ *  (toggling to an X while open, item 6) whose menu is a stack of
+ *  individually separate pill bubbles (not one continuous panel like
+ *  [GlassDropdownMenu] in GlassTheme.kt, which is still used as-is for the
+ *  Hub's unrelated upload button). "Add account to list" opens the app's
+ *  existing Add To sheet; "Show more/less like this" sends Bluesky's own
+ *  feed-personalization interaction signal (see
+ *  MainViewModel.sendShowMoreLikeThis/sendShowLessLikeThis) and only
+ *  appears when [supportsFeedInteractions] is true, i.e. the current view
+ *  is actually backed by a feed generator that can act on the signal
+ *  (item 9); "Block" is the same block/unblock action the old fixed button
+ *  used to trigger directly.
  *
- *  Each bubble is its own compact, half-height [LiquidGlassSurface] — same
- *  live-reflected backdrop and same rim weight the interaction bar itself
- *  uses (both are literally the same composable, just with a much shorter,
- *  pill-shaped bounding box) — rather than one shared panel, so they read
- *  as a stack of separate buttons the way the rest of the bar's buttons do.
- *  All four share one common width, `Modifier.width(IntrinsicSize.Max)` on
- *  the wrapping [Column] sizing every `fillMaxWidth()` bubble to whichever
- *  one's label is actually the widest, and the whole stack's shared right
- *  edge is pinned flush with the bar's own right edge — this composable is
- *  rendered as a direct sibling of the entire action-bar Row (not nested
- *  inside the small hamburger icon's own tiny click target), so its TopEnd
- *  anchor lines up with the true bar edge rather than wherever the icon
- *  happens to sit inside the row's SpaceEvenly arrangement. */
+ *  Bug fix (items 7/8): this used to be a [Popup]. A Popup opens its own
+ *  separate Android window, and `positionInRoot()` for anything inside it
+ *  is relative to THAT window — not the main content window the rest of
+ *  the UI (and the live backdrop layer's own tracked origin) is measured
+ *  in. That mismatch is exactly why the bubbles' live blur never lined up
+ *  right (item 7). A focusable Popup also captures every touch anywhere on
+ *  screen just to detect outside-taps, which both closed the menu on any
+ *  stray tap AND silently ate gestures (like swiping to the next post)
+ *  meant for the content underneath (item 8). Rendering this as a plain
+ *  sibling composable instead — positioned with a manual offset computed
+ *  from the action bar's own tracked root-relative bounds, the same
+ *  pattern [PostIndicatorNavButtons] already uses — fixes both: it shares
+ *  the same coordinate space as the real backdrop layer (so the blur lines
+ *  up), and it has no special touch-interception behavior at all, so
+ *  anything outside its own small footprint hits whatever's really there.
+ *  A blanket `clickable` with no visual indication on the wrapping Column
+ *  absorbs taps that land in the gaps *between* bubbles so those don't
+ *  fall through either, without closing the menu — it only closes via
+ *  [onDismissRequest] (wired to the X button) or by this whole composable
+ *  being disposed, which happens automatically on swiping to another post
+ *  or navigating to the hub, comments, or grid.
+ *
+ *  Item 5: bubbles are twice as tall as before (40dp vs the old 20dp), and
+ *  use the exact same 26dp corner radius as the interaction bar itself
+ *  (rather than a height-relative stadium radius) so they read as "just as
+ *  round" as the bar, not rounder or flatter. */
 @Composable
 private fun MoreBubbleMenu(
-    expanded: Boolean,
+    anchorOriginRoot: Offset,
+    anchorSize: IntSize,
+    containerRootOrigin: Offset,
     onDismissRequest: () -> Unit,
     liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
     onShowMoreLikeThis: () -> Unit, onShowLessLikeThis: () -> Unit,
-    onAddAccountToList: () -> Unit, onBlock: () -> Unit
+    onAddAccountToList: () -> Unit, onBlock: () -> Unit,
+    supportsFeedInteractions: Boolean
 ) {
-    if (!expanded) return
-    val items = listOf(
-        GlassMenuItem("Show more like this") { onShowMoreLikeThis() },
-        GlassMenuItem("Show less like this") { onShowLessLikeThis() },
-        GlassMenuItem("Add account to list") { onAddAccountToList() },
-        GlassMenuItem("Block", destructive = true) { onBlock() }
-    )
+    val items = buildList {
+        if (supportsFeedInteractions) {
+            add(GlassMenuItem("Show more like this") { onShowMoreLikeThis() })
+            add(GlassMenuItem("Show less like this") { onShowLessLikeThis() })
+        }
+        add(GlassMenuItem("Add account to list") { onAddAccountToList() })
+        add(GlassMenuItem("Block", destructive = true) { onBlock() })
+    }
     val density = LocalDensity.current
-    val bubbleHeightDp = 20.dp   // half the old 40dp row height
+    val bubbleHeightDp = 40.dp   // item 5: doubled from the old 20dp
     val gapDp = 5.dp             // compact — a seam between bubbles, not a big gap
+    val shape = RoundedCornerShape(26.dp) // item 5: same roundness as the interaction bar
     val stackHeightPx = with(density) {
         (bubbleHeightDp * items.size + gapDp * (items.size - 1)).roundToPx()
     }
-    val shape = RoundedCornerShape(bubbleHeightDp / 2)
-    Popup(
-        alignment = Alignment.TopEnd,
-        offset = IntOffset(0, -stackHeightPx - with(density) { 8.dp.roundToPx() }),
-        onDismissRequest = onDismissRequest,
-        properties = PopupProperties(focusable = true)
+    val gapAboveAnchorPx = with(density) { 8.dp.roundToPx() }
+    // Stack's shared right edge pinned flush with the action bar's own
+    // right edge, bottom edge sitting just above the bar's top edge.
+    val stackTopRightRoot = anchorOriginRoot +
+        Offset(anchorSize.width.toFloat(), -(stackHeightPx + gapAboveAnchorPx).toFloat())
+    val stackTopRightLocal = stackTopRightRoot - containerRootOrigin
+    val offsetX = with(density) { stackTopRightLocal.x.toDp() }
+    val offsetY = with(density) { stackTopRightLocal.y.toDp() }
+
+    Column(
+        modifier = Modifier
+            .offset(x = offsetX, y = offsetY)
+            .width(IntrinsicSize.Max)
+            .zIndex(6f)
+            // Item 8: swallows taps that land in the gaps between bubbles
+            // so they don't fall through to the post underneath, without
+            // closing the menu — same as tapping a bubble itself doesn't
+            // close it via this route (each bubble's own click closes it
+            // explicitly, after running its action).
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {},
+        verticalArrangement = Arrangement.spacedBy(gapDp),
+        horizontalAlignment = Alignment.End
     ) {
-        Column(
-            modifier = Modifier.width(IntrinsicSize.Max),
-            verticalArrangement = Arrangement.spacedBy(gapDp),
-            horizontalAlignment = Alignment.End
-        ) {
-            items.forEach { item ->
-                val bubbleModifier = Modifier
-                    .fillMaxWidth()
-                    .height(bubbleHeightDp)
-                    .clip(shape)
-                    .clickable { onDismissRequest(); item.onClick() }
-                val labelColor = if (item.destructive) Color(0xFFE0245E) else Color.White
-                if (liquidGlass) {
-                    LiquidGlassSurface(modifier = bubbleModifier, shape = shape, tint = tint, backdrop = backdrop) {
-                        Text(
-                            item.label, color = labelColor, fontSize = 11.sp, fontWeight = FontWeight.Medium,
-                            textAlign = TextAlign.Center, maxLines = 1,
-                            modifier = Modifier.align(Alignment.Center).padding(horizontal = 12.dp)
-                        )
-                    }
-                } else {
-                    Box(bubbleModifier.background(Color.Black.copy(alpha = 0.55f)), contentAlignment = Alignment.Center) {
-                        Text(
-                            item.label, color = labelColor, fontSize = 11.sp, fontWeight = FontWeight.Medium,
-                            textAlign = TextAlign.Center, maxLines = 1,
-                            modifier = Modifier.padding(horizontal = 12.dp)
-                        )
-                    }
+        items.forEach { item ->
+            val bubbleModifier = Modifier
+                .fillMaxWidth()
+                .height(bubbleHeightDp)
+                .clip(shape)
+                .clickable { onDismissRequest(); item.onClick() }
+            val labelColor = if (item.destructive) Color(0xFFE0245E) else Color.White
+            if (liquidGlass) {
+                LiquidGlassSurface(modifier = bubbleModifier, shape = shape, tint = tint, backdrop = backdrop) {
+                    Text(
+                        item.label, color = labelColor, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                        textAlign = TextAlign.Center, maxLines = 1,
+                        modifier = Modifier.align(Alignment.Center).padding(horizontal = 14.dp)
+                    )
+                }
+            } else {
+                Box(bubbleModifier.background(Color.Black.copy(alpha = 0.55f)), contentAlignment = Alignment.Center) {
+                    Text(
+                        item.label, color = labelColor, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                        textAlign = TextAlign.Center, maxLines = 1,
+                        modifier = Modifier.padding(horizontal = 14.dp)
+                    )
                 }
             }
         }
