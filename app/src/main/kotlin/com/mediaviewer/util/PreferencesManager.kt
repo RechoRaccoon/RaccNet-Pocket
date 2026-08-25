@@ -61,6 +61,11 @@ object PrefKeys {
     // "everyone you follow" pipeline. Never synced anywhere.
     val SUBSCRIBED_REVIEW_DIDS = stringSetPreferencesKey("subscribed_review_dids")
     val SUBSCRIBED_BLOG_DIDS   = stringSetPreferencesKey("subscribed_blog_dids")
+    // AI Tagging feature: realtime tag-on-like toggle. The "has an initial
+    // tagging pass ever completed" state isn't stored separately — it's
+    // derived at runtime from TagDatabase.scannedCount() > 0, so it can
+    // never drift out of sync with the actual dataset on disk.
+    val TAG_POST_WHEN_LIKED    = booleanPreferencesKey("tag_post_when_liked")
 }
 
 
@@ -111,6 +116,11 @@ class PreferencesManager(private val context: Context) {
     // internal storage, plus its original display name for the Settings row.
     val customFontPath: Flow<String?>          = context.dataStore.data.map { it[PrefKeys.CUSTOM_FONT_PATH] }
     val customFontName: Flow<String?>          = context.dataStore.data.map { it[PrefKeys.CUSTOM_FONT_NAME] }
+    val tagPostWhenLiked: Flow<Boolean>        = context.dataStore.data.map { it[PrefKeys.TAG_POST_WHEN_LIKED] ?: false }
+
+    suspend fun setTagPostWhenLiked(enabled: Boolean) {
+        context.dataStore.edit { prefs -> prefs[PrefKeys.TAG_POST_WHEN_LIKED] = enabled }
+    }
 
     suspend fun setTranslateEnabled(enabled: Boolean) {
         context.dataStore.edit { prefs -> prefs[PrefKeys.TRANSLATE_ENABLED] = enabled }

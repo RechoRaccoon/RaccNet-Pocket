@@ -59,6 +59,7 @@ import com.mediaviewer.ui.QuoteRepostDialog
 import com.mediaviewer.ui.ReplyDialog
 import com.mediaviewer.ui.SearchOverlay
 import com.mediaviewer.ui.SendDmDialog
+import com.mediaviewer.ui.TaggingOverlay
 import com.mediaviewer.ui.theme.MediaViewerTheme
 import com.mediaviewer.viewmodel.MainViewModel
 import java.io.File
@@ -227,6 +228,12 @@ private fun AppRoot(viewModel: MainViewModel) {
     val subscribedBlogDids    by viewModel.subscribedBlogDids.collectAsState()
     val searchOpen             by viewModel.searchOpen.collectAsState()
     val searchState            by viewModel.searchState.collectAsState()
+    // AI Tagging feature
+    val taggingOverlayOpen     by viewModel.taggingOverlayOpen.collectAsState()
+    val taggingUiState         by viewModel.taggingUiState.collectAsState()
+    val hasTaggedDataset       by viewModel.hasTaggedDataset.collectAsState()
+    val likedTagSearchResults  by viewModel.likedTagSearchResults.collectAsState()
+    val tagPostWhenLiked       by viewModel.tagPostWhenLiked.collectAsState()
     // Phase 4
     val translationEnabled     by viewModel.translationEnabled.collectAsState()
     val translationTargetLang  by viewModel.translationTargetLang.collectAsState()
@@ -558,6 +565,12 @@ private fun AppRoot(viewModel: MainViewModel) {
             onToggleDownloadOnLike    = viewModel::setDownloadOnLike,
             onDownloadAllLiked        = viewModel::downloadAllLiked,
             onCancelDownload          = viewModel::cancelDownloadAll,
+            tagPostWhenLiked          = tagPostWhenLiked,
+            onToggleTagPostWhenLiked  = viewModel::setTagPostWhenLiked,
+            taggingRunning            = taggingUiState.isRunning,
+            taggingScanned            = taggingUiState.scanned,
+            taggingTagged             = taggingUiState.tagged,
+            onLocallyTagAllLiked      = viewModel::startTaggingAllLiked,
             onShowLikes               = viewModel::showBskyLikes,
             onShowFriends             = viewModel::showFriendsFeed,
             onShowE621Following       = viewModel::searchFollowingE621,
@@ -660,15 +673,37 @@ private fun AppRoot(viewModel: MainViewModel) {
 
         if (searchOpen) {
             SearchOverlay(
-                state           = searchState,
-                liquidGlass     = liquidGlass,
-                selfAvatarUrl   = selfProfile?.author?.avatarUrl,
-                onQueryChange   = viewModel::runSearch,
-                onSelectFilter  = viewModel::setSearchFilter,
-                onOpenPost      = viewModel::openPostFromSearch,
-                onOpenAccount   = { author -> viewModel.closeSearch(); viewModel.openProfile(author) },
-                onAddFeed       = viewModel::addSavedFeedFromSearch,
-                onClose         = viewModel::closeSearch
+                state              = searchState,
+                liquidGlass        = liquidGlass,
+                selfAvatarUrl      = selfProfile?.author?.avatarUrl,
+                hasTaggedDataset   = hasTaggedDataset,
+                likedTagResults    = likedTagSearchResults,
+                onStartTagging     = viewModel::startTaggingAllLiked,
+                onQueryChange      = viewModel::runSearch,
+                onSelectFilter     = viewModel::setSearchFilter,
+                onOpenPost         = viewModel::openPostFromSearch,
+                onOpenAccount      = { author -> viewModel.closeSearch(); viewModel.openProfile(author) },
+                onAddFeed          = viewModel::addSavedFeedFromSearch,
+                onClose            = viewModel::closeSearch
+            )
+        }
+
+        // AI Tagging feature: full-screen "tagging in progress / complete"
+        // overlay — opened by either the Search page's "Start Tagging"
+        // button or Settings' "Locally Tag All Liked Posts" row, both of
+        // which just call startTaggingAllLiked(). Layered like every other
+        // full-screen overlay (Search, DM inbox, Live player) below.
+        if (taggingOverlayOpen) {
+            TaggingOverlay(
+                state          = taggingUiState,
+                liquidGlass    = liquidGlass,
+                selfAvatarUrl  = selfProfile?.author?.avatarUrl,
+                onDismiss      = viewModel::dismissTaggingOverlay,
+                onSearchLiked  = {
+                    viewModel.dismissTaggingOverlay()
+                    viewModel.openSearch()
+                    viewModel.setSearchFilter(MainViewModel.SearchFilter.LIKED_TAGS)
+                }
             )
         }
 

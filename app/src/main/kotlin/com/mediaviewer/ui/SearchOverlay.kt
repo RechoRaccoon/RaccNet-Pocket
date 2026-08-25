@@ -60,6 +60,13 @@ fun SearchOverlay(
     // and glass surfaces reflect their profile color — same pattern the
     // Hub (SettingsSheet's `dominantColor` shadow) and DM inbox use.
     selfAvatarUrl: String? = null,
+    // AI Tagging feature: the "Liked" tab's whole tab content depends on
+    // whether an initial tagging pass has ever completed (hasTaggedDataset)
+    // — before that it's just the explainer card + "Start Tagging" button;
+    // after, it's a normal tag search reading from likedTagResults.
+    hasTaggedDataset: Boolean = false,
+    likedTagResults: List<MediaItem> = emptyList(),
+    onStartTagging: () -> Unit = {},
     onQueryChange: (String) -> Unit,
     onSelectFilter: (MainViewModel.SearchFilter) -> Unit,
     onOpenPost: (Int) -> Unit,
@@ -196,6 +203,27 @@ fun SearchOverlay(
                             }
                         }
                     }
+                    state.filter == MainViewModel.SearchFilter.LIKED_TAGS -> {
+                        if (!hasTaggedDataset) {
+                            LikedTagsSetupPrompt(liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop, onStartTagging = onStartTagging)
+                        } else if (state.query.isBlank()) {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text("Search your liked posts by tag", color = DimGray, fontSize = 13.sp)
+                            }
+                        } else if (likedTagResults.isEmpty()) EmptyResultsText() else {
+                            LazyVerticalGrid(
+                                columns = GridCells.Fixed(3),
+                                contentPadding = PaddingValues(0.dp),
+                                horizontalArrangement = Arrangement.spacedBy(0.dp),
+                                verticalArrangement = Arrangement.spacedBy(0.dp),
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                itemsIndexed(likedTagResults, key = { i, item -> item.id + "_$i" }) { index, item ->
+                                    SearchPostCell(item = item, onClick = { onOpenPost(index) })
+                                }
+                            }
+                        }
+                    }
                     state.filter == MainViewModel.SearchFilter.ACCOUNTS -> {
                         if (state.accounts.isEmpty()) EmptyResultsText() else {
                             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 4.dp)) {
@@ -220,6 +248,43 @@ fun SearchOverlay(
     }
 }
 
+/** AI Tagging feature: the "Liked" tab's pre-setup state — glass card with
+ *  the explainer copy plus a "Start Tagging" button, per the request. Sits
+ *  centered in the results area, same as the other tabs' empty states. */
+@Composable
+private fun LikedTagsSetupPrompt(liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, onStartTagging: () -> Unit) {
+    Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+        val cardShape = RoundedCornerShape(20.dp)
+        @Composable
+        fun CardContent() {
+            Column(
+                Modifier.padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    "Before you can search through your liked posts, click the button below so RaccNet Pocket can start locally tagging your liked posts with an on-device model for an enhanced searching experience.",
+                    color = Color.White.copy(alpha = 0.9f), fontSize = 13.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center, lineHeight = 18.sp
+                )
+                Spacer(Modifier.height(16.dp))
+                val buttonShape = RoundedCornerShape(16.dp)
+                Box(
+                    Modifier
+                        .then(if (liquidGlass) Modifier.glassPanel(true, shape = buttonShape, tint = tint) else Modifier.clip(buttonShape).background(tint.copy(alpha = 0.35f)))
+                        .clickable(onClick = onStartTagging)
+                        .padding(horizontal = 20.dp, vertical = 10.dp)
+                ) {
+                    Text("Start Tagging", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+        if (liquidGlass) {
+            LiquidGlassSurface(Modifier.fillMaxWidth(0.85f), shape = cardShape, tint = tint, backdrop = backdrop) { CardContent() }
+        } else {
+            Box(Modifier.fillMaxWidth(0.85f).clip(cardShape).background(Color.White.copy(0.06f))) { CardContent() }
+        }
+    }
+}
+
 @Composable
 private fun EmptyResultsText() {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -230,6 +295,7 @@ private fun EmptyResultsText() {
 private fun MainViewModel.SearchFilter.label(): String = when (this) {
     MainViewModel.SearchFilter.ACCOUNTS      -> "People"
     MainViewModel.SearchFilter.POSTS         -> "Posts"
+    MainViewModel.SearchFilter.LIKED_TAGS    -> "Liked"
     MainViewModel.SearchFilter.FEEDS         -> "Feeds"
     MainViewModel.SearchFilter.STARTER_PACKS -> "Starter Packs"
 }

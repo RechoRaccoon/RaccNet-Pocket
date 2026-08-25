@@ -11,6 +11,8 @@ import com.mediaviewer.model.*
 import com.mediaviewer.repository.BlueskyRepository
 import com.mediaviewer.repository.E621Repository
 import com.mediaviewer.repository.StreamplaceRepository
+import com.mediaviewer.tagging.TaggerModelManager
+import com.mediaviewer.tagging.TaggingRepository
 import com.mediaviewer.util.PreferencesManager
 import com.mediaviewer.worker.DownloadWorker
 import com.mediaviewer.worker.GifDownloadWorker
@@ -30,6 +32,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val bskyRepo  = BlueskyRepository()
     private val e621Repo  = E621Repository()
     private val streamplaceRepo = StreamplaceRepository()
+    private val taggingRepo = TaggingRepository.get(application, bskyRepo, e621Repo)
 
     // ── Session ───────────────────────────────────────────────────────────────
     private val _bskyLoggedIn = MutableStateFlow(false)
@@ -555,7 +558,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // backed by a real search. Enum name kept as ACCOUNTS/FEEDS rather than
     // renaming the Kotlin identifiers too, to keep this diff scoped to
     // what's user-visible; .label() below is what actually says "People".
-    enum class SearchFilter { ACCOUNTS, POSTS, FEEDS, STARTER_PACKS }
+    enum class SearchFilter { ACCOUNTS, POSTS, LIKED_TAGS, FEEDS, STARTER_PACKS }
 
     data class SearchState(
         val query: String = "",
@@ -607,6 +610,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     bskyRepo.searchPosts(bskyToken, query).onSuccess { (posts, _) ->
                         _searchState.value = _searchState.value.copy(posts = posts, loading = false, hasSearched = true)
                     }.onFailure { _searchState.value = _searchState.value.copy(loading = false, hasSearched = true) }
+                }
+                // AI Tagging feature: this tab doesn't hit the network at
+                // all — it queries the local on-device dataset built by
+                // TaggingRepository. searchLikedTags publishes straight to
+                // its own likedTagSearchResults/likedTagSearchQuery state
+                // (the "Liked" tab reads those directly rather than
+                // _searchState.posts, since these results come from a
+                // completely different pipeline — see SearchOverlay's
+                // LIKED_TAGS branch).
+                SearchFilter.LIKED_TAGS -> {
+                    searchLikedTags(query)
+                    _searchState.value = _searchState.value.copy(loading = false, hasSearched = true)
                 }
                 SearchFilter.ACCOUNTS -> {
                     bskyRepo.searchActors(bskyToken, query).onSuccess { (accounts, _) ->
@@ -1179,6 +1194,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // confirmed — see supportsFeedInteractions below.
     private val _feedInteractionSupport = MutableStateFlow<Map<String, Boolean>>(emptyMap())
 
+    // Bug fix (round 2): sendFeedInteraction has to proxy to the feed
+    // generator's own service DID — a value declared on the generator's
+    // record (BskyFeedGeneratorView.did) that's often different from the
+    // DID in the feed's own at:// URI — not the feed URI itself. This caches
+    // that resolved service DID per feed URI, alongside (and populated at
+    // the same time as) _feedInteractionSupport above, so
+    // sendShowMoreLikeThisForCurrentItem/sendShowLessLikeThisForCurrentItem
+    // can look up the right proxy target instead of guessing it from the
+    // feed URI. See BlueskyRepository.sendFeedInteraction's doc comment.
+    private val _feedGeneratorDid = MutableStateFlow<Map<String, String>>(emptyMap())
+
     val supportsFeedInteractions: StateFlow<Boolean> = combine(
         _selectedFeedUri, _authorFeedState, _appMode, _feedInteractionSupport
     ) { feedUri, authorState, mode, cache ->
@@ -1223,8 +1249,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (uri != null && uri.contains("app.bsky.feed.generator") &&
                     !_feedInteractionSupport.value.containsKey(uri) && bskyToken.isNotBlank()
                 ) {
-                    val accepts = bskyRepo.getFeedGeneratorInfo(bskyToken, uri).getOrNull()?.acceptsInteractions ?: false
-                    _feedInteractionSupport.value = _feedInteractionSupport.value + (uri to accepts)
+                    val info = bskyRepo.getFeedGeneratorInfo(bskyToken, uri).getOrNull()
+                    _feedInteractionSupport.value = _feedInteractionSupport.value + (uri to (info?.acceptsInteractions ?: false))
+                    info?.did?.let { generatorDid -> _feedGeneratorDid.value = _feedGeneratorDid.value + (uri to generatorDid) }
                 }
             }
         }
@@ -1515,6 +1542,7 @@ _bskyDid.value          = session.did
             result.onSuccess { feeds ->
                 _availableFeeds.value = feeds
                 _feedInteractionSupport.value = _feedInteractionSupport.value + feeds.associate { it.uri to it.acceptsInteractions }
+                _feedGeneratorDid.value = _feedGeneratorDid.value + feeds.mapNotNull { f -> f.generatorDid?.let { f.uri to it } }
                 // Bug fix (Outstanding Issue #1 — feed loses scroll position
                 // navigating Hub pages): this auto-select-a-default-feed
                 // fallback is only meant to cover the genuine "nothing has
@@ -2259,8 +2287,9 @@ _bskyDid.value          = session.did
     fun sendShowMoreLikeThisForCurrentItem() {
         val item = currentItem.value ?: return
         if (_appMode.value != AppMode.BLUESKY) return
+        val generatorDid = _selectedFeedUri.value?.let { _feedGeneratorDid.value[it] }
         viewModelScope.launch(Dispatchers.IO) {
-            bskyRepo.sendFeedInteraction(bskyToken, item.postUri, wantMore = true, feedContext = item.feedContext, feedUri = _selectedFeedUri.value)
+            bskyRepo.sendFeedInteraction(bskyToken, item.postUri, wantMore = true, feedContext = item.feedContext, generatorDid = generatorDid)
                 .onSuccess { showToast("Showing more like this") }
                 .onFailure { _errorMessage.value = "Couldn't send feedback: ${it.message}" }
         }
@@ -2269,8 +2298,9 @@ _bskyDid.value          = session.did
     fun sendShowLessLikeThisForCurrentItem() {
         val item = currentItem.value ?: return
         if (_appMode.value != AppMode.BLUESKY) return
+        val generatorDid = _selectedFeedUri.value?.let { _feedGeneratorDid.value[it] }
         viewModelScope.launch(Dispatchers.IO) {
-            bskyRepo.sendFeedInteraction(bskyToken, item.postUri, wantMore = false, feedContext = item.feedContext, feedUri = _selectedFeedUri.value)
+            bskyRepo.sendFeedInteraction(bskyToken, item.postUri, wantMore = false, feedContext = item.feedContext, generatorDid = generatorDid)
                 .onSuccess { showToast("Showing less like this") }
                 .onFailure { _errorMessage.value = "Couldn't send feedback: ${it.message}" }
         }
@@ -2742,6 +2772,7 @@ _bskyDid.value          = session.did
                                 enqueueDownload(item)
                                 updateCurrentItem { it.copy(isDownloaded = true) }
                             }
+                            maybeTagOnLike(item)
                         }
                         .onFailure { updateCurrentItem { it.copy(isLiked = false, likeCount = item.likeCount) } }
                 }
@@ -2787,6 +2818,7 @@ _bskyDid.value          = session.did
                                 enqueueDownload(item)
                                 updateCurrentItem { it.copy(isDownloaded = true) }
                             }
+                            maybeTagOnLike(item)
                         }
                         .onFailure { updateCurrentItem { it.copy(isBookmarked = false) } }
                 }
@@ -3105,6 +3137,132 @@ _bskyDid.value          = session.did
             }
         } else {
             enqueueDownload(item.mediaUrl, item.id)
+        }
+    }
+
+    // ── AI Tagging (local, on-device) ────────────────────────────────────────
+    // See com.mediaviewer.tagging.* for the actual model/DB/pipeline code.
+    // This section just exposes state for the Search page's "Liked" tab, the
+    // full-screen tagging overlay, and the Settings "AI Tagging" section, and
+    // routes their button taps into TaggingRepository.
+
+    data class TaggingUiState(
+        val scanned: Int = 0,
+        val tagged: Int = 0,
+        val datasetBytes: Long = 0L,
+        val isRunning: Boolean = false,
+        val isComplete: Boolean = false,
+        val modelState: TaggerModelManager.State = TaggerModelManager.State.NotDownloaded,
+        val errorMessage: String? = null
+    )
+
+    private val _taggingOverlayOpen = MutableStateFlow(false)
+    val taggingOverlayOpen: StateFlow<Boolean> = _taggingOverlayOpen
+
+    private val _taggingUiState = MutableStateFlow(TaggingUiState())
+    val taggingUiState: StateFlow<TaggingUiState> = _taggingUiState
+
+    // True once at least one liked post has ever been scanned — this is what
+    // gates the Search page's "Liked" tab between showing the "Start
+    // Tagging" prompt vs. an actual search box, and it's derived straight
+    // from the on-disk dataset (see TagDatabase) rather than a separate
+    // "setup complete" flag, so it can never drift out of sync with it.
+    private val _hasTaggedDataset = MutableStateFlow(false)
+    val hasTaggedDataset: StateFlow<Boolean> = _hasTaggedDataset
+
+    val tagPostWhenLiked: StateFlow<Boolean> =
+        prefs.tagPostWhenLiked.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    private val _likedTagSearchQuery = MutableStateFlow("")
+    val likedTagSearchQuery: StateFlow<String> = _likedTagSearchQuery
+
+    private val _likedTagSearchResults = MutableStateFlow<List<MediaItem>>(emptyList())
+    val likedTagSearchResults: StateFlow<List<MediaItem>> = _likedTagSearchResults
+
+    init {
+        refreshTaggingCounts()
+    }
+
+    private fun refreshTaggingCounts() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val (scanned, tagged) = taggingRepo.currentCounts()
+            _hasTaggedDataset.value = scanned > 0
+            _taggingUiState.value = _taggingUiState.value.copy(scanned = scanned, tagged = tagged, datasetBytes = taggingRepo.datasetSizeBytes())
+        }
+    }
+
+    fun setTagPostWhenLiked(enabled: Boolean) {
+        viewModelScope.launch { prefs.setTagPostWhenLiked(enabled) }
+    }
+
+    private fun maybeTagOnLike(item: MediaItem) {
+        if (!tagPostWhenLiked.value) return
+        viewModelScope.launch(Dispatchers.IO) {
+            taggingRepo.tagOnLike(item)
+            refreshTaggingCounts()
+        }
+    }
+
+    /** Opens the full-screen tagging overlay and kicks off (or resumes) a
+     *  full backlog pass over every liked post. Used both by the Search
+     *  page's "Start Tagging" button and Settings' "Locally Tag All Liked
+     *  Posts" row — they're the same underlying action. */
+    fun startTaggingAllLiked() {
+        if (_taggingUiState.value.isRunning) return
+        _taggingOverlayOpen.value = true
+        _taggingUiState.value = _taggingUiState.value.copy(isRunning = true, isComplete = false, errorMessage = null)
+        viewModelScope.launch(Dispatchers.IO) {
+            taggingRepo.tagAllLiked(
+                isBlueskyMode = _appMode.value == AppMode.BLUESKY,
+                bskyToken = bskyToken,
+                bskyDid = _bskyDid.value,
+                e621Username = e621Username,
+                e621ApiKey = e621ApiKey
+            ) { progress ->
+                _taggingUiState.value = TaggingUiState(
+                    scanned = progress.scanned,
+                    tagged = progress.tagged,
+                    datasetBytes = progress.datasetBytes,
+                    isRunning = progress.isRunning,
+                    isComplete = progress.isComplete,
+                    modelState = progress.modelState,
+                    errorMessage = (progress.modelState as? TaggerModelManager.State.Failed)?.message
+                )
+                if (progress.scanned > 0) _hasTaggedDataset.value = true
+            }
+        }
+    }
+
+    fun cancelTagging() {
+        taggingRepo.cancel()
+    }
+
+    /** Closes the overlay after a completed (or cancelled) run — separate
+     *  from cancelTagging() since the person can dismiss a *finished* run's
+     *  "Tagging Complete" card without that meaning "stop", and dismissing
+     *  mid-run should stop the in-flight pass. */
+    fun dismissTaggingOverlay() {
+        if (_taggingUiState.value.isRunning) taggingRepo.cancel()
+        _taggingOverlayOpen.value = false
+    }
+
+    fun searchLikedTags(query: String) {
+        _likedTagSearchQuery.value = query
+        if (query.isBlank()) { _likedTagSearchResults.value = emptyList(); return }
+        viewModelScope.launch(Dispatchers.IO) {
+            val matchingUris = taggingRepo.search(query)
+            if (matchingUris.isEmpty()) { _likedTagSearchResults.value = emptyList(); return@launch }
+            // TaggingRepository's dataset only stores URIs/tags, never full
+            // post content (see its storage note), so a search hit's URI
+            // has to be hydrated back into a real MediaItem before it can
+            // be rendered in the feed grid.
+            val hydrated = if (_appMode.value == AppMode.BLUESKY) {
+                bskyRepo.getPostsByUris(bskyToken, matchingUris).getOrNull() ?: emptyList()
+            } else {
+                e621Repo.getPostsByUris(e621Username, e621ApiKey, matchingUris).getOrNull() ?: emptyList()
+            }
+            val order = matchingUris.withIndex().associate { (i, uri) -> uri to i }
+            _likedTagSearchResults.value = hydrated.sortedBy { order[it.postUri] ?: Int.MAX_VALUE }
         }
     }
 

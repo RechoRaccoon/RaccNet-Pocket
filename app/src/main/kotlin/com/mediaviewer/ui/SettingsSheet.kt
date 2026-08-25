@@ -131,6 +131,13 @@ fun SettingsSheet(
     onToggleDownloadOnLike: (Boolean) -> Unit,
     onDownloadAllLiked: () -> Unit,
     onCancelDownload: () -> Unit,
+    // AI Tagging feature
+    tagPostWhenLiked: Boolean,
+    onToggleTagPostWhenLiked: (Boolean) -> Unit,
+    taggingRunning: Boolean,
+    taggingScanned: Int,
+    taggingTagged: Int,
+    onLocallyTagAllLiked: () -> Unit,
     onShowLikes: () -> Unit,
     onShowFriends: () -> Unit,
     onShowE621Following: () -> Unit,
@@ -351,6 +358,9 @@ fun SettingsSheet(
                             e621LoggedIn = e621LoggedIn, e621Username = e621Username,
                             downloadOnLike = downloadOnLike, onToggleDownloadOnLike = onToggleDownloadOnLike,
                             downloadProgress = downloadProgress, onDownloadAllLiked = onDownloadAllLiked, onCancelDownload = onCancelDownload,
+                            tagPostWhenLiked = tagPostWhenLiked, onToggleTagPostWhenLiked = onToggleTagPostWhenLiked,
+                            taggingRunning = taggingRunning, taggingScanned = taggingScanned, taggingTagged = taggingTagged,
+                            onLocallyTagAllLiked = onLocallyTagAllLiked,
                             combineListsAndPacks = combineListsAndPacks, onToggleCombineListsPacks = onToggleCombineListsPacks,
                             autoAddToOnFollow = autoAddToOnFollow, onToggleAutoAddToOnFollow = onToggleAutoAddToOnFollow,
                             onLogoutBluesky = onLogoutBluesky, onLogoutE621 = onLogoutE621,
@@ -477,6 +487,13 @@ private fun SettingsPageContent(
     downloadProgress: DownloadProgress?,
     onDownloadAllLiked: () -> Unit,
     onCancelDownload: () -> Unit,
+    // AI Tagging feature
+    tagPostWhenLiked: Boolean,
+    onToggleTagPostWhenLiked: (Boolean) -> Unit,
+    taggingRunning: Boolean,
+    taggingScanned: Int,
+    taggingTagged: Int,
+    onLocallyTagAllLiked: () -> Unit,
     combineListsAndPacks: Boolean,
     onToggleCombineListsPacks: (Boolean) -> Unit,
     autoAddToOnFollow: Boolean,
@@ -836,6 +853,48 @@ private fun SettingsPageContent(
                 Text("Logged in as @$e621Username", color = DimGray, fontSize = 12.sp, modifier = Modifier.weight(1f))
                 Text("Logout", color = Color(0xFFEF5350), fontSize = 12.sp, fontWeight = FontWeight.Medium,
                     modifier = Modifier.clickable(onClick = onLogoutE621))
+            }
+        }
+
+        // ── AI Tagging (this session) ─────────────────────────────────────
+        // One glass bubble with internal dividers for each part of the
+        // setting, per the request: a "Locally Tag All Liked Posts" row
+        // (opens the same tagging overlay the Search page's "Start
+        // Tagging" button opens) and a "Tag Post When Liked" realtime
+        // toggle. Available in both AT Protocol and e621 modes — whichever
+        // is currently logged in is what startTaggingAllLiked() reads.
+        if (bskyLoggedIn || e621LoggedIn) {
+            SectionDivider("AI Tagging")
+
+            val aiShape = RoundedCornerShape(14.dp)
+            @Composable
+            fun AiTaggingBubbleContent() {
+                Column(Modifier.fillMaxWidth()) {
+                    Box(
+                        Modifier.fillMaxWidth().height(44.dp)
+                            .clickable(enabled = !taggingRunning) { onLocallyTagAllLiked() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            when {
+                                taggingRunning -> "Tagging… $taggingScanned scanned"
+                                taggingScanned > 0 -> "Locally Tag All Liked Posts — $taggingTagged tagged"
+                                else -> "Locally Tag All Liked Posts"
+                            },
+                            color = Color.White, fontSize = 13.sp, textAlign = TextAlign.Center
+                        )
+                    }
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
+                    CompactRow {
+                        Text("Tag Post When Liked", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(end = 12.dp))
+                        CompactSwitch(checked = tagPostWhenLiked, onCheckedChange = onToggleTagPostWhenLiked)
+                    }
+                }
+            }
+            if (liquidGlass) {
+                LiquidGlassSurface(modifier = Modifier.fillMaxWidth(), shape = aiShape, tint = dominantColor, backdrop = backdrop) { AiTaggingBubbleContent() }
+            } else {
+                Box(Modifier.fillMaxWidth().clip(aiShape).background(Color.White.copy(0.04f))) { AiTaggingBubbleContent() }
             }
         }
 
@@ -1643,6 +1702,33 @@ private fun HubUploadBubble(
             Column(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
+                    // Bug fix: this Box is pinned to a tiny fixed [size]
+                    // (e.g. 40dp square) via `.size(size)` above, on
+                    // purpose — see the class doc comment — but a plain
+                    // `.align(TopEnd)` child of a size-constrained Box is
+                    // still MEASURED with that same tight 40dp ceiling on
+                    // both axes, even though it's positioned by alignment.
+                    // That squashed the real ~220dp-tall, multi-bubble stack
+                    // down into the 40x40dp anchor's own bounds: each
+                    // bubble's text got clipped to a single leading
+                    // character (e.g. "Post" -> "P"), the five bubbles
+                    // collapsed on top of each other into what read as one
+                    // small circle, its glass backdrop sampled the wrong
+                    // (squashed) bounds so the blur/cutout mask never
+                    // resolved and it rendered transparent, and the
+                    // `-(stackHeightPx + gapAboveAnchorPx)` offset below —
+                    // computed for the *intended* full stack height — no
+                    // longer matched the actually-measured squashed size,
+                    // so the whole thing landed away from the "+" button
+                    // instead of stacked cleanly above it.
+                    // `wrapContentSize(unbounded = true)` measures this
+                    // Column ignoring the parent's incoming max
+                    // constraints (so it's free to be its natural, full
+                    // height/width) while still resolving its final
+                    // position via TopEnd alignment against the anchor —
+                    // exactly what a popover stack escaping a small anchor
+                    // needs.
+                    .wrapContentSize(unbounded = true)
                     .offset(y = with(density) { -(stackHeightPx + gapAboveAnchorPx).toDp() })
                     .width(IntrinsicSize.Max)
                     // Item 8 (same fix as the feed's MoreBubbleMenu):

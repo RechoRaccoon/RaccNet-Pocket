@@ -72,4 +72,9 @@ dependencies {
     // Both models run fully on-device; no server round trip and no API key.
     implementation("com.google.mlkit:translate:17.0.3")
     implementation("com.google.mlkit:language-id:17.0.6")
+
+    // AI Tagging feature: fully local ONNX inference for the e621-trained
+    // Z3D-E621-Convnext tagger (see ImageTagger.kt) — no cloud calls, no
+    // content-moderation layer, runs entirely on-device via NNAPI/XNNPACK.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
 }

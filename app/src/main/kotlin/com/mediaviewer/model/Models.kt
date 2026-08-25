@@ -318,7 +318,20 @@ data class BskyFeedInfo(
     val uri: String,
     val displayName: String,
     val avatarUrl: String? = null,
-    val acceptsInteractions: Boolean = false
+    val acceptsInteractions: Boolean = false,
+    // Bug fix: "Show more/less like this" was proxying to the wrong DID.
+    // The `app.bsky.feed.generator` record has its OWN `did` field — the
+    // service DID that actually runs the feed generator's server — which is
+    // NOT the same as the DID in the feed URI's authority segment (that's
+    // just whichever account *published* the generator record; the URI can
+    // be `at://did:plc:alice/app.bsky.feed.generator/foo` while the record's
+    // `did` field, and therefore the service that has to receive
+    // sendInteractions, is a completely different `did:web:...` belonging to
+    // whoever actually hosts the feed). generatorView.did (surfaced by
+    // getFeedGenerators, same call already used to resolve
+    // acceptsInteractions) is the correct value to proxy to — see
+    // BlueskyRepository.sendFeedInteraction.
+    val generatorDid: String? = null
 )
 
 // ── e621 ─────────────────────────────────────────────────────────────────────

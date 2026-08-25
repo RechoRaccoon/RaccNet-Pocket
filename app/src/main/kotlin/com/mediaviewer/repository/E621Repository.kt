@@ -25,6 +25,22 @@ class E621Repository {
         resp.body()?.posts?.mapNotNull { it.toMediaItem() } ?: error("Favorites failed: ${resp.code()}")
     }
 
+    /** Batch-hydrates arbitrary e621 post URIs into MediaItems — used by
+     *  the AI Tagging feature's search, mirroring
+     *  BlueskyRepository.getPostsByUris. e621 has no dedicated
+     *  get-posts-by-id endpoint, but its search endpoint accepts an `id:`
+     *  tag filter that does the same job. */
+    suspend fun getPostsByUris(username: String, apiKey: String, uris: List<String>): Result<List<MediaItem>> = runCatching {
+        val ids = uris.mapNotNull { it.substringAfterLast('/').toIntOrNull() }
+        if (ids.isEmpty()) return@runCatching emptyList()
+        val items = mutableListOf<MediaItem>()
+        ids.chunked(40).forEach { batch ->
+            val resp = api.searchPosts(basicAuth(username, apiKey), "id:${batch.joinToString(",")}", 1)
+            resp.body()?.posts?.mapNotNullTo(items) { it.toMediaItem() }
+        }
+        items
+    }
+
     suspend fun getComments(username: String, apiKey: String, postId: Int)
         : Result<List<CommentItem>> = runCatching {
         val resp = api.getComments(basicAuth(username, apiKey), postId = postId)

@@ -115,6 +115,22 @@ class BlueskyRepository {
         Pair(body.feed.flatMap { parseFeedItemSafe(it) }, body.cursor)
     }
 
+    /** Batch-hydrates arbitrary post URIs into MediaItems — used by the AI
+     *  Tagging feature's search (TaggingRepository only stores URIs/tags
+     *  locally, not full post content, so a search hit's URI has to be
+     *  turned back into something the feed UI can render). Reuses the same
+     *  getPosts + parseFeedItemSafe pattern as the DM-shared-posts hydration
+     *  above. */
+    suspend fun getPostsByUris(token: String, uris: List<String>): Result<List<MediaItem>> = runCatching {
+        if (uris.isEmpty()) return@runCatching emptyList()
+        val items = mutableListOf<MediaItem>()
+        uris.chunked(25).forEach { batch ->
+            val body = runCatching { api.getPosts("Bearer $token", batch) }.getOrNull()?.takeIf { it.isSuccessful }?.body()
+            body?.posts?.forEach { post -> items.addAll(parseFeedItemSafe(BskyFeedItem(post = post))) }
+        }
+        items
+    }
+
     // ── Saved Feeds — robust JSON parsing ────────────────────────────────────
 
     // Slot kinds preserved from the raw preferences, in pin order, so the final
@@ -179,13 +195,13 @@ class BlueskyRepository {
                 val batchResult = runCatching { api.getFeedGenerators("Bearer $token", batch) }
                 val batchBody = batchResult.getOrNull()?.takeIf { it.isSuccessful }?.body()
                 if (batchBody != null) {
-                    batchBody.feeds.forEach { infoByUri[it.uri] = BskyFeedInfo(it.uri, it.displayName, it.avatar, it.acceptsInteractions) }
+                    batchBody.feeds.forEach { infoByUri[it.uri] = BskyFeedInfo(it.uri, it.displayName, it.avatar, it.acceptsInteractions, it.did) }
                 } else {
                     // One bad URI shouldn't sink the whole batch — retry individually
                     batch.forEach { uri ->
                         runCatching { api.getFeedGenerators("Bearer $token", listOf(uri)) }
                             .getOrNull()?.body()?.feeds?.firstOrNull()?.let {
-                                infoByUri[it.uri] = BskyFeedInfo(it.uri, it.displayName, it.avatar, it.acceptsInteractions)
+                                infoByUri[it.uri] = BskyFeedInfo(it.uri, it.displayName, it.avatar, it.acceptsInteractions, it.did)
                             }
                     }
                 }
@@ -1149,25 +1165,39 @@ class BlueskyRepository {
     // own feedContext, if the generator set one) so it can fine-tune what it
     // serves this account next.
     //
-    // Bug fix: the default AppView host doesn't implement this endpoint
-    // itself for third-party feeds — it 501s ("Not Implemented") — because
-    // sendInteractions has to be proxied to the feed generator's own service,
-    // the same way chat.bsky.* calls are proxied to the chat service (see
-    // BlueskyApi's static atproto-proxy header on those). A feed generator's
-    // service DID is the authority segment of the *feed's* at:// URI (not
-    // the post's), so it's derived here from [feedUri] and sent as a dynamic
-    // atproto-proxy header targeting that generator's "#bsky_fg" service ID.
-    // When [feedUri] isn't a feed-generator URI (e.g. the chronological
-    // Following timeline, which isn't backed by one), the request just goes
-    // straight to the default AppView unproxied, same as before.
-    suspend fun sendFeedInteraction(token: String, postUri: String, wantMore: Boolean, feedContext: String?, feedUri: String?): Result<Unit> = runCatching {
+    // Bug fix (round 2): the default AppView host doesn't implement this
+    // endpoint itself for third-party feeds — it 501s ("Not Implemented") —
+    // because sendInteractions has to be proxied to the feed generator's own
+    // service, the same way chat.bsky.* calls are proxied to the chat
+    // service (see BlueskyApi's static atproto-proxy header on those).
+    //
+    // The first attempt at this fix derived the proxy target from the
+    // authority segment of the *feed's* at:// URI, e.g.
+    // `at://did:plc:alice/app.bsky.feed.generator/foo` → `did:plc:alice`.
+    // That's wrong: that DID only identifies whoever *published* the
+    // app.bsky.feed.generator record, which is frequently a different
+    // account than whoever actually *runs* the feed generator's server.
+    // The record has its own explicit `did` field for that (required by the
+    // app.bsky.feed.generator lexicon) — e.g. a generator record living at
+    // `at://did:plc:alice/app.bsky.feed.generator/foo` can declare
+    // `did: "did:web:somefeedhost.example"`, and it's that second DID whose
+    // "#bsky_fg" service endpoint actually needs to receive this request.
+    // Proxying to the *publisher's* DID instead (as before) sends the
+    // request to whatever service that account happens to run — usually
+    // nothing that implements sendInteractions at all — which is exactly
+    // what was producing the 501.
+    //
+    // getFeedGenerators (the same batch call already used to resolve
+    // acceptsInteractions) surfaces the correct value as generatorView.did,
+    // which callers now thread through as [generatorDid] — see
+    // BskyFeedInfo.generatorDid and MainViewModel's feed-interaction cache.
+    // When [generatorDid] is null (feed generator lookup never resolved, or
+    // there isn't one — e.g. the chronological Following timeline), the
+    // request just goes straight to the default AppView unproxied, same as
+    // before.
+    suspend fun sendFeedInteraction(token: String, postUri: String, wantMore: Boolean, feedContext: String?, generatorDid: String?): Result<Unit> = runCatching {
         val event = if (wantMore) "app.bsky.feed.defs#requestMore" else "app.bsky.feed.defs#requestLess"
-        val generatorDid = feedUri
-            ?.takeIf { it.startsWith("at://") }
-            ?.removePrefix("at://")
-            ?.substringBefore("/")
-            ?.takeIf { it.startsWith("did:") }
-        val proxy = generatorDid?.let { "$it#bsky_fg" }
+        val proxy = generatorDid?.takeIf { it.startsWith("did:") }?.let { "$it#bsky_fg" }
         val resp = api.sendInteractions(
             "Bearer $token",
             proxy,
