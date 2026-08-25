@@ -4,19 +4,26 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 
-/** Local-only SQLite store for the AI Tagging feature — schema lifted
- *  directly from the "Local On-Device AI Content Tagging Architecture" spec
- *  (liked_media / media_tags / tag_search_fts). Nothing in here ever touches
- *  the network or the account's AT Protocol PDS; it's purely a local index
+/** Local-only SQLite store for the AI Tagging feature — schema adapted from
+ *  the "Local On-Device AI Content Tagging Architecture" spec's
+ *  liked_media / media_tags tables. Nothing in here ever touches the
+ *  network or the account's AT Protocol PDS; it's purely a local index
  *  keyed by post URI, built by [com.mediaviewer.tagging.TaggingRepository]
  *  from images that are downloaded into memory, tagged, and immediately
  *  discarded (see that class's own doc comment — the actual media files are
  *  never written to disk by this feature).
  *
- *  FTS5 is bundled in the SQLite build shipped with Android since API 16's
- *  successor devices (in practice, every device this app's minSdk=26
- *  targets has it), so the virtual table below is safe to create
- *  unconditionally. */
+ *  Bug fix: this originally also created an `fts5`-backed virtual table for
+ *  search (`tag_search_fts`), on the assumption that the FTS5 module is
+ *  always compiled into the SQLite build Android ships. That's not actually
+ *  guaranteed — it's an optional SQLite compile-time module, and plenty of
+ *  real-world OEM system-image SQLite builds omit it (this crashed with
+ *  `no such module: fts5` on a real device). Since every tag here is
+ *  already a single discrete token (e.g. "dog_ears", not prose), full-text
+ *  tokenized search was never actually buying anything over plain exact
+ *  matching anyway — so search is now just an indexed `tag_name` lookup on
+ *  a normal table (see [searchPostUris]), which needs nothing beyond core
+ *  SQLite and is if anything more precise for this data. */
 class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContext, DB_NAME, null, DB_VERSION) {
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -40,19 +47,19 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
             )
             """.trimIndent()
         )
-        db.execSQL(
-            """
-            CREATE VIRTUAL TABLE IF NOT EXISTS tag_search_fts USING fts5(
-                post_uri UNINDEXED,
-                tag_space_separated
-            )
-            """.trimIndent()
-        )
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_media_tags_post_uri ON media_tags(post_uri)")
+        // The index that actually matters for search speed: every query in
+        // searchPostUris filters by tag_name first.
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_media_tags_tag_name ON media_tags(tag_name)")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // No prior versions yet — nothing to migrate.
+        if (oldVersion < 2) {
+            // Migrating off a v1 database that may have partially included
+            // (or attempted and failed to include) the old fts5 table.
+            db.execSQL("DROP TABLE IF EXISTS tag_search_fts")
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_media_tags_tag_name ON media_tags(tag_name)")
+        }
     }
 
     override fun onConfigure(db: SQLiteDatabase) {
@@ -71,7 +78,7 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
     /** Records one post + its tags. Called once per successfully-tagged
      *  image; a post with zero tags above the confidence threshold still
      *  gets a liked_media row (so it counts as "scanned" and isn't retried
-     *  forever) but no media_tags/FTS rows. */
+     *  forever) but no media_tags rows. */
     fun storeTags(postUri: String, cid: String, mediaUrl: String, tags: List<Pair<String, Float>>) {
         val db = writableDatabase
         db.beginTransaction()
@@ -82,18 +89,10 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
             )
             // Clear out anything from a previous pass (realtime re-tag, retry, etc.)
             db.execSQL("DELETE FROM media_tags WHERE post_uri = ?", arrayOf(postUri))
-            db.execSQL("DELETE FROM tag_search_fts WHERE post_uri = ?", arrayOf(postUri))
-            if (tags.isNotEmpty()) {
-                tags.forEach { (tag, confidence) ->
-                    db.execSQL(
-                        "INSERT INTO media_tags (post_uri, tag_name, confidence) VALUES (?, ?, ?)",
-                        arrayOf(postUri, tag, confidence)
-                    )
-                }
-                val spaceSeparated = tags.joinToString(" ") { it.first }
+            tags.forEach { (tag, confidence) ->
                 db.execSQL(
-                    "INSERT INTO tag_search_fts (post_uri, tag_space_separated) VALUES (?, ?)",
-                    arrayOf(postUri, spaceSeparated)
+                    "INSERT INTO media_tags (post_uri, tag_name, confidence) VALUES (?, ?, ?)",
+                    arrayOf(postUri, tag, confidence)
                 )
             }
             db.setTransactionSuccessful()
@@ -126,18 +125,32 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
             (if (shm.exists()) shm.length() else 0L)
     }
 
-    /** Runs an FTS5 MATCH query (already alias-expanded by
-     *  [TagAliases.expand]) and returns matching post URIs, best rank first. */
-    fun searchPostUris(ftsQuery: String, limit: Int = 200): List<String> {
-        if (ftsQuery.isBlank()) return emptyList()
-        val results = mutableListOf<String>()
-        readableDatabase.rawQuery(
-            "SELECT post_uri FROM tag_search_fts WHERE tag_space_separated MATCH ? ORDER BY rank LIMIT ?",
-            arrayOf(ftsQuery, limit.toString())
-        ).use { cursor ->
-            while (cursor.moveToNext()) results.add(cursor.getString(0))
+    /** Search, without FTS: [termGroups] is a list of alias-expanded OR
+     *  groups (see [TagAliases.toTagGroups]) — one group per word the
+     *  person typed, e.g. searching "dog explicit" produces
+     *  `[[canine, dog, dog_ears], [explicit]]`. A post has to have at least
+     *  one tag from *every* group (AND across groups, OR within a group) —
+     *  the same semantics the old FTS5 MATCH query had. Computed as a plain
+     *  set intersection across per-group queries rather than one large SQL
+     *  statement, since the number of groups is small (a handful of search
+     *  words at most) and this keeps each query simple and index-friendly. */
+    fun searchPostUris(termGroups: List<List<String>>, limit: Int = 200): List<String> {
+        if (termGroups.isEmpty() || termGroups.any { it.isEmpty() }) return emptyList()
+        var resultSet: LinkedHashSet<String>? = null
+        val db = readableDatabase
+        for (group in termGroups) {
+            val placeholders = group.joinToString(",") { "?" }
+            val matches = LinkedHashSet<String>()
+            db.rawQuery(
+                "SELECT DISTINCT post_uri FROM media_tags WHERE tag_name IN ($placeholders)",
+                group.toTypedArray()
+            ).use { cursor ->
+                while (cursor.moveToNext()) matches.add(cursor.getString(0))
+            }
+            resultSet = resultSet?.apply { retainAll(matches) } ?: matches
+            if (resultSet.isEmpty()) break
         }
-        return results
+        return (resultSet ?: emptySet()).take(limit)
     }
 
     /** Wipes the whole dataset — used if the user wants to re-tag from
@@ -147,13 +160,19 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
     fun clearAll() {
         val db = writableDatabase
         db.execSQL("DELETE FROM media_tags")
-        db.execSQL("DELETE FROM tag_search_fts")
         db.execSQL("DELETE FROM liked_media")
     }
 
     companion object {
         private const val DB_NAME = "liked_media_tags.db"
-        private const val DB_VERSION = 1
+        // Bumped 1 -> 2 for the fts5 removal (see class doc comment). Devices
+        // that never got past v1's onCreate (it always threw before
+        // completing, since CREATE VIRTUAL TABLE...fts5 failed) never
+        // actually persisted a v1 database — SQLiteOpenHelper rolls back and
+        // deletes on an onCreate failure — so onUpgrade only matters for the
+        // hypothetical device that *did* have fts5 and created a v1 database
+        // successfully before this fix.
+        private const val DB_VERSION = 2
 
         @Volatile private var instance: TagDatabase? = null
         fun get(context: Context): TagDatabase =

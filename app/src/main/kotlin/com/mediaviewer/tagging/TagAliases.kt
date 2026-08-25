@@ -3,10 +3,10 @@ package com.mediaviewer.tagging
 /** Local `tag_aliases` dictionary (per the tagging spec's "Search Query
  *  Execution and Synonym Mapping" section) — maps a handful of common,
  *  everyday search words onto the canonical e621/Z3D-E621-Convnext tag
- *  vocabulary before the query hits FTS5, so searching "dog" also matches
- *  images the model tagged "canine" or "dog_ears", etc. Deliberately small
- *  and easy to extend; anything not listed here is passed straight through
- *  as its own literal tag term. */
+ *  vocabulary, so searching "dog" also matches images the model tagged
+ *  "canine" or "dog_ears", etc. Deliberately small and easy to extend;
+ *  anything not listed here is passed straight through as its own literal
+ *  tag term. */
 object TagAliases {
 
     private val aliases: Map<String, List<String>> = mapOf(
@@ -28,19 +28,21 @@ object TagAliases {
         "questionable" to listOf("questionable")
     )
 
-    /** Turns a raw, space-separated user query into an FTS5 MATCH
-     *  expression: each user term becomes its own parenthesized OR-group of
-     *  aliases (when one exists) ANDed together with the rest of the query
-     *  (FTS5's default MATCH behavior is implicit AND between terms), e.g.
-     *  "dog explicit" -> "(canine OR dog OR dog_ears) (explicit)". */
-    fun toFtsQuery(rawQuery: String): String {
+    /** Turns a raw, space-separated user query into a list of OR-groups —
+     *  one group per word the person typed, each expanded to its aliases
+     *  (or just itself, if it isn't a known alias) — for
+     *  [TagDatabase.searchPostUris] to AND together, e.g.
+     *  "dog explicit" -> [[canine, dog, dog_ears], [explicit]].
+     *
+     *  (This used to build a single FTS5 MATCH expression string instead —
+     *  renamed/reshaped when the FTS5 dependency was removed, see
+     *  TagDatabase's doc comment for why.) */
+    fun toTagGroups(rawQuery: String): List<List<String>> {
         val terms = rawQuery.trim().lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
-        if (terms.isEmpty()) return ""
-        return terms.joinToString(" ") { term ->
+        return terms.mapNotNull { term ->
             val sanitized = term.replace(Regex("[^a-z0-9_]"), "")
-            if (sanitized.isBlank()) return@joinToString ""
-            val group = aliases[sanitized] ?: listOf(sanitized)
-            "(" + group.joinToString(" OR ") + ")"
-        }.trim()
+            if (sanitized.isBlank()) null else (aliases[sanitized] ?: listOf(sanitized))
+        }
     }
 }
+

@@ -217,8 +217,8 @@ class TaggingRepository(
 
     /** Search page's "Liked" tab. */
     fun search(query: String): List<String> {
-        val fts = TagAliases.toFtsQuery(query)
-        return db.searchPostUris(fts)
+        val groups = TagAliases.toTagGroups(query)
+        return db.searchPostUris(groups)
     }
 
     companion object {
