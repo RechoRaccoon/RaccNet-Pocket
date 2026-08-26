@@ -389,7 +389,7 @@ private fun EmptyResultsText() {
 private fun MainViewModel.SearchFilter.label(): String = when (this) {
     MainViewModel.SearchFilter.ACCOUNTS      -> "People"
     MainViewModel.SearchFilter.POSTS         -> "Posts"
-    MainViewModel.SearchFilter.LIKED_TAGS    -> "Liked"
+    MainViewModel.SearchFilter.LIKED_TAGS    -> "Tagged"
     MainViewModel.SearchFilter.FEEDS         -> "Feeds"
     MainViewModel.SearchFilter.STARTER_PACKS -> "Starter Packs"
 }

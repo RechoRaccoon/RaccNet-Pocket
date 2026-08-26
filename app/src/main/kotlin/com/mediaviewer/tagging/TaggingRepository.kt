@@ -251,8 +251,27 @@ class TaggingRepository(
         }
     }
 
-    private fun decodeBitmap(bytes: ByteArray): Bitmap? =
-        try { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) } catch (_: Exception) { null }
+    /** Decodes at roughly 2x the tagger's 448px input (not decoded straight
+     *  to 448 itself — that would double-downsample: once here, coarsely,
+     *  then again in ImageTagger's own bicubic-equivalent resize, losing
+     *  quality a single well-chosen resize wouldn't). A modern phone photo
+     *  can be 4000px+ on a side; decoding that in full just to immediately
+     *  discard ~95% of it in [ImageTagger]'s own downscale wastes real
+     *  decode time and a large transient allocation for zero quality
+     *  benefit — inSampleSize lets BitmapFactory's own decoder do the coarse
+     *  part of the downscale as it decodes, which is substantially cheaper
+     *  than decode-at-full-res-then-Bitmap.createScaledBitmap on the result. */
+    private fun decodeBitmap(bytes: ByteArray): Bitmap? = try {
+        val targetSize = 896
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= targetSize && bounds.outHeight / (sample * 2) >= targetSize) {
+            sample *= 2
+        }
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+    } catch (_: Exception) { null }
 
     private fun fetchBytes(url: String): ByteArray? = try {
         httpClient.newCall(Request.Builder().url(url).build()).execute().use { resp ->

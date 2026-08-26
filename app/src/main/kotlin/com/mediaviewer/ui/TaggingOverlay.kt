@@ -115,14 +115,17 @@ fun TaggingOverlay(
                         }
                         else -> {
                             CircularProgressIndicator(Modifier.size(28.dp), color = Color.White, strokeWidth = 2.dp)
-                            Spacer(Modifier.height(14.dp))
-                            Text("Tagging Liked Posts…", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                            Spacer(Modifier.height(10.dp))
-                            Text("${state.scanned} scanned", color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp)
-                            Text("${state.tagged} tagged", color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp)
-                            Spacer(Modifier.height(4.dp))
-                            Text(formatBytes(state.datasetBytes), color = DimGray, fontSize = 12.sp)
-                            Spacer(Modifier.height(20.dp))
+                            Spacer(Modifier.height(12.dp))
+                            Text("Tagging Liked Posts…", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+                            Spacer(Modifier.height(8.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("${state.scanned} scanned", color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp)
+                                Text("  ·  ", color = DimGray, fontSize = 13.sp)
+                                Text("${state.tagged} tagged", color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp)
+                                Text("  ·  ", color = DimGray, fontSize = 13.sp)
+                                Text(formatBytes(state.datasetBytes), color = DimGray, fontSize = 13.sp)
+                            }
+                            Spacer(Modifier.height(18.dp))
                             DismissButton(liquidGlass, profileTint, "Cancel", onDismiss)
                         }
                     }

@@ -2746,7 +2746,10 @@ _bskyDid.value          = session.did
             else -> 0
         }
         _screenState.value = screen
-        if (screen == ScreenState.COMMENTS) loadComments()
+        if (screen == ScreenState.COMMENTS) {
+            loadComments()
+            attachAiTagsToCurrentItem()
+        }
         // Item 3: the Settings "Profile" button was only ever populated by the
         // one loadSelfProfile() fired at app startup/login. If that request
         // hadn't finished (or had failed) by the time the person actually
@@ -2754,6 +2757,34 @@ _bskyDid.value          = session.did
         // session with nothing to retry it. Re-check every time Settings
         // opens so a missed/failed load gets a fresh attempt.
         if (screen == ScreenState.SETTINGS && _bskyLoggedIn.value && _selfProfile.value == null) loadSelfProfile()
+    }
+
+    /** Every path that opens the comments sheet — main feed, grid, profile,
+     *  DMs, wherever — funnels through [setScreen]\(COMMENTS\), so this is
+     *  the one place a lazy local-DB lookup covers all of them, instead of
+     *  only the Liked-tab search path ([openLikedPostFromSearch] below,
+     *  which is now just the "tags are already known, skip the DB round
+     *  trip" fast path for that one specific entry point). e621-mode posts
+     *  already carry real API tags in `tags` and are skipped; only blank
+     *  Bluesky-mode posts trigger a lookup. No-ops instead of racing if the
+     *  person navigates away before the (local, near-instant, but still
+     *  async) DB query resolves. */
+    private fun attachAiTagsToCurrentItem() {
+        val idx = _currentIndex.value
+        val item = _mediaItems.value.getOrNull(idx) ?: return
+        if (item.tags.isNotBlank() || item.postUri.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val aiTags = taggingRepo.tagsForPost(item.postUri)
+            if (aiTags.isEmpty()) return@launch
+            withContext(Dispatchers.Main) {
+                val list = _mediaItems.value.toMutableList()
+                val current = list.getOrNull(idx) ?: return@withContext
+                if (current.postUri == item.postUri && current.tags.isBlank()) {
+                    list[idx] = current.copy(tags = aiTags.joinToString(" "))
+                    _mediaItems.value = list
+                }
+            }
+        }
     }
 
     fun navigateNext() {
