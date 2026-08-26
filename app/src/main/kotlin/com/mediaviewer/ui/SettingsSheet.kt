@@ -139,6 +139,7 @@ fun SettingsSheet(
     taggingScanned: Int,
     taggingTagged: Int,
     onLocallyTagAllLiked: () -> Unit,
+    onDeleteTaggedDatabase: () -> Unit = {},
     tagConcurrency: Int,
     onSetTagConcurrency: (Int) -> Unit,
     onShowLikes: () -> Unit,
@@ -364,6 +365,7 @@ fun SettingsSheet(
                             tagPostWhenLiked = tagPostWhenLiked, onToggleTagPostWhenLiked = onToggleTagPostWhenLiked,
                             taggingRunning = taggingRunning, taggingScanned = taggingScanned, taggingTagged = taggingTagged,
                             onLocallyTagAllLiked = onLocallyTagAllLiked,
+                            onDeleteTaggedDatabase = onDeleteTaggedDatabase,
                             tagConcurrency = tagConcurrency, onSetTagConcurrency = onSetTagConcurrency,
                             combineListsAndPacks = combineListsAndPacks, onToggleCombineListsPacks = onToggleCombineListsPacks,
                             autoAddToOnFollow = autoAddToOnFollow, onToggleAutoAddToOnFollow = onToggleAutoAddToOnFollow,
@@ -498,6 +500,7 @@ private fun SettingsPageContent(
     taggingScanned: Int,
     taggingTagged: Int,
     onLocallyTagAllLiked: () -> Unit,
+    onDeleteTaggedDatabase: () -> Unit = {},
     tagConcurrency: Int,
     onSetTagConcurrency: (Int) -> Unit,
     combineListsAndPacks: Boolean,
@@ -873,6 +876,19 @@ private fun SettingsPageContent(
             SectionDivider("AI Tagging")
 
             val aiShape = RoundedCornerShape(14.dp)
+            // Item 5: tap-to-arm confirmation for the destructive delete
+            // row below — same lightweight pattern as FeedResultRow's
+            // "Add" -> "Added" swap rather than a separate AlertDialog,
+            // so a stray tap can't wipe the whole dataset by accident but
+            // confirming doesn't need a whole new modal. Resets back to
+            // the normal label if left armed and untouched.
+            var confirmingDelete by remember { mutableStateOf(false) }
+            LaunchedEffect(confirmingDelete) {
+                if (confirmingDelete) {
+                    kotlinx.coroutines.delay(3000)
+                    confirmingDelete = false
+                }
+            }
             @Composable
             fun AiTaggingBubbleContent() {
                 Column(Modifier.fillMaxWidth()) {
@@ -921,6 +937,28 @@ private fun SettingsPageContent(
                                 inactiveTrackColor = Color.White.copy(alpha = 0.15f)
                             ),
                             modifier = Modifier.fillMaxWidth().padding(top = 2.dp)
+                        )
+                    }
+                    // Item 5: lets the person wipe the tagged-post dataset
+                    // and start over, instead of only ever being able to
+                    // add to it.
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
+                    Box(
+                        Modifier.fillMaxWidth().height(44.dp)
+                            .clickable(enabled = !taggingRunning) {
+                                if (confirmingDelete) {
+                                    confirmingDelete = false
+                                    onDeleteTaggedDatabase()
+                                } else {
+                                    confirmingDelete = true
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            if (confirmingDelete) "Tap again to confirm delete" else "Delete Tagged Post Database",
+                            color = if (confirmingDelete) Color(0xFFEF5350) else Color(0xFFEF5350).copy(alpha = 0.85f),
+                            fontSize = 13.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center
                         )
                     }
                 }
@@ -1735,34 +1773,25 @@ private fun HubUploadBubble(
         if (expanded) {
             Column(
                 modifier = Modifier
+                    // `align = Alignment.TopEnd` here (wrapContentSize's own
+                    // placement, not just the outer Box's) makes the
+                    // right-edge-pinned intent explicit rather than relying
+                    // on the default Center — belt-and-suspenders alongside
+                    // the outer `.align(Alignment.TopEnd)` below for exactly
+                    // which corner of this Column ends up glued to which
+                    // corner of the anchor.
                     .align(Alignment.TopEnd)
-                    // Bug fix: this Box is pinned to a tiny fixed [size]
-                    // (e.g. 40dp square) via `.size(size)` above, on
-                    // purpose — see the class doc comment — but a plain
-                    // `.align(TopEnd)` child of a size-constrained Box is
-                    // still MEASURED with that same tight 40dp ceiling on
-                    // both axes, even though it's positioned by alignment.
-                    // That squashed the real ~220dp-tall, multi-bubble stack
-                    // down into the 40x40dp anchor's own bounds: each
-                    // bubble's text got clipped to a single leading
-                    // character (e.g. "Post" -> "P"), the five bubbles
-                    // collapsed on top of each other into what read as one
-                    // small circle, its glass backdrop sampled the wrong
-                    // (squashed) bounds so the blur/cutout mask never
-                    // resolved and it rendered transparent, and the
-                    // `-(stackHeightPx + gapAboveAnchorPx)` offset below —
-                    // computed for the *intended* full stack height — no
-                    // longer matched the actually-measured squashed size,
-                    // so the whole thing landed away from the "+" button
-                    // instead of stacked cleanly above it.
-                    // `wrapContentSize(unbounded = true)` measures this
-                    // Column ignoring the parent's incoming max
-                    // constraints (so it's free to be its natural, full
-                    // height/width) while still resolving its final
-                    // position via TopEnd alignment against the anchor —
-                    // exactly what a popover stack escaping a small anchor
-                    // needs.
-                    .wrapContentSize(unbounded = true)
+                    // This Box is pinned to a tiny fixed [size] (e.g. 40dp
+                    // square) via `.size(size)` above, on purpose — see the
+                    // class doc comment — which would otherwise force every
+                    // child (including this popover) to be measured within
+                    // that same tight 40dp ceiling. `wrapContentSize
+                    // (unbounded = true)` measures this Column ignoring the
+                    // parent's incoming max constraints (so it's free to be
+                    // its natural, full height/width) while still resolving
+                    // its final position via TopEnd alignment against the
+                    // anchor.
+                    .wrapContentSize(align = Alignment.TopEnd, unbounded = true)
                     .offset(y = with(density) { -(stackHeightPx + gapAboveAnchorPx).toDp() })
                     .width(IntrinsicSize.Max)
                     // Item 8 (same fix as the feed's MoreBubbleMenu):
@@ -1777,24 +1806,26 @@ private fun HubUploadBubble(
                     val bubbleModifier = Modifier
                         .fillMaxWidth()
                         .height(bubbleHeightDp)
-                        .clip(bubbleShape)
                         .clickable { expanded = false }
-                    if (liquidGlass) {
-                        LiquidGlassSurface(modifier = bubbleModifier, shape = bubbleShape, tint = tint, backdrop = menuBackdrop) {
-                            Text(
-                                label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                                textAlign = TextAlign.Center, maxLines = 1,
-                                modifier = Modifier.align(Alignment.Center).padding(horizontal = 14.dp)
-                            )
-                        }
-                    } else {
-                        Box(bubbleModifier.background(Color.Black.copy(alpha = 0.55f)), contentAlignment = Alignment.Center) {
-                            Text(
-                                label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                                textAlign = TextAlign.Center, maxLines = 1,
-                                modifier = Modifier.padding(horizontal = 14.dp)
-                            )
-                        }
+                    // Item 4: opaque masked bubbles instead of the live
+                    // LiquidGlassSurface — besides the "shouldn't be
+                    // transparent" request, this also removes the one thing
+                    // that could make the stack look "misaligned": a
+                    // LiquidGlassSurface crops its blurred backdrop from
+                    // this bubble's own tracked on-screen position, and that
+                    // sampling has previously gone wrong for this exact
+                    // popover (see git history) whenever its real measured
+                    // bounds didn't match what the backdrop crop expected —
+                    // reading as a bubble that LOOKED shifted/cut off even
+                    // when its actual layout position was correct.
+                    // opaqueMaskPanel just paints a flat brush, with nothing
+                    // to sample or crop, so that whole failure mode is gone.
+                    Box(bubbleModifier.opaqueMaskPanel(tint = tint, shape = bubbleShape), contentAlignment = Alignment.Center) {
+                        Text(
+                            label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                            textAlign = TextAlign.Center, maxLines = 1,
+                            modifier = Modifier.padding(horizontal = 14.dp)
+                        )
                     }
                 }
             }

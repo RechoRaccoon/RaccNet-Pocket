@@ -18,6 +18,19 @@ data class MediaItem(
     val id: String,
     val mediaUrl: String,
     val thumbUrl: String,
+    // Tagging-speed fix: a mid-resolution image URL to hand to the on-device
+    // tagger instead of the full-resolution mediaUrl. The tagger letterboxes
+    // everything down to 448x448 regardless of source size, so fetching and
+    // decoding a multi-MB/multi-thousand-pixel original just to immediately
+    // throw away >95% of it wastes real network+decode time for zero
+    // accuracy benefit — a source already well above 448px on its long edge
+    // (e621's ~850px "sample" JPEG, Bluesky's CDN thumbnail preset) carries
+    // every bit of detail the model can actually use. Blank = no
+    // appropriately-sized variant available for this item; callers fall
+    // back to mediaUrl/thumbUrl as before. Deliberately its own field rather
+    // than reusing thumbUrl: e621's thumbUrl defaults to a 150px preview,
+    // which is too small and would cost real tagging accuracy.
+    val taggingUrl: String = "",
     val isVideo: Boolean,
     val videoPlaylistUrl: String? = null,
     // Bug fix: the blob CID of the ORIGINAL video file (as uploaded), used with

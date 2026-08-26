@@ -1770,7 +1770,15 @@ class BlueskyRepository {
                         listOf(
                             MediaItem(
                                 id = post.cid, mediaUrl = first.fullsize,
-                                thumbUrl = resolvedThumb(first), isVideo = false, postUri = post.uri, postCid = post.cid, feedContext = item.feedContext,
+                                thumbUrl = resolvedThumb(first),
+                                // Tagging-speed fix: same reasoning as
+                                // E621Repository's taggingUrl — reuse the
+                                // CDN-served thumbnail (already sized well
+                                // above the tagger's 448px input) instead of
+                                // fetching the full, uncapped `fullsize` blob
+                                // just to tag it.
+                                taggingUrl = resolvedThumb(first),
+                                isVideo = false, postUri = post.uri, postCid = post.cid, feedContext = item.feedContext,
                                 author = author, likeUri = post.viewer?.like, repostUri = post.viewer?.repost,
                                 isLiked = post.viewer?.like != null, isReposted = post.viewer?.repost != null,
                                 likeCount = post.likeCount ?: 0, replyCount = post.replyCount ?: 0,

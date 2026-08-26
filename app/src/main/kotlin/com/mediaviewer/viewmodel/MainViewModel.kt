@@ -3320,6 +3320,23 @@ _bskyDid.value          = session.did
         taggingRepo.cancel()
     }
 
+    /** Settings' "Delete Tagged Post Database" button (item 5). Stops any
+     *  in-flight tagging pass first (so it can't keep writing rows back in
+     *  while/after the wipe), clears the dataset, then resets every piece
+     *  of UI state that was derived from it — otherwise the Search page's
+     *  Liked tab would still show stale "already tagged" results, and the
+     *  Settings row would still show the old scanned/tagged counts, until
+     *  the next unrelated refresh happened to overwrite them. */
+    fun deleteTaggedDatabase() {
+        if (_taggingUiState.value.isRunning) taggingRepo.cancel()
+        viewModelScope.launch(Dispatchers.IO) {
+            taggingRepo.deleteDatabase()
+            _hasTaggedDataset.value = false
+            _taggingUiState.value = TaggingUiState()
+            performLikedTagSearch("")
+        }
+    }
+
     /** Closes the overlay after a completed (or cancelled) run — separate
      *  from cancelTagging() since the person can dismiss a *finished* run's
      *  "Tagging Complete" card without that meaning "stop", and dismissing

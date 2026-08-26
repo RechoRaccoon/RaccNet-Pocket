@@ -165,7 +165,11 @@ fun CommentsSheet(
                 }
         ) {
             if (showTags && currentItem != null) {
+                // Per request: tags shown alphabetically rather than in
+                // whatever order the source (native e621 tags, or the AI
+                // tagger's confidence-sorted list) provided them in.
                 val tags = currentItem.tags.split(" ").filter { it.isNotBlank() }
+                    .sortedBy { it.lowercase() }
                 val tagListState = rememberLazyListState()
                 if (tags.isEmpty()) {
                     Text("no tags", color = DimGray, fontSize = 14.sp, modifier = Modifier.align(Alignment.Center))

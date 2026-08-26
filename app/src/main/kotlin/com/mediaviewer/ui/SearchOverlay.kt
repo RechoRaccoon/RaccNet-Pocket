@@ -111,12 +111,6 @@ fun SearchOverlay(
         if (liquidGlass) GlassBackdrop(backdropLayer) { backdropOrigin } else null
     }
 
-    // Item 4: tracked here (not inside the Column below) so both the search
-    // bar Row (which measures it) and the autocomplete dropdown (a sibling
-    // rendered after the Column, so it draws on top of it) can see it.
-    var barBottomLeft by remember { mutableStateOf(Offset.Zero) }
-    var barWidth by remember { mutableStateOf(0) }
-
     Box(
         Modifier.fillMaxSize()
             // Bug fix: claim pointer input over the whole overlay so taps on
@@ -145,51 +139,73 @@ fun SearchOverlay(
             Spacer(Modifier.height(16.dp))
 
             // ── Bar: close bubble + round search field ──────────────────────
-            // Item 4: this Row's own bottom-left position in root
-            // coordinates anchors the autocomplete dropdown below (rendered
-            // as a later sibling of the whole Column, further down, so it
-            // draws on top of the filter row/results per the request).
+            // Item 4 (rework): the autocomplete list is no longer a separate
+            // floating bubble underneath the search field — it's rendered
+            // *inside* the same bubble, which grows downward to fit it, so
+            // it reads as one continuous field expanding rather than two
+            // disconnected panels.
+            val isLiked = state.filter == MainViewModel.SearchFilter.LIKED_TAGS
+            val showSuggestions = isLiked && tagSuggestions.isNotEmpty()
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 14.dp)
-                    .onGloballyPositioned {
-                        val pos = it.positionInRoot()
-                        barBottomLeft = Offset(pos.x, pos.y + it.size.height)
-                        barWidth = it.size.width
-                    },
-                verticalAlignment = Alignment.CenterVertically,
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp),
+                // Top-aligned (not CenterVertically) so the close bubble
+                // stays pinned to the field's top 44dp band instead of
+                // re-centering against the whole, now-taller, expanded
+                // bubble whenever suggestions are showing.
+                verticalAlignment = Alignment.Top,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                SearchCloseBubble(liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop, onClick = onClose)
+                Box(Modifier.height(44.dp), contentAlignment = Alignment.Center) {
+                    SearchCloseBubble(liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop, onClick = onClose)
+                }
                 val fieldShape = RoundedCornerShape(24.dp)
-                val isLiked = state.filter == MainViewModel.SearchFilter.LIKED_TAGS
                 @Composable
                 fun SearchFieldContent() {
-                    Row(
-                        Modifier.fillMaxSize().padding(horizontal = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(Icons.Default.Search, contentDescription = null, tint = DimGray, modifier = Modifier.size(18.dp))
-                        // Item 2: the Liked tab's text field routes through
-                        // its own live-text-only/submit-on-search callbacks
-                        // instead of onQueryChange, so typing doesn't
-                        // re-query the dataset on every keystroke — see
-                        // onLikedQueryTextChange/onLikedSearchSubmit's doc
-                        // comments on MainViewModel.
-                        BasicTextFieldWithPlaceholder(
-                            value = state.query,
-                            onValueChange = if (isLiked) onLikedQueryTextChange else onQueryChange,
-                            // Item 1: just "Search" — no app-name text needed.
-                            placeholder = "Search", focusRequester = focusRequester,
-                            onSearch = { if (isLiked) onLikedSearchSubmit() else onQueryChange(state.query) }
-                        )
+                    Column(Modifier.fillMaxWidth()) {
+                        Row(
+                            Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(Icons.Default.Search, contentDescription = null, tint = DimGray, modifier = Modifier.size(18.dp))
+                            // Item 2: the Liked tab's text field routes through
+                            // its own live-text-only/submit-on-search callbacks
+                            // instead of onQueryChange, so typing doesn't
+                            // re-query the dataset on every keystroke — see
+                            // onLikedQueryTextChange/onLikedSearchSubmit's doc
+                            // comments on MainViewModel.
+                            BasicTextFieldWithPlaceholder(
+                                value = state.query,
+                                onValueChange = if (isLiked) onLikedQueryTextChange else onQueryChange,
+                                // Item 1: just "Search" — no app-name text needed.
+                                placeholder = "Search", focusRequester = focusRequester,
+                                onSearch = { if (isLiked) onLikedSearchSubmit() else onQueryChange(state.query) }
+                            )
+                        }
+                        // Item 4: suggestions live inside the same bubble now,
+                        // below the text row, instead of a separate floating
+                        // panel positioned underneath it.
+                        if (showSuggestions) {
+                            HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
+                            tagSuggestions.forEachIndexed { index, suggestion ->
+                                if (index > 0) HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
+                                Text(
+                                    suggestion, color = Color.White, fontSize = 14.sp,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onTagSuggestionSelected(suggestion) }
+                                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                                )
+                            }
+                        }
                     }
                 }
-                if (liquidGlass) {
-                    LiquidGlassSurface(Modifier.weight(1f).height(44.dp), shape = fieldShape, tint = profileTint, backdrop = searchBackdrop) { SearchFieldContent() }
-                } else {
-                    Box(Modifier.weight(1f).height(44.dp).clip(fieldShape).background(Color.White.copy(0.08f))) { SearchFieldContent() }
-                }
+                // Item 4: no longer a translucent LiquidGlassSurface — an
+                // opaque mask instead, so once it expands to show
+                // suggestions it fully hides the filter row/results
+                // scrolling underneath rather than letting them show
+                // through and compete with the suggestion text.
+                Box(Modifier.weight(1f).opaqueMaskPanel(tint = profileTint, shape = fieldShape)) { SearchFieldContent() }
             }
 
             Spacer(Modifier.height(14.dp))
@@ -292,53 +308,6 @@ fun SearchOverlay(
             }
         }
 
-        // Item 4: floating autocomplete/autocorrect list — a later sibling
-        // of the Column above (so it draws on top of the filter row and
-        // results grid, per "should overlay over the search tabs, posts,
-        // and everything"), positioned from the search bar's own tracked
-        // bottom-left corner so it always sits directly under the field
-        // regardless of tab or scroll state. Only ever populated (by
-        // MainViewModel.updateLikedQueryText) while the Liked tab is active
-        // and there's an in-progress word to suggest for; hitting space
-        // clears the in-progress word, which clears this list, which closes
-        // the dropdown — no separate "dismiss" logic needed.
-        if (tagSuggestions.isNotEmpty() && state.filter == MainViewModel.SearchFilter.LIKED_TAGS) {
-            val density = androidx.compose.ui.platform.LocalDensity.current
-            val dropdownShape = RoundedCornerShape(16.dp)
-            @Composable
-            fun SuggestionsContent() {
-                Column(Modifier.fillMaxWidth()) {
-                    tagSuggestions.forEachIndexed { index, suggestion ->
-                        if (index > 0) HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
-                        Text(
-                            suggestion, color = Color.White, fontSize = 14.sp,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onTagSuggestionSelected(suggestion) }
-                                .padding(horizontal = 16.dp, vertical = 12.dp)
-                        )
-                    }
-                }
-            }
-            Box(
-                Modifier
-                    .offset {
-                        with(density) {
-                            androidx.compose.ui.unit.IntOffset(
-                                barBottomLeft.x.toInt(),
-                                (barBottomLeft.y + 6.dp.toPx()).toInt()
-                            )
-                        }
-                    }
-                    .width(with(density) { barWidth.toDp() })
-            ) {
-                if (liquidGlass) {
-                    LiquidGlassSurface(Modifier.fillMaxWidth(), shape = dropdownShape, tint = profileTint, backdrop = searchBackdrop) { SuggestionsContent() }
-                } else {
-                    Box(Modifier.fillMaxWidth().clip(dropdownShape).background(Color(0xFF1A1A1A))) { SuggestionsContent() }
-                }
-            }
-        }
     }
 }
 

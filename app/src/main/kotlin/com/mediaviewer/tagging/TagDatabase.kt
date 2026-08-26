@@ -182,12 +182,18 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
 
     /** Wipes the whole dataset — used if the user wants to re-tag from
      *  scratch (a fresh "Locally Tag All Liked Posts" run reuses existing
-     *  rows instead by default via [isIndexed]; this is only for an
-     *  explicit reset, not currently wired to a button but kept available). */
+     *  rows instead by default via [isIndexed]). Now wired to Settings'
+     *  "Delete Tagged Post Database" button (item 5) via
+     *  [TaggingRepository.deleteDatabase]. Runs a VACUUM after the deletes —
+     *  SQLite doesn't shrink the on-disk file just because its rows are
+     *  gone, and the whole point of this button is to actually reclaim that
+     *  space, not just make the tables logically empty while
+     *  [datasetSizeBytes] keeps reporting the old size. */
     fun clearAll() {
         val db = writableDatabase
         db.execSQL("DELETE FROM media_tags")
         db.execSQL("DELETE FROM liked_media")
+        db.execSQL("VACUUM")
     }
 
     companion object {

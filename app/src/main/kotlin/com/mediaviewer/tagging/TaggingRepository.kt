@@ -86,6 +86,16 @@ class TaggingRepository(
 
     fun cancel() { cancelRequested = true }
 
+    /** Settings' "Delete Tagged Post Database" button (item 5): wipes every
+     *  scanned/tagged post so the person can restart the dataset from
+     *  scratch. Only clears the tag data — the already-downloaded model
+     *  file is left alone (no reason to force a ~390MB re-download just to
+     *  reset tagging progress), and a running tag-all pass should be
+     *  stopped first (the caller does this — see MainViewModel.
+     *  deleteTaggedDatabase) so it doesn't keep writing rows back in while
+     *  this runs. */
+    suspend fun deleteDatabase() = withContext(Dispatchers.IO) { db.clearAll() }
+
     /** Full backlog pass: pages through every liked post (Bluesky or e621,
      *  whichever app mode is active), skips anything already in the
      *  dataset (so a cancelled/resumed run doesn't redo work), tags the
@@ -214,8 +224,14 @@ class TaggingRepository(
                     ?.let { decodeBitmap(it) }
             }
         } else {
-            val imageUrl = item.mediaUrl.ifBlank { item.thumbUrl }
-            sourceUrlForRecord = imageUrl
+            // Tagging-speed fix: prefer the mid-resolution taggingUrl (see
+            // its doc comment on MediaItem) over the full-resolution
+            // mediaUrl — same final 448x448 input either way, but a much
+            // smaller fetch+decode. Still recorded against the item's real
+            // mediaUrl/thumbUrl below so the stored dataset row points at
+            // the same URL the rest of the app already uses for this post.
+            val imageUrl = item.taggingUrl.ifBlank { item.mediaUrl.ifBlank { item.thumbUrl } }
+            sourceUrlForRecord = item.mediaUrl.ifBlank { item.thumbUrl }
             bitmap = if (imageUrl.isBlank()) null else fetchBytes(imageUrl)?.let { decodeBitmap(it) }
         }
 

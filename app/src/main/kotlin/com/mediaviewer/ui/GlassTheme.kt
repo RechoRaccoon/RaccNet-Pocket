@@ -206,6 +206,37 @@ fun Modifier.glassPanel(
         )
 }
 
+/**
+ * An opaque "masked" surface — same rim treatment as [glassPanel], but the
+ * fill behind it is a fully solid copy of the app's own background gradient
+ * ([postBackgroundBrush]) instead of a translucent tint. Where [glassPanel]
+ * and [LiquidGlassSurface] are deliberately see-through so real content
+ * shows through the glass, this is for the opposite case: a surface that
+ * has to sit *over* other UI (search autocomplete expanding over results,
+ * a popped-open menu sitting over page content) and fully hide whatever's
+ * under it, rather than letting it show through and hurt legibility. Using
+ * the same brush as the page background (rather than a flat color) means
+ * the masked surface still reads as "part of this screen" instead of a
+ * disconnected opaque card dropped on top of it.
+ */
+fun Modifier.opaqueMaskPanel(
+    tint: Color = NeutralGlassTint,
+    shape: Shape = RoundedCornerShape(20.dp),
+    rim: Boolean = true
+): Modifier = composed {
+    val rimIntensity = LocalGlassRimIntensity.current
+    this
+        .clip(shape)
+        .background(postBackgroundBrush(tint))
+        .then(
+            if (rim) Modifier.border(
+                width = 1.dp,
+                brush = Brush.linearGradient(listOf(tint.copy(alpha = 0.85f * rimIntensity), Color.White.copy(alpha = 0.5f * rimIntensity), tint.copy(alpha = 0.7f * rimIntensity))),
+                shape = shape
+            ) else Modifier
+        )
+}
+
 /** How strong a dark legibility scrim a glass panel needs, given the color
  *  it's sitting against — keeps white icons/text readable over light posts
  *  without dulling the glass over already-dark ones. */

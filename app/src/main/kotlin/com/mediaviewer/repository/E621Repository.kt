@@ -92,6 +92,13 @@ class E621Repository {
             id               = id.toString(),
             mediaUrl         = url,
             thumbUrl         = thumb,
+            // Tagging-speed fix: e621's "sample" rendition (~850px longest
+            // edge JPEG) instead of the full original file — which for
+            // e621 posts is routinely a multi-MB, sometimes multi-ten-MB,
+            // PNG. Only used by TaggingRepository; falls back to `url`
+            // itself when a post has no sample (small originals below the
+            // site's sample threshold don't get one).
+            taggingUrl       = sample?.url ?: url,
             isVideo          = isVid,
             videoPlaylistUrl = if (isVid) url else null,
             postUri          = "https://e621.net/posts/$id",

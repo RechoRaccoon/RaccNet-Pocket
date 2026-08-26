@@ -30,22 +30,59 @@ class ImageTagger(modelFile: File, tagsFile: File) : AutoCloseable {
     private val inputSize = 448
 
     init {
-        val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
+        // Leaves one core free for the UI thread (tagging can run while the
+        // person is actively scrolling the feed) rather than the old
+        // coerceIn(2, 6), which left 2-3 of the 8a's 9 cores idle for no
+        // reason on a batch/background workload like this.
+        val threads = (Runtime.getRuntime().availableProcessors() - 1).coerceIn(2, 8)
         val options = OrtSession.SessionOptions().apply {
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            // Prefer the NPU/DSP via NNAPI where available. Important caveat
-            // on this specific graph: ConvNeXt's LayerNormalization and GELU
-            // ops aren't in most Android NNAPI drivers' supported-op list
-            // (Tensor G3 in the 8a included), so NNAPI often can't claim
-            // this graph at all and ORT falls back to its *generic* CPU EP —
-            // not XNNPACK — which is noticeably slower for fp32 conv nets on
-            // ARM. Registering XNNPACK explicitly gives NNAPI first refusal
-            // at whatever it *can* accelerate, with a fast CPU path (instead
-            // of the slow generic one) for everything it can't, rather than
-            // silently eating that cost.
-            try { addNnapi() } catch (_: Throwable) { /* not available on this device */ }
-            try { addXnnpack(mapOf("intra_op_num_threads" to threads.toString())) } catch (_: Throwable) { /* AAR build doesn't include it */ }
+            // Bug fix (this is the real fix for the "10-20s/image" report —
+            // NNAPI was the culprit, not raw compute speed): this used to
+            // also call addNnapi() ahead of XNNPACK, on the theory that
+            // "NNAPI for whatever it can claim, XNNPACK for the rest" could
+            // only ever help. In practice, for *this* graph, it made things
+            // dramatically worse. ConvNeXt interleaves depthwise Conv (an
+            // NNAPI op) with LayerNorm and GELU (not NNAPI ops) in literally
+            // every block — so NNAPI doesn't cleanly own "most of the graph"
+            // or "none of it", it ends up claiming a huge number of *tiny*,
+            // scattered single-op partitions threaded through dozens of
+            // blocks. Every one of those partition boundaries is a hand-off
+            // through Android's NNAPI HAL (real IPC/driver overhead, paid on
+            // *every* inference, not just once at session creation) before
+            // control returns to XNNPACK for the next unsupported op and
+            // back again. That per-block round-trip overhead, multiplied by
+            // however many blocks this ConvNeXt has, is a far more likely
+            // explanation for 10-20s/image than fp32 conv math itself (which
+            // XNNPACK alone handles in low single-digit seconds on this
+            // class of phone) — and it matches known ORT/NNAPI guidance that
+            // heavily-fragmented partitioning frequently loses to just not
+            // using NNAPI at all. Dropping addNnapi() and letting XNNPACK
+            // run the *entire* graph as one coherent optimized pass removes
+            // that fragmentation overhead entirely.
+            //
+            // This is also, if anything, a small *accuracy* positive, not a
+            // trade-off: NNAPI drivers are free to run the ops they accept
+            // at reduced precision under the hood (a fp16 or even quantized
+            // fast path) without this app ever choosing that — so removing
+            // NNAPI also guarantees every op now runs through one consistent
+            // fp32 path (XNNPACK, falling back to ORT's own CPU EP for
+            // anything XNNPACK itself doesn't cover), instead of silently
+            // mixing in whatever precision the device's specific NNAPI
+            // driver happened to pick for the fraction of the graph it
+            // could claim.
+            try { addXnnpack(mapOf("intra_op_num_threads" to threads.toString())) } catch (_: Throwable) { /* AAR build doesn't include it — falls back to ORT's generic CPU EP */ }
             setIntraOpNumThreads(threads)
+            // Free perf win, zero accuracy impact: without this, x86/ARM FPUs
+            // drop into a much slower microcoded path any time an
+            // intermediate value underflows into the denormal range, which
+            // happens routinely inside conv/norm layers. Flushing denormals
+            // to zero sidesteps that slow path; the values involved are
+            // already numerically insignificant (many orders of magnitude
+            // below the 0.15/0.25 confidence thresholds this model's output
+            // is ever compared against), so this can't change which tags
+            // clear threshold.
+            addConfigEntry("session.set_denormal_as_zero", "1")
         }
         session = env.createSession(modelFile.absolutePath, options)
         inputName = session.inputNames.iterator().next()

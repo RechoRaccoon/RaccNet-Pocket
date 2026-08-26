@@ -573,6 +573,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             taggingScanned            = taggingUiState.scanned,
             taggingTagged             = taggingUiState.tagged,
             onLocallyTagAllLiked      = viewModel::startTaggingAllLiked,
+            onDeleteTaggedDatabase    = viewModel::deleteTaggedDatabase,
             tagConcurrency            = tagConcurrency,
             onSetTagConcurrency       = viewModel::setTagConcurrency,
             onShowLikes               = viewModel::showBskyLikes,
