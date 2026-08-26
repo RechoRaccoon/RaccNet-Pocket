@@ -13,6 +13,7 @@ import com.mediaviewer.repository.E621Repository
 import com.mediaviewer.repository.StreamplaceRepository
 import com.mediaviewer.tagging.TaggerModelManager
 import com.mediaviewer.tagging.TaggingRepository
+import com.mediaviewer.tagging.TagSuggestionProvider
 import com.mediaviewer.util.PreferencesManager
 import com.mediaviewer.worker.DownloadWorker
 import com.mediaviewer.worker.GifDownloadWorker
@@ -25,6 +26,7 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
