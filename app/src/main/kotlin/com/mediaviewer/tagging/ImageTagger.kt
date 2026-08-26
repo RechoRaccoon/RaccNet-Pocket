@@ -4,6 +4,9 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import java.io.BufferedReader
 import java.io.File
 import java.io.FileReader
@@ -56,23 +59,30 @@ class ImageTagger(modelFile: File, tagsFile: File) : AutoCloseable {
         }
     }
 
-    /** Preprocesses [bitmap] to a 448x448 NHWC float tensor in [0,1] (the
-     *  Keras/TF preprocessing this model family expects), runs one forward
-     *  pass, and returns tags above [confidenceThreshold] sorted highest
-     *  confidence first. */
+    /** Preprocesses [bitmap] to a 448x448 NHWC float tensor with RAW [0,255]
+     *  pixel values (this Keras/ConvNeXt graph has its own baked-in
+     *  Normalization layer — see [tag]'s doc for why), runs one forward pass,
+     *  and returns tags above [confidenceThreshold] sorted highest confidence
+     *  first. */
     fun tag(bitmap: Bitmap, confidenceThreshold: Float = 0.25f): List<Pair<String, Float>> {
-        val resized = Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
+        val letterboxed = letterbox(bitmap, inputSize)
         val floatBuffer = FloatBuffer.allocate(inputSize * inputSize * 3)
         val pixels = IntArray(inputSize * inputSize)
-        resized.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
+        letterboxed.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
         for (pixel in pixels) {
-            // NHWC, RGB, normalized 0..1 — standard for this Keras-derived graph.
-            floatBuffer.put(((pixel shr 16) and 0xFF) / 255f)
-            floatBuffer.put(((pixel shr 8) and 0xFF) / 255f)
-            floatBuffer.put((pixel and 0xFF) / 255f)
+            // NHWC, RGB, RAW [0,255] floats — this Keras/ConvNeXt graph has its
+            // own built-in Normalization layer (see Keras ConvNeXt docs: "models
+            // expect their inputs to be float or uint8 tensors of pixels with
+            // values in the [0-255] range"). Pre-scaling to [0,1] here starves
+            // that layer of the input range it was trained on, and the model
+            // collapses to its tag-frequency prior — which is exactly the
+            // generic/high-frequency-tag garbage this was producing.
+            floatBuffer.put(((pixel shr 16) and 0xFF).toFloat())
+            floatBuffer.put(((pixel shr 8) and 0xFF).toFloat())
+            floatBuffer.put((pixel and 0xFF).toFloat())
         }
         floatBuffer.rewind()
-        if (resized !== bitmap) resized.recycle()
+        letterboxed.recycle()
 
         val shape = longArrayOf(1, inputSize.toLong(), inputSize.toLong(), 3)
         OnnxTensor.createTensor(env, floatBuffer, shape).use { inputTensor ->
@@ -94,6 +104,30 @@ class ImageTagger(modelFile: File, tagsFile: File) : AutoCloseable {
                 return tagged.sortedByDescending { it.second }
             }
         }
+    }
+
+    /** Aspect-ratio-preserving resize of [src] onto a [size]x[size] white
+     *  canvas (white, not black/transparent, since this tagger family is
+     *  trained on e621 posts composited on white — matching the fill color
+     *  a squashed/naive resize implicitly doesn't). Non-square source images
+     *  get letterboxed rather than stretched, which otherwise distorts
+     *  proportions the model was trained to recognize (e.g. squashing a
+     *  portrait image measurably hurts species/body-shape tags). */
+    private fun letterbox(src: Bitmap, size: Int): Bitmap {
+        val scale = minOf(size.toFloat() / src.width, size.toFloat() / src.height)
+        val scaledW = (src.width * scale).toInt().coerceAtLeast(1)
+        val scaledH = (src.height * scale).toInt().coerceAtLeast(1)
+        val scaled = Bitmap.createScaledBitmap(src, scaledW, scaledH, true)
+
+        val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        Canvas(out).apply {
+            drawColor(Color.WHITE)
+            val left = (size - scaledW) / 2f
+            val top = (size - scaledH) / 2f
+            drawBitmap(scaled, left, top, Paint(Paint.FILTER_BITMAP_FLAG))
+        }
+        if (scaled !== src) scaled.recycle()
+        return out
     }
 
     override fun close() {
