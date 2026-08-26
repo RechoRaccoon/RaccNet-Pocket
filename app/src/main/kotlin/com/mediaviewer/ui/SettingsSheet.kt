@@ -69,6 +69,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.sp
+import kotlin.math.roundToInt
 import coil.compose.AsyncImage
 import com.mediaviewer.model.AppMode
 import com.mediaviewer.model.BskyFeedInfo
@@ -138,6 +139,8 @@ fun SettingsSheet(
     taggingScanned: Int,
     taggingTagged: Int,
     onLocallyTagAllLiked: () -> Unit,
+    tagConcurrency: Int,
+    onSetTagConcurrency: (Int) -> Unit,
     onShowLikes: () -> Unit,
     onShowFriends: () -> Unit,
     onShowE621Following: () -> Unit,
@@ -361,6 +364,7 @@ fun SettingsSheet(
                             tagPostWhenLiked = tagPostWhenLiked, onToggleTagPostWhenLiked = onToggleTagPostWhenLiked,
                             taggingRunning = taggingRunning, taggingScanned = taggingScanned, taggingTagged = taggingTagged,
                             onLocallyTagAllLiked = onLocallyTagAllLiked,
+                            tagConcurrency = tagConcurrency, onSetTagConcurrency = onSetTagConcurrency,
                             combineListsAndPacks = combineListsAndPacks, onToggleCombineListsPacks = onToggleCombineListsPacks,
                             autoAddToOnFollow = autoAddToOnFollow, onToggleAutoAddToOnFollow = onToggleAutoAddToOnFollow,
                             onLogoutBluesky = onLogoutBluesky, onLogoutE621 = onLogoutE621,
@@ -494,6 +498,8 @@ private fun SettingsPageContent(
     taggingScanned: Int,
     taggingTagged: Int,
     onLocallyTagAllLiked: () -> Unit,
+    tagConcurrency: Int,
+    onSetTagConcurrency: (Int) -> Unit,
     combineListsAndPacks: Boolean,
     onToggleCombineListsPacks: (Boolean) -> Unit,
     autoAddToOnFollow: Boolean,
@@ -888,6 +894,34 @@ private fun SettingsPageContent(
                     CompactRow {
                         Text("Tag Post When Liked", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(end = 12.dp))
                         CompactSwitch(checked = tagPostWhenLiked, onCheckedChange = onToggleTagPostWhenLiked)
+                    }
+                    // Item 6: how many liked posts get fetched+tagged in
+                    // parallel during a "Locally Tag All Liked Posts" run —
+                    // see TaggingRepository.tagAllLiked's own doc comment
+                    // for why this is safe to parallelize. Doesn't affect
+                    // realtime tag-on-like (that's always exactly one post).
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+                        Text(
+                            "Tag $tagConcurrency Post${if (tagConcurrency == 1) "" else "s"} At Once",
+                            color = Color.White, fontSize = 14.sp
+                        )
+                        Text(
+                            "Higher speeds up tagging but uses more memory/CPU at once",
+                            color = DimGray, fontSize = 11.sp
+                        )
+                        Slider(
+                            value = tagConcurrency.toFloat(),
+                            onValueChange = { onSetTagConcurrency(it.roundToInt()) },
+                            valueRange = 1f..10f,
+                            steps = 8, // 8 intermediate steps -> 10 discrete stops (1..10)
+                            colors = SliderDefaults.colors(
+                                thumbColor = Color.White,
+                                activeTrackColor = dominantColor,
+                                inactiveTrackColor = Color.White.copy(alpha = 0.15f)
+                            ),
+                            modifier = Modifier.fillMaxWidth().padding(top = 2.dp)
+                        )
                     }
                 }
             }

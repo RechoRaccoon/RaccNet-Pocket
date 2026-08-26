@@ -233,6 +233,8 @@ private fun AppRoot(viewModel: MainViewModel) {
     val taggingUiState         by viewModel.taggingUiState.collectAsState()
     val hasTaggedDataset       by viewModel.hasTaggedDataset.collectAsState()
     val likedTagSearchResults  by viewModel.likedTagSearchResults.collectAsState()
+    val tagSuggestions         by viewModel.tagSuggestions.collectAsState()
+    val tagConcurrency         by viewModel.tagConcurrency.collectAsState()
     val tagPostWhenLiked       by viewModel.tagPostWhenLiked.collectAsState()
     // Phase 4
     val translationEnabled     by viewModel.translationEnabled.collectAsState()
@@ -571,6 +573,8 @@ private fun AppRoot(viewModel: MainViewModel) {
             taggingScanned            = taggingUiState.scanned,
             taggingTagged             = taggingUiState.tagged,
             onLocallyTagAllLiked      = viewModel::startTaggingAllLiked,
+            tagConcurrency            = tagConcurrency,
+            onSetTagConcurrency       = viewModel::setTagConcurrency,
             onShowLikes               = viewModel::showBskyLikes,
             onShowFriends             = viewModel::showFriendsFeed,
             onShowE621Following       = viewModel::searchFollowingE621,
@@ -679,7 +683,12 @@ private fun AppRoot(viewModel: MainViewModel) {
                 hasTaggedDataset   = hasTaggedDataset,
                 likedTagResults    = likedTagSearchResults,
                 onStartTagging     = viewModel::startTaggingAllLiked,
+                onOpenLikedPost    = viewModel::openLikedPostFromSearch,
+                tagSuggestions     = tagSuggestions,
                 onQueryChange      = viewModel::runSearch,
+                onLikedQueryTextChange = viewModel::updateLikedQueryText,
+                onLikedSearchSubmit    = viewModel::submitLikedSearch,
+                onTagSuggestionSelected = viewModel::applyTagSuggestion,
                 onSelectFilter     = viewModel::setSearchFilter,
                 onOpenPost         = viewModel::openPostFromSearch,
                 onOpenAccount      = { author -> viewModel.closeSearch(); viewModel.openProfile(author) },

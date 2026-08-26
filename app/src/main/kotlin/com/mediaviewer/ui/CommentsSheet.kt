@@ -112,13 +112,24 @@ fun CommentsSheet(
 
         HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
 
-        if (appMode == AppMode.E621 && currentItem != null) {
+        // Item 3 bug fix: the Comments/Tags toggle used to be gated to
+        // e621 mode only — Bluesky posts opened from the Liked search tab
+        // now carry the AI tagger's tags in this same `tags` field (see
+        // MainViewModel.openLikedPostFromSearch), so the toggle needs to
+        // show for those too, not just genuine e621 posts.
+        val showTagsToggle = currentItem != null && (appMode == AppMode.E621 || currentItem.tags.isNotBlank())
+        if (showTagsToggle && currentItem != null) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(OffBlack)
                     .padding(horizontal = 12.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
+                // Bug fix: Comments and Tags are supposed to sit at opposite
+                // ends of the bar, not bunched together — SpaceBetween with
+                // no inner spacing (was a fixed 16dp gap between two
+                // left-aligned items) pins Comments to the far left and
+                // Tags to the far right.
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text("Comments", color = if (!showTags) Color.White else DimGray,
                     fontSize = 13.sp, fontWeight = if (!showTags) FontWeight.SemiBold else FontWeight.Normal,
@@ -138,7 +149,7 @@ fun CommentsSheet(
                 .weight(1f)
                 .fillMaxWidth()
                 .let { base ->
-                    if (appMode == AppMode.E621 && currentItem != null) {
+                    if (showTagsToggle && currentItem != null) {
                         base.pointerInput(currentItem.id) {
                             var totalX = 0f
                             detectHorizontalDragGestures(

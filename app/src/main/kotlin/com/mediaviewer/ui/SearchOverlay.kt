@@ -67,7 +67,23 @@ fun SearchOverlay(
     hasTaggedDataset: Boolean = false,
     likedTagResults: List<MediaItem> = emptyList(),
     onStartTagging: () -> Unit = {},
+    onOpenLikedPost: (Int) -> Unit = {},
+    // Item 4: e621-style tag autocomplete/autocorrect suggestions for the
+    // current in-progress word being typed (only really meaningful on the
+    // Liked tab, where the vocabulary is the tagger's own fixed tag list —
+    // see TagSuggestionProvider). Empty list = nothing to show.
+    tagSuggestions: List<String> = emptyList(),
     onQueryChange: (String) -> Unit,
+    // Item 2: Liked tab's query text updates live (so the field shows what
+    // you're typing + suggestions can react to it) but must NOT re-run the
+    // actual dataset search until Enter/search is pressed — unlike the
+    // other tabs' onQueryChange, which both updates the field and searches
+    // immediately. Kept separate from onQueryChange rather than branching
+    // inside a single callback so each tab's contract stays simple/explicit
+    // at the call site.
+    onLikedQueryTextChange: (String) -> Unit = {},
+    onLikedSearchSubmit: () -> Unit = {},
+    onTagSuggestionSelected: (String) -> Unit = {},
     onSelectFilter: (MainViewModel.SearchFilter) -> Unit,
     onOpenPost: (Int) -> Unit,
     onOpenAccount: (AuthorInfo) -> Unit,
@@ -94,6 +110,12 @@ fun SearchOverlay(
     val searchBackdrop = remember(liquidGlass, backdropLayer) {
         if (liquidGlass) GlassBackdrop(backdropLayer) { backdropOrigin } else null
     }
+
+    // Item 4: tracked here (not inside the Column below) so both the search
+    // bar Row (which measures it) and the autocomplete dropdown (a sibling
+    // rendered after the Column, so it draws on top of it) can see it.
+    var barBottomLeft by remember { mutableStateOf(Offset.Zero) }
+    var barWidth by remember { mutableStateOf(0) }
 
     Box(
         Modifier.fillMaxSize()
@@ -123,13 +145,23 @@ fun SearchOverlay(
             Spacer(Modifier.height(16.dp))
 
             // ── Bar: close bubble + round search field ──────────────────────
+            // Item 4: this Row's own bottom-left position in root
+            // coordinates anchors the autocomplete dropdown below (rendered
+            // as a later sibling of the whole Column, further down, so it
+            // draws on top of the filter row/results per the request).
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 14.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp)
+                    .onGloballyPositioned {
+                        val pos = it.positionInRoot()
+                        barBottomLeft = Offset(pos.x, pos.y + it.size.height)
+                        barWidth = it.size.width
+                    },
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 SearchCloseBubble(liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop, onClick = onClose)
                 val fieldShape = RoundedCornerShape(24.dp)
+                val isLiked = state.filter == MainViewModel.SearchFilter.LIKED_TAGS
                 @Composable
                 fun SearchFieldContent() {
                     Row(
@@ -138,11 +170,18 @@ fun SearchOverlay(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Icon(Icons.Default.Search, contentDescription = null, tint = DimGray, modifier = Modifier.size(18.dp))
+                        // Item 2: the Liked tab's text field routes through
+                        // its own live-text-only/submit-on-search callbacks
+                        // instead of onQueryChange, so typing doesn't
+                        // re-query the dataset on every keystroke — see
+                        // onLikedQueryTextChange/onLikedSearchSubmit's doc
+                        // comments on MainViewModel.
                         BasicTextFieldWithPlaceholder(
-                            value = state.query, onValueChange = onQueryChange,
+                            value = state.query,
+                            onValueChange = if (isLiked) onLikedQueryTextChange else onQueryChange,
                             // Item 1: just "Search" — no app-name text needed.
                             placeholder = "Search", focusRequester = focusRequester,
-                            onSearch = { onQueryChange(state.query) }
+                            onSearch = { if (isLiked) onLikedSearchSubmit() else onQueryChange(state.query) }
                         )
                     }
                 }
@@ -173,6 +212,34 @@ fun SearchOverlay(
             // ── Results ──────────────────────────────────────────────────
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when {
+                    // Bug fix: this used to sit below the generic
+                    // `!state.hasSearched` fallback branch, which intercepts
+                    // first when the Liked tab is opened fresh (hasSearched
+                    // starts false) — so the "Start Tagging" card/message
+                    // never actually rendered, no matter the dataset state.
+                    // Checking the LIKED_TAGS filter before that generic
+                    // fallback fixes it.
+                    state.filter == MainViewModel.SearchFilter.LIKED_TAGS -> {
+                        if (!hasTaggedDataset) {
+                            LikedTagsSetupPrompt(liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop, onStartTagging = onStartTagging)
+                        } else if (state.loading) {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 1.5.dp)
+                            }
+                        } else if (likedTagResults.isEmpty()) EmptyResultsText() else {
+                            LazyVerticalGrid(
+                                columns = GridCells.Fixed(3),
+                                contentPadding = PaddingValues(0.dp),
+                                horizontalArrangement = Arrangement.spacedBy(0.dp),
+                                verticalArrangement = Arrangement.spacedBy(0.dp),
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                itemsIndexed(likedTagResults, key = { i, item -> item.id + "_$i" }) { index, item ->
+                                    SearchPostCell(item = item, onClick = { onOpenLikedPost(index) })
+                                }
+                            }
+                        }
+                    }
                     state.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 1.5.dp)
                     }
@@ -203,27 +270,6 @@ fun SearchOverlay(
                             }
                         }
                     }
-                    state.filter == MainViewModel.SearchFilter.LIKED_TAGS -> {
-                        if (!hasTaggedDataset) {
-                            LikedTagsSetupPrompt(liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop, onStartTagging = onStartTagging)
-                        } else if (state.query.isBlank()) {
-                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                Text("Search your liked posts by tag", color = DimGray, fontSize = 13.sp)
-                            }
-                        } else if (likedTagResults.isEmpty()) EmptyResultsText() else {
-                            LazyVerticalGrid(
-                                columns = GridCells.Fixed(3),
-                                contentPadding = PaddingValues(0.dp),
-                                horizontalArrangement = Arrangement.spacedBy(0.dp),
-                                verticalArrangement = Arrangement.spacedBy(0.dp),
-                                modifier = Modifier.fillMaxSize()
-                            ) {
-                                itemsIndexed(likedTagResults, key = { i, item -> item.id + "_$i" }) { index, item ->
-                                    SearchPostCell(item = item, onClick = { onOpenPost(index) })
-                                }
-                            }
-                        }
-                    }
                     state.filter == MainViewModel.SearchFilter.ACCOUNTS -> {
                         if (state.accounts.isEmpty()) EmptyResultsText() else {
                             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 4.dp)) {
@@ -242,6 +288,54 @@ fun SearchOverlay(
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // Item 4: floating autocomplete/autocorrect list — a later sibling
+        // of the Column above (so it draws on top of the filter row and
+        // results grid, per "should overlay over the search tabs, posts,
+        // and everything"), positioned from the search bar's own tracked
+        // bottom-left corner so it always sits directly under the field
+        // regardless of tab or scroll state. Only ever populated (by
+        // MainViewModel.updateLikedQueryText) while the Liked tab is active
+        // and there's an in-progress word to suggest for; hitting space
+        // clears the in-progress word, which clears this list, which closes
+        // the dropdown — no separate "dismiss" logic needed.
+        if (tagSuggestions.isNotEmpty() && state.filter == MainViewModel.SearchFilter.LIKED_TAGS) {
+            val density = androidx.compose.ui.platform.LocalDensity.current
+            val dropdownShape = RoundedCornerShape(16.dp)
+            @Composable
+            fun SuggestionsContent() {
+                Column(Modifier.fillMaxWidth()) {
+                    tagSuggestions.forEachIndexed { index, suggestion ->
+                        if (index > 0) HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
+                        Text(
+                            suggestion, color = Color.White, fontSize = 14.sp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onTagSuggestionSelected(suggestion) }
+                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                        )
+                    }
+                }
+            }
+            Box(
+                Modifier
+                    .offset {
+                        with(density) {
+                            androidx.compose.ui.unit.IntOffset(
+                                barBottomLeft.x.toInt(),
+                                (barBottomLeft.y + 6.dp.toPx()).toInt()
+                            )
+                        }
+                    }
+                    .width(with(density) { barWidth.toDp() })
+            ) {
+                if (liquidGlass) {
+                    LiquidGlassSurface(Modifier.fillMaxWidth(), shape = dropdownShape, tint = profileTint, backdrop = searchBackdrop) { SuggestionsContent() }
+                } else {
+                    Box(Modifier.fillMaxWidth().clip(dropdownShape).background(Color(0xFF1A1A1A))) { SuggestionsContent() }
                 }
             }
         }

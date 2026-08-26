@@ -588,9 +588,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setSearchFilter(filter: SearchFilter) {
         _searchState.value = _searchState.value.copy(filter = filter)
-        // Re-run against the already-typed query if this filter hasn't been
-        // searched yet — avoids re-fetching a filter the user already saw.
-        if (_searchState.value.query.isNotBlank()) runSearch(_searchState.value.query)
+        if (filter == SearchFilter.LIKED_TAGS) {
+            // Item 2: switching to the Liked tab always (re)loads its
+            // current view — either the default "everything tagged, most
+            // recent first" browse (blank query) or a re-run of whatever
+            // was already typed — rather than the live-search-on-keystroke
+            // behavior the other tabs use.
+            _tagSuggestions.value = emptyList()
+            viewModelScope.launch(Dispatchers.IO) { performLikedTagSearch(_searchState.value.query) }
+        } else if (_searchState.value.query.isNotBlank()) runSearch(_searchState.value.query)
     }
 
     fun runSearch(query: String) {
@@ -611,18 +617,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         _searchState.value = _searchState.value.copy(posts = posts, loading = false, hasSearched = true)
                     }.onFailure { _searchState.value = _searchState.value.copy(loading = false, hasSearched = true) }
                 }
-                // AI Tagging feature: this tab doesn't hit the network at
-                // all — it queries the local on-device dataset built by
-                // TaggingRepository. searchLikedTags publishes straight to
-                // its own likedTagSearchResults/likedTagSearchQuery state
-                // (the "Liked" tab reads those directly rather than
-                // _searchState.posts, since these results come from a
-                // completely different pipeline — see SearchOverlay's
-                // LIKED_TAGS branch).
-                SearchFilter.LIKED_TAGS -> {
-                    searchLikedTags(query)
-                    _searchState.value = _searchState.value.copy(loading = false, hasSearched = true)
-                }
+                // Item 2: kept only as a safety net — typing on the Liked
+                // tab no longer routes through runSearch at all (see
+                // updateLikedQueryText/submitLikedSearch), but if anything
+                // else ever calls runSearch while that filter is active,
+                // this keeps it working rather than silently doing nothing.
+                SearchFilter.LIKED_TAGS -> performLikedTagSearch(query)
                 SearchFilter.ACCOUNTS -> {
                     bskyRepo.searchActors(bskyToken, query).onSuccess { (accounts, _) ->
                         _searchState.value = _searchState.value.copy(accounts = accounts, loading = false, hasSearched = true)
@@ -1262,7 +1262,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val handle       = prefs.bskyHandle.first()
             val e621User     = prefs.e621Username.first()
             val e621Key      = prefs.e621ApiKey.first()
-            val lastMode     = prefs.lastMode.first()
             val lastFeedUri  = prefs.lastFeedUri.first()
             val lastE621Tags = prefs.lastE621Tags.first()
 
@@ -1280,28 +1279,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _bskyDid.value = did; bskyHandle = handle; _bskyLoggedIn.value = true
             }
 
-            // Restore last mode, but stay on the Hub (SETTINGS) at app start
-            // instead of auto-jumping into the feed — the feed/Hub content
-            // below is still warmed in the background so it's ready the
-            // instant the user swipes/taps into it, but the Hub is always
-            // the first thing shown on launch (see feedback: "app should
-            // open on the Hub by default instead of automatically
-            // scrolling into the first feed").
-            if (lastMode == "E621" && _e621LoggedIn.value) {
-                _appMode.value = AppMode.E621
-                loadE621Posts()
-            } else if (_bskyLoggedIn.value) {
-                _appMode.value = AppMode.BLUESKY
-                loadFeed()
-                loadAvailableFeeds()
-                prefetchUserLists()   // preload so list picker opens instantly
-                startHubBackgroundWarmup() // item 6/this session: Mutuals/Reviews/Livestreams, see its own comment
-                startDmLivePolling()
-                preloadFriendsFeed()  // item 7: warm the From Friends feed in the background too
-                loadSelfProfile()     // Settings Update: warm the Profile button's avatar/banner preview
+            // Item 5: always default to the Hub in AT Protocol/Bluesky mode
+            // on every cold start — regardless of which mode was last
+            // active — rather than restoring lastMode's e621 session
+            // automatically. This is also what was causing "closing the
+            // app while in e621 mode, then reopening, loads forever": this
+            // block used to auto-fire loadE621Posts() on cold start
+            // whenever e621 was the last-used mode, and if the very first
+            // e621 network call happens to fail without going through
+            // Result.onFailure cleanly (or is otherwise slow), the person
+            // is dropped into e621 mode with a spinner that has nothing
+            // else queued to replace it — the Bluesky branch below, in
+            // contrast, kicks off several independent warmup calls, so one
+            // stalling doesn't leave the whole screen stuck. Not
+            // auto-restoring e621 on launch sidesteps that entirely; e621
+            // mode itself, once switched to manually via the Hub, is
+            // unaffected — its credentials are still restored just above,
+            // so that switch is still instant.
+            //
+            // lastMode/prefs.setLastMode still exist and still track
+            // whichever mode is currently active (so mid-session mode
+            // switches keep working the same as before) — this only
+            // changes what happens on a *fresh app launch*.
+            try {
+                if (_bskyLoggedIn.value) {
+                    _appMode.value = AppMode.BLUESKY
+                    loadFeed()
+                    loadAvailableFeeds()
+                    prefetchUserLists()   // preload so list picker opens instantly
+                    startHubBackgroundWarmup() // item 6/this session: Mutuals/Reviews/Livestreams, see its own comment
+                    startDmLivePolling()
+                    preloadFriendsFeed()  // item 7: warm the From Friends feed in the background too
+                    loadSelfProfile()     // Settings Update: warm the Profile button's avatar/banner preview
+                }
+            } finally {
+                // Stay on SETTINGS (the Hub) either way — and always flip
+                // this, even if one of the warmup calls above threw
+                // synchronously, so the app can never get stuck on a
+                // permanent loading state at startup.
+                _appInitialized.value = true
             }
-            // Stay on SETTINGS (the Hub) either way.
-            _appInitialized.value = true
         }
     }
 
@@ -2007,17 +2024,30 @@ _bskyDid.value          = session.did
         if (!_e621LoggedIn.value) return
         viewModelScope.launch(Dispatchers.IO) {
             if (reset) { e621Page = 1; _isLoading.value = true; _currentIndex.value = 0 }
-            val result = if (e621ShowingFavorites)
-                e621Repo.getFavorites(e621Username, e621ApiKey, e621Page)
-            else
-                e621Repo.searchPosts(e621Username, e621ApiKey, _e621SearchTags.value, e621Page)
-            result.onSuccess { items ->
-                val followed = _e621FollowedArtists.value
-                val stamped = items.map { it.copy(author = it.author.copy(isFollowing = followed.contains(it.author.handle))) }
-                _mediaItems.value = if (reset) stamped else _mediaItems.value + stamped
-                e621Page++
-            }.onFailure { _errorMessage.value = it.message }
-            _isLoading.value = false
+            try {
+                // Bug fix: guarantee this can never leave _isLoading stuck
+                // at true (the app's "loads forever" symptom) even if the
+                // network call hangs indefinitely or throws something that
+                // isn't a normal Result.failure — a hard timeout plus a
+                // try/finally around the whole call, instead of relying on
+                // the repo call always resolving cleanly on its own.
+                val result = kotlinx.coroutines.withTimeout(20_000) {
+                    if (e621ShowingFavorites)
+                        e621Repo.getFavorites(e621Username, e621ApiKey, e621Page)
+                    else
+                        e621Repo.searchPosts(e621Username, e621ApiKey, _e621SearchTags.value, e621Page)
+                }
+                result.onSuccess { items ->
+                    val followed = _e621FollowedArtists.value
+                    val stamped = items.map { it.copy(author = it.author.copy(isFollowing = followed.contains(it.author.handle))) }
+                    _mediaItems.value = if (reset) stamped else _mediaItems.value + stamped
+                    e621Page++
+                }.onFailure { _errorMessage.value = it.message }
+            } catch (e: Exception) {
+                _errorMessage.value = e.message ?: "e621 request timed out"
+            } finally {
+                _isLoading.value = false
+            }
         }
     }
 
@@ -3173,11 +3203,30 @@ _bskyDid.value          = session.did
     val tagPostWhenLiked: StateFlow<Boolean> =
         prefs.tagPostWhenLiked.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
-    private val _likedTagSearchQuery = MutableStateFlow("")
-    val likedTagSearchQuery: StateFlow<String> = _likedTagSearchQuery
+    // Item 6: how many liked posts to fetch+decode+run through the tagger
+    // in parallel during a "Locally Tag All Liked Posts" pass (1-10, see
+    // TaggingRepository.tagAllLiked's own doc comment on why this is safe
+    // to parallelize). Realtime tag-on-like always tags just the one post
+    // that was liked, so this only affects the bulk pass.
+    val tagConcurrency: StateFlow<Int> =
+        prefs.tagConcurrency.stateIn(viewModelScope, SharingStarted.Eagerly, 3)
 
+    fun setTagConcurrency(value: Int) {
+        viewModelScope.launch { prefs.setTagConcurrency(value.coerceIn(1, 10)) }
+    }
+
+    // likedTagSearchQuery removed — the Liked tab now reads/writes
+    // _searchState.query directly (see updateLikedQueryText/submitLikedSearch
+    // below), the same field the other search tabs already use, so there's
+    // one query string per tab instead of a second one that could drift out
+    // of sync with what the text field actually shows.
     private val _likedTagSearchResults = MutableStateFlow<List<MediaItem>>(emptyList())
     val likedTagSearchResults: StateFlow<List<MediaItem>> = _likedTagSearchResults
+
+    // Item 4: autocomplete/autocorrect suggestions for the word currently
+    // being typed in the Liked tab's search bar.
+    private val _tagSuggestions = MutableStateFlow<List<String>>(emptyList())
+    val tagSuggestions: StateFlow<List<String>> = _tagSuggestions
 
     init {
         refreshTaggingCounts()
@@ -3217,7 +3266,8 @@ _bskyDid.value          = session.did
                 bskyToken = bskyToken,
                 bskyDid = _bskyDid.value,
                 e621Username = e621Username,
-                e621ApiKey = e621ApiKey
+                e621ApiKey = e621ApiKey,
+                concurrency = tagConcurrency.value
             ) { progress ->
                 _taggingUiState.value = TaggingUiState(
                     scanned = progress.scanned,
@@ -3244,25 +3294,113 @@ _bskyDid.value          = session.did
     fun dismissTaggingOverlay() {
         if (_taggingUiState.value.isRunning) taggingRepo.cancel()
         _taggingOverlayOpen.value = false
+        // Item 2: land back on the Liked tab's default "everything, most
+        // recent first" browse rather than whatever stale search results
+        // (or lack thereof) were showing before tagging started.
+        viewModelScope.launch(Dispatchers.IO) { performLikedTagSearch("") }
     }
 
-    fun searchLikedTags(query: String) {
-        _likedTagSearchQuery.value = query
-        if (query.isBlank()) { _likedTagSearchResults.value = emptyList(); return }
+    /** Item 2: the query text field's live value updates on every
+     *  keystroke (so the field visibly shows what's being typed and
+     *  suggestions can react), but — unlike the other search tabs — does
+     *  NOT re-run the actual dataset lookup. That only happens on
+     *  [submitLikedSearch] (Enter/search-key) or [setSearchFilter] (tab
+     *  switch), matching the request that results shouldn't change while
+     *  typing. Also drives the item-4 autocomplete off the in-progress
+     *  last word. */
+    fun updateLikedQueryText(text: String) {
+        _searchState.value = _searchState.value.copy(query = text)
+        val lastWord = text.substringAfterLast(' ')
+        if (lastWord.isBlank()) {
+            // Item 4: "tapping space should close this menu" — an empty
+            // in-progress word (just typed a space, or field is empty)
+            // means there's nothing to suggest completions for.
+            _tagSuggestions.value = emptyList()
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
-            val matchingUris = taggingRepo.search(query)
-            if (matchingUris.isEmpty()) { _likedTagSearchResults.value = emptyList(); return@launch }
-            // TaggingRepository's dataset only stores URIs/tags, never full
-            // post content (see its storage note), so a search hit's URI
-            // has to be hydrated back into a real MediaItem before it can
-            // be rendered in the feed grid.
-            val hydrated = if (_appMode.value == AppMode.BLUESKY) {
-                bskyRepo.getPostsByUris(bskyToken, matchingUris).getOrNull() ?: emptyList()
-            } else {
-                e621Repo.getPostsByUris(e621Username, e621ApiKey, matchingUris).getOrNull() ?: emptyList()
+            val vocabulary = taggingRepo.tagVocabulary()
+            _tagSuggestions.value = TagSuggestionProvider.suggest(lastWord, vocabulary)
+        }
+    }
+
+    /** Item 4: tapping a suggestion replaces the in-progress last word with
+     *  it (keeping any earlier words untouched) and adds a trailing space,
+     *  same as e621's own autocomplete, then continues as if the person had
+     *  typed it — suggestions clear immediately since the new last word is
+     *  now empty. */
+    fun applyTagSuggestion(suggestion: String) {
+        val current = _searchState.value.query
+        val lastSpace = current.lastIndexOf(' ')
+        val newQuery = (if (lastSpace >= 0) current.substring(0, lastSpace + 1) else "") + suggestion + " "
+        _searchState.value = _searchState.value.copy(query = newQuery)
+        _tagSuggestions.value = emptyList()
+    }
+
+    fun submitLikedSearch() {
+        _tagSuggestions.value = emptyList()
+        viewModelScope.launch(Dispatchers.IO) { performLikedTagSearch(_searchState.value.query) }
+    }
+
+    /** Item 2: blank query browses everything tagged so far, most recent
+     *  first, instead of an empty "type to search" state — a search query
+     *  narrows that same list by tag. */
+    private suspend fun performLikedTagSearch(query: String) {
+        _searchState.value = _searchState.value.copy(loading = true)
+        val uris = if (query.isBlank()) taggingRepo.browseAllTagged() else taggingRepo.search(query)
+        _likedTagSearchResults.value = hydrateLikedUris(uris)
+        _searchState.value = _searchState.value.copy(loading = false, hasSearched = true)
+    }
+
+    private suspend fun hydrateLikedUris(uris: List<String>): List<MediaItem> {
+        if (uris.isEmpty()) return emptyList()
+        // TaggingRepository's dataset only stores URIs/tags, never full
+        // post content (see its storage note), so a hit's URI has to be
+        // hydrated back into a real MediaItem before it can be rendered.
+        val hydrated = if (_appMode.value == AppMode.BLUESKY) {
+            bskyRepo.getPostsByUris(bskyToken, uris).getOrNull() ?: emptyList()
+        } else {
+            e621Repo.getPostsByUris(e621Username, e621ApiKey, uris).getOrNull() ?: emptyList()
+        }
+        val order = uris.withIndex().associate { (i, uri) -> uri to i }
+        return hydrated.sortedBy { order[it.postUri] ?: Int.MAX_VALUE }
+    }
+
+    /** Item 3 bug fix: posts opened from the Liked tab weren't clickable at
+     *  all — openPostFromSearch only ever looked at _searchState.value.posts
+     *  (the POSTS tab's own result list), which is always empty for the
+     *  Liked tab (its results live in _likedTagSearchResults, a separate
+     *  pipeline — see performLikedTagSearch above), so the index bounds
+     *  check silently failed and the tap did nothing. This is the Liked
+     *  tab's own equivalent of openPostFromSearch, and also attaches each
+     *  opened post's full AI tag list (item 3: "Tags mode needs to display
+     *  ALL the tags on the post") via CommentsSheet's existing `tags` field
+     *  — but only when the post doesn't already carry real tags of its own
+     *  (e621-mode posts already have genuine e621 tags from the API; only
+     *  Bluesky posts, which have no tags concept at all, need the AI ones
+     *  substituted in). */
+    fun openLikedPostFromSearch(index: Int) {
+        val results = _likedTagSearchResults.value
+        if (index !in results.indices) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val withTags = results.map { item ->
+                if (item.tags.isNotBlank()) item
+                else {
+                    val aiTags = taggingRepo.tagsForPost(item.postUri)
+                    if (aiTags.isEmpty()) item else item.copy(tags = aiTags.joinToString(" "))
+                }
             }
-            val order = matchingUris.withIndex().associate { (i, uri) -> uri to i }
-            _likedTagSearchResults.value = hydrated.sortedBy { order[it.postUri] ?: Int.MAX_VALUE }
+            withContext(Dispatchers.Main) {
+                _mediaItems.value = withTags
+                _currentIndex.value = index
+                _navDirection.value = 0
+                _authorFeedState.value = null
+                activeFeedMode = ActiveFeedMode.NORMAL
+                activeFeedActorDid = null
+                _selectedFeedUri.value = null
+                closeSearch()
+                _screenState.value = ScreenState.FEED
+            }
         }
     }
 

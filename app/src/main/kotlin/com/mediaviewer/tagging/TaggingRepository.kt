@@ -8,6 +8,9 @@ import com.mediaviewer.model.MediaItem
 import com.mediaviewer.repository.BlueskyRepository
 import com.mediaviewer.repository.E621Repository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -48,6 +51,32 @@ class TaggingRepository(
     fun datasetSizeBytes(): Long = db.datasetSizeBytes()
     fun isModelReady(): Boolean = modelManager.isReady()
 
+    @Volatile private var cachedVocabulary: List<String>? = null
+
+    /** The tagger's fixed tag vocabulary, for the search bar's autocomplete
+     *  (item 4) — reads straight from the already-downloaded tags CSV, so
+     *  it's available the instant the model's been fetched once, without
+     *  needing to spin up a full ONNX session (that only happens when
+     *  actually tagging an image). Returns empty before the initial
+     *  "Locally Tag All Liked Posts" pass has ever run. */
+    fun tagVocabulary(): List<String> {
+        cachedVocabulary?.let { return it }
+        if (!modelManager.tagsFile.exists()) return emptyList()
+        val parsed = try {
+            val lines = modelManager.tagsFile.readLines()
+            if (lines.isEmpty()) emptyList() else {
+                val header = lines.first().split(",")
+                val nameIdx = header.indexOfFirst { it.trim().equals("name", ignoreCase = true) }
+                    .let { if (it >= 0) it else 1.coerceAtMost(header.lastIndex) }
+                lines.drop(1).mapNotNull { line ->
+                    line.split(",").getOrNull(nameIdx)?.trim()?.trim('"')?.takeIf { it.isNotBlank() }
+                }
+            }
+        } catch (_: Exception) { emptyList() }
+        cachedVocabulary = parsed
+        return parsed
+    }
+
     private suspend fun ensureTagger(onModelProgress: (TaggerModelManager.State) -> Unit): ImageTagger {
         tagger?.let { return it }
         modelManager.ensureReady(onModelProgress)
@@ -60,16 +89,26 @@ class TaggingRepository(
     /** Full backlog pass: pages through every liked post (Bluesky or e621,
      *  whichever app mode is active), skips anything already in the
      *  dataset (so a cancelled/resumed run doesn't redo work), tags the
-     *  rest, and streams progress back for the tagging overlay. */
+     *  rest, and streams progress back for the tagging overlay.
+     *
+     *  [concurrency] (Settings' "posts tagged at once" slider, 1-10) tags
+     *  that many posts of each fetched page in parallel rather than one at
+     *  a time — each one is an independent network fetch + decode +
+     *  inference pass with no shared mutable state except the counters
+     *  below (kept as AtomicIntegers) and the SQLite writes in
+     *  TagDatabase.storeTags (Android's SQLiteDatabase already serializes
+     *  concurrent writers internally, so no extra locking is needed here). */
     suspend fun tagAllLiked(
         isBlueskyMode: Boolean,
         bskyToken: String,
         bskyDid: String,
         e621Username: String,
         e621ApiKey: String,
+        concurrency: Int = 1,
         onProgress: (Progress) -> Unit
     ) {
         cancelRequested = false
+        val parallelism = concurrency.coerceIn(1, 10)
         withContext(Dispatchers.IO) {
             onProgress(Progress(db.scannedCount(), db.taggedCount(), db.datasetSizeBytes(), isRunning = true, isComplete = false, modelState = TaggerModelManager.State.Downloading(0, 0)))
             val loadedTagger = try {
@@ -79,10 +118,28 @@ class TaggingRepository(
                 return@withContext
             }
 
-            var scanned = db.scannedCount()
-            var tagged = db.taggedCount()
+            val scanned = java.util.concurrent.atomic.AtomicInteger(db.scannedCount())
+            val tagged = java.util.concurrent.atomic.AtomicInteger(db.taggedCount())
             fun reportProgress() {
-                onProgress(Progress(scanned, tagged, db.datasetSizeBytes(), isRunning = true, isComplete = false))
+                onProgress(Progress(scanned.get(), tagged.get(), db.datasetSizeBytes(), isRunning = true, isComplete = false))
+            }
+
+            /** Tags a batch of not-yet-indexed items, [parallelism] at a time. */
+            suspend fun tagBatch(items: List<MediaItem>) {
+                items.chunked(parallelism).forEach { chunk ->
+                    if (cancelRequested) return
+                    coroutineScope {
+                        chunk.filter { it.postUri.isNotBlank() && !db.isIndexed(it.postUri) }
+                            .map { item ->
+                                async(Dispatchers.IO) {
+                                    val newlyTagged = tagOnePost(loadedTagger, item)
+                                    scanned.incrementAndGet()
+                                    if (newlyTagged) tagged.incrementAndGet()
+                                    reportProgress()
+                                }
+                            }.awaitAll()
+                    }
+                }
             }
 
             if (isBlueskyMode) {
@@ -91,13 +148,7 @@ class TaggingRepository(
                     if (cancelRequested) break
                     val result = bskyRepo.getActorLikes(bskyToken, bskyDid, cursor).getOrNull() ?: break
                     val (items, nextCursor) = result
-                    for (item in items) {
-                        if (cancelRequested) break
-                        if (item.postUri.isNotBlank() && db.isIndexed(item.postUri)) continue // resume-skip, already counted in the starting scanned/tagged totals
-                        if (tagOnePost(loadedTagger, item)) tagged++
-                        scanned++
-                        reportProgress()
-                    }
+                    tagBatch(items)
                     cursor = nextCursor
                 } while (cursor != null && !cancelRequested)
             } else {
@@ -105,17 +156,11 @@ class TaggingRepository(
                 while (!cancelRequested) {
                     val items = e621Repo.getFavorites(e621Username, e621ApiKey, page).getOrNull() ?: break
                     if (items.isEmpty()) break
-                    for (item in items) {
-                        if (cancelRequested) break
-                        if (item.postUri.isNotBlank() && db.isIndexed(item.postUri)) continue
-                        if (tagOnePost(loadedTagger, item)) tagged++
-                        scanned++
-                        reportProgress()
-                    }
+                    tagBatch(items)
                     page++
                 }
             }
-            onProgress(Progress(scanned, tagged, db.datasetSizeBytes(), isRunning = false, isComplete = !cancelRequested))
+            onProgress(Progress(scanned.get(), tagged.get(), db.datasetSizeBytes(), isRunning = false, isComplete = !cancelRequested))
         }
     }
 
@@ -220,6 +265,14 @@ class TaggingRepository(
         val groups = TagAliases.toTagGroups(query)
         return db.searchPostUris(groups)
     }
+
+    /** Default view for the Liked tab (item 2): every tagged post, most
+     *  recently-tagged first — shown before the person types anything. */
+    fun browseAllTagged(limit: Int = 200): List<String> = db.allTaggedPostUris(limit)
+
+    /** Full tag list for one post — item 3's "Tags mode needs to display
+     *  ALL the tags on the post", sorted highest confidence first. */
+    fun tagsForPost(postUri: String): List<String> = db.tagsForPost(postUri)
 
     companion object {
         @Volatile private var instance: TaggingRepository? = null

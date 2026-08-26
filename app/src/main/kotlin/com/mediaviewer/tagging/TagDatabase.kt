@@ -153,6 +153,33 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
         return (resultSet ?: emptySet()).take(limit)
     }
 
+    /** Item 2: default "browse all" view for the Liked search tab, most
+     *  recently-tagged post first — only posts that ended up with >=1 tag
+     *  (an EXISTS check against media_tags, same filter taggedCount() uses). */
+    fun allTaggedPostUris(limit: Int = 200): List<String> {
+        val results = mutableListOf<String>()
+        readableDatabase.rawQuery(
+            """
+            SELECT lm.post_uri FROM liked_media lm
+            WHERE EXISTS (SELECT 1 FROM media_tags mt WHERE mt.post_uri = lm.post_uri)
+            ORDER BY lm.indexed_timestamp DESC LIMIT ?
+            """.trimIndent(),
+            arrayOf(limit.toString())
+        ).use { cursor -> while (cursor.moveToNext()) results.add(cursor.getString(0)) }
+        return results
+    }
+
+    /** Item 3: the complete tag list for one post (for the Tags mode on a
+     *  post opened from the Liked tab), highest confidence first. */
+    fun tagsForPost(postUri: String): List<String> {
+        val results = mutableListOf<String>()
+        readableDatabase.rawQuery(
+            "SELECT tag_name FROM media_tags WHERE post_uri = ? ORDER BY confidence DESC",
+            arrayOf(postUri)
+        ).use { cursor -> while (cursor.moveToNext()) results.add(cursor.getString(0)) }
+        return results
+    }
+
     /** Wipes the whole dataset — used if the user wants to re-tag from
      *  scratch (a fresh "Locally Tag All Liked Posts" run reuses existing
      *  rows instead by default via [isIndexed]; this is only for an

@@ -66,6 +66,8 @@ object PrefKeys {
     // derived at runtime from TagDatabase.scannedCount() > 0, so it can
     // never drift out of sync with the actual dataset on disk.
     val TAG_POST_WHEN_LIKED    = booleanPreferencesKey("tag_post_when_liked")
+    // Item 6: parallel tagging slider (1-10 posts at once).
+    val TAG_CONCURRENCY        = intPreferencesKey("tag_concurrency")
 }
 
 
@@ -117,9 +119,14 @@ class PreferencesManager(private val context: Context) {
     val customFontPath: Flow<String?>          = context.dataStore.data.map { it[PrefKeys.CUSTOM_FONT_PATH] }
     val customFontName: Flow<String?>          = context.dataStore.data.map { it[PrefKeys.CUSTOM_FONT_NAME] }
     val tagPostWhenLiked: Flow<Boolean>        = context.dataStore.data.map { it[PrefKeys.TAG_POST_WHEN_LIKED] ?: false }
+    val tagConcurrency: Flow<Int>              = context.dataStore.data.map { (it[PrefKeys.TAG_CONCURRENCY] ?: 3).coerceIn(1, 10) }
 
     suspend fun setTagPostWhenLiked(enabled: Boolean) {
         context.dataStore.edit { prefs -> prefs[PrefKeys.TAG_POST_WHEN_LIKED] = enabled }
+    }
+
+    suspend fun setTagConcurrency(value: Int) {
+        context.dataStore.edit { prefs -> prefs[PrefKeys.TAG_CONCURRENCY] = value.coerceIn(1, 10) }
     }
 
     suspend fun setTranslateEnabled(enabled: Boolean) {
