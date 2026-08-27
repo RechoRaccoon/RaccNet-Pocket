@@ -239,6 +239,13 @@ fun Modifier.opaqueMaskPanel(
     this
         .clip(shape)
         .onGloballyPositioned { coords -> trackedOrigin = coords.positionInRoot() }
+        // Always paint a solid, opaque fallback first — even if the live
+        // backdrop crop below fails/mis-times for any reason (wrong geometry
+        // on the first frame before trackedOrigin settles, a size/offset
+        // mismatch, etc.), the panel is still opaque instead of fully
+        // see-through. Mirrors LiquidGlassSurface's proven-working structure:
+        // base fill first, live crop layered on top as a separate step.
+        .background(postBackgroundBrush(tint))
         .then(
             if (CAN_BLUR && backdrop != null) {
                 // No .blur()/magnify/tint scrim here on purpose, unlike
@@ -251,11 +258,7 @@ fun Modifier.opaqueMaskPanel(
                     }
                     drawContent()
                 }
-            } else {
-                // No live backdrop available (API < 31, or none supplied) —
-                // falls back to the flat gradient approximation.
-                Modifier.background(postBackgroundBrush(tint))
-            }
+            } else Modifier
         )
         .then(
             if (rim) Modifier.border(

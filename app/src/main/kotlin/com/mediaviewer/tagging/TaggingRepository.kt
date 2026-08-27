@@ -8,9 +8,9 @@ import com.mediaviewer.model.MediaItem
 import com.mediaviewer.repository.BlueskyRepository
 import com.mediaviewer.repository.E621Repository
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -107,10 +107,15 @@ class TaggingRepository(
      *  dataset (so a cancelled/resumed run doesn't redo work), tags the
      *  rest, and streams progress back for the tagging overlay.
      *
-     *  [concurrency] (Settings' "posts tagged at once" slider, 1-10) tags
-     *  that many posts of each fetched page in parallel rather than one at
-     *  a time — each one is an independent network fetch + decode +
-     *  inference pass with no shared mutable state except the counters
+     *  [concurrency] (Settings' tagging slider, 1-10) controls how many
+     *  posts get fetched+decoded ahead of the inference queue at once (see
+     *  [tagBatch]'s own doc comment for why this is a *prefetch depth*, not
+     *  a simultaneous-inference count — the shared tagger's OrtSession
+     *  already saturates the phone's cores for one inference at a time, so
+     *  actual tagging always happens serially, one post at a time; what the
+     *  slider buys is keeping the next posts' bitmaps ready and waiting so
+     *  inference never stalls on network/decode between posts). No shared
+     *  mutable state to worry about across producers besides the counters
      *  below (kept as AtomicIntegers) and the SQLite writes in
      *  TagDatabase.storeTags (Android's SQLiteDatabase already serializes
      *  concurrent writers internally, so no extra locking is needed here). */
@@ -140,20 +145,88 @@ class TaggingRepository(
                 onProgress(Progress(scanned.get(), tagged.get(), db.datasetSizeBytes(), isRunning = true, isComplete = false))
             }
 
-            /** Tags a batch of not-yet-indexed items, [parallelism] at a time. */
+            /** Tags a batch of not-yet-indexed items.
+             *
+             *  Restructured (item 2 fix) from a chunked `awaitAll()` loop
+             *  into a fetch/decode pipeline feeding one serial inference
+             *  consumer. The old version launched [parallelism] items
+             *  concurrently per chunk, but every one of those coroutines
+             *  called into the same shared `ImageTagger`/`OrtSession`, whose
+             *  intra-op thread pool already uses nearly all of the phone's
+             *  cores for a *single* inference — so concurrent `Run()` calls
+             *  just queued/timeshared the same cores instead of actually
+             *  speeding anything up, and items still finished (and reported
+             *  progress) essentially one at a time. Fetch+decode, on the
+             *  other hand, genuinely does parallelize (network I/O and
+             *  bitmap decode aren't CPU-bound on the inference cores), and
+             *  the old chunk-barrier (`chunked().forEach { awaitAll() }`)
+             *  also meant the next chunk's fetches couldn't start until the
+             *  current chunk's slowest inference finished.
+             *
+             *  This version launches [parallelism] producer coroutines that
+             *  fetch+decode items concurrently and push the results onto a
+             *  bounded channel, and runs exactly one consumer that drains
+             *  that channel and calls into the tagger serially — so while
+             *  post N is being inferred, N+1, N+2, ... are already being
+             *  fetched/decoded in the background, and inference time is no
+             *  longer paid serially *between* the fetch/decode of the next
+             *  item. The "posts tagged at once" slider now controls how
+             *  many items are prefetched ahead of the inference queue,
+             *  rather than how many are inferred at the same instant (see
+             *  the Settings copy for this slider). */
             suspend fun tagBatch(items: List<MediaItem>) {
-                items.chunked(parallelism).forEach { chunk ->
-                    if (cancelRequested) return
-                    coroutineScope {
-                        chunk.filter { it.postUri.isNotBlank() && !db.isIndexed(it.postUri) }
-                            .map { item ->
-                                async(Dispatchers.IO) {
-                                    val newlyTagged = tagOnePost(loadedTagger, item)
+                val toTag = items.filter { it.postUri.isNotBlank() && !db.isIndexed(it.postUri) }
+                if (toTag.isEmpty() || cancelRequested) return
+
+                coroutineScope {
+                    val itemQueue = Channel<MediaItem>(Channel.UNLIMITED)
+                    toTag.forEach { itemQueue.trySend(it) }
+                    itemQueue.close()
+
+                    // Bounded to `parallelism` so producers can't run
+                    // arbitrarily far ahead of inference and pile up
+                    // decoded bitmaps in memory.
+                    val preparedQueue = Channel<PreparedItem>(capacity = parallelism)
+
+                    val producers = (1..parallelism).map {
+                        launch(Dispatchers.IO) {
+                            for (item in itemQueue) {
+                                if (cancelRequested) break
+                                if (item.isTextOnly) {
+                                    // No fetch/decode/inference needed for a
+                                    // text-only post — handle it right here
+                                    // instead of round-tripping through the
+                                    // inference consumer for nothing.
+                                    db.storeTags(item.postUri, item.postCid, "", emptyList())
                                     scanned.incrementAndGet()
-                                    if (newlyTagged) tagged.incrementAndGet()
                                     reportProgress()
+                                    continue
                                 }
-                            }.awaitAll()
+                                preparedQueue.send(PreparedItem(item, prepareMedia(item)))
+                            }
+                        }
+                    }
+                    // Close preparedQueue once every producer has drained
+                    // itemQueue, so the consumer's `for` loop below knows
+                    // when there's genuinely nothing left to infer.
+                    launch {
+                        producers.forEach { it.join() }
+                        preparedQueue.close()
+                    }
+
+                    // Single serial consumer: the only coroutine that ever
+                    // calls into the shared tagger, so inference for item
+                    // N+1 doesn't start until N is done — but its bitmap is
+                    // already sitting decoded and ready the moment it does.
+                    for (prepared in preparedQueue) {
+                        if (cancelRequested) {
+                            if (prepared.media.ownsBitmap) prepared.media.bitmap?.recycle()
+                            continue
+                        }
+                        val newlyTagged = inferAndStore(loadedTagger, prepared.item, prepared.media)
+                        scanned.incrementAndGet()
+                        if (newlyTagged) tagged.incrementAndGet()
+                        reportProgress()
                     }
                 }
             }
@@ -224,24 +297,19 @@ class TaggingRepository(
         return fetchBytes(url)?.let { decodeBitmap(it) }?.let { it to true }
     }
 
-    /** Returns true if this call newly tagged the post with >=1 tag (used
-     *  to increment the running "tagged" counter). Callers are responsible
-     *  for the resume-skip check (db.isIndexed) before calling this, since
-     *  the two counting paths (tagAllLiked's batch loop vs tagOnLike's
-     *  single-post realtime path) need different behavior on an
-     *  already-indexed post — tagAllLiked skips it entirely (already
-     *  counted), while tagOnLike re-tags unconditionally (a like can only
-     *  fire once for a given post in normal use, but re-tagging on repeat
-     *  calls is harmless either way). See [fetchBitmapForTagging]'s own doc
-     *  comment just below for the Coil-cache-reuse speed fix this now goes
-     *  through to get its bitmap. */
-    private suspend fun tagOnePost(imageTagger: ImageTagger, item: MediaItem): Boolean {
-        if (item.postUri.isBlank()) return false
-        if (item.isTextOnly) {
-            db.storeTags(item.postUri, item.postCid, "", emptyList())
-            return false
-        }
+    /** The fetch+decode half of tagging a post — everything that's safe to
+     *  run concurrently across several posts at once (network I/O, bitmap
+     *  decode, video frame extraction). Deliberately has no dependency on
+     *  the tagger, so [tagBatch]'s producer coroutines can call this without
+     *  ever touching the shared `ImageTagger`/`OrtSession`. */
+    private data class PreparedMedia(val bitmap: Bitmap?, val ownsBitmap: Boolean, val sourceUrlForRecord: String)
 
+    /** Pairs a still-to-be-inferred item with its already-fetched/decoded
+     *  media, as passed from [tagBatch]'s producers to its single serial
+     *  inference consumer. */
+    private data class PreparedItem(val item: MediaItem, val media: PreparedMedia)
+
+    private suspend fun prepareMedia(item: MediaItem): PreparedMedia {
         var bitmap: Bitmap? = null
         var ownsBitmap = false
         val sourceUrlForRecord: String
@@ -277,19 +345,48 @@ class TaggingRepository(
                 fetchBitmapForTagging(imageUrl)?.let { (bmp, owns) -> bitmap = bmp; ownsBitmap = owns }
             }
         }
+        return PreparedMedia(bitmap, ownsBitmap, sourceUrlForRecord)
+    }
 
-        val finalBitmap = bitmap
+    /** The inference half of tagging a post — the part that must stay
+     *  serial across a batch (see [tagBatch]'s doc comment for why: the
+     *  shared `OrtSession`'s intra-op thread pool already uses nearly all
+     *  of the phone's cores for one inference, so running several at once
+     *  doesn't get any real wall-clock benefit).
+     *
+     *  Returns true if this call newly tagged the post with >=1 tag (used
+     *  to increment the running "tagged" counter). Callers are responsible
+     *  for the resume-skip check (db.isIndexed) before calling this, since
+     *  the two counting paths (tagAllLiked's batch loop vs tagOnLike's
+     *  single-post realtime path) need different behavior on an
+     *  already-indexed post — tagAllLiked skips it entirely (already
+     *  counted), while tagOnLike re-tags unconditionally (a like can only
+     *  fire once for a given post in normal use, but re-tagging on repeat
+     *  calls is harmless either way). */
+    private fun inferAndStore(imageTagger: ImageTagger, item: MediaItem, prepared: PreparedMedia): Boolean {
+        val finalBitmap = prepared.bitmap
         if (finalBitmap == null) {
-            db.storeTags(item.postUri, item.postCid, sourceUrlForRecord, emptyList())
+            db.storeTags(item.postUri, item.postCid, prepared.sourceUrlForRecord, emptyList())
             return false
         }
-        val tags = try { imageTagger.tag(finalBitmap) } finally { if (ownsBitmap) finalBitmap.recycle() }
+        val tags = try { imageTagger.tag(finalBitmap) } finally { if (prepared.ownsBitmap) finalBitmap.recycle() }
         // Bitmaps/decode buffers we own are eligible for GC/release the
         // moment this function returns; nothing here is ever written to
         // disk, and Coil-owned bitmaps are left untouched for Coil's own
         // cache to manage.
-        db.storeTags(item.postUri, item.postCid, sourceUrlForRecord, tags)
+        db.storeTags(item.postUri, item.postCid, prepared.sourceUrlForRecord, tags)
         return tags.isNotEmpty()
+    }
+
+    /** Realtime single-post path (see [tagOnLike]) — just runs prepare then
+     *  infer back-to-back, no pipelining needed for exactly one item. */
+    private suspend fun tagOnePost(imageTagger: ImageTagger, item: MediaItem): Boolean {
+        if (item.postUri.isBlank()) return false
+        if (item.isTextOnly) {
+            db.storeTags(item.postUri, item.postCid, "", emptyList())
+            return false
+        }
+        return inferAndStore(imageTagger, item, prepareMedia(item))
     }
 
     /** Pulls the single frame at the video's halfway point. Uses

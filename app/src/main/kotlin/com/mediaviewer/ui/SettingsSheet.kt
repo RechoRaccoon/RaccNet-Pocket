@@ -911,11 +911,14 @@ private fun SettingsPageContent(
                         Text("Tag Post When Liked", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(end = 12.dp))
                         CompactSwitch(checked = tagPostWhenLiked, onCheckedChange = onToggleTagPostWhenLiked)
                     }
-                    // Item 6: how many liked posts get fetched+tagged in
-                    // parallel during a "Locally Tag All Liked Posts" run —
-                    // see TaggingRepository.tagAllLiked's own doc comment
-                    // for why this is safe to parallelize. Doesn't affect
-                    // realtime tag-on-like (that's always exactly one post).
+                    // Item 6: how many liked posts get fetched+decoded ahead
+                    // of the inference queue during a "Locally Tag All Liked
+                    // Posts" run — see TaggingRepository.tagAllLiked/
+                    // tagBatch's own doc comments for why this is a
+                    // prefetch depth rather than a simultaneous-inference
+                    // count (inference itself always runs one post at a
+                    // time on shared hardware). Doesn't affect realtime
+                    // tag-on-like (that's always exactly one post).
                     HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
                     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
                         // Bug fix: this Slider's value used to be driven
@@ -940,11 +943,11 @@ private fun SettingsPageContent(
                         var localConcurrency by remember { mutableStateOf(tagConcurrency) }
                         LaunchedEffect(tagConcurrency) { localConcurrency = tagConcurrency }
                         Text(
-                            "Tag $localConcurrency Post${if (localConcurrency == 1) "" else "s"} At Once",
+                            "Prefetch $localConcurrency Post${if (localConcurrency == 1) "" else "s"} Ahead",
                             color = Color.White, fontSize = 14.sp
                         )
                         Text(
-                            "Higher speeds up tagging but uses more memory/CPU at once",
+                            "How many posts to fetch and decode ahead of time while tagging — tagging itself always runs one at a time, so higher speeds up the overall backlog but uses more memory",
                             color = DimGray, fontSize = 11.sp
                         )
                         Slider(
