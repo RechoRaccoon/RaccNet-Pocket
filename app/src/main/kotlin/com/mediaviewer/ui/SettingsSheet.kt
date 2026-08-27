@@ -918,8 +918,29 @@ private fun SettingsPageContent(
                     // realtime tag-on-like (that's always exactly one post).
                     HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
                     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+                        // Bug fix: this Slider's value used to be driven
+                        // straight from the tagConcurrency prop, which
+                        // round-trips through an async DataStore write +
+                        // Flow re-emission on every step change (see
+                        // PreferencesManager.setTagConcurrency). For a
+                        // *discrete*, step-snapping Slider, that write-back
+                        // latency — even just a frame or two — is enough for
+                        // Compose's own step-snapping to fight the
+                        // now-stale external value mid-drag: the thumb
+                        // visibly stutters or resets instead of tracking
+                        // the finger, reading as "doesn't work". The
+                        // continuous intensity sliders above don't show
+                        // this because there's no discrete step for a
+                        // stale value to visibly snap away from — a lagged
+                        // continuous drag just looks like inertia. Local
+                        // optimistic state updates the instant a drag
+                        // crosses a step, with the prop only used to
+                        // (re)seed it on first composition or if it's ever
+                        // changed from somewhere else entirely.
+                        var localConcurrency by remember { mutableStateOf(tagConcurrency) }
+                        LaunchedEffect(tagConcurrency) { localConcurrency = tagConcurrency }
                         Text(
-                            "Tag $tagConcurrency Post${if (tagConcurrency == 1) "" else "s"} At Once",
+                            "Tag $localConcurrency Post${if (localConcurrency == 1) "" else "s"} At Once",
                             color = Color.White, fontSize = 14.sp
                         )
                         Text(
@@ -927,8 +948,12 @@ private fun SettingsPageContent(
                             color = DimGray, fontSize = 11.sp
                         )
                         Slider(
-                            value = tagConcurrency.toFloat(),
-                            onValueChange = { onSetTagConcurrency(it.roundToInt()) },
+                            value = localConcurrency.toFloat(),
+                            onValueChange = {
+                                val rounded = it.roundToInt()
+                                localConcurrency = rounded
+                                onSetTagConcurrency(rounded)
+                            },
                             valueRange = 1f..10f,
                             steps = 8, // 8 intermediate steps -> 10 discrete stops (1..10)
                             colors = SliderDefaults.colors(
@@ -1820,7 +1845,7 @@ private fun HubUploadBubble(
                     // when its actual layout position was correct.
                     // opaqueMaskPanel just paints a flat brush, with nothing
                     // to sample or crop, so that whole failure mode is gone.
-                    Box(bubbleModifier.opaqueMaskPanel(tint = tint, shape = bubbleShape), contentAlignment = Alignment.Center) {
+                    Box(bubbleModifier.opaqueMaskPanel(backdrop = menuBackdrop, tint = tint, shape = bubbleShape), contentAlignment = Alignment.Center) {
                         Text(
                             label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium,
                             textAlign = TextAlign.Center, maxLines = 1,

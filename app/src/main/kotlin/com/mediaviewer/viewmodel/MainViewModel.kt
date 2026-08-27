@@ -576,6 +576,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _searchOpen = MutableStateFlow(false)
     val searchOpen: StateFlow<Boolean> = _searchOpen
 
+    // Item 4 (Search page): mirrors ProfileOverlayState.hidden — true once a
+    // post opened from search hides the search overlay (rather than fully
+    // closing it via closeSearch(), which wipes its results/scroll/filter)
+    // so pinchInFromPost() below can restore it exactly as left instead of
+    // falling through to the generic grid, same as a hidden profile does.
+    private val _searchHiddenBehindPost = MutableStateFlow(false)
+
     private val _searchState = MutableStateFlow(SearchState())
     val searchState: StateFlow<SearchState> = _searchState
 
@@ -584,6 +591,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun openSearch() { _searchOpen.value = true }
     fun closeSearch() {
         _searchOpen.value = false
+        _searchHiddenBehindPost.value = false
         searchJob?.cancel()
         _searchState.value = SearchState()
     }
@@ -664,7 +672,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Opens a post found via search in its own standalone pager, the same
      *  way tapping into any other feed does — navDirection 0 since there's
-     *  no meaningful slide direction coming from a flat search result list. */
+     *  no meaningful slide direction coming from a flat search result list.
+     *
+     *  Item 4: now mirrors openPostFromProfileTab exactly — hides the search
+     *  overlay instead of closing it (closeSearch() wipes _searchState
+     *  entirely: query, results, active filter tab), so pinching back in
+     *  from the post (pinchInFromPost()) restores the exact same search
+     *  screen the person left, rather than reopening search from scratch. */
     fun openPostFromSearch(index: Int) {
         val results = _searchState.value.posts
         if (index !in results.indices) return
@@ -675,7 +689,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         activeFeedMode = ActiveFeedMode.NORMAL
         activeFeedActorDid = null
         _selectedFeedUri.value = null
-        closeSearch()
+        _searchOpen.value = false
+        _searchHiddenBehindPost.value = true
         _screenState.value = ScreenState.FEED
     }
 
@@ -1893,11 +1908,19 @@ _bskyDid.value          = session.did
 
     /** Pinch-in on a post: if it was reached by tapping a grid item inside a
      *  still-alive (hidden) profile, bring that profile back exactly as it
-     *  was left instead of falling through to the generic grid. */
+     *  was left instead of falling through to the generic grid. Item 4:
+     *  same check for a hidden search overlay now too — checked after
+     *  profile so a post reached via a profile that was itself opened from
+     *  within search still restores the (closer, more specific) profile
+     *  first; pinching a second time from the grid would fall through to
+     *  the search restore in that nested case. */
     fun pinchInFromPost() {
         val overlay = _profileOverlay.value
         if (overlay != null && overlay.hidden) {
             _profileOverlay.value = overlay.copy(hidden = false)
+        } else if (_searchHiddenBehindPost.value) {
+            _searchHiddenBehindPost.value = false
+            _searchOpen.value = true
         } else {
             _screenState.value = ScreenState.GRID
         }
@@ -3429,6 +3452,11 @@ _bskyDid.value          = session.did
      *  (e621-mode posts already have genuine e621 tags from the API; only
      *  Bluesky posts, which have no tags concept at all, need the AI ones
      *  substituted in). */
+    /** Item 4: same hide-not-close treatment as openPostFromSearch — see its
+     *  doc comment. The Liked tab's own results/query/tag-suggestion state
+     *  all live outside _searchState (in _likedTagSearchResults etc.), so
+     *  leaving _searchState/that state alone and just hiding the overlay is
+     *  enough to bring the whole Liked tab view back intact on pinch-in. */
     fun openLikedPostFromSearch(index: Int) {
         val results = _likedTagSearchResults.value
         if (index !in results.indices) return
@@ -3448,7 +3476,8 @@ _bskyDid.value          = session.did
                 activeFeedMode = ActiveFeedMode.NORMAL
                 activeFeedActorDid = null
                 _selectedFeedUri.value = null
-                closeSearch()
+                _searchOpen.value = false
+                _searchHiddenBehindPost.value = true
                 _screenState.value = ScreenState.FEED
             }
         }

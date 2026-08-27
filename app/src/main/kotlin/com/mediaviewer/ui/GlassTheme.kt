@@ -207,27 +207,56 @@ fun Modifier.glassPanel(
 }
 
 /**
- * An opaque "masked" surface — same rim treatment as [glassPanel], but the
- * fill behind it is a fully solid copy of the app's own background gradient
- * ([postBackgroundBrush]) instead of a translucent tint. Where [glassPanel]
- * and [LiquidGlassSurface] are deliberately see-through so real content
- * shows through the glass, this is for the opposite case: a surface that
- * has to sit *over* other UI (search autocomplete expanding over results,
- * a popped-open menu sitting over page content) and fully hide whatever's
- * under it, rather than letting it show through and hurt legibility. Using
- * the same brush as the page background (rather than a flat color) means
- * the masked surface still reads as "part of this screen" instead of a
- * disconnected opaque card dropped on top of it.
+ * An opaque "masked" surface for cases that need to sit *over* other UI and
+ * fully hide it — search autocomplete expanding over results, a popped-open
+ * menu over page content — the opposite of [glassPanel]/[LiquidGlassSurface]
+ * which are deliberately see-through.
+ *
+ * Bug fix: this used to just paint a fresh `postBackgroundBrush(tint)` fill.
+ * That brush is a 3-stop vertical gradient with no fixed start/end — Compose
+ * resolves it against *whatever bounds it's drawn into*, so painting it into
+ * a full-screen Box (its original, only use) and painting it again into a
+ * small ~44-80dp search bubble somewhere in the upper third of the screen
+ * produce two completely different-looking gradients: the small bubble
+ * squashes the same deep→black→deep progression into a fraction of the
+ * height, reading as a flatly darker tint instead of "a window onto the
+ * matching slice of the real background". A masked surface needs to show
+ * the *actual* background pixels that would be behind it, sampled at its
+ * real position — which is exactly what [LiquidGlassSurface]'s live
+ * backdrop crop already does, just with blur and a translucent tint over
+ * top. Reusing that same crop with neither gives a true, always-pixel-
+ * accurate "hole punched through to the background" instead of an
+ * approximation, and fixes both at once.
  */
 fun Modifier.opaqueMaskPanel(
+    backdrop: GlassBackdrop? = null,
     tint: Color = NeutralGlassTint,
     shape: Shape = RoundedCornerShape(20.dp),
     rim: Boolean = true
 ): Modifier = composed {
     val rimIntensity = LocalGlassRimIntensity.current
+    var trackedOrigin by remember { mutableStateOf(Offset.Zero) }
     this
         .clip(shape)
-        .background(postBackgroundBrush(tint))
+        .onGloballyPositioned { coords -> trackedOrigin = coords.positionInRoot() }
+        .then(
+            if (CAN_BLUR && backdrop != null) {
+                // No .blur()/magnify/tint scrim here on purpose, unlike
+                // LiquidGlassSurface's version of this same crop — this is
+                // meant to read as plain, sharp background, not glass.
+                Modifier.drawWithContent {
+                    val delta = trackedOrigin - backdrop.originInRoot()
+                    translate(-delta.x, -delta.y) {
+                        drawLayer(backdrop.layer)
+                    }
+                    drawContent()
+                }
+            } else {
+                // No live backdrop available (API < 31, or none supplied) —
+                // falls back to the flat gradient approximation.
+                Modifier.background(postBackgroundBrush(tint))
+            }
+        )
         .then(
             if (rim) Modifier.border(
                 width = 1.dp,

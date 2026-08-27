@@ -31,6 +31,12 @@ class TaggingRepository(
     private val bskyRepo: BlueskyRepository,
     private val e621Repo: E621Repository
 ) {
+    // Tagging-speed fix: kept for fetchBitmapForTagging's Coil lookups
+    // (Coil's own imageLoader() call takes a Context and internally uses
+    // the application one regardless, but holding this explicitly avoids
+    // ever accidentally leaking an Activity context into a longer-lived
+    // repository field).
+    private val appContext = context.applicationContext
     private val db = TagDatabase.get(context)
     private val modelManager = TaggerModelManager(context)
     private val httpClient = OkHttpClient.Builder().build()
@@ -188,6 +194,36 @@ class TaggingRepository(
         }
     }
 
+    /** Tagging-speed fix: routed through Coil's shared ImageLoader (memory
+     *  + disk cache) instead of always doing a fresh OkHttp fetch. For the
+     *  realtime tag-on-like path especially, this exact URL was very likely
+     *  just decoded by Coil moments ago to display the post the person is
+     *  looking at right now — reusing that cache turns what would
+     *  otherwise be a second full network round trip into an in-memory
+     *  lookup. Falls back to the original direct fetch+decode on any cache
+     *  miss/failure, so this can only ever be as fast or faster, never
+     *  slower. `allowHardware(false)` is required, not optional — a
+     *  hardware Bitmap can't be read back for pixel access, same reason
+     *  fetchDominantColor in GlassTheme.kt needs it.
+     *
+     *  Returns the bitmap paired with whether *this* call owns it and must
+     *  recycle it when done: a Coil-sourced bitmap may be the same shared
+     *  instance sitting in Coil's memory cache for the *displayed* post —
+     *  recycling that would corrupt what the feed is showing on screen the
+     *  moment this runs, so only bitmaps decoded directly here (the
+     *  fallback path) are ever ours to recycle. */
+    private suspend fun fetchBitmapForTagging(url: String): Pair<Bitmap, Boolean>? {
+        if (url.isBlank()) return null
+        try {
+            val loader = coil.Coil.imageLoader(appContext)
+            val request = coil.request.ImageRequest.Builder(appContext)
+                .data(url).size(896, 896).allowHardware(false).build()
+            val bmp = (loader.execute(request).drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap
+            if (bmp != null) return bmp to false
+        } catch (_: Exception) { /* fall through to the direct fetch below */ }
+        return fetchBytes(url)?.let { decodeBitmap(it) }?.let { it to true }
+    }
+
     /** Returns true if this call newly tagged the post with >=1 tag (used
      *  to increment the running "tagged" counter). Callers are responsible
      *  for the resume-skip check (db.isIndexed) before calling this, since
@@ -196,15 +232,18 @@ class TaggingRepository(
      *  already-indexed post — tagAllLiked skips it entirely (already
      *  counted), while tagOnLike re-tags unconditionally (a like can only
      *  fire once for a given post in normal use, but re-tagging on repeat
-     *  calls is harmless either way). */
-    private fun tagOnePost(imageTagger: ImageTagger, item: MediaItem): Boolean {
+     *  calls is harmless either way). See [fetchBitmapForTagging]'s own doc
+     *  comment just below for the Coil-cache-reuse speed fix this now goes
+     *  through to get its bitmap. */
+    private suspend fun tagOnePost(imageTagger: ImageTagger, item: MediaItem): Boolean {
         if (item.postUri.isBlank()) return false
         if (item.isTextOnly) {
             db.storeTags(item.postUri, item.postCid, "", emptyList())
             return false
         }
 
-        val bitmap: Bitmap?
+        var bitmap: Bitmap? = null
+        var ownsBitmap = false
         val sourceUrlForRecord: String
 
         if (item.isVideo && item.mediaUrl.isNotBlank()) {
@@ -216,12 +255,14 @@ class TaggingRepository(
             // can pull a single frame straight from the remote URL over
             // HTTP without ever writing the video itself to disk.
             sourceUrlForRecord = item.mediaUrl
-            bitmap = extractMiddleFrame(item.mediaUrl) ?: run {
+            val frame = extractMiddleFrame(item.mediaUrl)
+            if (frame != null) {
+                bitmap = frame; ownsBitmap = true
+            } else if (item.thumbUrl.isNotBlank()) {
                 // Frame grab failed (e.g. an unsupported codec/container) —
                 // fall back to the feed-supplied poster thumbnail rather
                 // than leaving the post untagged.
-                item.thumbUrl.takeIf { it.isNotBlank() }?.let { fetchBytes(it) }
-                    ?.let { decodeBitmap(it) }
+                fetchBitmapForTagging(item.thumbUrl)?.let { (bmp, owns) -> bitmap = bmp; ownsBitmap = owns }
             }
         } else {
             // Tagging-speed fix: prefer the mid-resolution taggingUrl (see
@@ -232,17 +273,21 @@ class TaggingRepository(
             // the same URL the rest of the app already uses for this post.
             val imageUrl = item.taggingUrl.ifBlank { item.mediaUrl.ifBlank { item.thumbUrl } }
             sourceUrlForRecord = item.mediaUrl.ifBlank { item.thumbUrl }
-            bitmap = if (imageUrl.isBlank()) null else fetchBytes(imageUrl)?.let { decodeBitmap(it) }
+            if (imageUrl.isNotBlank()) {
+                fetchBitmapForTagging(imageUrl)?.let { (bmp, owns) -> bitmap = bmp; ownsBitmap = owns }
+            }
         }
 
-        if (bitmap == null) {
+        val finalBitmap = bitmap
+        if (finalBitmap == null) {
             db.storeTags(item.postUri, item.postCid, sourceUrlForRecord, emptyList())
             return false
         }
-        val tags = try { imageTagger.tag(bitmap) } finally { bitmap.recycle() }
-        // The bitmap (and, for videos, the retriever's internal decode
-        // buffers) are both eligible for GC/release as soon as this
-        // function returns — nothing here is written to disk.
+        val tags = try { imageTagger.tag(finalBitmap) } finally { if (ownsBitmap) finalBitmap.recycle() }
+        // Bitmaps/decode buffers we own are eligible for GC/release the
+        // moment this function returns; nothing here is ever written to
+        // disk, and Coil-owned bitmaps are left untouched for Coil's own
+        // cache to manage.
         db.storeTags(item.postUri, item.postCid, sourceUrlForRecord, tags)
         return tags.isNotEmpty()
     }
