@@ -247,7 +247,17 @@ fun Modifier.opaqueMaskPanel(
         // base fill first, live crop layered on top as a separate step.
         .background(postBackgroundBrush(tint))
         .then(
-            if (CAN_BLUR && backdrop != null) {
+            // Bug fix: this used to also gate on CAN_BLUR (API 31+), copied
+            // from LiquidGlassSurface — but CAN_BLUR exists purely because
+            // *.blur()*'s RenderEffect needs API 31, and this panel
+            // deliberately never calls .blur() (see the comment below).
+            // Plain GraphicsLayer recording/drawLayer has no such
+            // requirement, so gating on CAN_BLUR here was disabling the
+            // live crop on every device below API 31 for no reason — those
+            // devices always fell straight to the flat, squashed-gradient
+            // fallback above, which is exactly the "mask has its own
+            // gradient instead of the real background" symptom.
+            if (backdrop != null) {
                 // No .blur()/magnify/tint scrim here on purpose, unlike
                 // LiquidGlassSurface's version of this same crop — this is
                 // meant to read as plain, sharp background, not glass.

@@ -159,12 +159,7 @@ fun SearchOverlay(
             // square to meet them) — so the seam is invisible even though
             // they're two separately-positioned elements.
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 14.dp)
-                    .onGloballyPositioned {
-                        val pos = it.positionInRoot()
-                        barBottomLeft = Offset(pos.x, pos.y + it.size.height)
-                        barWidthPx = it.size.width
-                    },
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
@@ -202,7 +197,26 @@ fun SearchOverlay(
                 // is showing, this field visually continues into it as one
                 // solid shape instead of the old semi-transparent field
                 // sitting oddly above an opaque dropdown.
-                Box(Modifier.weight(1f).height(44.dp).opaqueMaskPanel(backdrop = searchBackdrop, tint = profileTint, shape = fieldShape)) { SearchFieldContent() }
+                //
+                // Bug fix: barBottomLeft/barWidthPx are now measured from
+                // this field Box itself, not the outer Row above. The Row
+                // also contains the close bubble (30.dp) plus the 10.dp
+                // spacedBy gap before this field starts, so measuring the
+                // Row gave the suggestions panel below the *bar's* left
+                // edge/width instead of the *field's* — the panel rendered
+                // ~40dp too far left (starting under the close bubble) and
+                // too wide by the same amount. Tracking the field's own
+                // position/size lines the panel's edges up with the field
+                // that visually "grows into" it.
+                Box(
+                    Modifier.weight(1f).height(44.dp)
+                        .onGloballyPositioned {
+                            val pos = it.positionInRoot()
+                            barBottomLeft = Offset(pos.x, pos.y + it.size.height)
+                            barWidthPx = it.size.width
+                        }
+                        .opaqueMaskPanel(backdrop = searchBackdrop, tint = profileTint, shape = fieldShape)
+                ) { SearchFieldContent() }
             }
 
             Spacer(Modifier.height(14.dp))
