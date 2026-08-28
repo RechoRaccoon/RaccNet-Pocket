@@ -33,7 +33,8 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
                 post_uri TEXT PRIMARY KEY,
                 cid TEXT NOT NULL,
                 media_url TEXT NOT NULL,
-                indexed_timestamp INTEGER NOT NULL
+                indexed_timestamp INTEGER NOT NULL,
+                dataset_id TEXT NOT NULL DEFAULT ''
             )
             """.trimIndent()
         )
@@ -47,10 +48,33 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
             )
             """.trimIndent()
         )
+        // Import/Export feature: one row per *imported* dataset (a JSON file
+        // someone else exported from their own device — see
+        // TaggingRepository.importDataset/exportAllPosts). The on-device
+        // dataset built by the person's own "Locally Tag All Liked Posts"/
+        // realtime tagging never gets a row here — it's identified purely by
+        // liked_media.dataset_id being the empty-string sentinel (see
+        // LOCAL_DATASET_ID below), so there's nothing to list/delete for it
+        // beyond the existing "Delete Tagged Post Database" button. Imported
+        // datasets each get their own id here so Settings can list them and
+        // delete one without touching any other dataset's (or the local
+        // dataset's) rows — everything in liked_media/media_tags is still
+        // queried together with no dataset filter for search/browse/counts,
+        // which is what "use them all as one" means in practice.
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS datasets (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                imported_at INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_media_tags_post_uri ON media_tags(post_uri)")
         // The index that actually matters for search speed: every query in
         // searchPostUris filters by tag_name first.
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_media_tags_tag_name ON media_tags(tag_name)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_liked_media_dataset_id ON liked_media(dataset_id)")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -59,6 +83,24 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
             // (or attempted and failed to include) the old fts5 table.
             db.execSQL("DROP TABLE IF EXISTS tag_search_fts")
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_media_tags_tag_name ON media_tags(tag_name)")
+        }
+        if (oldVersion < 3) {
+            // Import/Export feature: every pre-existing row belongs to the
+            // person's own on-device dataset, so backfilling the new column
+            // with the '' default (already what DEFAULT '' gives every
+            // existing row) is exactly correct with no data migration needed
+            // beyond adding the column itself.
+            db.execSQL("ALTER TABLE liked_media ADD COLUMN dataset_id TEXT NOT NULL DEFAULT ''")
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS datasets (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    imported_at INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_liked_media_dataset_id ON liked_media(dataset_id)")
         }
     }
 
@@ -78,14 +120,19 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
     /** Records one post + its tags. Called once per successfully-tagged
      *  image; a post with zero tags above the confidence threshold still
      *  gets a liked_media row (so it counts as "scanned" and isn't retried
-     *  forever) but no media_tags rows. */
-    fun storeTags(postUri: String, cid: String, mediaUrl: String, tags: List<Pair<String, Float>>) {
+     *  forever) but no media_tags rows.
+     *
+     *  [datasetId] defaults to [LOCAL_DATASET_ID] — every call from the
+     *  normal on-device tagging pipeline (TaggingRepository.inferAndStore/
+     *  tagOnePost/tagBatch's text-only shortcut) leaves this at the
+     *  default, so only [importDataset] ever passes a real dataset id. */
+    fun storeTags(postUri: String, cid: String, mediaUrl: String, tags: List<Pair<String, Float>>, datasetId: String = LOCAL_DATASET_ID) {
         val db = writableDatabase
         db.beginTransaction()
         try {
             db.execSQL(
-                "INSERT OR REPLACE INTO liked_media (post_uri, cid, media_url, indexed_timestamp) VALUES (?, ?, ?, ?)",
-                arrayOf(postUri, cid, mediaUrl, System.currentTimeMillis())
+                "INSERT OR REPLACE INTO liked_media (post_uri, cid, media_url, indexed_timestamp, dataset_id) VALUES (?, ?, ?, ?, ?)",
+                arrayOf(postUri, cid, mediaUrl, System.currentTimeMillis(), datasetId)
             )
             // Clear out anything from a previous pass (realtime re-tag, retry, etc.)
             db.execSQL("DELETE FROM media_tags WHERE post_uri = ?", arrayOf(postUri))
@@ -133,17 +180,32 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
      *  the same semantics the old FTS5 MATCH query had. Computed as a plain
      *  set intersection across per-group queries rather than one large SQL
      *  statement, since the number of groups is small (a handful of search
-     *  words at most) and this keeps each query simple and index-friendly. */
+     *  words at most) and this keeps each query simple and index-friendly.
+     *
+     *  Bug fix (item 5 — "typing numbers or symbols... shows no results"):
+     *  each term used to match only via an exact `tag_name IN (...)`
+     *  lookup. Most real e621 tags aren't bare numbers/symbols on their own
+     *  — they're a *part* of a compound tag (`rule_34`, `69_position`,
+     *  `3d`) — so an exact-match-only query correctly, but unhelpfully,
+     *  came back empty for exactly the kind of short numeric/symbolic term
+     *  someone would type expecting a substring match. Every term now also
+     *  tries a `LIKE '%term%'` match alongside the exact one (still OR'd
+     *  together within the same group, still AND'd across groups), so
+     *  "34" now finds "rule_34" the way a person typing it would expect,
+     *  without changing behavior for a term that *is* an exact/aliased tag
+     *  (that still matches first, via the same query). */
     fun searchPostUris(termGroups: List<List<String>>, limit: Int = 200): List<String> {
         if (termGroups.isEmpty() || termGroups.any { it.isEmpty() }) return emptyList()
         var resultSet: LinkedHashSet<String>? = null
         val db = readableDatabase
         for (group in termGroups) {
-            val placeholders = group.joinToString(",") { "?" }
+            val exactPlaceholders = group.joinToString(",") { "?" }
+            val likeClauses = group.joinToString(" OR ") { "tag_name LIKE ?" }
+            val likeArgs = group.map { "%$it%" }
             val matches = LinkedHashSet<String>()
             db.rawQuery(
-                "SELECT DISTINCT post_uri FROM media_tags WHERE tag_name IN ($placeholders)",
-                group.toTypedArray()
+                "SELECT DISTINCT post_uri FROM media_tags WHERE tag_name IN ($exactPlaceholders) OR $likeClauses",
+                (group + likeArgs).toTypedArray()
             ).use { cursor ->
                 while (cursor.moveToNext()) matches.add(cursor.getString(0))
             }
@@ -180,6 +242,138 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
         return results
     }
 
+    /** One row of the "imported datasets" list Settings shows under the
+     *  Import/Export buttons — [postCount] is computed live off liked_media
+     *  rather than stored, so it can never drift out of sync with reality
+     *  (e.g. if a future feature ever lets someone delete individual posts). */
+    data class DatasetInfo(val id: String, val name: String, val importedAt: Long, val postCount: Int)
+
+    /** One post as read back out for [TaggingRepository.exportAllPosts] to
+     *  serialize to JSON — a plain snapshot, not tied to any one dataset
+     *  (export always bundles *everything* currently on the device, local +
+     *  every imported dataset together, per the request that Export produces
+     *  one shareable backup of "their dataset" as a whole). */
+    data class ExportedPost(val postUri: String, val cid: String, val mediaUrl: String, val tags: List<Pair<String, Float>>)
+
+    /** Every post currently in the database, across every dataset — the
+     *  source data for an Export. */
+    fun allPostsForExport(): List<ExportedPost> {
+        val posts = LinkedHashMap<String, ExportedPost>()
+        readableDatabase.rawQuery("SELECT post_uri, cid, media_url FROM liked_media", null).use { cursor ->
+            while (cursor.moveToNext()) {
+                val uri = cursor.getString(0)
+                posts[uri] = ExportedPost(uri, cursor.getString(1), cursor.getString(2), emptyList())
+            }
+        }
+        val tagsByPost = HashMap<String, MutableList<Pair<String, Float>>>()
+        readableDatabase.rawQuery("SELECT post_uri, tag_name, confidence FROM media_tags ORDER BY confidence DESC", null).use { cursor ->
+            while (cursor.moveToNext()) {
+                tagsByPost.getOrPut(cursor.getString(0)) { mutableListOf() }.add(cursor.getString(1) to cursor.getFloat(2))
+            }
+        }
+        return posts.values.map { it.copy(tags = tagsByPost[it.postUri] ?: emptyList()) }
+    }
+
+    /** Imports a friend's exported dataset as its own separate, independently
+     *  deletable entry — per the request, importing must never override or
+     *  merge into the existing on-device dataset. Everything lands in the
+     *  same liked_media/media_tags tables (so search/browse still treats
+     *  every dataset "as one", per the request) but tagged with a fresh
+     *  [datasetId] so [deleteDataset] can later remove exactly this import
+     *  and nothing else.
+     *
+     *  Uses INSERT OR IGNORE on post_uri (liked_media's primary key): if this
+     *  import contains a post the device already has — from the local
+     *  dataset or an earlier import — the existing row (and its tags) wins
+     *  and the incoming duplicate is skipped rather than overwriting it or
+     *  failing the whole import. A handful of coincidental overlapping likes
+     *  between two people's datasets is expected and shouldn't block the
+     *  rest of the import or silently reassign an existing post to a
+     *  different dataset_id. */
+    fun importDataset(name: String, posts: List<ExportedPost>): DatasetInfo {
+        val id = java.util.UUID.randomUUID().toString()
+        val importedAt = System.currentTimeMillis()
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.execSQL(
+                "INSERT INTO datasets (id, name, imported_at) VALUES (?, ?, ?)",
+                arrayOf(id, name, importedAt)
+            )
+            var inserted = 0
+            // Not android.database.Cursor — SQLiteStatement doesn't
+            // implement java.io.Closeable, so this is explicit try/finally
+            // rather than Kotlin's `.use {}`.
+            val insertStmt = db.compileStatement(
+                "INSERT OR IGNORE INTO liked_media (post_uri, cid, media_url, indexed_timestamp, dataset_id) VALUES (?, ?, ?, ?, ?)"
+            )
+            try {
+                posts.forEach { post ->
+                    if (post.postUri.isBlank()) return@forEach
+                    insertStmt.clearBindings()
+                    insertStmt.bindString(1, post.postUri)
+                    insertStmt.bindString(2, post.cid)
+                    insertStmt.bindString(3, post.mediaUrl)
+                    insertStmt.bindLong(4, importedAt)
+                    insertStmt.bindString(5, id)
+                    val rowId = insertStmt.executeInsert()
+                    if (rowId == -1L) return@forEach // already present under another dataset — skip its tags too
+                    inserted++
+                    post.tags.forEach { (tag, confidence) ->
+                        db.execSQL(
+                            "INSERT INTO media_tags (post_uri, tag_name, confidence) VALUES (?, ?, ?)",
+                            arrayOf(post.postUri, tag, confidence)
+                        )
+                    }
+                }
+            } finally {
+                insertStmt.close()
+            }
+            db.setTransactionSuccessful()
+            return DatasetInfo(id, name, importedAt, inserted)
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /** Settings' imported-datasets list. Only ever contains entries created
+     *  by [importDataset] — the local on-device dataset isn't listed here
+     *  (see the `datasets` table's own doc comment in [onCreate]). */
+    fun listImportedDatasets(): List<DatasetInfo> {
+        val results = mutableListOf<DatasetInfo>()
+        readableDatabase.rawQuery(
+            """
+            SELECT d.id, d.name, d.imported_at,
+                (SELECT COUNT(*) FROM liked_media lm WHERE lm.dataset_id = d.id) AS post_count
+            FROM datasets d ORDER BY d.imported_at DESC
+            """.trimIndent(),
+            null
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                results.add(DatasetInfo(cursor.getString(0), cursor.getString(1), cursor.getLong(2), cursor.getInt(3)))
+            }
+        }
+        return results
+    }
+
+    /** Removes exactly one imported dataset's posts/tags — everything else
+     *  (the local dataset, and every other import) is untouched, which is
+     *  the whole point of tracking dataset_id per row (per the request:
+     *  "if someone imports one they don't like they can remove it without
+     *  deleting the others"). */
+    fun deleteDataset(id: String) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.execSQL("DELETE FROM media_tags WHERE post_uri IN (SELECT post_uri FROM liked_media WHERE dataset_id = ?)", arrayOf(id))
+            db.execSQL("DELETE FROM liked_media WHERE dataset_id = ?", arrayOf(id))
+            db.execSQL("DELETE FROM datasets WHERE id = ?", arrayOf(id))
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     /** Wipes the whole dataset — used if the user wants to re-tag from
      *  scratch (a fresh "Locally Tag All Liked Posts" run reuses existing
      *  rows instead by default via [isIndexed]). Now wired to Settings'
@@ -193,6 +387,12 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
         val db = writableDatabase
         db.execSQL("DELETE FROM media_tags")
         db.execSQL("DELETE FROM liked_media")
+        // Item 4 (Import/Export): "Delete Tagged Post Database" is the
+        // nuclear "start over" option, so it clears every imported dataset's
+        // listing too, not just the local tagged rows — otherwise Settings'
+        // imported-datasets list would keep showing entries whose underlying
+        // liked_media/media_tags rows had already been wiped.
+        db.execSQL("DELETE FROM datasets")
         db.execSQL("VACUUM")
     }
 
@@ -205,7 +405,16 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
         // deletes on an onCreate failure — so onUpgrade only matters for the
         // hypothetical device that *did* have fts5 and created a v1 database
         // successfully before this fix.
-        private const val DB_VERSION = 2
+        //
+        // Bumped 2 -> 3 for the Import/Export feature's dataset_id column +
+        // datasets table (see onUpgrade/onCreate).
+        private const val DB_VERSION = 3
+
+        /** Sentinel dataset_id for every row created by the normal on-device
+         *  tagging pipeline (as opposed to an imported dataset — see the
+         *  `datasets` table's doc comment in [onCreate]). Never actually
+         *  shown to the user; just how liked_media rows are told apart. */
+        const val LOCAL_DATASET_ID = ""
 
         @Volatile private var instance: TagDatabase? = null
         fun get(context: Context): TagDatabase =

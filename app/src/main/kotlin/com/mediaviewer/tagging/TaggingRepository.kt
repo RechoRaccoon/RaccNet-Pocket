@@ -50,7 +50,13 @@ class TaggingRepository(
         val datasetBytes: Long,
         val isRunning: Boolean,
         val isComplete: Boolean,
-        val modelState: TaggerModelManager.State = TaggerModelManager.State.Ready
+        val modelState: TaggerModelManager.State = TaggerModelManager.State.Ready,
+        // Tagging page redesign (item 3): whichever post is being fetched/
+        // inferred right now, so the overlay can show it full-screen in real
+        // time instead of a generic loading box. Null before the first item
+        // starts (still downloading the model, or between pages of the
+        // liked-posts pagination) and while nothing is running.
+        val currentItem: MediaItem? = null
     )
 
     fun currentCounts(): Pair<Int, Int> = db.scannedCount() to db.taggedCount()
@@ -102,6 +108,28 @@ class TaggingRepository(
      *  this runs. */
     suspend fun deleteDatabase() = withContext(Dispatchers.IO) { db.clearAll() }
 
+    // ── Import/Export (item 4) ──────────────────────────────────────────
+    // JSON (de)serialization itself lives in MainViewModel (via Gson,
+    // already a project dependency — see NetworkClient.kt) since that's
+    // where file I/O against a picked Uri already happens for the custom
+    // font import feature; this repository only ever deals in plain Kotlin
+    // data (TagDatabase.ExportedPost/DatasetInfo), same as every other
+    // method here.
+
+    /** Everything currently tagged, across every dataset — the source data
+     *  for Settings' "Export" button. */
+    suspend fun exportAllPosts(): List<TagDatabase.ExportedPost> = withContext(Dispatchers.IO) { db.allPostsForExport() }
+
+    /** Settings' "Import" button, once a file's been picked and parsed. */
+    suspend fun importDataset(name: String, posts: List<TagDatabase.ExportedPost>): TagDatabase.DatasetInfo =
+        withContext(Dispatchers.IO) { db.importDataset(name, posts) }
+
+    /** Settings' imported-datasets list, under Import/Export. */
+    suspend fun listImportedDatasets(): List<TagDatabase.DatasetInfo> = withContext(Dispatchers.IO) { db.listImportedDatasets() }
+
+    /** The list's per-row delete ("X"). */
+    suspend fun deleteDataset(id: String) = withContext(Dispatchers.IO) { db.deleteDataset(id) }
+
     /** Full backlog pass: pages through every liked post (Bluesky or e621,
      *  whichever app mode is active), skips anything already in the
      *  dataset (so a cancelled/resumed run doesn't redo work), tags the
@@ -141,8 +169,17 @@ class TaggingRepository(
 
             val scanned = java.util.concurrent.atomic.AtomicInteger(db.scannedCount())
             val tagged = java.util.concurrent.atomic.AtomicInteger(db.taggedCount())
+            // Tagging page redesign (item 3): tracks whichever post the
+            // single serial inference consumer below is currently on, for
+            // reportProgress() to attach to every update. An AtomicReference
+            // rather than a plain local var for the same cross-thread-
+            // visibility reason scanned/tagged above are AtomicIntegers —
+            // the consumer coroutine that writes it and the producer
+            // coroutines that also call reportProgress() (for text-only
+            // items) can run on different Dispatchers.IO threads.
+            val currentItemRef = java.util.concurrent.atomic.AtomicReference<MediaItem?>(null)
             fun reportProgress() {
-                onProgress(Progress(scanned.get(), tagged.get(), db.datasetSizeBytes(), isRunning = true, isComplete = false))
+                onProgress(Progress(scanned.get(), tagged.get(), db.datasetSizeBytes(), isRunning = true, isComplete = false, currentItem = currentItemRef.get()))
             }
 
             /** Tags a batch of not-yet-indexed items.
@@ -223,6 +260,15 @@ class TaggingRepository(
                             if (prepared.media.ownsBitmap) prepared.media.bitmap?.recycle()
                             continue
                         }
+                        // Tagging page redesign (item 3): report the post as
+                        // "now tagging" before running inference on it (not
+                        // just after), so the full-screen overlay shows it
+                        // for the whole time it's actually being tagged —
+                        // inference itself is real, visible work (see
+                        // ImageTagger.tag's own doc comments), not
+                        // instantaneous.
+                        currentItemRef.set(prepared.item)
+                        reportProgress()
                         val newlyTagged = inferAndStore(loadedTagger, prepared.item, prepared.media)
                         scanned.incrementAndGet()
                         if (newlyTagged) tagged.incrementAndGet()
@@ -437,9 +483,20 @@ class TaggingRepository(
         }
     } catch (_: Exception) { null }
 
-    /** Search page's "Liked" tab. */
+    /** Search page's "Liked" tab.
+     *
+     *  Bug fix (item 5): a query that's non-blank but sanitizes away to
+     *  nothing — e.g. typed entirely in symbols like "!!!" — used to fall
+     *  through to [TagDatabase.searchPostUris] with an empty term-group
+     *  list, which it (correctly) treats as "nothing to search for" and
+     *  returns zero results, even though the person typed *something*. A
+     *  blank query already browses everything tagged so far (see
+     *  MainViewModel.performLikedTagSearch) — a query with no *searchable*
+     *  characters in it should behave the same way rather than looking
+     *  "broken" with a permanent empty result. */
     fun search(query: String): List<String> {
         val groups = TagAliases.toTagGroups(query)
+        if (groups.isEmpty()) return browseAllTagged()
         return db.searchPostUris(groups)
     }
 

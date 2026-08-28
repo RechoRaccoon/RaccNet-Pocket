@@ -140,8 +140,11 @@ fun SettingsSheet(
     taggingTagged: Int,
     onLocallyTagAllLiked: () -> Unit,
     onDeleteTaggedDatabase: () -> Unit = {},
-    tagConcurrency: Int,
-    onSetTagConcurrency: (Int) -> Unit,
+    // Import/Export (item 4)
+    importedDatasets: List<com.mediaviewer.tagging.TagDatabase.DatasetInfo> = emptyList(),
+    onExportDataset: (String, android.net.Uri) -> Unit = { _, _ -> },
+    onImportDataset: (android.net.Uri) -> Unit = {},
+    onDeleteImportedDataset: (String) -> Unit = {},
     onShowLikes: () -> Unit,
     onShowFriends: () -> Unit,
     onShowE621Following: () -> Unit,
@@ -366,7 +369,9 @@ fun SettingsSheet(
                             taggingRunning = taggingRunning, taggingScanned = taggingScanned, taggingTagged = taggingTagged,
                             onLocallyTagAllLiked = onLocallyTagAllLiked,
                             onDeleteTaggedDatabase = onDeleteTaggedDatabase,
-                            tagConcurrency = tagConcurrency, onSetTagConcurrency = onSetTagConcurrency,
+                            importedDatasets = importedDatasets,
+                            onExportDataset = onExportDataset, onImportDataset = onImportDataset,
+                            onDeleteImportedDataset = onDeleteImportedDataset,
                             combineListsAndPacks = combineListsAndPacks, onToggleCombineListsPacks = onToggleCombineListsPacks,
                             autoAddToOnFollow = autoAddToOnFollow, onToggleAutoAddToOnFollow = onToggleAutoAddToOnFollow,
                             onLogoutBluesky = onLogoutBluesky, onLogoutE621 = onLogoutE621,
@@ -501,8 +506,11 @@ private fun SettingsPageContent(
     taggingTagged: Int,
     onLocallyTagAllLiked: () -> Unit,
     onDeleteTaggedDatabase: () -> Unit = {},
-    tagConcurrency: Int,
-    onSetTagConcurrency: (Int) -> Unit,
+    // Import/Export (item 4)
+    importedDatasets: List<com.mediaviewer.tagging.TagDatabase.DatasetInfo> = emptyList(),
+    onExportDataset: (String, android.net.Uri) -> Unit = { _, _ -> },
+    onImportDataset: (android.net.Uri) -> Unit = {},
+    onDeleteImportedDataset: (String) -> Unit = {},
     combineListsAndPacks: Boolean,
     onToggleCombineListsPacks: (Boolean) -> Unit,
     autoAddToOnFollow: Boolean,
@@ -866,14 +874,42 @@ private fun SettingsPageContent(
         }
 
         // ── AI Tagging (this session) ─────────────────────────────────────
-        // One glass bubble with internal dividers for each part of the
-        // setting, per the request: a "Locally Tag All Liked Posts" row
-        // (opens the same tagging overlay the Search page's "Start
-        // Tagging" button opens) and a "Tag Post When Liked" realtime
-        // toggle. Available in both AT Protocol and e621 modes — whichever
-        // is currently logged in is what startTaggingAllLiked() reads.
+        // Available in both AT Protocol and e621 modes — whichever is
+        // currently logged in is what startTaggingAllLiked() reads.
         if (bskyLoggedIn || e621LoggedIn) {
             SectionDivider("AI Tagging")
+
+            // Item 1 (this session): "Locally Tag All Liked Posts" used to be
+            // the top row *inside* the AI Tagging glass bubble below,
+            // squeezed in above a divider like it was just one more setting.
+            // It's the main action of this whole section, so it now gets its
+            // own full standalone button — same 44dp-tall single-purpose
+            // glass bubble every other primary action in Settings uses (e.g.
+            // "Download All Liked Media" above), not a row buried inside a
+            // taller bubble.
+            val tagAllShape = RoundedCornerShape(14.dp)
+            @Composable
+            fun LocallyTagAllLikedContent() {
+                Box(
+                    Modifier.fillMaxWidth().height(44.dp)
+                        .clickable(enabled = !taggingRunning) { onLocallyTagAllLiked() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        when {
+                            taggingRunning -> "Tagging… $taggingScanned scanned"
+                            taggingScanned > 0 -> "Locally Tag All Liked Posts — $taggingTagged tagged"
+                            else -> "Locally Tag All Liked Posts"
+                        },
+                        color = Color.White, fontSize = 13.sp, textAlign = TextAlign.Center
+                    )
+                }
+            }
+            if (liquidGlass) {
+                LiquidGlassSurface(modifier = Modifier.fillMaxWidth(), shape = tagAllShape, tint = dominantColor, backdrop = backdrop) { LocallyTagAllLikedContent() }
+            } else {
+                Box(Modifier.fillMaxWidth().clip(tagAllShape).background(Color.White.copy(0.08f))) { LocallyTagAllLikedContent() }
+            }
 
             val aiShape = RoundedCornerShape(14.dp)
             // Item 5: tap-to-arm confirmation for the destructive delete
@@ -892,85 +928,20 @@ private fun SettingsPageContent(
             @Composable
             fun AiTaggingBubbleContent() {
                 Column(Modifier.fillMaxWidth()) {
-                    Box(
-                        Modifier.fillMaxWidth().height(44.dp)
-                            .clickable(enabled = !taggingRunning) { onLocallyTagAllLiked() },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            when {
-                                taggingRunning -> "Tagging… $taggingScanned scanned"
-                                taggingScanned > 0 -> "Locally Tag All Liked Posts — $taggingTagged tagged"
-                                else -> "Locally Tag All Liked Posts"
-                            },
-                            color = Color.White, fontSize = 13.sp, textAlign = TextAlign.Center
-                        )
-                    }
-                    HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
                     CompactRow {
                         Text("Tag Post When Liked", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(end = 12.dp))
                         CompactSwitch(checked = tagPostWhenLiked, onCheckedChange = onToggleTagPostWhenLiked)
                     }
-                    // Item 6: how many liked posts get fetched+decoded ahead
-                    // of the inference queue during a "Locally Tag All Liked
-                    // Posts" run — see TaggingRepository.tagAllLiked/
-                    // tagBatch's own doc comments for why this is a
-                    // prefetch depth rather than a simultaneous-inference
-                    // count (inference itself always runs one post at a
-                    // time on shared hardware). Doesn't affect realtime
-                    // tag-on-like (that's always exactly one post).
+                    // Item 2 (this session): the prefetch-depth slider that
+                    // used to live here is gone — it barely moved the needle
+                    // on real-world tagging speed (bottlenecked on inference,
+                    // not fetch/decode) but was one more thing to explain and
+                    // tune, so it's now just hardcoded to 3 (its own former
+                    // default) — see MainViewModel.taggingPrefetchDepth.
                     HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
-                        // Bug fix: this Slider's value used to be driven
-                        // straight from the tagConcurrency prop, which
-                        // round-trips through an async DataStore write +
-                        // Flow re-emission on every step change (see
-                        // PreferencesManager.setTagConcurrency). For a
-                        // *discrete*, step-snapping Slider, that write-back
-                        // latency — even just a frame or two — is enough for
-                        // Compose's own step-snapping to fight the
-                        // now-stale external value mid-drag: the thumb
-                        // visibly stutters or resets instead of tracking
-                        // the finger, reading as "doesn't work". The
-                        // continuous intensity sliders above don't show
-                        // this because there's no discrete step for a
-                        // stale value to visibly snap away from — a lagged
-                        // continuous drag just looks like inertia. Local
-                        // optimistic state updates the instant a drag
-                        // crosses a step, with the prop only used to
-                        // (re)seed it on first composition or if it's ever
-                        // changed from somewhere else entirely.
-                        var localConcurrency by remember { mutableStateOf(tagConcurrency) }
-                        LaunchedEffect(tagConcurrency) { localConcurrency = tagConcurrency }
-                        Text(
-                            "Prefetch $localConcurrency Post${if (localConcurrency == 1) "" else "s"} Ahead",
-                            color = Color.White, fontSize = 14.sp
-                        )
-                        Text(
-                            "How many posts to fetch and decode ahead of time while tagging — tagging itself always runs one at a time, so higher speeds up the overall backlog but uses more memory",
-                            color = DimGray, fontSize = 11.sp
-                        )
-                        Slider(
-                            value = localConcurrency.toFloat(),
-                            onValueChange = {
-                                val rounded = it.roundToInt()
-                                localConcurrency = rounded
-                                onSetTagConcurrency(rounded)
-                            },
-                            valueRange = 1f..10f,
-                            steps = 8, // 8 intermediate steps -> 10 discrete stops (1..10)
-                            colors = SliderDefaults.colors(
-                                thumbColor = Color.White,
-                                activeTrackColor = dominantColor,
-                                inactiveTrackColor = Color.White.copy(alpha = 0.15f)
-                            ),
-                            modifier = Modifier.fillMaxWidth().padding(top = 2.dp)
-                        )
-                    }
                     // Item 5: lets the person wipe the tagged-post dataset
                     // and start over, instead of only ever being able to
                     // add to it.
-                    HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
                     Box(
                         Modifier.fillMaxWidth().height(44.dp)
                             .clickable(enabled = !taggingRunning) {
@@ -995,6 +966,103 @@ private fun SettingsPageContent(
                 LiquidGlassSurface(modifier = Modifier.fillMaxWidth(), shape = aiShape, tint = dominantColor, backdrop = backdrop) { AiTaggingBubbleContent() }
             } else {
                 Box(Modifier.fillMaxWidth().clip(aiShape).background(Color.White.copy(0.04f))) { AiTaggingBubbleContent() }
+            }
+
+            // ── Import/Export (item 4) ──────────────────────────────────
+            // "Export" first (get your own data out) then "Import" (bring
+            // someone else's in) — a person is far more likely to reach for
+            // Export first the very first time they notice this row (to
+            // back their own tagging up), so it leads.
+            var showExportNameDialog by remember { mutableStateOf(false) }
+            var pendingExportName by remember { mutableStateOf("") }
+            val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+                if (uri != null) onExportDataset(pendingExportName, uri)
+            }
+            val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+                if (uri != null) onImportDataset(uri)
+            }
+
+            val exportShape = RoundedCornerShape(topStart = 14.dp, bottomStart = 14.dp, topEnd = 3.dp, bottomEnd = 3.dp)
+            val importShape = RoundedCornerShape(topStart = 3.dp, bottomStart = 3.dp, topEnd = 14.dp, bottomEnd = 14.dp)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                @Composable
+                fun ExportBubbleContent() {
+                    Box(
+                        Modifier.fillMaxSize().clickable {
+                            pendingExportName = ""
+                            showExportNameDialog = true
+                        },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("Export", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    }
+                }
+                @Composable
+                fun ImportBubbleContent() {
+                    Box(
+                        Modifier.fillMaxSize().clickable { importLauncher.launch(arrayOf("application/json")) },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("Import", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    }
+                }
+                if (liquidGlass) {
+                    LiquidGlassSurface(modifier = Modifier.weight(1f).height(44.dp), shape = exportShape, tint = dominantColor, backdrop = backdrop) { ExportBubbleContent() }
+                    LiquidGlassSurface(modifier = Modifier.weight(1f).height(44.dp), shape = importShape, tint = dominantColor, backdrop = backdrop) { ImportBubbleContent() }
+                } else {
+                    Box(Modifier.weight(1f).height(44.dp).clip(exportShape).background(Color.White.copy(0.08f))) { ExportBubbleContent() }
+                    Box(Modifier.weight(1f).height(44.dp).clip(importShape).background(Color.White.copy(0.08f))) { ImportBubbleContent() }
+                }
+            }
+
+            if (showExportNameDialog) {
+                ExportDatasetNameDialog(
+                    liquidGlass = liquidGlass, dominantColor = dominantColor, backdrop = backdrop,
+                    onConfirm = { name ->
+                        pendingExportName = name
+                        showExportNameDialog = false
+                        val fileSafeName = name.ifBlank { "dataset" }.replace(Regex("[^A-Za-z0-9 _-]"), "").ifBlank { "dataset" }
+                        exportLauncher.launch("$fileSafeName.json")
+                    },
+                    onDismiss = { showExportNameDialog = false }
+                )
+            }
+
+            // Imported-datasets list — every dataset someone else exported
+            // and this device has imported, each removable independently of
+            // every other one (including the local on-device dataset, which
+            // isn't in this list at all — see TagDatabase's `datasets` table
+            // doc comment).
+            if (importedDatasets.isNotEmpty()) {
+                val listShape = RoundedCornerShape(14.dp)
+                @Composable
+                fun ImportedDatasetsListContent() {
+                    Column(Modifier.fillMaxWidth()) {
+                        importedDatasets.forEachIndexed { index, dataset ->
+                            if (index > 0) HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
+                            CompactRow {
+                                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                                    Text(dataset.name, color = Color.White, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(
+                                        "${dataset.postCount} post${if (dataset.postCount == 1) "" else "s"}",
+                                        color = DimGray, fontSize = 11.sp
+                                    )
+                                }
+                                Box(
+                                    Modifier.size(28.dp).clip(CircleShape).clickable { onDeleteImportedDataset(dataset.id) },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(Icons.Default.Close, contentDescription = "Remove ${dataset.name}", tint = DimGray, modifier = Modifier.size(16.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+                if (liquidGlass) {
+                    LiquidGlassSurface(modifier = Modifier.fillMaxWidth(), shape = listShape, tint = dominantColor, backdrop = backdrop) { ImportedDatasetsListContent() }
+                } else {
+                    Box(Modifier.fillMaxWidth().clip(listShape).background(Color.White.copy(0.04f))) { ImportedDatasetsListContent() }
+                }
             }
         }
 
@@ -2451,3 +2519,74 @@ private fun fieldColors() = OutlinedTextFieldDefaults.colors(
     focusedBorderColor = Color.White.copy(0.3f), unfocusedBorderColor = Color.White.copy(0.1f),
     cursorColor = Color.White, focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent
 )
+
+/** Item 4 (Import/Export): naming prompt shown when tapping Settings'
+ *  "Export" button — the name typed here becomes both the suggested
+ *  filename and the dataset's display name once someone else imports the
+ *  resulting file (see MainViewModel.DatasetFile/exportDataset). Deliberately
+ *  minimal — a title, one text field, Cancel/Export — mirroring
+ *  ReplyDialog's own scaffold rather than introducing a different dialog
+ *  shape into the app. */
+@Composable
+private fun ExportDatasetNameDialog(
+    liquidGlass: Boolean,
+    dominantColor: Color,
+    backdrop: GlassBackdrop?,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(dismissOnClickOutside = true, dismissOnBackPress = true, usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.65f))
+                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss),
+            contentAlignment = Alignment.Center
+        ) {
+            val shape = RoundedCornerShape(20.dp)
+            @Composable
+            fun DialogContent() {
+                Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                    Text(
+                        "Name This Dataset", color = Color.White, fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Shown to anyone you share this file with when they import it.",
+                        color = DimGray, fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    OutlinedTextField(
+                        value = name, onValueChange = { name = it },
+                        placeholder = { Text("e.g. My Tagged Posts", color = DimGray, fontSize = 13.sp) },
+                        singleLine = true,
+                        colors = fieldColors(),
+                        textStyle = LocalTextStyle.current.copy(fontSize = 14.sp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(
+                            onClick = onDismiss,
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                            modifier = Modifier.weight(1f).height(46.dp)
+                        ) { Text("Cancel") }
+                        Button(
+                            onClick = { onConfirm(name.trim()) },
+                            colors = ButtonDefaults.buttonColors(containerColor = dominantColor),
+                            modifier = Modifier.weight(1f).height(46.dp)
+                        ) { Text("Export", color = Color.White, fontWeight = FontWeight.SemiBold) }
+                    }
+                }
+            }
+            if (liquidGlass) {
+                LiquidGlassSurface(modifier = Modifier.fillMaxWidth(0.88f), shape = shape, tint = dominantColor, backdrop = backdrop) { DialogContent() }
+            } else {
+                Box(Modifier.fillMaxWidth(0.88f).clip(shape).background(OffBlack)) { DialogContent() }
+            }
+        }
+    }
+}

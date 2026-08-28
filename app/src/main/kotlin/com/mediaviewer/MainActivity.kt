@@ -234,8 +234,8 @@ private fun AppRoot(viewModel: MainViewModel) {
     val hasTaggedDataset       by viewModel.hasTaggedDataset.collectAsState()
     val likedTagSearchResults  by viewModel.likedTagSearchResults.collectAsState()
     val tagSuggestions         by viewModel.tagSuggestions.collectAsState()
-    val tagConcurrency         by viewModel.tagConcurrency.collectAsState()
     val tagPostWhenLiked       by viewModel.tagPostWhenLiked.collectAsState()
+    val importedDatasets       by viewModel.importedDatasets.collectAsState()
     // Phase 4
     val translationEnabled     by viewModel.translationEnabled.collectAsState()
     val translationTargetLang  by viewModel.translationTargetLang.collectAsState()
@@ -574,8 +574,10 @@ private fun AppRoot(viewModel: MainViewModel) {
             taggingTagged             = taggingUiState.tagged,
             onLocallyTagAllLiked      = viewModel::startTaggingAllLiked,
             onDeleteTaggedDatabase    = viewModel::deleteTaggedDatabase,
-            tagConcurrency            = tagConcurrency,
-            onSetTagConcurrency       = viewModel::setTagConcurrency,
+            importedDatasets          = importedDatasets,
+            onExportDataset           = viewModel::exportDataset,
+            onImportDataset           = viewModel::importDatasetFromUri,
+            onDeleteImportedDataset   = viewModel::deleteImportedDataset,
             onShowLikes               = viewModel::showBskyLikes,
             onShowFriends             = viewModel::showFriendsFeed,
             onShowE621Following       = viewModel::searchFollowingE621,

@@ -11,6 +11,7 @@ import com.mediaviewer.model.*
 import com.mediaviewer.repository.BlueskyRepository
 import com.mediaviewer.repository.E621Repository
 import com.mediaviewer.repository.StreamplaceRepository
+import com.mediaviewer.tagging.TagDatabase
 import com.mediaviewer.tagging.TaggerModelManager
 import com.mediaviewer.tagging.TaggingRepository
 import com.mediaviewer.tagging.TagSuggestionProvider
@@ -3239,7 +3240,11 @@ _bskyDid.value          = session.did
         val isRunning: Boolean = false,
         val isComplete: Boolean = false,
         val modelState: TaggerModelManager.State = TaggerModelManager.State.NotDownloaded,
-        val errorMessage: String? = null
+        val errorMessage: String? = null,
+        // Tagging page redesign (item 3): the post currently being fetched/
+        // tagged, straight from TaggingRepository.Progress — drives the
+        // overlay's full-screen "now tagging" view.
+        val currentItem: MediaItem? = null
     )
 
     private val _taggingOverlayOpen = MutableStateFlow(false)
@@ -3259,17 +3264,15 @@ _bskyDid.value          = session.did
     val tagPostWhenLiked: StateFlow<Boolean> =
         prefs.tagPostWhenLiked.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
-    // Item 6: how many liked posts to fetch+decode+run through the tagger
-    // in parallel during a "Locally Tag All Liked Posts" pass (1-10, see
-    // TaggingRepository.tagAllLiked's own doc comment on why this is safe
-    // to parallelize). Realtime tag-on-like always tags just the one post
-    // that was liked, so this only affects the bulk pass.
-    val tagConcurrency: StateFlow<Int> =
-        prefs.tagConcurrency.stateIn(viewModelScope, SharingStarted.Eagerly, 3)
-
-    fun setTagConcurrency(value: Int) {
-        viewModelScope.launch { prefs.setTagConcurrency(value.coerceIn(1, 10)) }
-    }
+    // Item 2 (this session): the "posts tagged at once" slider was removed
+    // from Settings — see TaggingRepository.tagAllLiked's own doc comment,
+    // but in short it only ever controlled fetch/decode *prefetch* depth,
+    // never simultaneous inference (that's always one at a time regardless).
+    // 3 was already the slider's own default; hardcoding it here means the
+    // prefetch pipeline keeps exactly the same shape/behavior it always had
+    // at that setting, just without a control the person had to think about
+    // for something that "really doesn't make much of a difference".
+    private val taggingPrefetchDepth = 3
 
     // likedTagSearchQuery removed — the Liked tab now reads/writes
     // _searchState.query directly (see updateLikedQueryText/submitLikedSearch
@@ -3284,8 +3287,23 @@ _bskyDid.value          = session.did
     private val _tagSuggestions = MutableStateFlow<List<String>>(emptyList())
     val tagSuggestions: StateFlow<List<String>> = _tagSuggestions
 
+    // Item 4 (Import/Export): every dataset imported on this device, for
+    // Settings' list under the Import/Export buttons — refreshed after
+    // every import/delete (see refreshImportedDatasets below).
+    private val _importedDatasets = MutableStateFlow<List<TagDatabase.DatasetInfo>>(emptyList())
+    val importedDatasets: StateFlow<List<TagDatabase.DatasetInfo>> = _importedDatasets
+
+    // Item 4 (Import/Export): human-readable status for the last
+    // export/import attempt — surfaced as a small toast-style message
+    // rather than a full error dialog, since a failure here (bad file, I/O
+    // error) isn't as disruptive as e.g. a login failure. Reuses
+    // _errorMessage's existing display path (see MainActivity's error
+    // banner) rather than a brand new one.
+    private fun reportDatasetError(message: String) { _errorMessage.value = message }
+
     init {
         refreshTaggingCounts()
+        refreshImportedDatasets()
     }
 
     private fun refreshTaggingCounts() {
@@ -3293,6 +3311,12 @@ _bskyDid.value          = session.did
             val (scanned, tagged) = taggingRepo.currentCounts()
             _hasTaggedDataset.value = scanned > 0
             _taggingUiState.value = _taggingUiState.value.copy(scanned = scanned, tagged = tagged, datasetBytes = taggingRepo.datasetSizeBytes())
+        }
+    }
+
+    private fun refreshImportedDatasets() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _importedDatasets.value = taggingRepo.listImportedDatasets()
         }
     }
 
@@ -3323,7 +3347,7 @@ _bskyDid.value          = session.did
                 bskyDid = _bskyDid.value,
                 e621Username = e621Username,
                 e621ApiKey = e621ApiKey,
-                concurrency = tagConcurrency.value
+                concurrency = taggingPrefetchDepth
             ) { progress ->
                 _taggingUiState.value = TaggingUiState(
                     scanned = progress.scanned,
@@ -3332,7 +3356,8 @@ _bskyDid.value          = session.did
                     isRunning = progress.isRunning,
                     isComplete = progress.isComplete,
                     modelState = progress.modelState,
-                    errorMessage = (progress.modelState as? TaggerModelManager.State.Failed)?.message
+                    errorMessage = (progress.modelState as? TaggerModelManager.State.Failed)?.message,
+                    currentItem = progress.currentItem
                 )
                 if (progress.scanned > 0) _hasTaggedDataset.value = true
             }
@@ -3356,6 +3381,101 @@ _bskyDid.value          = session.did
             taggingRepo.deleteDatabase()
             _hasTaggedDataset.value = false
             _taggingUiState.value = TaggingUiState()
+            _importedDatasets.value = emptyList() // clearAll() wipes the datasets table too
+            performLikedTagSearch("")
+        }
+    }
+
+    // ── Import/Export (item 4) ──────────────────────────────────────────
+
+    /** Plain JSON shape of an exported dataset file — kept intentionally
+     *  simple/flat (no versioned wrapper classes, no binary format) so a
+     *  friend's export is just a small readable JSON file that's easy to
+     *  back up, email, or inspect. [name] is what the person typed into the
+     *  "Export" naming dialog; it's what shows up in the *other* person's
+     *  imported-datasets list after they import it. */
+    private data class DatasetFile(
+        val formatVersion: Int = 1,
+        val name: String,
+        val exportedAt: Long,
+        val posts: List<DatasetFilePost>
+    )
+    private data class DatasetFilePost(
+        val postUri: String,
+        val cid: String,
+        val mediaUrl: String,
+        val tags: List<DatasetFileTag>
+    )
+    private data class DatasetFileTag(val name: String, val confidence: Float)
+
+    private val datasetGson = com.google.gson.Gson()
+
+    /** Settings' "Export" button, once the person has named the dataset and
+     *  picked a save location via the system file picker (ActivityResult
+     *  CreateDocument — see SettingsSheet's exportLauncher). Bundles
+     *  *everything* currently tagged on the device — local + every imported
+     *  dataset together — into one file, per the request that Export is a
+     *  full backup/share of "their dataset" as a whole rather than picking
+     *  one dataset to export. */
+    fun exportDataset(name: String, uri: android.net.Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val posts = taggingRepo.exportAllPosts()
+                val file = DatasetFile(
+                    name = name.ifBlank { "Untitled Dataset" },
+                    exportedAt = System.currentTimeMillis(),
+                    posts = posts.map { p ->
+                        DatasetFilePost(p.postUri, p.cid, p.mediaUrl, p.tags.map { (tag, conf) -> DatasetFileTag(tag, conf) })
+                    }
+                )
+                val json = datasetGson.toJson(file)
+                getApplication<Application>().contentResolver.openOutputStream(uri)?.use { out ->
+                    out.write(json.toByteArray(Charsets.UTF_8))
+                } ?: throw java.io.IOException("Couldn't open the chosen file for writing")
+            } catch (e: Exception) {
+                reportDatasetError("Export failed: ${e.message ?: "unknown error"}")
+            }
+        }
+    }
+
+    /** Settings' "Import" button, once a file's been picked via the system
+     *  file picker (ActivityResult OpenDocument — see SettingsSheet's
+     *  importLauncher). Reads and parses the file, then hands the posts to
+     *  TaggingRepository.importDataset, which is what actually keeps it
+     *  separate from every other dataset already on the device (see that
+     *  method's own doc comment). */
+    fun importDatasetFromUri(uri: android.net.Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val json = getApplication<Application>().contentResolver.openInputStream(uri)?.use { it.reader(Charsets.UTF_8).readText() }
+                    ?: throw java.io.IOException("Couldn't open the chosen file for reading")
+                val file = datasetGson.fromJson(json, DatasetFile::class.java)
+                    ?: throw java.io.IOException("That file isn't a dataset export")
+                if (file.posts.isEmpty()) throw java.io.IOException("That dataset export is empty")
+                taggingRepo.importDataset(
+                    name = file.name.ifBlank { "Untitled Dataset" },
+                    posts = file.posts.map { p ->
+                        TagDatabase.ExportedPost(p.postUri, p.cid, p.mediaUrl, p.tags.map { it.name to it.confidence })
+                    }
+                )
+                refreshImportedDatasets()
+                refreshTaggingCounts()
+                performLikedTagSearch("")
+            } catch (e: Exception) {
+                reportDatasetError("Import failed: ${e.message ?: "that file doesn't look like a dataset export"}")
+            }
+        }
+    }
+
+    /** Per-row "X" in Settings' imported-datasets list. Only ever removes
+     *  the one dataset picked — see TagDatabase.deleteDataset's own doc
+     *  comment for why every other dataset (including the local one) is
+     *  untouched. */
+    fun deleteImportedDataset(id: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            taggingRepo.deleteDataset(id)
+            refreshImportedDatasets()
+            refreshTaggingCounts()
             performLikedTagSearch("")
         }
     }
