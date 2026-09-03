@@ -15,6 +15,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.time.Instant
 
 class BlueskyRepository {
@@ -23,6 +25,10 @@ class BlueskyRepository {
     private var baseUrl: String = "https://bsky.social/"
 
     fun updateServiceUrl(url: String) { baseUrl = url; api = NetworkClient.buildBlueskyApi(url) }
+
+    /** The current account's PDS host (e.g. "bsky.social") — used to mint
+     *  the service-auth token video.bsky.app upload requires. */
+    private fun currentPdsHost(): String = runCatching { java.net.URI(baseUrl).host }.getOrDefault("bsky.social")
 
     // ── Chat PDS resolution ──────────────────────────────────────────────────
     // chat.bsky.* calls must be routed through the account's ACTUAL PDS host,
@@ -1607,6 +1613,223 @@ class BlueskyRepository {
         }
         Pair(items, body.cursor)
     }
+
+    // ── Compose Post (upload flow) ──────────────────────────────────────────
+    // See ComposePostScreen.kt's header comment for the overall plan this
+    // implements. Images/thread/textshot are wired end to end; video posts
+    // (uploadVideoBlob below) follow Bluesky's documented service-auth flow
+    // but haven't been exercised against the live API yet, and the custom-
+    // thumbnail-as-first-frame trick RaccNet Legacy does with ffmpeg isn't
+    // ported yet (see ComposePostScreen.kt) — a video post today uploads and
+    // publishes fine, it just always gets Bluesky's own auto-generated
+    // thumbnail (frame 0 of the real video) rather than a custom one.
+
+    /** Reads an image at [uri], downscaling/re-encoding as needed to satisfy
+     *  Bluesky's current app.bsky.embed.images limits (2,000,000 byte blob
+     *  cap, images rendered at up to 4000×4000 — see the class doc comment
+     *  in ComposePostScreen.kt for where these numbers come from), then
+     *  uploads it via com.atproto.repo.uploadBlob. */
+    suspend fun uploadImageBlob(
+        token: String, context: android.content.Context, uri: android.net.Uri
+    ): Result<BskyBlob> = withContext(Dispatchers.IO) {
+        runCatching {
+            val (bytes, mimeType) = prepareImageForUpload(context, uri)
+            val body = bytes.toRequestBody(mimeType.toMediaType())
+            val resp = api.uploadBlob("Bearer $token", mimeType, body)
+            resp.body()?.blob ?: error("uploadBlob ${resp.code()}: ${resp.errorBody()?.string()}")
+        }
+    }
+
+    private val IMAGE_MAX_BLOB_BYTES = 2_000_000
+    private val IMAGE_MAX_DIMENSION = 4000
+
+    private fun prepareImageForUpload(context: android.content.Context, uri: android.net.Uri): Pair<ByteArray, String> {
+        val resolver = context.contentResolver
+        val original = resolver.openInputStream(uri)?.use { it.readBytes() } ?: error("Couldn't read image")
+        val declaredType = resolver.getType(uri)
+
+        // Fast path: already within both limits and a format Bluesky
+        // accepts as-is (jpeg/png/webp/gif) — upload the original bytes
+        // untouched rather than a re-encoded copy.
+        if (original.size <= IMAGE_MAX_BLOB_BYTES && declaredType != null &&
+            (declaredType == "image/jpeg" || declaredType == "image/png" || declaredType == "image/webp" || declaredType == "image/gif")) {
+            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            android.graphics.BitmapFactory.decodeByteArray(original, 0, original.size, bounds)
+            if (bounds.outWidth <= IMAGE_MAX_DIMENSION && bounds.outHeight <= IMAGE_MAX_DIMENSION) {
+                return original to declaredType
+            }
+        }
+
+        var bitmap = android.graphics.BitmapFactory.decodeByteArray(original, 0, original.size)
+            ?: error("Couldn't decode image")
+        if (bitmap.width > IMAGE_MAX_DIMENSION || bitmap.height > IMAGE_MAX_DIMENSION) {
+            val scale = IMAGE_MAX_DIMENSION.toFloat() / maxOf(bitmap.width, bitmap.height)
+            bitmap = android.graphics.Bitmap.createScaledBitmap(
+                bitmap, (bitmap.width * scale).toInt().coerceAtLeast(1), (bitmap.height * scale).toInt().coerceAtLeast(1), true
+            )
+        }
+        var quality = 92
+        var out = java.io.ByteArrayOutputStream().apply { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, this) }
+        while (out.size() > IMAGE_MAX_BLOB_BYTES && quality > 30) {
+            quality -= 12
+            out = java.io.ByteArrayOutputStream().apply { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, this) }
+        }
+        return out.toByteArray() to "image/jpeg"
+    }
+
+    /** Builds an app.bsky.embed.images embed (≤4 images) or an
+     *  app.bsky.embed.gallery embed (5-10 images) depending on count — the
+     *  two are different lexicons; images tops out at 4 by schema, gallery
+     *  covers 5-10 (soft-capped in authoring UIs; schema ceiling is 20). */
+    private fun buildImagesEmbed(blobs: List<BskyBlob>): Map<String, Any> {
+        val imageObjs = blobs.map { blob -> mapOf("image" to blob, "alt" to "") }
+        return if (blobs.size <= 4) {
+            mapOf("\$type" to "app.bsky.embed.images", "images" to imageObjs)
+        } else {
+            mapOf(
+                "\$type" to "app.bsky.embed.gallery",
+                "items" to blobs.map { blob -> mapOf("\$type" to "app.bsky.embed.gallery#image", "image" to blob, "alt" to "") }
+            )
+        }
+    }
+
+    /** Creates a single post — optionally with up to 10 images attached —
+     *  and optionally as a reply (used by [createThread] below for the
+     *  self-reply chain). Returns the new post's (uri, cid). */
+    suspend fun createPost(
+        token: String, did: String, text: String,
+        imageBlobs: List<BskyBlob> = emptyList(),
+        reply: BskyReplyRef? = null
+    ): Result<BskyRef> = withContext(Dispatchers.IO) {
+        runCatching {
+        val record = mutableMapOf<String, Any>(
+            "\$type" to "app.bsky.feed.post",
+            "text" to text,
+            "createdAt" to Instant.now().toString()
+        )
+        if (imageBlobs.isNotEmpty()) record["embed"] = buildImagesEmbed(imageBlobs)
+        if (reply != null) record["reply"] = mapOf(
+            "root" to mapOf("uri" to reply.root.uri, "cid" to reply.root.cid),
+            "parent" to mapOf("uri" to reply.parent.uri, "cid" to reply.parent.cid)
+        )
+        buildHashtagFacets(text).takeIf { it.isNotEmpty() }?.let { record["facets"] = it }
+
+        val resp = api.createRecord("Bearer $token", BskyCreateRecordRequest(did, "app.bsky.feed.post", record))
+        val body = resp.body() ?: error("createPost ${resp.code()}: ${resp.errorBody()?.string()}")
+        BskyRef(body.uri, body.cid)
+    }
+    }
+
+    /** Posts a self-thread: each entry's images are uploaded and attached to
+     *  that entry, and each post after the first replies to the previous one
+     *  (root always the first post) — a standard Bluesky self-thread. Stops
+     *  and returns whatever succeeded so far if any step fails, since partial
+     *  threads still need to be visible to the caller/person rather than
+     *  silently vanishing. */
+    suspend fun createThread(
+        token: String, did: String, context: android.content.Context,
+        posts: List<ThreadPostToSend>
+    ): Result<List<BskyRef>> = withContext(Dispatchers.IO) {
+        runCatching {
+        val created = mutableListOf<BskyRef>()
+        var root: BskyRef? = null
+        for (post in posts) {
+            val blobs = post.images.map { uri ->
+                uploadImageBlob(token, context, uri).getOrElse { throw it }
+            }
+            val reply = root?.let { r -> BskyReplyRef(root = r, parent = created.last()) }
+            val ref = createPost(token, did, post.text, blobs, reply).getOrElse { throw it }
+            if (root == null) root = ref
+            created += ref
+        }
+        created
+    }
+    }
+
+    /** One post's worth of content + already-resolved local media, ready to
+     *  send — the network-layer counterpart of ComposePostScreen's
+     *  ThreadPostDraft (which carries raw content:// Uris instead). */
+    data class ThreadPostToSend(val text: String, val images: List<android.net.Uri> = emptyList())
+
+    /** Renders [text] to a transparent-background/white-text square PNG
+     *  (same shrink-to-fit layout ComposePostScreen's live preview uses),
+     *  uploads it, and posts it as a single-image post — the network side of
+     *  Textshot mode. */
+    suspend fun createTextshotPost(token: String, did: String, textshotBitmap: android.graphics.Bitmap): Result<BskyRef> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val out = java.io.ByteArrayOutputStream()
+                textshotBitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
+                val bytes = out.toByteArray()
+                val body = bytes.toRequestBody("image/png".toMediaType())
+                val resp = api.uploadBlob("Bearer $token", "image/png", body)
+                val blob = resp.body()?.blob ?: error("uploadBlob ${resp.code()}: ${resp.errorBody()?.string()}")
+                createPost(token, did, "", listOf(blob)).getOrElse { throw it }
+            }
+        }
+
+    /** Uploads a video via video.bsky.app (a separate service from the
+     *  user's own PDS, per Bluesky's documented flow — see the class doc
+     *  comment above), polling until it's encoded, then posts it. `did` and
+     *  `pdsHost` identify the account/PDS the service-auth token is minted
+     *  for. */
+    suspend fun createVideoPost(
+        token: String, did: String, context: android.content.Context,
+        videoUri: android.net.Uri, thumbnailUri: android.net.Uri? = null,
+        title: String, description: String
+    ): Result<BskyRef> = withContext(Dispatchers.IO) {
+        runCatching {
+            val pdsHost = currentPdsHost()
+            // See VideoThumbnailStitcher's header comment — this is the
+            // only way a custom thumbnail actually shows up on Bluesky,
+            // since the platform always shows frame 0 as the thumbnail.
+            // Falls back to the original video untouched if no thumbnail
+            // was picked, or splicing fails for any reason (a missing
+            // thumbnail beats a failed post).
+            val uploadUri = if (thumbnailUri != null) {
+                runCatching { com.mediaviewer.util.VideoThumbnailStitcher.stitch(context, videoUri, thumbnailUri) }
+                    .getOrDefault(videoUri)
+            } else videoUri
+            val authResp = api.getServiceAuth(
+                "Bearer $token",
+                aud = "did:web:$pdsHost",
+                lxm = "com.atproto.repo.uploadBlob",
+                exp = (System.currentTimeMillis() / 1000) + 60 * 30
+            )
+            val serviceToken = authResp.body()?.token ?: error("getServiceAuth ${authResp.code()}")
+
+            val resolver = context.contentResolver
+            val bytes = resolver.openInputStream(uploadUri)?.use { it.readBytes() } ?: error("Couldn't read video")
+            // Transformer always re-muxes to mp4, so once stitching has
+            // happened the original content:// URI's declared type (mov,
+            // etc.) no longer applies to the bytes we're actually sending.
+            val mimeType = if (uploadUri != videoUri) "video/mp4" else (resolver.getType(videoUri) ?: "video/mp4")
+            val fileName = "raccnet-${System.currentTimeMillis()}.mp4"
+            val body = bytes.toRequestBody(mimeType.toMediaType())
+
+            var jobStatus: BskyJobStatus? = videoApi.uploadVideo("Bearer $serviceToken", mimeType, did, fileName, body).body()
+                ?: error("uploadVideo failed")
+            while (jobStatus?.state != "JOB_STATE_COMPLETED" && jobStatus?.blob == null) {
+                if (jobStatus?.state == "JOB_STATE_FAILED") error("Video processing failed: ${jobStatus?.error ?: jobStatus?.message}")
+                delay(2000)
+                jobStatus = videoApi.getJobStatus(jobStatus?.jobId ?: error("no jobId")).body()?.jobStatus
+            }
+            val blob = jobStatus?.blob ?: error("Video job completed with no blob")
+
+            val text = if (description.isBlank()) title else "$title\n\n$description"
+            val record = mutableMapOf<String, Any>(
+                "\$type" to "app.bsky.feed.post",
+                "text" to text,
+                "embed" to mapOf("\$type" to "app.bsky.embed.video", "video" to blob),
+                "createdAt" to Instant.now().toString()
+            )
+            val resp = api.createRecord("Bearer $token", BskyCreateRecordRequest(did, "app.bsky.feed.post", record))
+            val respBody = resp.body() ?: error("createPost ${resp.code()}")
+            BskyRef(respBody.uri, respBody.cid)
+        }
+    }
+
+    private val videoApi: com.mediaviewer.network.BlueskyVideoApi by lazy { NetworkClient.buildBlueskyVideoApi() }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 

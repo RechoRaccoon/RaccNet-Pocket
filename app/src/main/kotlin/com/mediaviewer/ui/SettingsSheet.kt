@@ -164,6 +164,10 @@ fun SettingsSheet(
     onShowSaves: () -> Unit,
     onShowHistory: () -> Unit,
     onOpenDmInbox: () -> Unit,
+    // Upload flow: the Hub's "+" -> "Post" bubble opens the Bluesky post
+    // composer (see ComposePostScreen.kt). Default no-op keeps every other
+    // existing call site of SettingsSheet compiling unchanged.
+    onOpenComposePost: () -> Unit = {},
     // Item 7
     onOpenSearch: () -> Unit = {},
     // Phase 4 — on-device translation
@@ -440,7 +444,8 @@ fun SettingsSheet(
                         uploadBackdrop = hubBackgroundBackdrop,
                         onReturnToFeed = { onReturnToFeed() },
                         onRefresh = if (hubPage == HubPage.AT_PROTOCOL) onRefreshHub else null,
-                        hasVisitedFeed = hasVisitedFeed
+                        hasVisitedFeed = hasVisitedFeed,
+                        onOpenComposePost = onOpenComposePost
                     )
                 }
             }
@@ -1831,7 +1836,11 @@ private fun HubUploadBubble(
     // `uploadBackdrop` — this is that same background-only layer, used
     // only for the popped-open menu bubbles below, never for the "+"
     // circle itself (which keeps using [backdrop], same as before).
-    menuBackdrop: GlassBackdrop? = null
+    menuBackdrop: GlassBackdrop? = null,
+    // Upload flow: "Post" is the first entry with real functionality —
+    // opens the Bluesky post composer (ComposePostScreen.kt). The other
+    // four entries (Blog/Review/Record/Go Live) remain placeholders.
+    onOpenComposePost: () -> Unit = {}
 ) {
     var expanded by remember { mutableStateOf(false) }
     val rotation by animateFloatAsState(if (expanded) 45f else 0f, animationSpec = tween(220), label = "uploadPlusRotation")
@@ -1902,7 +1911,7 @@ private fun HubUploadBubble(
                     val bubbleModifier = Modifier
                         .fillMaxWidth()
                         .height(bubbleHeightDp)
-                        .clickable { expanded = false }
+                        .clickable { expanded = false; if (label == "Post") onOpenComposePost() }
                     // Item 4: opaque masked bubbles instead of the live
                     // LiquidGlassSurface — besides the "shouldn't be
                     // transparent" request, this also removes the one thing
@@ -1958,7 +1967,9 @@ private fun ReturnToFeedBar(
     // Feed" from then on — see MainViewModel.hasVisitedFeed's own doc
     // comment for why this is tracked centrally rather than as local
     // per-button state.
-    hasVisitedFeed: Boolean = false
+    hasVisitedFeed: Boolean = false,
+    // Upload flow: forwarded down to HubUploadBubble's "Post" entry.
+    onOpenComposePost: () -> Unit = {}
 ) {
     val barHeight = 40.dp
     val shape = RoundedCornerShape(20.dp)
@@ -2019,7 +2030,8 @@ private fun ReturnToFeedBar(
         }
         HubUploadBubble(
             liquidGlass, tint, size = barHeight, modifier = Modifier.align(Alignment.CenterEnd),
-            backdrop = backdrop, menuBackdrop = uploadBackdrop
+            backdrop = backdrop, menuBackdrop = uploadBackdrop,
+            onOpenComposePost = onOpenComposePost
         )
     }
 }

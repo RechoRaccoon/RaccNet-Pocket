@@ -212,6 +212,8 @@ private fun AppRoot(viewModel: MainViewModel) {
     val bskyDid                by viewModel.bskyDid.collectAsState()
     val dmInboxOpen            by viewModel.dmInboxOpen.collectAsState()
     val dmThread               by viewModel.dmThread.collectAsState()
+    val composePostOpen        by viewModel.composePostOpen.collectAsState()
+    val composePostSubmitting  by viewModel.composePostSubmitting.collectAsState()
     // Item 12 follow-up: DM-thread "shared posts" feed loading overlay.
     val dmFeedLoadingOverlay   by viewModel.dmFeedLoadingOverlay.collectAsState()
     // Item 8: Hub Friends/Livestreams sections.
@@ -640,6 +642,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             onShowSaves               = viewModel::showSaves,
             onShowHistory             = viewModel::showHistory,
             onOpenDmInbox             = viewModel::openDmInbox,
+            onOpenComposePost         = viewModel::openComposePost,
             onOpenSearch              = viewModel::openSearch,
             translationEnabled        = translationEnabled,
             translationTargetLang     = translationTargetLang,
@@ -664,6 +667,17 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onTapAuthor     = { author -> viewModel.closeDmInbox(); viewModel.openProfile(author) },
                 onLoadMoreMessages   = viewModel::loadMoreDmMessages,
                 onOpenSharedPostsFeed = viewModel::openDmThreadSharedPostsFeed
+            )
+        }
+
+        if (composePostOpen) {
+            com.mediaviewer.ui.ComposePostScreen(
+                selfProfile    = selfProfile?.author,
+                liquidGlass    = liquidGlass,
+                dominantColor  = currentDominantColor,
+                submitting     = composePostSubmitting,
+                onClose        = viewModel::closeComposePost,
+                onSubmit       = viewModel::submitComposePost
             )
         }
 

@@ -268,6 +268,37 @@ data class BskyCreateRecordRequest(
 
 data class BskyCreateRecordResponse(val uri: String, val cid: String)
 
+// ── Compose Post (upload flow) ──────────────────────────────────────────────
+
+data class BskyBlobRef(@SerializedName("\$link") val link: String)
+
+data class BskyBlob(
+    @SerializedName("\$type") val type: String = "blob",
+    val ref: BskyBlobRef,
+    val mimeType: String,
+    val size: Long
+)
+
+data class BskyUploadBlobResponse(val blob: BskyBlob)
+
+data class BskyServiceAuthResponse(val token: String)
+
+// app.bsky.video.defs#jobStatus. `state` is one of JOB_STATE_CREATED,
+// JOB_STATE_ENCODING, JOB_STATE_COMPLETED, JOB_STATE_FAILED (etc — treated
+// as an opaque string here; only COMPLETED/FAILED are checked for).
+data class BskyJobStatus(
+    val jobId: String,
+    val did: String? = null,
+    val state: String = "",
+    val progress: Int? = null,
+    val blob: BskyBlob? = null,
+    val error: String? = null,
+    val message: String? = null
+)
+
+data class BskyJobStatusResponse(val jobStatus: BskyJobStatus)
+
+
 data class BskyDeleteRecordRequest(
     val repo: String,
     val collection: String,

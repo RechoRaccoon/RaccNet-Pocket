@@ -553,6 +553,68 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closeDmInbox() { _dmInboxOpen.value = false; _dmThread.value = null }
 
+    // ── Compose Post (upload flow — Hub "+" -> "Post") ──────────────────────
+    // See ComposePostScreen.kt for the full composer UI. Submitting is wired
+    // through here rather than straight from the screen so the screen itself
+    // stays a plain, stateless-ish presentation layer — same pattern as every
+    // other overlay in this app (DM inbox, Search, Reply).
+    private val _composePostOpen = MutableStateFlow(false)
+    val composePostOpen: StateFlow<Boolean> = _composePostOpen
+
+    private val _composePostSubmitting = MutableStateFlow(false)
+    val composePostSubmitting: StateFlow<Boolean> = _composePostSubmitting
+
+    fun openComposePost() { _composePostOpen.value = true }
+    fun closeComposePost() { if (!_composePostSubmitting.value) _composePostOpen.value = false }
+
+    /** Routes a finished [com.mediaviewer.ui.ComposePostDraft] to the right
+     *  BlueskyRepository call for its mode, retrying once on an expired-
+     *  session error the same way every other authenticated call in this
+     *  ViewModel does (see isAuthError/refreshBskyTokenIfPossible). */
+    fun submitComposePost(draft: com.mediaviewer.ui.ComposePostDraft) {
+        if (_composePostSubmitting.value) return
+        _composePostSubmitting.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            var result = runCatchingComposePost(draft)
+            if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
+                if (refreshBskyTokenIfPossible()) result = runCatchingComposePost(draft)
+            }
+            result.onFailure { _errorMessage.value = it.message }
+            _composePostSubmitting.value = false
+            if (result.isSuccess) _composePostOpen.value = false
+        }
+    }
+
+    private suspend fun runCatchingComposePost(draft: com.mediaviewer.ui.ComposePostDraft): Result<Any> {
+        val context = getApplication<Application>()
+        val did = _bskyDid.value
+        return when (draft.mode) {
+            com.mediaviewer.ui.ComposeMode.SINGLE -> {
+                val post = draft.posts.firstOrNull()
+                if (post == null) Result.failure(IllegalStateException("Empty post"))
+                else runCatching {
+                    val blobs = post.images.map { uri -> bskyRepo.uploadImageBlob(bskyToken, context, uri).getOrElse { throw it } }
+                    bskyRepo.createPost(bskyToken, did, post.text, blobs).getOrElse { throw it }
+                }
+            }
+            com.mediaviewer.ui.ComposeMode.THREAD -> runCatching {
+                val posts = draft.posts.map { com.mediaviewer.repository.BlueskyRepository.ThreadPostToSend(it.text, it.images) }
+                bskyRepo.createThread(bskyToken, did, context, posts).getOrElse { throw it }
+            }
+            com.mediaviewer.ui.ComposeMode.TEXTSHOT -> runCatching {
+                val bitmap = com.mediaviewer.util.TextshotRenderer.render(draft.textshotText)
+                bskyRepo.createTextshotPost(bskyToken, did, bitmap).getOrElse { throw it }
+            }
+            com.mediaviewer.ui.ComposeMode.VIDEO -> {
+                val uri = draft.videoUri
+                if (uri == null) Result.failure(IllegalStateException("No video attached"))
+                else runCatching {
+                    bskyRepo.createVideoPost(bskyToken, did, context, uri, draft.videoThumbnailUri, draft.videoTitle, draft.videoDescription).getOrElse { throw it }
+                }
+            }
+        }
+    }
+
     // ── Search (item 7) ──────────────────────────────────────────────────────
 
     // Reordered/renamed (per feedback): People now first (was Posts), and

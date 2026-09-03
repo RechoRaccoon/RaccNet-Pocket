@@ -78,6 +78,31 @@ object NetworkClient {
             .create(StreamplaceApi::class.java)
     }
 
+    // Compose Post (upload flow): video upload/processing lives on its own
+    // service, separate from the user's PDS — see BlueskyRepository.
+    // uploadVideoBlob. Longer timeouts than the default client since a
+    // 300MB/10-minute video upload can legitimately take a while even with
+    // Bluesky's faster 2026 upload pipeline.
+    fun buildBlueskyVideoApi(): BlueskyVideoApi {
+        val client = OkHttpClient.Builder()
+            .dispatcher(buildDispatcher())
+            .addInterceptor(HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BASIC })
+            .addInterceptor { chain ->
+                val req = chain.request().newBuilder().header("User-Agent", "MediaViewer/1.0 (ATProto client)").build()
+                chain.proceed(req)
+            }
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.MINUTES)
+            .writeTimeout(5, TimeUnit.MINUTES)
+            .build()
+        return Retrofit.Builder()
+            .baseUrl("https://video.bsky.app/")
+            .client(client)
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+            .create(BlueskyVideoApi::class.java)
+    }
+
     /** Plain OkHttpClient for streaming downloads */
     val downloadClient: OkHttpClient by lazy { buildOkHttp() }
 }

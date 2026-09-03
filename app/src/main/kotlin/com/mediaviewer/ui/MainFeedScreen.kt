@@ -272,6 +272,7 @@ fun MainFeedScreen(
     onShowSaves: () -> Unit = {},
     onShowHistory: () -> Unit = {},
     onOpenDmInbox: () -> Unit = {},
+    onOpenComposePost: () -> Unit = {},
     onOpenSearch: () -> Unit = {},
     // Phase 4 — on-device translation
     translationEnabled: Boolean = false,
@@ -497,6 +498,7 @@ fun MainFeedScreen(
                         onShowSaves               = { onShowSaves(); onSetScreen(ScreenState.FEED) },
                         onShowHistory             = { onShowHistory(); onSetScreen(ScreenState.FEED) },
                         onOpenDmInbox             = onOpenDmInbox,
+                        onOpenComposePost         = onOpenComposePost,
                         onOpenSearch              = onOpenSearch,
                         translationEnabled          = translationEnabled,
                         translationTargetLang       = translationTargetLang,

@@ -97,6 +97,30 @@ interface BlueskyApi {
         @Body request: BskyCreateRecordRequest
     ): Response<BskyCreateRecordResponse>
 
+    // ── Compose Post (upload flow) ──────────────────────────────────────────
+    // Raw-bytes blob upload — used for both images and (through
+    // BlueskyRepository's own video.bsky.app client below) video. Content-
+    // Type is per-call since it depends on the file being uploaded, so it's
+    // a plain @Header rather than a fixed @Headers annotation.
+    @POST("xrpc/com.atproto.repo.uploadBlob")
+    suspend fun uploadBlob(
+        @Header("Authorization") token: String,
+        @Header("Content-Type") contentType: String,
+        @Body body: okhttp3.RequestBody
+    ): Response<BskyUploadBlobResponse>
+
+    // Mints a short-lived service-auth token scoped to a single lexicon
+    // method (here, uploadBlob) for a specific audience service — required
+    // to authenticate directly against video.bsky.app, which is a separate
+    // service from the user's own PDS. See BlueskyRepository.uploadVideoBlob.
+    @GET("xrpc/com.atproto.server.getServiceAuth")
+    suspend fun getServiceAuth(
+        @Header("Authorization") token: String,
+        @Query("aud") aud: String,
+        @Query("lxm") lxm: String,
+        @Query("exp") exp: Long
+    ): Response<BskyServiceAuthResponse>
+
     @POST("xrpc/com.atproto.repo.deleteRecord")
     suspend fun deleteRecord(
         @Header("Authorization") token: String,
@@ -304,4 +328,25 @@ interface BlueskyApi {
         @Header("Authorization") token: String,
         @Body body: Map<String, String>
     ): Response<Unit>
+}
+
+/**
+ * Separate from [BlueskyApi] because video upload/processing happens on a
+ * dedicated service (video.bsky.app), not the user's own PDS — see
+ * NetworkClient.buildBlueskyVideoApi and BlueskyRepository.uploadVideoBlob.
+ */
+interface BlueskyVideoApi {
+    @POST("xrpc/app.bsky.video.uploadVideo")
+    suspend fun uploadVideo(
+        @Header("Authorization") serviceAuthToken: String,
+        @Header("Content-Type") contentType: String,
+        @Query("did") did: String,
+        @Query("name") name: String,
+        @Body body: okhttp3.RequestBody
+    ): Response<BskyJobStatus>
+
+    @GET("xrpc/app.bsky.video.getJobStatus")
+    suspend fun getJobStatus(
+        @Query("jobId") jobId: String
+    ): Response<BskyJobStatusResponse>
 }
