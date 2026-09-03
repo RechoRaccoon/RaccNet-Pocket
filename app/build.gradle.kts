@@ -59,18 +59,9 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.5.0")
     implementation("io.coil-kt:coil-video:2.5.0")
 
-    implementation("androidx.media3:media3-exoplayer:1.11.0")
-    implementation("androidx.media3:media3-exoplayer-hls:1.11.0")
-    implementation("androidx.media3:media3-ui:1.11.0")
-    // Compose Post (upload flow) — splices a custom thumbnail into a
-    // video's first frame before upload (Bluesky has no separate video-
-    // thumbnail field; see VideoThumbnailStitcher.kt for details, and
-    // RaccNet Legacy's ffmpeg-based equivalent for where this trick comes
-    // from). Kept at the same 1.11.0 line as the exoplayer/ui artifacts
-    // above since Media3 modules are version-locked together.
-    implementation("androidx.media3:media3-transformer:1.11.0")
-    implementation("androidx.media3:media3-effect:1.11.0")
-    implementation("androidx.media3:media3-muxer:1.11.0")
+    implementation("androidx.media3:media3-exoplayer:1.3.0")
+    implementation("androidx.media3:media3-exoplayer-hls:1.3.0")
+    implementation("androidx.media3:media3-ui:1.3.0")
 
     implementation("androidx.datastore:datastore-preferences:1.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
