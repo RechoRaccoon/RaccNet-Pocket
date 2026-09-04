@@ -189,7 +189,7 @@ fun ComposePostScreen(
     // habit of collapsing straight back down to a single "1/1" post because
     // short seed text didn't actually need a second one.
     fun startThreadFromSingle() {
-        threadPosts = computeThreadPosts(singleText.text, minPosts = 2)
+        threadPosts = computeThreadPosts(singleText.text, minPosts = 2).map { TextFieldValue(it) }
         activeThreadIndex = threadPosts.lastIndex
         mode = ComposeMode.THREAD
         isBlogMode = false
@@ -209,7 +209,7 @@ fun ComposePostScreen(
     // (see the doc comment on computeThreadPosts) purely so this is safe to
     // reuse below for re-flowing an already-started thread too.
     fun growTextIntoThread(fullText: String, floor: Int) {
-        threadPosts = computeThreadPosts(fullText, minPosts = floor)
+        threadPosts = computeThreadPosts(fullText, minPosts = floor).map { TextFieldValue(it) }
         activeThreadIndex = threadPosts.lastIndex
         mode = ComposeMode.THREAD
         isBlogMode = false
