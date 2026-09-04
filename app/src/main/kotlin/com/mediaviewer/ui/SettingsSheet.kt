@@ -1838,8 +1838,11 @@ private fun HubUploadBubble(
     // circle itself (which keeps using [backdrop], same as before).
     menuBackdrop: GlassBackdrop? = null,
     // Upload flow: "Post" is the first entry with real functionality —
-    // opens the Bluesky post composer (ComposePostScreen.kt). The other
-    // four entries (Blog/Review/Record/Go Live) remain placeholders.
+    // opens the Bluesky post composer (ComposePostScreen.kt). "Blog" now
+    // lives inside that composer itself (its bottom-bar status button)
+    // rather than as its own placeholder entry here, and "Record" has been
+    // removed outright — the remaining Review/Go Live entries stay
+    // placeholders.
     onOpenComposePost: () -> Unit = {}
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -1857,7 +1860,7 @@ private fun HubUploadBubble(
     }
 
     val items = remember {
-        listOf("Post", "Blog", "Review", "Record", "Go Live")
+        listOf("Post", "Review", "Go Live")
     }
     val bubbleHeightDp = 40.dp
     val gapDp = 5.dp
