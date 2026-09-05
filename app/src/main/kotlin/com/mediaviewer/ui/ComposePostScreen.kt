@@ -6,7 +6,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -36,22 +36,17 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.text.rememberTextMeasurer
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
@@ -163,6 +158,16 @@ fun ComposePostScreen(
     // own editor — the composer keeps using the same single-field editor
     // underneath it), separate from the Thread/Textshot mode switch below.
     var isBlogMode by remember { mutableStateOf(false) }
+    // Item 3/6/7: whether the thread re-flows text across posts as a single
+    // continuous stream (greedy-packing every post full before spilling into
+    // the next) or leaves each post exactly as the person typed it. On by
+    // default whenever the thread was created *for* the person (typing past
+    // the limit, or turning off Textshot/Blog over the limit) since there's
+    // real text that genuinely needs auto-splitting; off whenever they
+    // started the thread themselves via "+", since re-flowing would otherwise
+    // yank whatever they type in post 2 or 3 back into post 1 the moment it
+    // could technically still fit there.
+    var autoFormat by remember { mutableStateOf(true) }
 
     // Item 3: focus targets so a tap anywhere on the blank background can
     // land the keyboard caret in whichever field is actually active, rather
@@ -183,16 +188,23 @@ fun ComposePostScreen(
         }
     }
 
-    // Item 4: explicit "+" tap from a non-thread mode — keeps whatever's
+    // Item 4/6: explicit "+" tap from a non-thread mode — keeps whatever's
     // already been typed as post 1 and opens a blank post 2 right after it
     // ("the next sub post after the main one"), instead of the old code's
     // habit of collapsing straight back down to a single "1/1" post because
-    // short seed text didn't actually need a second one.
+    // short seed text didn't actually need a second one. Item 6: if that
+    // text (e.g. a long Blog draft) already overflows a single post on its
+    // own, this is really an auto-split rather than "add one more post to
+    // continue typing", so Auto Format starts on for it same as typing past
+    // the limit does — otherwise it stays off, the normal manual-add case.
     fun startThreadFromSingle() {
-        threadPosts = computeThreadPosts(singleText.text, minPosts = 2).map { TextFieldValue(it) }
+        val overflowing = singleText.text.length > POST_CHAR_LIMIT
+        threadPosts = computeThreadPosts(singleText.text, minPosts = if (overflowing) 1 else 2)
+            .map { TextFieldValue(it) }
         activeThreadIndex = threadPosts.lastIndex
         mode = ComposeMode.THREAD
         isBlogMode = false
+        autoFormat = overflowing
     }
 
     // Item 4: "+" tap while already threaded — appends one genuinely new
@@ -207,12 +219,15 @@ fun ComposePostScreen(
     // into a thread — no more "Thread/Textshot" choice sitting in the
     // status bubble. `minPosts` is floored at the thread's *current* size
     // (see the doc comment on computeThreadPosts) purely so this is safe to
-    // reuse below for re-flowing an already-started thread too.
+    // reuse below for re-flowing an already-started thread too. Always turns
+    // Auto Format on — this is always the "genuinely needs splitting" path,
+    // never the manual "+" one.
     fun growTextIntoThread(fullText: String, floor: Int) {
         threadPosts = computeThreadPosts(fullText, minPosts = floor).map { TextFieldValue(it) }
         activeThreadIndex = threadPosts.lastIndex
         mode = ComposeMode.THREAD
         isBlogMode = false
+        autoFormat = true
     }
 
     fun switchToTextshot() {
@@ -220,6 +235,32 @@ fun ComposePostScreen(
         singleText = TextFieldValue(seed)
         isBlogMode = false
         mode = ComposeMode.TEXTSHOT
+    }
+
+    // Item 7: turning Textshot back off doesn't just dump the person back
+    // into a single post that's silently over the limit — if the text won't
+    // fit in one post any more, it goes straight into a thread with Auto
+    // Format on, same as typing past the limit does anywhere else.
+    fun disableTextshot() {
+        if (singleText.text.length > POST_CHAR_LIMIT) {
+            growTextIntoThread(singleText.text, floor = 1)
+        } else {
+            mode = ComposeMode.SINGLE
+        }
+    }
+
+    // Item 6: entering Blog from a work-in-progress thread used to just show
+    // whatever stale text `singleText` still held from before the thread was
+    // ever started — everything actually typed into post 2, 3, etc. was
+    // effectively gone. Folding every post's real text into one blob (with a
+    // blank line between each, so the original post breaks are still
+    // visible) keeps all of it.
+    fun enableBlogMode() {
+        if (mode == ComposeMode.THREAD) {
+            singleText = TextFieldValue(threadPosts.joinToString("\n\n") { it.text.trimEnd() })
+        }
+        isBlogMode = true
+        mode = ComposeMode.SINGLE
     }
 
     // ── Media pickers (Android Photo Picker — no storage permission
@@ -417,31 +458,44 @@ fun ComposePostScreen(
                     // post it now lands in, so typing anywhere in the thread
                     // (including a freshly-added blank post) keeps the caret
                     // exactly where it was instead of snapping to position 0.
+                    // Item 3: all of that re-flowing only happens when Auto
+                    // Format is on; off, each post is just its own field —
+                    // typing in post 2 stays in post 2 instead of getting
+                    // pulled back into post 1 the moment it could still fit
+                    // there.
                     ComposeMode.THREAD -> {
                         threadPosts.forEachIndexed { index, tfv ->
                             HubDivider("Post ${index + 1}/${threadPosts.size}")
                             GrowingTextField(
                                 value = tfv,
                                 onValueChange = { newVal ->
-                                    val priorLength = threadPosts.take(index).sumOf { it.text.length }
-                                    val absoluteCaret = priorLength + newVal.selection.end
-                                    val fullText = threadPosts.mapIndexed { i, v -> if (i == index) newVal.text else v.text }
-                                        .joinToString("")
-                                    val chunks = computeThreadPosts(fullText, minPosts = threadPosts.size)
+                                    if (!autoFormat) {
+                                        val budget = POST_CHAR_LIMIT - threadSuffixLength(threadPosts.size)
+                                        threadPosts = threadPosts.toMutableList().also {
+                                            it[index] = capBudget(newVal, budget)
+                                        }
+                                        activeThreadIndex = index
+                                    } else {
+                                        val priorLength = threadPosts.take(index).sumOf { it.text.length }
+                                        val absoluteCaret = priorLength + newVal.selection.end
+                                        val fullText = threadPosts.mapIndexed { i, v -> if (i == index) newVal.text else v.text }
+                                            .joinToString("")
+                                        val chunks = computeThreadPosts(fullText, minPosts = threadPosts.size)
 
-                                    var remainingCaret = absoluteCaret
-                                    var caretChunk = 0
-                                    for ((i, chunk) in chunks.withIndex()) {
-                                        caretChunk = i
-                                        if (remainingCaret <= chunk.length) break
-                                        remainingCaret -= chunk.length
-                                    }
-                                    remainingCaret = remainingCaret.coerceIn(0, chunks.getOrElse(caretChunk) { "" }.length)
+                                        var remainingCaret = absoluteCaret
+                                        var caretChunk = 0
+                                        for ((i, chunk) in chunks.withIndex()) {
+                                            caretChunk = i
+                                            if (remainingCaret <= chunk.length) break
+                                            remainingCaret -= chunk.length
+                                        }
+                                        remainingCaret = remainingCaret.coerceIn(0, chunks.getOrElse(caretChunk) { "" }.length)
 
-                                    threadPosts = chunks.mapIndexed { i, text ->
-                                        if (i == caretChunk) TextFieldValue(text, TextRange(remainingCaret)) else TextFieldValue(text)
+                                        threadPosts = chunks.mapIndexed { i, text ->
+                                            if (i == caretChunk) TextFieldValue(text, TextRange(remainingCaret)) else TextFieldValue(text)
+                                        }
+                                        activeThreadIndex = caretChunk
                                     }
-                                    activeThreadIndex = caretChunk
                                 },
                                 placeholder = if (index == 0) "Start a thread…" else "Continue the thread…",
                                 onFocus = { activeThreadIndex = index },
@@ -452,7 +506,12 @@ fun ComposePostScreen(
                                 // (see handlePost's own suffix) — purely
                                 // visual, so it can't be tapped into or
                                 // accidentally deleted from the real content.
-                                visualTransformation = threadSuffixTransformation(index, threadPosts.size)
+                                // Held back until the post actually has text
+                                // in it, otherwise it overlapped the "Continue
+                                // the thread…" placeholder on every not-yet-
+                                // started post.
+                                visualTransformation = if (tfv.text.isNotEmpty())
+                                    threadSuffixTransformation(index, threadPosts.size) else VisualTransformation.None
                             )
                             Spacer(Modifier.height(10.dp))
                         }
@@ -479,8 +538,13 @@ fun ComposePostScreen(
                                 // Item 9: overflowing the limit here turns
                                 // this straight into a thread — no more
                                 // in-between "choose Thread or Textshot"
-                                // state living in the status bubble.
-                                if (newVal.text.length > POST_CHAR_LIMIT) {
+                                // state living in the status bubble. Item 6:
+                                // Blog is long-form on purpose, so it's left
+                                // alone here — going over the limit while
+                                // blogging doesn't interrupt typing; it's
+                                // only handled when the person actually taps
+                                // "+" (see startThreadFromSingle).
+                                if (!isBlogMode && newVal.text.length > POST_CHAR_LIMIT) {
                                     growTextIntoThread(newVal.text, floor = threadPosts.size)
                                 } else {
                                     singleText = newVal
@@ -503,72 +567,105 @@ fun ComposePostScreen(
             }
 
             // ── Fixed bottom bar — rides up above the keyboard via
-            // imePadding() so it always sits directly on top of it. ──────
-            Row(
+            // imePadding() so it always sits directly on top of it.
+            // Item 5: the char counter moved up to its own row, far
+            // right, so the "+" (add post to thread) button can sit on
+            // the far right of the button row underneath it instead of
+            // squeezed in next to the counter text. ────────────────────
+            Column(
                 Modifier.fillMaxWidth().imePadding().navigationBarsPadding()
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
-                val attachEnabled = mode != ComposeMode.TEXTSHOT
-                GlassCircleButton(
-                    icon = Icons.Default.Image, contentDescription = "Attach image or video",
-                    liquidGlass = liquidGlass, tint = dominantColor, size = 40.dp,
-                    enabled = attachEnabled,
-                    onClick = {
-                        mediaPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        val (used, limit) = activeBudget
+                        val overLimit = used > limit
+                        Text(
+                            if (limit == Int.MAX_VALUE) "$used" else "$used/$limit",
+                            color = if (overLimit) Color(0xFFE0245E) else DimGray,
+                            fontSize = 12.sp, fontWeight = FontWeight.Medium
+                        )
                     }
-                )
-                Spacer(Modifier.width(6.dp))
-                // Item 7: Blog and Textshot toggle buttons — dim unless the
-                // status they set is the one currently active.
-                GlassCircleButton(
-                    icon = Icons.Default.Article, contentDescription = "Blog",
-                    liquidGlass = liquidGlass, tint = dominantColor, size = 40.dp,
-                    enabled = mode != ComposeMode.VIDEO,
-                    selected = isBlogMode,
-                    onClick = {
-                        if (isBlogMode) {
-                            isBlogMode = false
-                        } else {
-                            isBlogMode = true
-                            if (mode != ComposeMode.VIDEO) mode = ComposeMode.SINGLE
+                    Spacer(Modifier.height(8.dp))
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        // Item 1: one consistent gap between every button in
+                        // this cluster instead of a mix of a 6dp Spacer
+                        // between some and none between others.
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            GlassCircleButton(
+                                icon = Icons.Default.Image, contentDescription = "Attach image or video",
+                                liquidGlass = liquidGlass, tint = dominantColor, size = 40.dp,
+                                enabled = mode != ComposeMode.TEXTSHOT,
+                                onClick = {
+                                    mediaPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                                }
+                            )
+                            // Item 2: Blog and Textshot are text buttons, not
+                            // icons — dim unless the status they set is the
+                            // one currently active.
+                            TextToggleButton(
+                                label = "Blog",
+                                liquidGlass = liquidGlass, tint = dominantColor,
+                                enabled = mode != ComposeMode.VIDEO,
+                                selected = isBlogMode,
+                                onClick = {
+                                    if (isBlogMode) {
+                                        isBlogMode = false
+                                    } else if (mode != ComposeMode.VIDEO) {
+                                        enableBlogMode()
+                                    }
+                                }
+                            )
+                            TextToggleButton(
+                                label = "Textshot",
+                                liquidGlass = liquidGlass, tint = dominantColor,
+                                enabled = mode != ComposeMode.VIDEO,
+                                selected = mode == ComposeMode.TEXTSHOT,
+                                onClick = {
+                                    if (mode == ComposeMode.TEXTSHOT) {
+                                        disableTextshot()
+                                    } else {
+                                        switchToTextshot()
+                                    }
+                                }
+                            )
+                            // Item 3: Auto Format is thread-mode exclusive —
+                            // it only appears once a thread actually exists,
+                            // right after Textshot.
+                            if (mode == ComposeMode.THREAD) {
+                                TextToggleButton(
+                                    label = "Auto Format",
+                                    liquidGlass = liquidGlass, tint = dominantColor,
+                                    selected = autoFormat,
+                                    onClick = {
+                                        autoFormat = !autoFormat
+                                        if (autoFormat) {
+                                            // Re-flowing back on immediately
+                                            // packs whatever's there right
+                                            // now, same greedy fill as typing
+                                            // normally would have produced.
+                                            val fullText = threadPosts.joinToString("") { it.text }
+                                            threadPosts = computeThreadPosts(fullText, minPosts = threadPosts.size)
+                                                .map { TextFieldValue(it) }
+                                            activeThreadIndex = activeThreadIndex.coerceAtMost(threadPosts.lastIndex)
+                                        }
+                                    }
+                                )
+                            }
                         }
+                        Spacer(Modifier.weight(1f))
+                        GlassCircleButton(
+                            icon = Icons.Default.Add, contentDescription = "Add post to thread",
+                            liquidGlass = liquidGlass, tint = dominantColor, size = 36.dp,
+                            enabled = mode != ComposeMode.VIDEO,
+                            onClick = {
+                                if (mode == ComposeMode.THREAD) addThreadPost() else startThreadFromSingle()
+                            }
+                        )
                     }
-                )
-                GlassCircleButton(
-                    icon = Icons.Default.Screenshot, contentDescription = "Textshot",
-                    liquidGlass = liquidGlass, tint = dominantColor, size = 40.dp,
-                    enabled = mode != ComposeMode.VIDEO,
-                    selected = mode == ComposeMode.TEXTSHOT,
-                    onClick = {
-                        if (mode == ComposeMode.TEXTSHOT) {
-                            mode = ComposeMode.SINGLE
-                        } else {
-                            switchToTextshot()
-                        }
-                    }
-                )
-                Spacer(Modifier.weight(1f))
-                GlassCircleButton(
-                    icon = Icons.Default.Add, contentDescription = "Add post to thread",
-                    liquidGlass = liquidGlass, tint = dominantColor, size = 36.dp,
-                    enabled = mode != ComposeMode.VIDEO,
-                    onClick = {
-                        if (mode == ComposeMode.THREAD) addThreadPost() else startThreadFromSingle()
-                    }
-                )
-                Spacer(Modifier.width(10.dp))
-                val (used, limit) = activeBudget
-                val overLimit = used > limit
-                Text(
-                    if (limit == Int.MAX_VALUE) "$used" else "$used/$limit",
-                    color = if (overLimit) Color(0xFFE0245E) else DimGray,
-                    fontSize = 12.sp, fontWeight = FontWeight.Medium
-                )
+                }
             }
         }
     }
-}
 
 // ── Sub-components ──────────────────────────────────────────────────────
 
@@ -598,6 +695,35 @@ private fun GlassCircleButton(
         Box(clickMod.background(Color.White.copy(0.10f)), contentAlignment = Alignment.Center) {
             Icon(icon, contentDescription = contentDescription, tint = Color.White.copy(alpha = alpha), modifier = Modifier.size(size * 0.45f))
         }
+    }
+}
+
+/** Item 2: Blog/Textshot/Auto Format as text pills instead of icons — same
+ *  dim-unless-selected treatment as GlassCircleButton above, just a label
+ *  in a rounded glass pill rather than an icon in a circle. */
+@Composable
+private fun TextToggleButton(
+    label: String,
+    liquidGlass: Boolean, tint: Color,
+    enabled: Boolean = true,
+    selected: Boolean = true,
+    onClick: () -> Unit
+) {
+    val shape = RoundedCornerShape(14.dp)
+    val clickMod = Modifier.clip(shape).clickable(enabled = enabled, onClick = onClick)
+    val alpha = if (enabled && selected) 1f else 0.35f
+
+    @Composable
+    fun Content() {
+        Text(
+            label, color = Color.White.copy(alpha = alpha), fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+        )
+    }
+    if (liquidGlass) {
+        LiquidGlassSurface(clickMod, shape = shape, tint = tint) { Content() }
+    } else {
+        Box(clickMod.background(Color.White.copy(0.10f))) { Content() }
     }
 }
 
@@ -755,43 +881,32 @@ private fun VideoAndThumbnailRow(
     }
 }
 
-/** Textshot mode's live preview: transparent background, white text,
- *  shrinking to fit as the text grows so everything stays visible when the
- *  final image is viewed on social media. */
+/** Item 9: Textshot mode's live preview now calls the exact same
+ *  [com.mediaviewer.util.TextshotRenderer.render] used to build the actual
+ *  uploaded image (see MainViewModel.submitComposePost), and just displays
+ *  that bitmap — rather than a second, separately-tuned Compose-based
+ *  layout that could (and did) drift out of sync with the real render.
+ *  Item 8: since it's the same renderer, the preview automatically picks up
+ *  its tight, content-hugging padding instead of sitting in a fixed square
+ *  with a lot of dead space around short posts. */
 @Composable
 private fun TextshotPreview(text: String, liquidGlass: Boolean, tint: Color) {
     val shape = RoundedCornerShape(14.dp)
-    val density = LocalDensity.current
-    val measurer = rememberTextMeasurer()
-    val sizeDp = 320.dp
-    val sizePx = with(density) { sizeDp.toPx() }.toInt()
-    val padding = with(density) { 24.dp.toPx() }
-    val maxTextWidth = (sizePx - padding * 2).toInt().coerceAtLeast(1)
-    val maxTextHeight = (sizePx - padding * 2).toInt().coerceAtLeast(1)
-
-    val layout = remember(text, sizePx) {
-        var fontSizeSp = 34f
-        var result = measurer.measure(
-            AnnotatedString(text),
-            style = TextStyle(color = Color.White, fontSize = fontSizeSp.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center),
-            constraints = Constraints(maxWidth = maxTextWidth)
-        )
-        while (result.size.height > maxTextHeight && fontSizeSp > 10f) {
-            fontSizeSp -= 2f
-            result = measurer.measure(
-                AnnotatedString(text),
-                style = TextStyle(color = Color.White, fontSize = fontSizeSp.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center),
-                constraints = Constraints(maxWidth = maxTextWidth)
-            )
+    var bitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    LaunchedEffect(text) {
+        bitmap = withContext(Dispatchers.Default) {
+            com.mediaviewer.util.TextshotRenderer.render(text)
         }
-        result
     }
+    val current = bitmap
+    val aspect = if (current != null && current.height > 0) current.width.toFloat() / current.height.toFloat() else 1f
 
-    Box(Modifier.size(sizeDp).clip(shape).then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.background(Color.White.copy(0.05f)))) {
-        Canvas(Modifier.fillMaxSize()) {
-            val x = (size.width - layout.size.width) / 2f
-            val y = (size.height - layout.size.height) / 2f
-            translate(x, y) { drawText(layout) }
+    Box(
+        Modifier.fillMaxWidth().aspectRatio(aspect).clip(shape)
+            .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.background(Color.White.copy(0.05f)))
+    ) {
+        if (current != null) {
+            Image(bitmap = current.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize())
         }
     }
 }
