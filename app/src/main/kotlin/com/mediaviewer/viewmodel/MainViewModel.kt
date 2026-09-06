@@ -623,7 +623,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // backed by a real search. Enum name kept as ACCOUNTS/FEEDS rather than
     // renaming the Kotlin identifiers too, to keep this diff scoped to
     // what's user-visible; .label() below is what actually says "People".
-    enum class SearchFilter { ACCOUNTS, POSTS, LIKED_TAGS, FEEDS, STARTER_PACKS }
+    enum class SearchFilter { ACCOUNTS, POSTS, LIKED_TAGS, TITLES, FEEDS, STARTER_PACKS }
 
     data class SearchState(
         val query: String = "",
@@ -632,6 +632,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val accounts: List<SearchAccountResult> = emptyList(),
         val starterPacks: List<SearchStarterPackResult> = emptyList(),
         val feeds: List<SearchFeedResult> = emptyList(),
+        // Titles feature (placeholder — no catalog wired up right now;
+        // TMDB was removed, see history). `titleFilter` reuses
+        // ProfileOverlay's ReviewKindFilter for its sub-filter row, per
+        // spec ("just like in the profile tabs"), but only ALL/MOVIES/TV
+        // are actually selectable here — Games/Music/Books stay
+        // Profile-only buckets.
+        val titles: List<TitleSearchResult> = emptyList(),
+        val titleFilter: com.mediaviewer.ui.ReviewKindFilter = com.mediaviewer.ui.ReviewKindFilter.ALL,
+        val titleLoading: Boolean = false,
+        val selectedTitle: TitleSearchResult? = null,
+        val selectedTitleLoading: Boolean = false,
         val loading: Boolean = false,
         val hasSearched: Boolean = false
     )
@@ -717,8 +728,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         _searchState.value = _searchState.value.copy(feeds = feeds, loading = false, hasSearched = true)
                     }.onFailure { _searchState.value = _searchState.value.copy(loading = false, hasSearched = true) }
                 }
+                // Titles feature: placeholder for now (per feedback — TMDB
+                // has been fully removed). No catalog is wired up, so this
+                // just clears any stale results and marks the search as
+                // "done" so the UI shows its placeholder state instead of a
+                // stuck spinner.
+                SearchFilter.TITLES -> {
+                    _searchState.value = _searchState.value.copy(
+                        titles = emptyList(), titleLoading = false, loading = false, hasSearched = true
+                    )
+                }
             }
         }
+    }
+
+    /** Titles tab's sub-filter row (All/Movies/TV) — kept for the
+     *  placeholder UI even though there's no catalog behind it right now. */
+    fun setTitleSubFilter(filter: com.mediaviewer.ui.ReviewKindFilter) {
+        _searchState.value = _searchState.value.copy(titleFilter = filter)
+    }
+
+    /** Tapping a Title card — opens it in its own overlayed page (see
+     *  TitleDetailOverlay in ProfileOverlay.kt). Titles is a placeholder
+     *  feature right now (TMDB removed) — TitleDetailOverlay itself shows
+     *  "Placeholder" for every field a real catalog would have supplied,
+     *  so there's nothing to fetch here. */
+    fun openTitleDetail(title: TitleSearchResult) {
+        _searchState.value = _searchState.value.copy(selectedTitle = title, selectedTitleLoading = false)
+    }
+
+    fun closeTitleDetail() {
+        _searchState.value = _searchState.value.copy(selectedTitle = null, selectedTitleLoading = false)
     }
 
     /** Search page's Feeds tab: "Add" on a feed result — writes it into the
@@ -1316,6 +1356,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { prefs.customFontName.collect { _customFontName.value = it } }
         viewModelScope.launch { prefs.subscribedReviewDids.collect { _subscribedReviewDids.value = it } }
         viewModelScope.launch { prefs.subscribedBlogDids.collect { _subscribedBlogDids.value = it } }
+        // Bug fix (per feedback — Reviews/Blogs show their cached content
+        // instantly on cold start, but Mutuals sits blank/reloads every
+        // time): Reviews/Blogs' "instant snapshot from disk" step
+        // (loadFriendsReviewsIfNeeded) is reached the moment the Hub page
+        // itself composes — cheap, and effectively immediate. Mutuals'
+        // equivalent snapshot step, inside loadDmConversationsBlocking, was
+        // only ever reachable through ensureDmConversationsLoadedSuspend —
+        // which is itself only called from cold-start warmup/preload paths
+        // that run alongside, and have to actually get scheduled amid, the
+        // six-plus *other* concurrent network calls cold start also kicks
+        // off (loadFeed, loadAvailableFeeds, prefetchUserLists,
+        // preloadFriendsFeed, loadSelfProfile — see startHubBackgroundWarmup's
+        // own doc comment on that exact pile-up). The on-disk cache read
+        // itself is a handful of milliseconds, but it had no path to run
+        // before all of that. Reading it here — its own tiny, standalone
+        // coroutine, launched first, before any of those network calls even
+        // get kicked off below — decouples "show what's on disk" from all
+        // of that entirely, so it can never be starved out by unrelated
+        // network traffic the way it apparently was.
+        viewModelScope.launch(Dispatchers.IO) {
+            if (_dmConversations.value.isEmpty()) {
+                runCatching {
+                    val type = object : com.google.gson.reflect.TypeToken<List<DmConversation>>() {}.type
+                    val cached: List<DmConversation> = dmCacheGson.fromJson(prefs.hubMutualsCacheJson.first(), type) ?: emptyList()
+                    if (cached.isNotEmpty()) _dmConversations.value = cached
+                }
+            }
+        }
         loadHistoryFromPrefs()
         trackHistoryAutomatically()
         // Item 3 (rework): fills in _feedInteractionSupport for any feed the
@@ -2495,6 +2563,43 @@ _bskyDid.value          = session.did
     // you happen to open Send Post.
     private val dmConversationsMutex = Mutex()
 
+    // Bug fix (see the init-block cache-hydration comment above): a plain
+    // Gson().fromJson would throw — and, wrapped in runCatching, silently
+    // discard the *entire* cached list — the moment any single cached
+    // AuthorInfo/DmConversation object doesn't line up with the current
+    // data class shape (a field renamed/added since that cache was written
+    // by an older build). This lenient reader defaults every field instead
+    // of leaving that to Gson's normal reflective (and much stricter about
+    // matching the JSON exactly) deserialization, the same fix already
+    // applied to LeafletBlog's own cache reader above.
+    private val dmCacheGson: com.google.gson.Gson by lazy {
+        com.google.gson.GsonBuilder()
+            .registerTypeAdapter(AuthorInfo::class.java, com.google.gson.JsonDeserializer { json, _, _ ->
+                val o = json.asJsonObject
+                fun str(key: String) = o.get(key)?.takeIf { !it.isJsonNull }?.asString
+                AuthorInfo(
+                    did = str("did") ?: "",
+                    handle = str("handle") ?: "",
+                    displayName = str("displayName") ?: "",
+                    avatarUrl = str("avatarUrl"),
+                    followingUri = str("followingUri"),
+                    isFollowing = o.get("isFollowing")?.takeIf { !it.isJsonNull }?.asBoolean ?: false
+                )
+            })
+            .registerTypeAdapter(DmConversation::class.java, com.google.gson.JsonDeserializer { json, _, ctx ->
+                val o = json.asJsonObject
+                fun str(key: String) = o.get(key)?.takeIf { !it.isJsonNull }?.asString
+                DmConversation(
+                    convoId = str("convoId") ?: "",
+                    member = o.get("member")?.let { ctx.deserialize<AuthorInfo>(it, AuthorInfo::class.java) }
+                        ?: AuthorInfo(did = "", handle = "", displayName = "", avatarUrl = null),
+                    lastSentByUsAt = str("lastSentByUsAt") ?: "",
+                    lastActivityAt = str("lastActivityAt") ?: ""
+                )
+            })
+            .create()
+    }
+
     private suspend fun ensureDmConversationsLoadedSuspend(silent: Boolean) {
         if (_dmConversations.value.isNotEmpty()) return
         dmConversationsMutex.withLock {
@@ -2675,7 +2780,7 @@ _bskyDid.value          = session.did
         if (_dmConversations.value.isEmpty()) {
             runCatching {
                 val type = object : com.google.gson.reflect.TypeToken<List<DmConversation>>() {}.type
-                val cached: List<DmConversation> = com.google.gson.Gson().fromJson(prefs.hubMutualsCacheJson.first(), type) ?: emptyList()
+                val cached: List<DmConversation> = dmCacheGson.fromJson(prefs.hubMutualsCacheJson.first(), type) ?: emptyList()
                 if (cached.isNotEmpty()) _dmConversations.value = cached
             }
         }

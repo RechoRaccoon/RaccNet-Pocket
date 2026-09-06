@@ -310,8 +310,25 @@ private fun DmThreadView(
         // "Search"-bar pattern SearchOverlay uses — and sits with proper
         // clearance above the gesture bar via navigationBarsPadding, instead
         // of butting right up against it.
+        //
+        // Bug fix: when the keyboard opens, this row now rides up to sit
+        // directly on top of it instead of staying pinned to the bottom of
+        // the screen underneath it. `WindowInsets.ime.union(...navigationBars)`
+        // (rather than stacking two separate `.imePadding()` /
+        // `.navigationBarsPadding()` modifiers, which would add both insets
+        // together and leave a gap above the keyboard on 3-button nav)
+        // takes whichever of the two is currently larger — the nav bar's
+        // own inset while the keyboard is closed, the keyboard's height
+        // once it's open. Because this Column is `fillMaxSize()` and the
+        // message list above is the only `weight(1f)` child, this row
+        // growing to make room for the keyboard is what shrinks that list
+        // rather than the keyboard just covering it — see the doc comment
+        // on the outer Column in DmInboxOverlay for why that in turn never
+        // touches the page header.
         Row(
-            Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 10.dp, vertical = 10.dp),
+            Modifier.fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
+                .padding(horizontal = 10.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {

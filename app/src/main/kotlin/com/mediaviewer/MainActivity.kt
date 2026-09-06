@@ -710,6 +710,9 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onOpenPost         = viewModel::openPostFromSearch,
                 onOpenAccount      = { author -> viewModel.closeSearch(); viewModel.openProfile(author) },
                 onAddFeed          = viewModel::addSavedFeedFromSearch,
+                onSelectTitleSubFilter = viewModel::setTitleSubFilter,
+                onOpenTitle        = viewModel::openTitleDetail,
+                onCloseTitle       = viewModel::closeTitleDetail,
                 onClose            = viewModel::closeSearch
             )
         }

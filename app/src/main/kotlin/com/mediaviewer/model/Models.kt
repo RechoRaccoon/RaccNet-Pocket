@@ -894,6 +894,36 @@ data class SearchFeedResult(
     val creatorHandle: String
 )
 
+// ─── Title search (Review Support feature) ─────────────────────────────────
+
+/** Search page's "Titles" tab: one movie/TV/game/album/book result. The
+ *  Titles tab is currently a placeholder (see SearchOverlay.kt/
+ *  MainViewModel — nothing populates this from a real catalog right now),
+ *  so this model exists purely to keep the results-grid/detail-overlay UI
+ *  wired up for whenever a real data source is added later.
+ *  `mediaCategory` uses the exact same loose keyword strings as
+ *  [PopfeedBacklogItem.mediaCategory]/[PopfeedReview.mediaCategory] (e.g.
+ *  "movie", "tv_show", "video_game", "album", "book") so the same
+ *  `categoryBucket()`/`ReviewKindFilter` machinery in ProfileOverlay.kt
+ *  buckets all three into the same five sub-filter tabs. */
+data class TitleSearchResult(
+    // Prefixed with the category since a real provider's own ids won't
+    // necessarily be unique *across* categories — only within one.
+    val id: String,
+    val title: String,
+    val posterUrl: String? = null,
+    val backdropUrl: String? = null,
+    // Raw ISO-8601 string (or blank) — left unformatted here;
+    // TitleDetailOverlay is what formats it for display.
+    val releaseDate: String = "",
+    // "Directed by"/"By"/developer/artist depending on category.
+    val creator: String? = null,
+    val genres: List<String> = emptyList(),
+    val tagline: String? = null,
+    val overview: String? = null,
+    val mediaCategory: String? = null
+)
+
 data class SharedPostMessage(
     val postUri: String,
     val postCid: String,

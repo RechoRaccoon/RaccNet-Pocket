@@ -1812,131 +1812,45 @@ private fun HubRefreshBubble(
  *  interaction bar (that bar's old center [UploadPlaceholderButton] is gone;
  *  see ActionRow in MainFeedScreen.kt). A circular "+" bubble, matching
  *  [HubRefreshBubble]'s sizing/shape so the pair reads as symmetric anchors
- *  on either end of the Return to Feed pill. The "+" itself rotates 45°
- *  clockwise while the menu is open (and back on close) as an open/close
- *  affordance, same idea as a standard "+" -> "x" FAB transform.
+ *  on either end of the Return to Feed pill.
  *
- *  Bug fix (follow-up — should use the same system as the feed's "More"
- *  menu): this used to open a single, continuous [GlassDropdownMenu] panel
- *  with all five entries stacked inside one shared glass surface. Now it's
- *  a stack of individually separate pill bubbles — one glass surface per
- *  entry, each with its own small gap — exactly like MainFeedScreen's
- *  MoreBubbleMenu. Unlike that one, this stack doesn't need any root-
- *  coordinate math to position itself: this bubble's own wrapping [Box] is
- *  pinned to an exact [size] (so it can never grow/shift when the stack
- *  beneath it expands — the stack is drawn *outside* those bounds, which
- *  Compose allows without clipping), so the stack can just align itself to
- *  that Box's own `TopEnd` corner and offset upward, entirely in local
- *  coordinates. */
+ *  Bug fix (this session): this used to pop open a "Post"/"Review"/"Go
+ *  Live" stack of bubbles (and before that, a single [GlassDropdownMenu]
+ *  panel) — "Review" and "Go Live" were always placeholders with no
+ *  functionality behind them, so the whole picker step was just friction.
+ *  Tapping "+" now jumps straight to the post composer, no intermediate
+ *  menu and (since nothing ever animates open) no "+" -> "x" rotation
+ *  affordance either — both removed outright rather than kept around
+ *  unused. */
 @Composable
 private fun HubUploadBubble(
     liquidGlass: Boolean, tint: Color, size: androidx.compose.ui.unit.Dp = 26.dp,
     modifier: Modifier = Modifier, backdrop: GlassBackdrop? = null,
     // Item 5 (rework): see ReturnToFeedBar's own doc comment on
-    // `uploadBackdrop` — this is that same background-only layer, used
-    // only for the popped-open menu bubbles below, never for the "+"
-    // circle itself (which keeps using [backdrop], same as before).
+    // `uploadBackdrop` — kept as a parameter for source compatibility with
+    // existing callers even though this bubble no longer pops open a menu
+    // that would need it.
     menuBackdrop: GlassBackdrop? = null,
-    // Upload flow: "Post" is the first entry with real functionality —
-    // opens the Bluesky post composer (ComposePostScreen.kt). "Blog" now
-    // lives inside that composer itself (its bottom-bar status button)
-    // rather than as its own placeholder entry here, and "Record" has been
-    // removed outright — the remaining Review/Go Live entries stay
-    // placeholders.
+    // Upload flow: tapping this bubble now opens the Bluesky post composer
+    // (ComposePostScreen.kt) directly.
     onOpenComposePost: () -> Unit = {}
 ) {
-    var expanded by remember { mutableStateOf(false) }
-    val rotation by animateFloatAsState(if (expanded) 45f else 0f, animationSpec = tween(220), label = "uploadPlusRotation")
     val circleShape = CircleShape
-    val bubbleShape = RoundedCornerShape(26.dp) // item 5: same roundness as the interaction bar's More stack
-    val clickModifier = Modifier.size(size).clickable { expanded = !expanded }
+    val clickModifier = Modifier.size(size).clickable { onOpenComposePost() }
 
     @Composable
     fun IconContent() {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Icon(Icons.Default.Add, contentDescription = "Upload", tint = Color.White,
-                modifier = Modifier.size(16.dp).graphicsLayer { rotationZ = rotation })
+                modifier = Modifier.size(16.dp))
         }
     }
 
-    val items = remember {
-        listOf("Post", "Review", "Go Live")
-    }
-    val bubbleHeightDp = 40.dp
-    val gapDp = 5.dp
-    val density = LocalDensity.current
-    val stackHeightPx = with(density) {
-        (bubbleHeightDp * items.size + gapDp * (items.size - 1)).roundToPx()
-    }
-    val gapAboveAnchorPx = with(density) { gapDp.roundToPx() }
-
-    // Pinned to an exact size so this Box can never grow/shift to
-    // accommodate the popped-open stack below — see the doc comment above.
     Box(modifier.size(size)) {
         if (liquidGlass) {
             LiquidGlassSurface(clickModifier, shape = circleShape, tint = tint, backdrop = backdrop) { IconContent() }
         } else {
             Box(clickModifier.clip(circleShape).background(Color.White.copy(0.10f))) { IconContent() }
-        }
-        if (expanded) {
-            Column(
-                modifier = Modifier
-                    // `align = Alignment.TopEnd` here (wrapContentSize's own
-                    // placement, not just the outer Box's) makes the
-                    // right-edge-pinned intent explicit rather than relying
-                    // on the default Center — belt-and-suspenders alongside
-                    // the outer `.align(Alignment.TopEnd)` below for exactly
-                    // which corner of this Column ends up glued to which
-                    // corner of the anchor.
-                    .align(Alignment.TopEnd)
-                    // This Box is pinned to a tiny fixed [size] (e.g. 40dp
-                    // square) via `.size(size)` above, on purpose — see the
-                    // class doc comment — which would otherwise force every
-                    // child (including this popover) to be measured within
-                    // that same tight 40dp ceiling. `wrapContentSize
-                    // (unbounded = true)` measures this Column ignoring the
-                    // parent's incoming max constraints (so it's free to be
-                    // its natural, full height/width) while still resolving
-                    // its final position via TopEnd alignment against the
-                    // anchor.
-                    .wrapContentSize(align = Alignment.TopEnd, unbounded = true)
-                    .offset(y = with(density) { -(stackHeightPx + gapAboveAnchorPx).toDp() })
-                    .width(IntrinsicSize.Max)
-                    // Item 8 (same fix as the feed's MoreBubbleMenu):
-                    // swallows taps in the gaps between bubbles so they
-                    // don't fall through to the card underneath, without
-                    // closing the menu itself.
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {},
-                verticalArrangement = Arrangement.spacedBy(gapDp),
-                horizontalAlignment = Alignment.End
-            ) {
-                items.forEach { label ->
-                    val bubbleModifier = Modifier
-                        .fillMaxWidth()
-                        .height(bubbleHeightDp)
-                        .clickable { expanded = false; if (label == "Post") onOpenComposePost() }
-                    // Item 4: opaque masked bubbles instead of the live
-                    // LiquidGlassSurface — besides the "shouldn't be
-                    // transparent" request, this also removes the one thing
-                    // that could make the stack look "misaligned": a
-                    // LiquidGlassSurface crops its blurred backdrop from
-                    // this bubble's own tracked on-screen position, and that
-                    // sampling has previously gone wrong for this exact
-                    // popover (see git history) whenever its real measured
-                    // bounds didn't match what the backdrop crop expected —
-                    // reading as a bubble that LOOKED shifted/cut off even
-                    // when its actual layout position was correct.
-                    // opaqueMaskPanel just paints a flat brush, with nothing
-                    // to sample or crop, so that whole failure mode is gone.
-                    Box(bubbleModifier.opaqueMaskPanel(backdrop = menuBackdrop, tint = tint, shape = bubbleShape), contentAlignment = Alignment.Center) {
-                        Text(
-                            label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                            textAlign = TextAlign.Center, maxLines = 1,
-                            modifier = Modifier.padding(horizontal = 14.dp)
-                        )
-                    }
-                }
-            }
         }
     }
 }

@@ -65,6 +65,7 @@ import com.mediaviewer.model.LeafletTextSpan
 import com.mediaviewer.model.MediaItem
 import com.mediaviewer.model.PopfeedBacklogItem
 import com.mediaviewer.model.PopfeedReview
+import com.mediaviewer.model.TitleSearchResult
 import com.mediaviewer.ui.theme.DimGray
 import com.mediaviewer.ui.theme.OledBlack
 import com.mediaviewer.viewmodel.MainViewModel
@@ -97,10 +98,13 @@ private fun MediaKindFilter.matches(item: MediaItem) = when (this) {
     MediaKindFilter.VIDEOS -> item.isVideo
 }
 
-private enum class ReviewKindFilter { ALL, MOVIES, TV, GAMES, MUSIC }
-private fun ReviewKindFilter.label() = when (this) {
+// Not private: Search's Titles tab (SearchOverlay.kt) reuses this exact
+// enum/label/bucketing for its own sub-filter row, per spec ("subtabs...
+// just like in the profile tabs").
+enum class ReviewKindFilter { ALL, MOVIES, TV, GAMES, MUSIC, BOOKS }
+fun ReviewKindFilter.label() = when (this) {
     ReviewKindFilter.ALL -> "All"; ReviewKindFilter.MOVIES -> "Movies"; ReviewKindFilter.TV -> "TV"
-    ReviewKindFilter.GAMES -> "Games"; ReviewKindFilter.MUSIC -> "Music"
+    ReviewKindFilter.GAMES -> "Games"; ReviewKindFilter.MUSIC -> "Music"; ReviewKindFilter.BOOKS -> "Books"
 }
 
 /** Buckets a raw creativeWorkType string (e.g. "movie", "tv_show",
@@ -110,18 +114,26 @@ private fun ReviewKindFilter.label() = when (this) {
  *  exact set of type strings isn't fully documented, so this is deliberately
  *  loose rather than an exact-match enum. Null/unrecognized categories only
  *  show up under "All", never hidden entirely. */
-private fun categoryBucket(raw: String?): ReviewKindFilter? {
+fun categoryBucket(raw: String?): ReviewKindFilter? {
     val v = raw?.lowercase() ?: return null
     return when {
         v.contains("movie") || v.contains("film") -> ReviewKindFilter.MOVIES
         v.contains("tv") || v.contains("show") || v.contains("series") || v.contains("episode") -> ReviewKindFilter.TV
         v.contains("game") -> ReviewKindFilter.GAMES
         v.contains("album") || v.contains("music") || v.contains("song") || v.contains("track") -> ReviewKindFilter.MUSIC
+        // Titles feature: books, added alongside the Titles tab per spec
+        // ("which btw need the 'Books' options at the end") — keyed off the
+        // same loose keyword-contains matching as every other bucket here.
+        v.contains("book") || v.contains("novel") || v.contains("comic") || v.contains("literature") -> ReviewKindFilter.BOOKS
         else -> null
     }
 }
 private fun ReviewKindFilter.matchesReview(review: PopfeedReview) = this == ReviewKindFilter.ALL || categoryBucket(review.mediaCategory) == this
 private fun ReviewKindFilter.matchesBacklog(item: PopfeedBacklogItem) = this == ReviewKindFilter.ALL || categoryBucket(item.mediaCategory) == this
+// Titles feature: same bucketing, applied to a search result instead of a
+// Popfeed backlog/review record.
+fun ReviewKindFilter.matchesTitle(result: com.mediaviewer.model.TitleSearchResult) =
+    this == ReviewKindFilter.ALL || categoryBucket(result.mediaCategory) == this
 
 @Composable
 private fun <T> ProfileSubFilterRow(
@@ -1092,10 +1104,28 @@ private fun LazyListScope.profileBacklogGridRows(items: List<PopfeedBacklogItem>
  *  that extends a little further down to leave room for the title —
  *  tapping does nothing yet (per spec, this is thumbnail-browsing only for
  *  now). Rim/background tint reflects that item's own poster color, the
- *  same way Reviews tiles reflect their thumbnail's color. */
+ *  same way Reviews tiles reflect their thumbnail's color.
+ *
+ *  Just a thin wrapper around [TitlePosterCard] now — see that function's
+ *  own doc comment for why it was pulled out. */
 @Composable
 private fun BacklogCard(item: PopfeedBacklogItem, liquidGlass: Boolean, modifier: Modifier = Modifier) {
-    val tint = rememberDominantColor(item.imageUrl ?: "")
+    TitlePosterCard(
+        title = item.title, imageUrl = item.imageUrl, liquidGlass = liquidGlass,
+        onClick = { /* no functionality yet — per spec */ }, modifier = modifier
+    )
+}
+
+/** Titles feature: the exact same poster-tile format/style [BacklogCard]
+ *  above already used for the profile's Backlog tab, pulled out so Search's
+ *  Titles tab results grid (see SearchOverlay.kt) can render its results in
+ *  that identical format, per spec ("It should show results in the same
+ *  way they get shown in a profile's Backlog tab. Same format and
+ *  style."). Rim/background tint reflects the poster's own dominant color,
+ *  same as before. */
+@Composable
+fun TitlePosterCard(title: String, imageUrl: String?, liquidGlass: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val tint = rememberDominantColor(imageUrl ?: "")
     val shape = RoundedCornerShape(14.dp)
     val imageShape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp)
     Column(
@@ -1104,11 +1134,11 @@ private fun BacklogCard(item: PopfeedBacklogItem, liquidGlass: Boolean, modifier
                 if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
                 else Modifier.clip(shape).background(Color.White.copy(0.06f))
             )
-            .clickable { /* no functionality yet — per spec */ }
+            .clickable(onClick = onClick)
     ) {
         Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f)) {
-            if (item.imageUrl != null) {
-                AsyncImage(model = item.imageUrl, contentDescription = null, contentScale = ContentScale.Crop,
+            if (imageUrl != null) {
+                AsyncImage(model = imageUrl, contentDescription = null, contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize().clip(imageShape))
             } else {
                 Box(Modifier.fillMaxSize().clip(imageShape).background(Color.White.copy(0.10f)))
@@ -1117,7 +1147,7 @@ private fun BacklogCard(item: PopfeedBacklogItem, liquidGlass: Boolean, modifier
         // Title area is a single row — the text shrinks to fit rather than
         // wrapping to a second line, and is centered rather than left-aligned.
         Box(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp), contentAlignment = Alignment.Center) {
-            ShrinkToFitText(item.title, baseFontSize = 10.sp, minFontSize = 7.sp)
+            ShrinkToFitText(title, baseFontSize = 10.sp, minFontSize = 7.sp)
         }
     }
 }
@@ -1874,5 +1904,166 @@ private fun ReviewDetailOverlay(review: PopfeedReview, author: AuthorInfo, liqui
                 Spacer(Modifier.height(40.dp))
             }
         }
+    }
+}
+
+// ─── Titles (Review Support feature) ───────────────────────────────────────
+
+/**
+ * Titles feature: a title found via Search's Titles tab, opened in its own
+ * overlayed page (per spec). Deliberately modeled on [ReviewDetailOverlay]
+ * just above — every bubble here, and the background gradient, are tinted
+ * from the same dominant-color-of-the-poster pattern that overlay uses —
+ * but the layout itself is different:
+ *  - A horizontal/landscape banner fills the top with a fade under it
+ *    (same idea as the reference screenshot).
+ *  - A portrait poster (styled exactly like [TitlePosterCard] above, minus
+ *    its title-text footer) sits close to the left edge, slightly
+ *    overlapping the bottom of that banner.
+ *  - To its right, height-confined to match the poster: the full title
+ *    (auto-sizing so it always stays on one row — see [ShrinkToFitText]),
+ *    then a row with the numeric release date on the left and the 5-star
+ *    rating on the right, then "Directed by" (or whatever the category's
+ *    equivalent credit is), then genres, then the tagline — each its own
+ *    separate bubble.
+ *  - Below all of that, the full description in its own edge-to-edge
+ *    bubble.
+ *  - A fixed "Review" pill sits where the interaction bar usually would,
+ *    pinned to the bottom of the screen.
+ *
+ * Placeholder (per feedback — TMDB has been fully removed, and this page's
+ * layout was the one part of the Titles feature built specifically around
+ * TMDB-sourced data): every field that would have come from a real catalog
+ * — poster/banner art, release date, director/creator, genres, tagline,
+ * description — now just reads "Placeholder" (or shows a flat placeholder
+ * box in place of an image) instead of anything derived from [title]. Only
+ * the page's structure/layout is real right now; no title-specific data
+ * flows into it. Tapping "Review" doesn't do anything yet either.
+ */
+@Composable
+fun TitleDetailOverlay(title: TitleSearchResult, liquidGlass: Boolean, onClose: () -> Unit) {
+    val tint = NeutralGlassTint
+
+    Box(
+        Modifier.fillMaxSize()
+            .then(if (liquidGlass) Modifier.background(postBackgroundBrush(tint)) else Modifier.background(OledBlack))
+            // Same "swallow all touches" reasoning as ReviewDetailOverlay
+            // above — a plain .background() isn't hit-testable on its own.
+            .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null) {}
+    ) {
+        Column(Modifier.fillMaxSize()) {
+            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+                // ── Banner + overlapping poster + details ──────────────────
+                Box(Modifier.fillMaxWidth()) {
+                    val bannerHeight = 220.dp
+                    val posterWidth = 108.dp
+                    val posterHeight = posterWidth * 3f / 2f
+                    // How far the poster's top edge pokes up into the banner.
+                    val overlap = 44.dp
+
+                    Box(Modifier.fillMaxWidth().height(bannerHeight)) {
+                        // Placeholder — no banner art without a real catalog.
+                        Box(Modifier.fillMaxSize().background(tint.copy(alpha = 0.35f)), contentAlignment = Alignment.Center) {
+                            Text("Placeholder", color = Color.White.copy(alpha = 0.6f), fontSize = 13.sp)
+                        }
+                        // Fade under the banner, same purpose as the
+                        // reference screenshot's gradient into the page.
+                        Box(
+                            Modifier.fillMaxSize().background(
+                                Brush.verticalGradient(0.4f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.85f))
+                            )
+                        )
+                    }
+                    Box(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars).padding(12.dp)) {
+                        CloseGlassBubble(liquidGlass = liquidGlass, tint = tint, onClick = onClose)
+                    }
+
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .padding(top = bannerHeight - overlap)
+                            .padding(start = 10.dp, end = 14.dp)
+                    ) {
+                        // Portrait poster — same styling as TitlePosterCard's
+                        // image half (rounded corners, glass rim), just
+                        // without its title-text footer, per spec.
+                        // Placeholder — no poster art without a real catalog.
+                        val posterShape = RoundedCornerShape(14.dp)
+                        Box(
+                            Modifier.width(posterWidth).height(posterHeight)
+                                .then(
+                                    if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = posterShape)
+                                    else Modifier.clip(posterShape).background(Color.White.copy(0.10f))
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("Placeholder", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        // Details column — height-confined to the poster's
+                        // own height, per spec, with its five rows spread
+                        // evenly across that space. Every row is a
+                        // hardcoded "Placeholder" bubble for now.
+                        Column(
+                            Modifier.weight(1f).height(posterHeight),
+                            verticalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            ShrinkToFitTitleBubble("Placeholder", liquidGlass = liquidGlass, tint = tint)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                ProfileGlassPill(text = "Placeholder", liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true)
+                                Spacer(Modifier.weight(1f))
+                                StarRatingPill(rating = 0f, liquidGlass = liquidGlass, tint = tint)
+                            }
+                            ProfileGlassPill(text = "Placeholder", liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true)
+                            ProfileGlassPill(text = "Placeholder", liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true)
+                            ProfileGlassPill(text = "Placeholder", liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true)
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                // ── Description — full-width, edge-to-edge bubble ──────────
+                val descShape = RoundedCornerShape(16.dp)
+                Box(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp)
+                        .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = descShape) else Modifier.clip(descShape).background(Color.White.copy(0.06f)))
+                        .padding(14.dp)
+                ) {
+                    Text("Placeholder", color = Color.White.copy(0.92f), fontSize = 14.sp, lineHeight = 21.sp)
+                }
+                // Room for the fixed "Review" bar below so it never covers
+                // the tail end of the description while scrolled to the
+                // bottom.
+                Spacer(Modifier.height(90.dp))
+            }
+
+            // ── Fixed "Review" bar — sits where the interaction bar
+            // usually would. No functionality yet, per spec.
+            val reviewShape = RoundedCornerShape(20.dp)
+            Box(
+                Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 14.dp, vertical = 10.dp).height(46.dp)
+                    .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = reviewShape) else Modifier.clip(reviewShape).background(Color.White.copy(0.10f)))
+                    .clickable { /* no functionality yet — per spec */ },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("Review", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+    }
+}
+
+/** A pill-wrapped [ShrinkToFitText] — the title bubble on [TitleDetailOverlay],
+ *  which per spec needs to both (a) look like the page's other bubbles and
+ *  (b) always keep the full title on one row by shrinking its font rather
+ *  than truncating, the way [TitlePosterCard]'s footer already does. */
+@Composable
+private fun ShrinkToFitTitleBubble(text: String, liquidGlass: Boolean, tint: Color) {
+    val shape = RoundedCornerShape(14.dp)
+    Box(
+        Modifier.fillMaxWidth()
+            .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.clip(shape).background(Color.Black.copy(0.55f)))
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+    ) {
+        ShrinkToFitText(text, baseFontSize = 17.sp, minFontSize = 11.sp)
     }
 }
