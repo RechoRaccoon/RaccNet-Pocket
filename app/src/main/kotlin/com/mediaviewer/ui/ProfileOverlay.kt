@@ -234,6 +234,10 @@ fun ProfileOverlay(
     onCloseBlog: () -> Unit,
     onOpenReview: (PopfeedReview) -> Unit,
     onCloseReview: () -> Unit,
+    // Backlog cards' "full info menu" (Titles feature) — see
+    // MainViewModel.openProfileTitle's own doc comment.
+    onOpenTitle: (PopfeedBacklogItem) -> Unit = {},
+    onCloseTitle: () -> Unit = {},
     // Pinch navigation: the mirror of the post pager's pinch-in. Only takes
     // effect (see pinchOutFromProfile() in the ViewModel) when this profile
     // is the one currently hidden behind a post — hiding it again is what
@@ -453,7 +457,8 @@ fun ProfileOverlay(
                     onTapItem(index)
                 },
                 onOpenBlog = onOpenBlog,
-                onOpenReview = onOpenReview
+                onOpenReview = onOpenReview,
+                onOpenTitle = onOpenTitle
             )
         }
 
@@ -489,6 +494,9 @@ fun ProfileOverlay(
         }
         state.openReview?.let { review ->
             ReviewDetailOverlay(review = review, author = author, liquidGlass = liquidGlass, onClose = onCloseReview)
+        }
+        state.openTitle?.let { title ->
+            TitleDetailOverlay(title = title, liquidGlass = liquidGlass, onClose = onCloseTitle)
         }
     }
 }
@@ -923,7 +931,8 @@ private fun LazyListScope.profileResultsContent(
     onLoadMore: () -> Unit,
     onTapItem: (Int) -> Unit,
     onOpenBlog: (LeafletBlog) -> Unit,
-    onOpenReview: (PopfeedReview) -> Unit
+    onOpenReview: (PopfeedReview) -> Unit,
+    onOpenTitle: (PopfeedBacklogItem) -> Unit = {}
 ) {
     val tabState = state.tabStates[state.selectedTab]
 
@@ -984,7 +993,7 @@ private fun LazyListScope.profileResultsContent(
         }
         MainViewModel.ProfileTab.BACKLOG -> {
             val backlog = (tabState?.backlog ?: emptyList()).filter { reviewKindFilter.matchesBacklog(it) }
-            profileBacklogGridRows(items = backlog, liquidGlass = liquidGlass)
+            profileBacklogGridRows(items = backlog, liquidGlass = liquidGlass, onOpenTitle = onOpenTitle)
         }
         MainViewModel.ProfileTab.VODS -> {
             items(tabState?.vods ?: emptyList(), key = { "vod_${it.uri}" }) { vod ->
@@ -1085,7 +1094,7 @@ private fun LazyListScope.profileMediaGridRows(
 
 // ─── Backlog (Popfeed) ───────────────────────────────────────────────────────
 
-private fun LazyListScope.profileBacklogGridRows(items: List<PopfeedBacklogItem>, liquidGlass: Boolean) {
+private fun LazyListScope.profileBacklogGridRows(items: List<PopfeedBacklogItem>, liquidGlass: Boolean, onOpenTitle: (PopfeedBacklogItem) -> Unit = {}) {
     val rows = items.chunked(3)
     itemsIndexed(rows, key = { i, row -> "backlog_row_${i}_${row.firstOrNull()?.uri ?: i}" }) { _, row ->
         Row(
@@ -1093,7 +1102,7 @@ private fun LazyListScope.profileBacklogGridRows(items: List<PopfeedBacklogItem>
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             row.forEach { backlogItem ->
-                BacklogCard(item = backlogItem, liquidGlass = liquidGlass, modifier = Modifier.weight(1f))
+                BacklogCard(item = backlogItem, liquidGlass = liquidGlass, onOpenTitle = onOpenTitle, modifier = Modifier.weight(1f))
             }
             repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
         }
@@ -1102,17 +1111,19 @@ private fun LazyListScope.profileBacklogGridRows(items: List<PopfeedBacklogItem>
 
 /** A single Backlog tile: poster-shaped thumbnail in a liquid glass frame
  *  that extends a little further down to leave room for the title —
- *  tapping does nothing yet (per spec, this is thumbnail-browsing only for
- *  now). Rim/background tint reflects that item's own poster color, the
- *  same way Reviews tiles reflect their thumbnail's color.
+ *  tapping opens the same "full info menu" (Titles feature) Search's
+ *  Titles tab cards do, via [TitleDetailOverlay] — see
+ *  MainViewModel.openProfileTitle's own doc comment. Rim/background tint
+ *  reflects that item's own poster color, the same way Reviews tiles
+ *  reflect their thumbnail's color.
  *
  *  Just a thin wrapper around [TitlePosterCard] now — see that function's
  *  own doc comment for why it was pulled out. */
 @Composable
-private fun BacklogCard(item: PopfeedBacklogItem, liquidGlass: Boolean, modifier: Modifier = Modifier) {
+private fun BacklogCard(item: PopfeedBacklogItem, liquidGlass: Boolean, onOpenTitle: (PopfeedBacklogItem) -> Unit = {}, modifier: Modifier = Modifier) {
     TitlePosterCard(
         title = item.title, imageUrl = item.imageUrl, liquidGlass = liquidGlass,
-        onClick = { /* no functionality yet — per spec */ }, modifier = modifier
+        onClick = { onOpenTitle(item) }, modifier = modifier
     )
 }
 
@@ -1910,11 +1921,13 @@ private fun ReviewDetailOverlay(review: PopfeedReview, author: AuthorInfo, liqui
 // ─── Titles (Review Support feature) ───────────────────────────────────────
 
 /**
- * Titles feature: a title found via Search's Titles tab, opened in its own
- * overlayed page (per spec). Deliberately modeled on [ReviewDetailOverlay]
- * just above — every bubble here, and the background gradient, are tinted
- * from the same dominant-color-of-the-poster pattern that overlay uses —
- * but the layout itself is different:
+ * Titles feature: a title card's "full info menu" — used by both Search's
+ * Titles tab (currently a placeholder — see MainViewModel.runSearch's
+ * TITLES branch) and Profile's Backlog tab (per feedback — "all title
+ * cards", not just Search's). Deliberately modeled on
+ * [ReviewDetailOverlay] just above — every bubble here, and the background
+ * gradient, are tinted from the same dominant-color-of-the-poster pattern
+ * that overlay uses — but the layout itself is different:
  *  - A horizontal/landscape banner fills the top with a fade under it
  *    (same idea as the reference screenshot).
  *  - A portrait poster (styled exactly like [TitlePosterCard] above, minus
@@ -1931,18 +1944,18 @@ private fun ReviewDetailOverlay(review: PopfeedReview, author: AuthorInfo, liqui
  *  - A fixed "Review" pill sits where the interaction bar usually would,
  *    pinned to the bottom of the screen.
  *
- * Placeholder (per feedback — TMDB has been fully removed, and this page's
- * layout was the one part of the Titles feature built specifically around
- * TMDB-sourced data): every field that would have come from a real catalog
- * — poster/banner art, release date, director/creator, genres, tagline,
- * description — now just reads "Placeholder" (or shows a flat placeholder
- * box in place of an image) instead of anything derived from [title]. Only
- * the page's structure/layout is real right now; no title-specific data
- * flows into it. Tapping "Review" doesn't do anything yet either.
+ * Uses whatever real data [title] actually carries — Backlog cards supply
+ * a real title, portrait poster, and (when the record has one) a real
+ * landscape backdrop, so those show up for real. Everything else (release
+ * date, director/creator, genres, tagline, description) has no data source
+ * right now — TMDB was removed, and Popfeed's backlog schema doesn't carry
+ * any of those fields at all — so those five still just read "Placeholder"
+ * regardless of which card opened this page. Tapping "Review" doesn't do
+ * anything yet either.
  */
 @Composable
 fun TitleDetailOverlay(title: TitleSearchResult, liquidGlass: Boolean, onClose: () -> Unit) {
-    val tint = NeutralGlassTint
+    val tint = rememberDominantColor(title.posterUrl ?: title.backdropUrl ?: "")
 
     Box(
         Modifier.fillMaxSize()
@@ -1960,11 +1973,16 @@ fun TitleDetailOverlay(title: TitleSearchResult, liquidGlass: Boolean, onClose: 
                     val posterHeight = posterWidth * 3f / 2f
                     // How far the poster's top edge pokes up into the banner.
                     val overlap = 44.dp
+                    val bannerImage = title.backdropUrl ?: title.posterUrl
 
                     Box(Modifier.fillMaxWidth().height(bannerHeight)) {
-                        // Placeholder — no banner art without a real catalog.
-                        Box(Modifier.fillMaxSize().background(tint.copy(alpha = 0.35f)), contentAlignment = Alignment.Center) {
-                            Text("Placeholder", color = Color.White.copy(alpha = 0.6f), fontSize = 13.sp)
+                        if (bannerImage != null) {
+                            AsyncImage(model = bannerImage, contentDescription = null, contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize())
+                        } else {
+                            Box(Modifier.fillMaxSize().background(tint.copy(alpha = 0.35f)), contentAlignment = Alignment.Center) {
+                                Text("Placeholder", color = Color.White.copy(alpha = 0.6f), fontSize = 13.sp)
+                            }
                         }
                         // Fade under the banner, same purpose as the
                         // reference screenshot's gradient into the page.
@@ -1986,7 +2004,6 @@ fun TitleDetailOverlay(title: TitleSearchResult, liquidGlass: Boolean, onClose: 
                         // Portrait poster — same styling as TitlePosterCard's
                         // image half (rounded corners, glass rim), just
                         // without its title-text footer, per spec.
-                        // Placeholder — no poster art without a real catalog.
                         val posterShape = RoundedCornerShape(14.dp)
                         Box(
                             Modifier.width(posterWidth).height(posterHeight)
@@ -1996,18 +2013,25 @@ fun TitleDetailOverlay(title: TitleSearchResult, liquidGlass: Boolean, onClose: 
                                 ),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text("Placeholder", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                            if (title.posterUrl != null) {
+                                AsyncImage(model = title.posterUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize().clip(posterShape))
+                            } else {
+                                Text("Placeholder", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                            }
                         }
                         Spacer(Modifier.width(12.dp))
                         // Details column — height-confined to the poster's
                         // own height, per spec, with its five rows spread
-                        // evenly across that space. Every row is a
-                        // hardcoded "Placeholder" bubble for now.
+                        // evenly across that space. The title uses real
+                        // data when present; the rest have no data source
+                        // right now (see this function's own doc comment)
+                        // so they stay hardcoded "Placeholder" bubbles.
                         Column(
                             Modifier.weight(1f).height(posterHeight),
                             verticalArrangement = Arrangement.SpaceBetween
                         ) {
-                            ShrinkToFitTitleBubble("Placeholder", liquidGlass = liquidGlass, tint = tint)
+                            ShrinkToFitTitleBubble(title.title.ifBlank { "Placeholder" }, liquidGlass = liquidGlass, tint = tint)
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 ProfileGlassPill(text = "Placeholder", liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true)
                                 Spacer(Modifier.weight(1f))

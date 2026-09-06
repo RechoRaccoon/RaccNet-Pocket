@@ -986,8 +986,11 @@ class BlueskyRepository {
             if (backlogKeywords.none { listType.contains(it) }) continue
             val title = firstStringField(obj, "title") ?: continue
             val image = firstImageField(obj, did, "posterUrl", "coverUrl", "artworkUrl", "poster", "image", "coverImage", "thumb")
+            // Same landscape/backdrop keyword set getPopfeedReviews uses —
+            // see PopfeedBacklogItem.mediaBackdropUrl's own doc comment.
+            val backdrop = firstImageField(obj, did, "backdrop", "backdropUrl", "banner", "bannerUrl", "landscape", "landscapeUrl", "fanart", "heroImage", "wideImage")
             val createdAt = firstStringField(obj, "createdAt", "updatedAt") ?: ""
-            result[rec.uri] = PopfeedBacklogItem(uri = rec.uri, title = title, imageUrl = image, createdAt = createdAt, mediaCategory = creativeWorkType)
+            result[rec.uri] = PopfeedBacklogItem(uri = rec.uri, title = title, imageUrl = image, mediaBackdropUrl = backdrop, createdAt = createdAt, mediaCategory = creativeWorkType)
         }
         return result.values.sortedByDescending { it.createdAt }
     }

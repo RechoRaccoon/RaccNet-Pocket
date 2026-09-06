@@ -307,6 +307,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val tabStates: Map<ProfileTab, ProfileTabState> = emptyMap(),
         val openBlog: LeafletBlog? = null,
         val openReview: PopfeedReview? = null,
+        // Backlog cards' own "full info menu" (Titles feature) — see
+        // openProfileTitle/closeProfileTitle and TitleDetailOverlay.
+        val openTitle: TitleSearchResult? = null,
         // Pinch navigation: tapping a post from this profile's grid doesn't
         // destroy this state (see openPostFromProfileTab) — it just flips
         // this to true, so the composable stays alive (scroll position and
@@ -1866,6 +1869,7 @@ _bskyDid.value          = session.did
         when {
             cur.openBlog != null -> { _profileOverlay.value = cur.copy(openBlog = null); return }
             cur.openReview != null -> { _profileOverlay.value = cur.copy(openReview = null); return }
+            cur.openTitle != null -> { _profileOverlay.value = cur.copy(openTitle = null); return }
         }
         // Item 17: walk past any *hidden* ancestors in the parent chain —
         // those only exist as scaffolding behind the post pager (see
@@ -2089,6 +2093,24 @@ _bskyDid.value          = session.did
     fun closeProfileBlog() { _profileOverlay.value = _profileOverlay.value?.copy(openBlog = null) }
     fun openProfileReview(review: PopfeedReview) { _profileOverlay.value = _profileOverlay.value?.copy(openReview = review) }
     fun closeProfileReview() { _profileOverlay.value = _profileOverlay.value?.copy(openReview = null) }
+
+    /** Backlog cards' "full info menu" (Titles feature) — per feedback,
+     *  this was meant to cover *every* title card, not just Search's
+     *  Titles tab. Converts the tapped [PopfeedBacklogItem] into the same
+     *  [TitleSearchResult] shape TitleDetailOverlay already renders, so the
+     *  real title/portrait poster/landscape backdrop it already has show up
+     *  for real — only the fields Popfeed's backlog schema doesn't carry at
+     *  all (release date, director, genres, tagline, description, rating)
+     *  still read "Placeholder" there. */
+    fun openProfileTitle(item: PopfeedBacklogItem) {
+        _profileOverlay.value = _profileOverlay.value?.copy(
+            openTitle = TitleSearchResult(
+                id = item.uri, title = item.title, posterUrl = item.imageUrl,
+                backdropUrl = item.mediaBackdropUrl, mediaCategory = item.mediaCategory
+            )
+        )
+    }
+    fun closeProfileTitle() { _profileOverlay.value = _profileOverlay.value?.copy(openTitle = null) }
 
     fun toggleProfileFollow() {
         val cur = _profileOverlay.value ?: return

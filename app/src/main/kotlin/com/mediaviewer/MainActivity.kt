@@ -769,6 +769,8 @@ private fun AppRoot(viewModel: MainViewModel) {
                     onCloseBlog       = viewModel::closeProfileBlog,
                     onOpenReview      = viewModel::openProfileReview,
                     onCloseReview     = viewModel::closeProfileReview,
+                    onOpenTitle       = viewModel::openProfileTitle,
+                    onCloseTitle      = viewModel::closeProfileTitle,
                     onPinchOut        = viewModel::pinchOutFromProfile,
                     onSaveScroll      = viewModel::saveProfileScrollPosition,
                     isReviewSubscribed = currentProfileOverlay.author.did in subscribedReviewDids,

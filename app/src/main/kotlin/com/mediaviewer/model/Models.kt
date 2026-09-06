@@ -669,6 +669,12 @@ data class PopfeedBacklogItem(
     val uri: String,
     val title: String,
     val imageUrl: String? = null,
+    // Same portrait/landscape split as PopfeedReview.mediaBackdropUrl above
+    // — a separate landscape/backdrop image distinct from the portrait
+    // poster (imageUrl), used for TitleDetailOverlay's wide banner. Null if
+    // the record doesn't carry one, in which case callers fall back to
+    // imageUrl.
+    val mediaBackdropUrl: String? = null,
     val createdAt: String = "",
     // Same sub-filter bucketing as PopfeedReview.mediaCategory above.
     val mediaCategory: String? = null
