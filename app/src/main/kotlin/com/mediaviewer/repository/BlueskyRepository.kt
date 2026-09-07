@@ -632,10 +632,19 @@ class BlueskyRepository {
         val createdAt = firstStringField(obj, "createdAt", "publishedAt") ?: ""
         val category = firstStringField(subject, "creativeWorkType", "mediaType", "type")
             ?: firstStringField(obj, "creativeWorkType", "mediaType", "type")
+        // Confirmed real lexicon fields (social.popfeed.feed.review) — see
+        // PopfeedReview's own doc comment for why these aren't surfaced in
+        // the Reviews tab UI yet, just carried through for parity/future use.
+        val releaseDate = firstStringField(subject, "releaseDate") ?: firstStringField(obj, "releaseDate") ?: ""
+        val genres = stringArrayField(subject, "genres").ifEmpty { stringArrayField(obj, "genres") }
+        val mainCredit = firstStringField(subject, "mainCredit") ?: firstStringField(obj, "mainCredit")
+        val mainCreditRole = firstStringField(subject, "mainCreditRole") ?: firstStringField(obj, "mainCreditRole")
+        val imdbId = imdbIdField(subject) ?: imdbIdField(obj)
         return PopfeedReview(
             uri = uri, mediaTitle = title, mediaImageUrl = image, mediaBackdropUrl = backdrop,
             ratingOutOf5 = rating5.coerceIn(0f, 5f), reviewText = text, createdAt = createdAt,
-            mediaCategory = category
+            mediaCategory = category, releaseDate = releaseDate, genres = genres,
+            mainCredit = mainCredit, mainCreditRole = mainCreditRole, imdbId = imdbId
         )
     }
 
@@ -922,6 +931,27 @@ class BlueskyRepository {
         return null
     }
 
+    /** Same idea as [firstStringField] but for a JSON array of strings —
+     *  used for Popfeed's `genres` field (confirmed real, see review.json/
+     *  listItem.json in Popfeed's public lexicon repo). Returns an empty
+     *  list, never null, so callers can use it directly without an
+     *  elvis-default at every call site. */
+    private fun stringArrayField(obj: com.google.gson.JsonObject?, key: String): List<String> {
+        val arr = obj?.get(key)?.takeIf { it.isJsonArray }?.asJsonArray ?: return emptyList()
+        return arr.mapNotNull { it.takeIf { el -> el.isJsonPrimitive && el.asJsonPrimitive.isString }?.asString }
+            .filter { it.isNotBlank() }
+    }
+
+    /** Popfeed's `identifiers` sub-object (confirmed real —
+     *  social.popfeed.feed.review / listItem's `identifiers.imdbId`) — pulls
+     *  out just the one identifier this app currently has a use for
+     *  (WikipediaRepository's IMDb-ID-based lookup). `obj` is the *outer*
+     *  record, not the identifiers object itself. */
+    private fun imdbIdField(obj: com.google.gson.JsonObject?): String? {
+        val identifiers = obj?.getAsJsonObject("identifiers") ?: return null
+        return firstStringField(identifiers, "imdbId")
+    }
+
     /** Bug fix: Popfeed reviews' posters weren't showing up because the poster
      *  field, when present, is very likely a blob reference (the standard
      *  AT-proto shape for an embedded image: `{"$type":"blob","ref":{"$link":
@@ -952,25 +982,30 @@ class BlueskyRepository {
     /** Profile "Backlog" tab (Popfeed's backlog + watchlist — movies, TV
      *  shows, and games the account has logged to watch/play eventually).
      *
-     *  Unlike [getPopfeedReviews], this one is grounded in a confirmed real
-     *  schema rather than a guess: an open-source third-party Popfeed
-     *  integration (paperbnd.koplugin, a KOReader reading-progress sync
-     *  plugin) reads and writes real `social.popfeed.feed.listItem` records
-     *  with fields `title`, `creativeWorkType` (e.g. "book"), and `listType`
-     *  (e.g. "currently_reading_books") — see
-     *  tangled.org/graham.systems/paperbnd.koplugin. That confirms the
-     *  collection name and those three field names for books specifically;
-     *  it does NOT confirm the exact `listType` strings Popfeed uses for a
-     *  movie/TV/game backlog or watchlist, or the field name for a
-     *  poster/cover image, so those two are still matched defensively
-     *  (keyword/alias matching) rather than as exact known values. */
+     *  Collection name and every field parsed below (`title`,
+     *  `creativeWorkType`, `status`, `listType`, `poster`/`posterUrl`,
+     *  `backdrop`/`backdropUrl`, `releaseDate`, `genres`, `mainCredit`,
+     *  `mainCreditRole`, `identifiers.imdbId`) are now confirmed directly
+     *  against Popfeed's own public lexicon repository
+     *  (github.com/Popfeed-Social/Popfeed-Community, lexicons/listItem.json)
+     *  — this used to be pieced together defensively from a third-party
+     *  integration (paperbnd.koplugin) that only confirmed `title`/
+     *  `creativeWorkType`/`listType` for books specifically. One real
+     *  improvement now possible from the full lexicon: `status` has a fixed,
+     *  known enum (`#finished`/`#in_progress`/`#backlog`/`#abandoned`), so a
+     *  "Backlog" item is now recognized primarily by `status == "#backlog"`
+     *  rather than guessing off the freeform `listType` string — the old
+     *  `listType`-keyword match is kept only as a fallback, for items on a
+     *  custom user list (e.g. one named "Watchlist") that never set `status`
+     *  at all. */
     suspend fun getPopfeedBacklog(did: String): List<PopfeedBacklogItem> {
         val resp = runCatching { api.listRecords(null, did, "social.popfeed.feed.listItem", 100, null) }.getOrNull()
         val body = resp?.takeIf { it.isSuccessful }?.body() ?: return emptyList()
 
-        // listType follows a "{status}_{mediaTypePlural}" convention for books
-        // (confirmed: "currently_reading_books") — these are the plausible
-        // equivalents for a movie/TV/game/music backlog or watchlist.
+        // Kept as a fallback only now (see this function's doc comment) for
+        // custom user lists that never set the real `status` field below —
+        // listType follows a "{status}_{mediaTypePlural}" convention for
+        // books (confirmed: "currently_reading_books").
         val backlogKeywords = listOf("backlog", "watchlist", "want_to", "towatch", "to_watch", "toplay", "to_play", "plan_to", "planning")
         // Broadened to include music (album/song/track) — profile tabs
         // sub-filter row (this session) needs Music as a real Backlog
@@ -982,15 +1017,38 @@ class BlueskyRepository {
             val obj = rec.value?.takeIf { it.isJsonObject }?.asJsonObject ?: continue
             val creativeWorkType = firstStringField(obj, "creativeWorkType", "mediaType", "type")?.lowercase() ?: continue
             if (mediaTypeKeywords.none { creativeWorkType.contains(it) }) continue
+            // Primary match: the lexicon's real `status` enum. Values are
+            // written with a leading '#' (Lexicon "knownValues" convention,
+            // e.g. "#backlog") — stripped here so both that and a bare
+            // "backlog" compare cleanly.
+            val status = firstStringField(obj, "status")?.lowercase()?.removePrefix("#") ?: ""
             val listType = firstStringField(obj, "listType")?.lowercase() ?: ""
-            if (backlogKeywords.none { listType.contains(it) }) continue
+            val isBacklog = status == "backlog" || (status.isEmpty() && backlogKeywords.any { listType.contains(it) })
+            if (!isBacklog) continue
             val title = firstStringField(obj, "title") ?: continue
-            val image = firstImageField(obj, did, "posterUrl", "coverUrl", "artworkUrl", "poster", "image", "coverImage", "thumb")
+            // Blob checked before the legacy URL string — see
+            // getPopfeedReviews' matching image lookup just above for why
+            // (Popfeed is mid-migration from posterUrl/backdropUrl to
+            // poster/backdrop blobs; preferring the blob when both a record
+            // and this app's parsing happen to see both is the safer,
+            // self-hosted-first default).
+            val image = firstImageField(obj, did, "poster", "posterUrl", "coverUrl", "artworkUrl", "image", "coverImage", "thumb")
             // Same landscape/backdrop keyword set getPopfeedReviews uses —
             // see PopfeedBacklogItem.mediaBackdropUrl's own doc comment.
             val backdrop = firstImageField(obj, did, "backdrop", "backdropUrl", "banner", "bannerUrl", "landscape", "landscapeUrl", "fanart", "heroImage", "wideImage")
             val createdAt = firstStringField(obj, "createdAt", "updatedAt") ?: ""
-            result[rec.uri] = PopfeedBacklogItem(uri = rec.uri, title = title, imageUrl = image, mediaBackdropUrl = backdrop, createdAt = createdAt, mediaCategory = creativeWorkType)
+            // Confirmed real lexicon fields — see PopfeedBacklogItem's own
+            // doc comment for how TitleDetailOverlay uses these.
+            val releaseDate = firstStringField(obj, "releaseDate") ?: ""
+            val genres = stringArrayField(obj, "genres")
+            val mainCredit = firstStringField(obj, "mainCredit")
+            val mainCreditRole = firstStringField(obj, "mainCreditRole")
+            val imdbId = imdbIdField(obj)
+            result[rec.uri] = PopfeedBacklogItem(
+                uri = rec.uri, title = title, imageUrl = image, mediaBackdropUrl = backdrop,
+                createdAt = createdAt, mediaCategory = creativeWorkType, releaseDate = releaseDate,
+                genres = genres, mainCredit = mainCredit, mainCreditRole = mainCreditRole, imdbId = imdbId
+            )
         }
         return result.values.sortedByDescending { it.createdAt }
     }

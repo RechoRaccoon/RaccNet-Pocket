@@ -634,9 +634,9 @@ sealed class LeafletBlock {
 }
 
 /** A single Popfeed (social.popfeed.review, formerly app.popsky.review)
- *  review, reduced down to what the Reviews tab needs. Popfeed's exact field
- *  names aren't publicly documented, so parsing is defensive across a few
- *  known aliases (see BlueskyRepository.getPopfeedReviews). */
+ *  review, reduced down to what the Reviews tab needs. Field names below are
+ *  now confirmed directly against Popfeed's public lexicon (see
+ *  BlueskyRepository.getPopfeedReviews's comment) rather than guessed. */
 data class PopfeedReview(
     val uri: String,
     val mediaTitle: String,
@@ -655,16 +655,28 @@ data class PopfeedReview(
     // "video_game"/"album" (see BlueskyRepository.getPopfeedBacklog's
     // comment for where this field name was confirmed). Bucketed into the
     // four filter categories by ProfileOverlay's reviewCategoryBucket().
-    val mediaCategory: String? = null
+    val mediaCategory: String? = null,
+    // The four fields below are confirmed real lexicon fields
+    // (social.popfeed.feed.review's releaseDate/genres/mainCredit/
+    // mainCreditRole) not currently surfaced anywhere in the Reviews tab UI,
+    // kept here for parity with PopfeedBacklogItem and for any future
+    // review-detail screen that wants them.
+    val releaseDate: String = "",
+    val genres: List<String> = emptyList(),
+    val mainCredit: String? = null,
+    val mainCreditRole: String? = null,
+    // identifiers.imdbId off the record — present so a future caller could
+    // do the same open, key-free Wikipedia description lookup
+    // (WikipediaRepository.fetchDescription) that TitleDetailOverlay now
+    // does for Backlog items, without needing to re-derive it.
+    val imdbId: String? = null
 )
 
 /** A single Popfeed backlog/watchlist entry (movie, TV show, or game the
  *  account has logged to watch/play eventually) — reduced down to what the
- *  profile's Backlog tab needs. The collection these come from
- *  (social.popfeed.feed.listItem) and the title field are confirmed against
- *  a real third-party Popfeed integration; the image field and the exact
- *  backlog/watchlist category values for movies/TV/games are not, and are
- *  matched defensively — see BlueskyRepository.getPopfeedBacklog. */
+ *  profile's Backlog tab needs. Field names below are confirmed directly
+ *  against Popfeed's public lexicon (social.popfeed.feed.listItem) — see
+ *  BlueskyRepository.getPopfeedBacklog's comment for the source. */
 data class PopfeedBacklogItem(
     val uri: String,
     val title: String,
@@ -677,7 +689,24 @@ data class PopfeedBacklogItem(
     val mediaBackdropUrl: String? = null,
     val createdAt: String = "",
     // Same sub-filter bucketing as PopfeedReview.mediaCategory above.
-    val mediaCategory: String? = null
+    val mediaCategory: String? = null,
+    // Confirmed real lexicon fields — TitleDetailOverlay now reads these
+    // directly instead of showing "Placeholder" for every Backlog card.
+    // Blank/empty/null when the record itself doesn't carry a value, in
+    // which case TitleDetailOverlay still falls back to its placeholder
+    // text for that one field only.
+    val releaseDate: String = "",
+    val genres: List<String> = emptyList(),
+    // "Directed by"/"By"/developer/artist depending on mainCreditRole —
+    // TitleDetailOverlay picks the label, this is just the name.
+    val mainCredit: String? = null,
+    val mainCreditRole: String? = null,
+    // identifiers.imdbId off the record, when present — Popfeed's lexicon
+    // carries no synopsis field at all (confirmed), so this is what lets
+    // openProfileTitle's Wikipedia lookup (WikipediaRepository.
+    // fetchDescription) find the exact right article instead of guessing
+    // off the title alone.
+    val imdbId: String? = null
 )
 
 // ── Settings Update ───────────────────────────────────────────────────────────
@@ -903,10 +932,17 @@ data class SearchFeedResult(
 // ─── Title search (Review Support feature) ─────────────────────────────────
 
 /** Search page's "Titles" tab: one movie/TV/game/album/book result. The
- *  Titles tab is currently a placeholder (see SearchOverlay.kt/
- *  MainViewModel — nothing populates this from a real catalog right now),
- *  so this model exists purely to keep the results-grid/detail-overlay UI
- *  wired up for whenever a real data source is added later.
+ *  Titles tab itself is still a placeholder (see SearchOverlay.kt/
+ *  MainViewModel — there's genuinely no open, standalone movie *catalog* to
+ *  search against; Popfeed's lexicon only has per-review/per-list-item
+ *  snapshots, not an independently searchable database), so search results
+ *  still won't populate this. However, this same model is now also used by
+ *  MainViewModel.openProfileTitle to open a Backlog card's "full info"
+ *  screen (TitleDetailOverlay) with real data: releaseDate/creator/genres
+ *  come straight off the tapped PopfeedBacklogItem, and `overview` is filled
+ *  in asynchronously via WikipediaRepository.fetchDescription once it
+ *  resolves (see openProfileTitle) since Popfeed's schema has no synopsis
+ *  field at all. `tagline` still has no source anywhere and stays null.
  *  `mediaCategory` uses the exact same loose keyword strings as
  *  [PopfeedBacklogItem.mediaCategory]/[PopfeedReview.mediaCategory] (e.g.
  *  "movie", "tv_show", "video_game", "album", "book") so the same
@@ -924,6 +960,11 @@ data class TitleSearchResult(
     val releaseDate: String = "",
     // "Directed by"/"By"/developer/artist depending on category.
     val creator: String? = null,
+    // Raw mainCreditRole off a Popfeed record (e.g. "director"/"developer"/
+    // "author") — TitleDetailOverlay's creatorRoleLabel() maps this to the
+    // actual "Directed by"/"Developed by"/etc. prefix shown next to
+    // [creator]. Null (no label prefix, just the bare name) when absent.
+    val creatorRole: String? = null,
     val genres: List<String> = emptyList(),
     val tagline: String? = null,
     val overview: String? = null,

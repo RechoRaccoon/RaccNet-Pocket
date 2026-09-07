@@ -11,6 +11,7 @@ import com.mediaviewer.model.*
 import com.mediaviewer.repository.BlueskyRepository
 import com.mediaviewer.repository.E621Repository
 import com.mediaviewer.repository.StreamplaceRepository
+import com.mediaviewer.repository.WikipediaRepository
 import com.mediaviewer.tagging.TagDatabase
 import com.mediaviewer.tagging.TaggerModelManager
 import com.mediaviewer.tagging.TaggingRepository
@@ -2097,18 +2098,40 @@ _bskyDid.value          = session.did
     /** Backlog cards' "full info menu" (Titles feature) — per feedback,
      *  this was meant to cover *every* title card, not just Search's
      *  Titles tab. Converts the tapped [PopfeedBacklogItem] into the same
-     *  [TitleSearchResult] shape TitleDetailOverlay already renders, so the
-     *  real title/portrait poster/landscape backdrop it already has show up
-     *  for real — only the fields Popfeed's backlog schema doesn't carry at
-     *  all (release date, director, genres, tagline, description, rating)
-     *  still read "Placeholder" there. */
+     *  [TitleSearchResult] shape TitleDetailOverlay already renders.
+     *
+     *  Title/poster/backdrop/releaseDate/genres/mainCredit all come straight
+     *  off the record now (confirmed real Popfeed lexicon fields — see
+     *  BlueskyRepository.getPopfeedBacklog), so those show up immediately,
+     *  synchronously, no network round trip needed. `overview` is the one
+     *  field with no Popfeed source at all (their lexicon has no synopsis
+     *  field, confirmed) — it starts null (TitleDetailOverlay shows its
+     *  loading/placeholder state) and is patched in a moment later via
+     *  [WikipediaRepository], the one open, key-free description source
+     *  that exists. `tagline` still has nowhere to come from and stays null.
+     *
+     *  The `cur.openTitle?.id == item.uri` check below guards against a
+     *  slow Wikipedia lookup finishing after the person has already closed
+     *  this card or opened a different one — without it, a late response
+     *  could overwrite whatever's open by then with the wrong movie's
+     *  description. */
     fun openProfileTitle(item: PopfeedBacklogItem) {
         _profileOverlay.value = _profileOverlay.value?.copy(
             openTitle = TitleSearchResult(
                 id = item.uri, title = item.title, posterUrl = item.imageUrl,
-                backdropUrl = item.mediaBackdropUrl, mediaCategory = item.mediaCategory
+                backdropUrl = item.mediaBackdropUrl, mediaCategory = item.mediaCategory,
+                releaseDate = item.releaseDate, creator = item.mainCredit,
+                creatorRole = item.mainCreditRole, genres = item.genres
             )
         )
+        viewModelScope.launch(Dispatchers.IO) {
+            val overview = runCatching { WikipediaRepository.fetchDescription(item.title, item.imdbId) }.getOrNull()
+            if (overview.isNullOrBlank()) return@launch
+            val cur = _profileOverlay.value ?: return@launch
+            if (cur.openTitle?.id == item.uri) {
+                _profileOverlay.value = cur.copy(openTitle = cur.openTitle.copy(overview = overview))
+            }
+        }
     }
     fun closeProfileTitle() { _profileOverlay.value = _profileOverlay.value?.copy(openTitle = null) }
 

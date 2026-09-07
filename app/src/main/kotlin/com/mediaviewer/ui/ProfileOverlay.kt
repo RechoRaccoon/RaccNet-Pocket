@@ -1944,15 +1944,45 @@ private fun ReviewDetailOverlay(review: PopfeedReview, author: AuthorInfo, liqui
  *  - A fixed "Review" pill sits where the interaction bar usually would,
  *    pinned to the bottom of the screen.
  *
- * Uses whatever real data [title] actually carries — Backlog cards supply
- * a real title, portrait poster, and (when the record has one) a real
- * landscape backdrop, so those show up for real. Everything else (release
- * date, director/creator, genres, tagline, description) has no data source
- * right now — TMDB was removed, and Popfeed's backlog schema doesn't carry
- * any of those fields at all — so those five still just read "Placeholder"
- * regardless of which card opened this page. Tapping "Review" doesn't do
- * anything yet either.
+ * Uses whatever real data [title] actually carries. Backlog cards now supply
+ * real title/poster/backdrop *and* release date/genres/director-or-equivalent
+ * (all confirmed real fields in Popfeed's own public lexicon — see
+ * MainViewModel.openProfileTitle and BlueskyRepository.getPopfeedBacklog),
+ * so all of those show up for real. `description` is filled in a moment
+ * after this page opens, from Wikipedia (see WikipediaRepository) — the one
+ * field Popfeed's schema has no equivalent for at all — so it briefly shows
+ * a muted loading line before either the real synopsis or a "no description
+ * found" message replaces it. `tagline` still has no data source anywhere
+ * and keeps reading "Placeholder". Tapping "Review" doesn't do anything yet
+ * either.
  */
+
+/** Maps Popfeed's raw `mainCreditRole` value (confirmed real lexicon enum:
+ *  director/author/artist/showrunner/lead_actor/creator/studio/publisher/
+ *  developer/performer/network) to the display prefix shown next to
+ *  [TitleSearchResult.creator] — e.g. "director" -> "Directed by". Falls
+ *  back to the generic "By" for a role this app doesn't have a specific
+ *  label for yet, or none at all. */
+private fun creatorRoleLabel(role: String?): String = when (role?.lowercase()) {
+    "director" -> "Directed by"
+    "author" -> "Written by"
+    "showrunner", "creator" -> "Created by"
+    "developer" -> "Developed by"
+    "publisher" -> "Published by"
+    "studio" -> "Studio"
+    "network" -> "Network"
+    "lead_actor" -> "Starring"
+    else -> "By"
+}
+
+/** Popfeed's `releaseDate` is a raw ISO-8601 datetime string (e.g.
+ *  "2010-07-16T00:00:00Z") — this pulls out just the year for the compact
+ *  pill on [TitleDetailOverlay]. Null (caller falls back to its own
+ *  "Placeholder" text) if [iso] is blank or doesn't start with a 4-digit
+ *  year. */
+private fun releaseYearLabel(iso: String): String? =
+    iso.take(4).takeIf { it.length == 4 && it.all(Char::isDigit) }
+
 @Composable
 fun TitleDetailOverlay(title: TitleSearchResult, liquidGlass: Boolean, onClose: () -> Unit) {
     val tint = rememberDominantColor(title.posterUrl ?: title.backdropUrl ?: "")
@@ -2023,22 +2053,39 @@ fun TitleDetailOverlay(title: TitleSearchResult, liquidGlass: Boolean, onClose: 
                         Spacer(Modifier.width(12.dp))
                         // Details column — height-confined to the poster's
                         // own height, per spec, with its five rows spread
-                        // evenly across that space. The title uses real
-                        // data when present; the rest have no data source
-                        // right now (see this function's own doc comment)
-                        // so they stay hardcoded "Placeholder" bubbles.
+                        // evenly across that space. Release date/director-
+                        // or-equivalent/genres now come from real Popfeed
+                        // fields (see this function's own doc comment); any
+                        // one of them still reads "Placeholder" only if the
+                        // specific record it came from happens to leave
+                        // that field blank. The star rating stays 0 — Popfeed
+                        // backlog/watchlist entries genuinely carry no
+                        // rating (that only exists on reviews).
                         Column(
                             Modifier.weight(1f).height(posterHeight),
                             verticalArrangement = Arrangement.SpaceBetween
                         ) {
                             ShrinkToFitTitleBubble(title.title.ifBlank { "Placeholder" }, liquidGlass = liquidGlass, tint = tint)
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                ProfileGlassPill(text = "Placeholder", liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true)
+                                ProfileGlassPill(
+                                    text = releaseYearLabel(title.releaseDate) ?: "Placeholder",
+                                    liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true
+                                )
                                 Spacer(Modifier.weight(1f))
                                 StarRatingPill(rating = 0f, liquidGlass = liquidGlass, tint = tint)
                             }
-                            ProfileGlassPill(text = "Placeholder", liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true)
-                            ProfileGlassPill(text = "Placeholder", liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true)
+                            ProfileGlassPill(
+                                text = title.creator?.let { "${creatorRoleLabel(title.creatorRole)} $it" } ?: "Placeholder",
+                                liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true
+                            )
+                            ProfileGlassPill(
+                                text = title.genres.takeIf { it.isNotEmpty() }?.joinToString(", ") ?: "Placeholder",
+                                liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true
+                            )
+                            // Tagline has no data source anywhere (Popfeed's
+                            // schema doesn't carry one, and it's out of
+                            // scope for the Wikipedia lookup below) — always
+                            // "Placeholder" for now.
                             ProfileGlassPill(text = "Placeholder", liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true)
                         }
                     }
@@ -2047,13 +2094,24 @@ fun TitleDetailOverlay(title: TitleSearchResult, liquidGlass: Boolean, onClose: 
                 Spacer(Modifier.height(16.dp))
 
                 // ── Description — full-width, edge-to-edge bubble ──────────
+                // Popfeed carries no synopsis field at all (confirmed
+                // against its public lexicon), so unlike everything above,
+                // this doesn't come from [title] as originally passed in —
+                // MainViewModel.openProfileTitle patches title.overview in
+                // asynchronously, a moment after this page opens, from a
+                // Wikipedia lookup (see WikipediaRepository). Recomposes on
+                // its own once that arrives since `title` is Compose state.
                 val descShape = RoundedCornerShape(16.dp)
                 Box(
                     Modifier.fillMaxWidth().padding(horizontal = 12.dp)
                         .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = descShape) else Modifier.clip(descShape).background(Color.White.copy(0.06f)))
                         .padding(14.dp)
                 ) {
-                    Text("Placeholder", color = Color.White.copy(0.92f), fontSize = 14.sp, lineHeight = 21.sp)
+                    Text(
+                        title.overview ?: "No description found for this title yet.",
+                        color = Color.White.copy(if (title.overview != null) 0.92f else 0.55f),
+                        fontSize = 14.sp, lineHeight = 21.sp
+                    )
                 }
                 // Room for the fixed "Review" bar below so it never covers
                 // the tail end of the description while scrolled to the
