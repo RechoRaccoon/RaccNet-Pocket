@@ -156,18 +156,14 @@ fun ComposePostScreen(
     BackHandler(onBack = onClose)
     val context = LocalContext.current
 
-    // Item 2: match the rest of the app and reflect the signed-in person's
-    // own profile color here, instead of whatever post the feed happened to
-    // be showing when the composer was opened (that's what the incoming
-    // `dominantColor` param actually carries — see MainActivity's
+    // Item 2 / Item 10: match the rest of the app and reflect the signed-in
+    // person's own profile color here, instead of whatever post the feed
+    // happened to be showing when the composer was opened (that's what the
+    // incoming `dominantColor` param actually carries — see MainActivity's
     // `currentDominantColor`). Same shadowing pattern SettingsSheet's Hub
-    // uses for its own `dominantColor` param.
-    val dominantColor = selfProfile?.avatarUrl?.let { rememberDominantColor(it) } ?: dominantColor
-
-    // Item 10: tints the whole composer to the title's own poster color
-    // while reviewing, same "match what's on screen" reasoning the profile
-    // avatar shadow above already applies — takes priority since the
-    // title being reviewed is far more the visual subject here than the
+    // uses for its own `dominantColor` param. While reviewing, the title's
+    // own poster color takes priority over the profile avatar shadow, since
+    // the title being reviewed is far more the visual subject here than the
     // reviewer's own avatar is.
     val dominantColor = reviewTarget?.posterUrl?.let { rememberDominantColor(it) }
         ?: selfProfile?.avatarUrl?.let { rememberDominantColor(it) } ?: dominantColor

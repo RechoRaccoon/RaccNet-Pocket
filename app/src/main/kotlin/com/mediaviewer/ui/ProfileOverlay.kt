@@ -253,7 +253,7 @@ fun ProfileOverlay(
     reviewSocial: Map<String, MainViewModel.ReviewSocialState> = emptyMap(),
     onLoadReviewSocial: (PopfeedReview) -> Unit = {},
     onToggleReviewLike: (PopfeedReview) -> Unit = {},
-    onPostReviewComment: (PopfeedReview, String) -> Unit = {},
+    onPostReviewComment: (PopfeedReview, String) -> Unit = { _, _ -> },
     // Pinch navigation: the mirror of the post pager's pinch-in. Only takes
     // effect (see pinchOutFromProfile() in the ViewModel) when this profile
     // is the one currently hidden behind a post — hiding it again is what
@@ -2093,7 +2093,7 @@ fun TitleDetailOverlay(
     reviewSocial: Map<String, MainViewModel.ReviewSocialState> = emptyMap(),
     onLoadReviewSocial: (PopfeedReview) -> Unit = {},
     onToggleReviewLike: (PopfeedReview) -> Unit = {},
-    onPostReviewComment: (PopfeedReview, String) -> Unit = {}
+    onPostReviewComment: (PopfeedReview, String) -> Unit = { _, _ -> }
 ) {
     val tint = rememberDominantColor(title.posterUrl ?: title.backdropUrl ?: "")
     val uriHandler = LocalUriHandler.current
@@ -2599,7 +2599,7 @@ private fun LikeReviewCommentBar(
 ) {
     val shape = RoundedCornerShape(26.dp)
     @Composable
-    fun Segment(label: String, active: Boolean, onClick: () -> Unit) {
+    fun RowScope.Segment(label: String, active: Boolean, onClick: () -> Unit) {
         Box(Modifier.weight(1f).fillMaxHeight().clickable(onClick = onClick), contentAlignment = Alignment.Center) {
             Text(label, color = if (active) Color(0xFFFF4D6D) else Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         }
