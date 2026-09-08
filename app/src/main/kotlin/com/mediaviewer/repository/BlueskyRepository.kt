@@ -1053,6 +1053,132 @@ class BlueskyRepository {
         return result.values.sortedByDescending { it.createdAt }
     }
 
+    /** Item 10: posts a new review record to the confirmed real
+     *  `social.popfeed.feed.review` collection (see review.json in
+     *  Popfeed's public lexicon — required fields: identifiers,
+     *  creativeWorkType, rating, createdAt). [ratingOutOf10] is Popfeed's
+     *  native 0–10 half-star scale (see parsePopfeedReviewRecord's own
+     *  comment on why rating is always /2'd back to a 0–5 scale for
+     *  display) — ComposePostScreen's star picker already produces this
+     *  directly, so no conversion happens here. */
+    suspend fun postPopfeedReview(token: String, did: String, target: TitleSearchResult, ratingOutOf10: Int, text: String): Result<String> {
+        val identifiers = mutableMapOf<String, Any>()
+        if (target.id.startsWith("imdb:")) identifiers["imdbId"] = target.id.removePrefix("imdb:")
+        val record = mutableMapOf<String, Any>(
+            "identifiers" to identifiers,
+            "creativeWorkType" to (target.mediaCategory ?: "movie"),
+            "rating" to ratingOutOf10.coerceIn(0, 10),
+            "createdAt" to java.time.Instant.now().toString(),
+            "title" to target.title
+        )
+        if (text.isNotBlank()) record["text"] = text
+        target.posterUrl?.let { record["posterUrl"] = it }
+        target.backdropUrl?.let { record["backdropUrl"] = it }
+        if (target.releaseDate.isNotBlank()) record["releaseDate"] = target.releaseDate
+        if (target.genres.isNotEmpty()) record["genres"] = target.genres
+        target.creator?.let { record["mainCredit"] = it }
+        target.creatorRole?.let { record["mainCreditRole"] = it }
+        return createRecord(token, did, "social.popfeed.feed.review", record)
+    }
+
+    /** Item 10: "after posting the review it should remove it from the
+     *  backlog/watchlist" — [listItemUri] is a social.popfeed.feed.listItem
+     *  record's own AT-URI (see PopfeedBacklogItem.uri), deleted outright
+     *  rather than status-flipped to #finished, since the lexicon's
+     *  `status` enum has no dedicated "reviewed" value and Backlog/Watchlist
+     *  is specifically what this needs to disappear from. */
+    suspend fun removeBacklogListItem(token: String, did: String, listItemUri: String): Result<Unit> =
+        deleteRecord(token, did, "social.popfeed.feed.listItem", listItemUri.rkey())
+
+    // ── Popfeed likes/comments (item 12) ────────────────────────────────────
+    // Popfeed has no dedicated AppView of its own that this app talks to —
+    // every read here is a raw com.atproto.repo.listRecords call against
+    // individual PDSes (same approach getPopfeedReviews/getPopfeedBacklog
+    // already use), and there's no server-side aggregation endpoint that
+    // could hand back "total like count across everyone" the way Bluesky's
+    // own getPosts does for app.bsky.feed.post. So the like COUNT and
+    // "who's liked this" surfaced here are honestly best-effort: they only
+    // ever cover the current account plus whichever accounts it subscribes
+    // to for Reviews (the same `dids` list the Hub's Mutual Reviews section
+    // already uses) — not a true global count. Whether *I* (the signed-in
+    // account) like something is always accurate, since that's just reading
+    // my own repo.
+
+    /** My own like record on [subjectUri], if any — its rkey is needed to
+     *  unlike (delete) later. Null if I haven't liked it. */
+    private suspend fun myPopfeedLike(did: String, subjectUri: String): BskyRecordRef? {
+        val resp = runCatching { api.listRecords(null, did, "social.popfeed.feed.like", 100, null) }.getOrNull()
+        val body = resp?.takeIf { it.isSuccessful }?.body() ?: return null
+        for (rec in body.records) {
+            val obj = rec.value?.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+            if (firstStringField(obj, "subjectUri") == subjectUri) return BskyRecordRef(rec.uri)
+        }
+        return null
+    }
+
+    /** Best-effort like summary for [subjectUri] (a review's own AT-URI) —
+     *  see this section's class-level comment for why the count is scoped
+     *  to `dids` rather than a true global tally. */
+    suspend fun getPopfeedLikeSummary(myDid: String, subjectUri: String, subscribedDids: List<String>): PopfeedLikeSummary = coroutineScope {
+        val allDids = (subscribedDids + myDid).distinct()
+        val gate = Semaphore(SUBSCRIBED_FETCH_CONCURRENCY)
+        var count = 0
+        var likedByMe = false
+        allDids.map { d ->
+            async {
+                gate.withPermit {
+                    val ref = runCatching { myPopfeedLike(d, subjectUri) }.getOrNull()
+                    if (ref != null) {
+                        if (d == myDid) likedByMe = true
+                        true
+                    } else false
+                }
+            }
+        }.awaitAll().forEach { if (it) count++ }
+        PopfeedLikeSummary(count = count, likedByMe = likedByMe)
+    }
+
+    suspend fun likePopfeedReview(token: String, did: String, subjectUri: String): Result<String> =
+        createRecord(token, did, "social.popfeed.feed.like", mapOf(
+            "subjectUri" to subjectUri, "subjectType" to "review", "createdAt" to java.time.Instant.now().toString()
+        ))
+
+    suspend fun unlikePopfeedReview(token: String, did: String, subjectUri: String): Result<Unit> {
+        val ref = myPopfeedLike(did, subjectUri) ?: return Result.success(Unit)
+        return deleteRecord(token, did, "social.popfeed.feed.like", ref.uri.rkey())
+    }
+
+    /** Comments on [subjectUri] (a review's own AT-URI) — same best-effort
+     *  scoping as likes above (self + subscribed accounts only), sorted
+     *  oldest-first for a normal reading order. */
+    suspend fun getPopfeedComments(token: String, myDid: String, subjectUri: String, subscribedDids: List<String>): List<PopfeedCommentRecord> = coroutineScope {
+        val allDids = (subscribedDids + myDid).distinct()
+        val authors = fetchAuthorInfos(token, allDids)
+        val gate = Semaphore(SUBSCRIBED_FETCH_CONCURRENCY)
+        allDids.map { d ->
+            async {
+                gate.withPermit {
+                    val author = authors[d] ?: return@withPermit emptyList<PopfeedCommentRecord>()
+                    val resp = runCatching { api.listRecords(null, d, "social.popfeed.feed.comment", 100, null) }.getOrNull()
+                    val body = resp?.takeIf { it.isSuccessful }?.body() ?: return@withPermit emptyList<PopfeedCommentRecord>()
+                    body.records.mapNotNull { rec ->
+                        val obj = rec.value?.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+                        if (firstStringField(obj, "subjectUri") != subjectUri) return@mapNotNull null
+                        val text = firstStringField(obj, "text") ?: return@mapNotNull null
+                        val createdAt = firstStringField(obj, "createdAt") ?: ""
+                        PopfeedCommentRecord(uri = rec.uri, author = author, text = text, createdAt = createdAt)
+                    }
+                }
+            }
+        }.awaitAll().flatten().sortedBy { it.createdAt }
+    }
+
+    suspend fun postPopfeedComment(token: String, did: String, subjectUri: String, text: String): Result<String> =
+        createRecord(token, did, "social.popfeed.feed.comment", mapOf(
+            "text" to text, "subjectUri" to subjectUri, "subjectType" to "review",
+            "createdAt" to java.time.Instant.now().toString()
+        ))
+
     // ── Thread / Comments ─────────────────────────────────────────────────────
 
     suspend fun getPostThread(token: String, uri: String): Result<List<CommentItem>> = runCatching {

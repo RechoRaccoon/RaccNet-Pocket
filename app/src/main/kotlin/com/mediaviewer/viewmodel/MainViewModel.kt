@@ -311,6 +311,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Backlog cards' own "full info menu" (Titles feature) — see
         // openProfileTitle/closeProfileTitle and TitleDetailOverlay.
         val openTitle: TitleSearchResult? = null,
+        // Set alongside [openTitle] whenever the title page was opened *from*
+        // a specific review (a Hub Mutual Review card, or a row on someone's
+        // Reviews tab — see openMutualReview/openProfileReview) rather than
+        // from a Backlog card. TitleDetailOverlay uses this to auto-select
+        // that reviewer's bubble (as the second option, right after
+        // "Summary") the moment the page opens, instead of landing on the
+        // Summary tab and making the person find it themselves.
+        val openTitlePreselectedReview: FriendPopfeedReview? = null,
         // Pinch navigation: tapping a post from this profile's grid doesn't
         // destroy this state (see openPostFromProfileTab) — it just flips
         // this to true, so the composable stays alive (scroll position and
@@ -568,8 +576,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _composePostSubmitting = MutableStateFlow(false)
     val composePostSubmitting: StateFlow<Boolean> = _composePostSubmitting
 
+    // Item 10: the title page's "Review" bar opens the composer straight
+    // into Review mode/status for one specific title — this is that
+    // title's own carried state, read by ComposePostScreen (see
+    // reviewTarget param) so it knows to force REVIEW mode and grey out
+    // the other mode buttons the moment it opens.
+    private val _reviewComposeTarget = MutableStateFlow<TitleSearchResult?>(null)
+    val reviewComposeTarget: StateFlow<TitleSearchResult?> = _reviewComposeTarget
+
     fun openComposePost() { _composePostOpen.value = true }
-    fun closeComposePost() { if (!_composePostSubmitting.value) _composePostOpen.value = false }
+    fun openReviewCompose(target: TitleSearchResult) {
+        _reviewComposeTarget.value = target
+        _composePostOpen.value = true
+    }
+    fun closeComposePost() {
+        if (_composePostSubmitting.value) return
+        _composePostOpen.value = false
+        _reviewComposeTarget.value = null
+    }
 
     /** Routes a finished [com.mediaviewer.ui.ComposePostDraft] to the right
      *  BlueskyRepository call for its mode, retrying once on an expired-
@@ -585,7 +609,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             result.onFailure { _errorMessage.value = it.message }
             _composePostSubmitting.value = false
-            if (result.isSuccess) _composePostOpen.value = false
+            if (result.isSuccess) { _composePostOpen.value = false; _reviewComposeTarget.value = null }
         }
     }
 
@@ -616,6 +640,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     bskyRepo.createVideoPost(bskyToken, did, context, uri, draft.videoThumbnailUri, draft.videoTitle, draft.videoDescription).getOrElse { throw it }
                 }
             }
+            // Item 10: posts a real social.popfeed.feed.review record (not
+            // an app.bsky.feed.post) for the title the composer was opened
+            // from, then — per spec ("after posting the review it should
+            // remove it from the backlog/watchlist") — deletes the matching
+            // social.popfeed.feed.listItem record so the title drops off
+            // the Backlog/Watchlist tab now that it's been reviewed. The
+            // listItem delete is best-effort: a title reviewed straight
+            // from a friend's Mutual Review card (openMutualReview) was
+            // never on *this* account's own backlog in the first place, so
+            // there's nothing there to remove — that's expected, not an
+            // error, and shouldn't fail the review post itself.
+            com.mediaviewer.ui.ComposeMode.REVIEW -> {
+                val target = draft.reviewTarget
+                if (target == null) Result.failure(IllegalStateException("No title to review"))
+                else runCatching {
+                    val uri = bskyRepo.postPopfeedReview(bskyToken, did, target, draft.reviewRating, draft.posts.firstOrNull()?.text.orEmpty())
+                        .getOrElse { throw it }
+                    // Only a title opened from an actual Backlog/Watchlist
+                    // card (see MainViewModel.openProfileTitle) has an
+                    // `id` that's really a social.popfeed.feed.listItem
+                    // record's own AT-URI — one opened from a review
+                    // instead (openMutualReview/openProfileReview) has a
+                    // synthetic "imdb:..." or review-record id, which
+                    // deliberately doesn't match this and is skipped.
+                    if (target.id.startsWith("at://") && target.id.contains("social.popfeed.feed.listItem")) {
+                        runCatching { bskyRepo.removeBacklogListItem(bskyToken, did, target.id) }
+                    }
+                    uri
+                }
+            }
         }
     }
 
@@ -627,7 +681,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // backed by a real search. Enum name kept as ACCOUNTS/FEEDS rather than
     // renaming the Kotlin identifiers too, to keep this diff scoped to
     // what's user-visible; .label() below is what actually says "People".
-    enum class SearchFilter { ACCOUNTS, POSTS, LIKED_TAGS, TITLES, FEEDS, STARTER_PACKS }
+    enum class SearchFilter { ACCOUNTS, POSTS, LIKED_TAGS, FEEDS, STARTER_PACKS }
 
     data class SearchState(
         val query: String = "",
@@ -636,17 +690,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val accounts: List<SearchAccountResult> = emptyList(),
         val starterPacks: List<SearchStarterPackResult> = emptyList(),
         val feeds: List<SearchFeedResult> = emptyList(),
-        // Titles feature (placeholder — no catalog wired up right now;
-        // TMDB was removed, see history). `titleFilter` reuses
-        // ProfileOverlay's ReviewKindFilter for its sub-filter row, per
-        // spec ("just like in the profile tabs"), but only ALL/MOVIES/TV
-        // are actually selectable here — Games/Music/Books stay
-        // Profile-only buckets.
-        val titles: List<TitleSearchResult> = emptyList(),
-        val titleFilter: com.mediaviewer.ui.ReviewKindFilter = com.mediaviewer.ui.ReviewKindFilter.ALL,
-        val titleLoading: Boolean = false,
-        val selectedTitle: TitleSearchResult? = null,
-        val selectedTitleLoading: Boolean = false,
         val loading: Boolean = false,
         val hasSearched: Boolean = false
     )
@@ -732,37 +775,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         _searchState.value = _searchState.value.copy(feeds = feeds, loading = false, hasSearched = true)
                     }.onFailure { _searchState.value = _searchState.value.copy(loading = false, hasSearched = true) }
                 }
-                // Titles feature: placeholder for now (per feedback — TMDB
-                // has been fully removed). No catalog is wired up, so this
-                // just clears any stale results and marks the search as
-                // "done" so the UI shows its placeholder state instead of a
-                // stuck spinner.
-                SearchFilter.TITLES -> {
-                    _searchState.value = _searchState.value.copy(
-                        titles = emptyList(), titleLoading = false, loading = false, hasSearched = true
-                    )
-                }
             }
         }
-    }
-
-    /** Titles tab's sub-filter row (All/Movies/TV) — kept for the
-     *  placeholder UI even though there's no catalog behind it right now. */
-    fun setTitleSubFilter(filter: com.mediaviewer.ui.ReviewKindFilter) {
-        _searchState.value = _searchState.value.copy(titleFilter = filter)
-    }
-
-    /** Tapping a Title card — opens it in its own overlayed page (see
-     *  TitleDetailOverlay in ProfileOverlay.kt). Titles is a placeholder
-     *  feature right now (TMDB removed) — TitleDetailOverlay itself shows
-     *  "Placeholder" for every field a real catalog would have supplied,
-     *  so there's nothing to fetch here. */
-    fun openTitleDetail(title: TitleSearchResult) {
-        _searchState.value = _searchState.value.copy(selectedTitle = title, selectedTitleLoading = false)
-    }
-
-    fun closeTitleDetail() {
-        _searchState.value = _searchState.value.copy(selectedTitle = null, selectedTitleLoading = false)
     }
 
     /** Search page's Feeds tab: "Add" on a feed result — writes it into the
@@ -1797,13 +1811,19 @@ _bskyDid.value          = session.did
     // review's detail overlay, layered on top of the profile it belongs to
     // — the exact same visual result as opening the profile normally,
     // going to its Reviews tab, and tapping that review, just in one step.
-    fun openProfile(author: AuthorInfo, initialTab: ProfileTab = ProfileTab.MEDIA, review: PopfeedReview? = null, blog: LeafletBlog? = null) {
+    fun openProfile(
+        author: AuthorInfo, initialTab: ProfileTab = ProfileTab.MEDIA, review: PopfeedReview? = null, blog: LeafletBlog? = null,
+        title: TitleSearchResult? = null, preselectedReview: FriendPopfeedReview? = null
+    ) {
         if (!_bskyLoggedIn.value) return
         // Item 17: don't clobber a profile that's already open (visible or
         // hidden behind a post pager) — chain onto it via `parent` so
         // closeProfile() can unwind back through it instead of losing it.
         val parent = _profileOverlay.value
-        _profileOverlay.value = ProfileOverlayState(author = author, selectedTab = initialTab, parent = parent, openReview = review, openBlog = blog)
+        _profileOverlay.value = ProfileOverlayState(
+            author = author, selectedTab = initialTab, parent = parent, openReview = review, openBlog = blog,
+            openTitle = title, openTitlePreselectedReview = preselectedReview
+        )
 
         viewModelScope.launch(Dispatchers.IO) {
             var result = bskyRepo.getFullProfile(bskyToken, author.did)
@@ -1870,7 +1890,7 @@ _bskyDid.value          = session.did
         when {
             cur.openBlog != null -> { _profileOverlay.value = cur.copy(openBlog = null); return }
             cur.openReview != null -> { _profileOverlay.value = cur.copy(openReview = null); return }
-            cur.openTitle != null -> { _profileOverlay.value = cur.copy(openTitle = null); return }
+            cur.openTitle != null -> { _profileOverlay.value = cur.copy(openTitle = null, openTitlePreselectedReview = null); return }
         }
         // Item 17: walk past any *hidden* ancestors in the parent chain —
         // those only exist as scaffolding behind the post pager (see
@@ -2078,13 +2098,51 @@ _bskyDid.value          = session.did
 
     fun openProfileBlog(blog: LeafletBlog) { _profileOverlay.value = _profileOverlay.value?.copy(openBlog = blog) }
 
+    /** Builds the [TitleSearchResult] shape TitleDetailOverlay renders
+     *  straight out of a review's own carried title fields — used whenever
+     *  a title page is opened *from* a review (see openMutualReview/
+     *  openProfileReview below) rather than from a Backlog card. Reviews
+     *  carry the same confirmed real lexicon fields Backlog items do
+     *  (releaseDate/genres/mainCredit/mainCreditRole/identifiers.imdbId —
+     *  see PopfeedReview's own doc comment), so this is exactly the same
+     *  synchronous, no-network-round-trip mapping openProfileTitle already
+     *  does for Backlog items. */
+    private fun titleFromReview(review: PopfeedReview): TitleSearchResult = TitleSearchResult(
+        id = review.imdbId?.let { "imdb:$it" } ?: review.uri,
+        title = review.mediaTitle, posterUrl = review.mediaImageUrl, backdropUrl = review.mediaBackdropUrl,
+        releaseDate = review.releaseDate, creator = review.mainCredit, creatorRole = review.mainCreditRole,
+        genres = review.genres, mediaCategory = review.mediaCategory
+    )
+
+    /** Same "patch in a Wikipedia synopsis a moment after the page opens"
+     *  step openProfileTitle does for Backlog cards, reused for the
+     *  review-opened path below (openMutualReview/openProfileReview) — see
+     *  that function's own doc comment for the full reasoning (no synopsis
+     *  field on Popfeed's lexicon at all, Wikipedia is the one open,
+     *  key-free source that has one). Also carries through the resolved
+     *  Wikipedia article's own title/URL, needed for the CC BY-SA
+     *  attribution TitleDetailOverlay's description bubble shows underneath
+     *  the extract (see WikipediaRepository's class doc comment). */
+    private fun fetchTitleOverviewFor(review: PopfeedReview) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching { WikipediaRepository.fetchDescription(review.mediaTitle, review.imdbId) }.getOrNull() ?: return@launch
+            val cur = _profileOverlay.value ?: return@launch
+            if (cur.openTitle?.title == review.mediaTitle) {
+                _profileOverlay.value = cur.copy(openTitle = cur.openTitle.copy(overview = result.extract, wikipediaArticleUrl = result.pageUrl))
+            }
+        }
+    }
+
     /** Feature (this session): the Hub's Mutual Reviews cards call this
      *  directly instead of onOpenProfile — opens the review's author's
-     *  profile (Reviews tab) with the review's own detail overlay already
-     *  showing on top, matching "open the full review in its overlay the
-     *  same way it does when opening one on someone's profile." */
+     *  profile (Reviews tab), with that title's own full page open on top
+     *  and this specific review pre-selected in its Summary/Reviews tab
+     *  strip (item 12 — "tapping a user's review should open this title
+     *  page with their specific review auto selected"), rather than the
+     *  old standalone ReviewDetailOverlay popup. */
     fun openMutualReview(fr: FriendPopfeedReview) {
-        openProfile(fr.author, initialTab = ProfileTab.REVIEWS, review = fr.review)
+        openProfile(fr.author, initialTab = ProfileTab.REVIEWS, title = titleFromReview(fr.review), preselectedReview = fr)
+        fetchTitleOverviewFor(fr.review)
     }
 
     /** Hub Blogs section equivalent of [openMutualReview] above. */
@@ -2092,8 +2150,70 @@ _bskyDid.value          = session.did
         openProfile(fb.author, initialTab = ProfileTab.BLOGS, blog = fb.blog)
     }
     fun closeProfileBlog() { _profileOverlay.value = _profileOverlay.value?.copy(openBlog = null) }
-    fun openProfileReview(review: PopfeedReview) { _profileOverlay.value = _profileOverlay.value?.copy(openReview = review) }
+
+    /** Profile Reviews tab equivalent of [openMutualReview] — the profile
+     *  overlay is already open here (we're tapping a row on it), so this
+     *  just layers the title page on top of the *current* state instead of
+     *  pushing a whole new profile stack entry. */
+    fun openProfileReview(review: PopfeedReview) {
+        val cur = _profileOverlay.value ?: return
+        _profileOverlay.value = cur.copy(openTitle = titleFromReview(review), openTitlePreselectedReview = FriendPopfeedReview(cur.author, review))
+        fetchTitleOverviewFor(review)
+    }
     fun closeProfileReview() { _profileOverlay.value = _profileOverlay.value?.copy(openReview = null) }
+
+    // ── Title page: Reviews tab social actions (item 12) ────────────────────
+    // Keyed by review URI rather than nested in ProfileOverlayState since
+    // TitleDetailOverlay renders a whole scrollable strip of *other people's*
+    // reviews at once (see the Summary/Reviews tab strip), each of which can
+    // independently be liked/commented on — a flat map avoids needing a
+    // parallel per-review slot inside ProfileOverlayState for every one of
+    // them.
+    data class ReviewSocialState(val loading: Boolean = false, val likeCount: Int = 0, val likedByMe: Boolean = false, val comments: List<PopfeedCommentRecord> = emptyList())
+    private val _reviewSocial = MutableStateFlow<Map<String, ReviewSocialState>>(emptyMap())
+    val reviewSocial: StateFlow<Map<String, ReviewSocialState>> = _reviewSocial
+
+    /** Loads (or reloads) the like/comment state for one review — called the
+     *  moment a review's bubble becomes the selected tab on TitleDetailOverlay. */
+    fun loadReviewSocial(review: PopfeedReview) {
+        val did = _bskyDid.value
+        if (did.isBlank()) return
+        _reviewSocial.value = _reviewSocial.value + (review.uri to (_reviewSocial.value[review.uri] ?: ReviewSocialState()).copy(loading = true))
+        viewModelScope.launch(Dispatchers.IO) {
+            val subs = _subscribedReviewDids.value.toList()
+            val likes = runCatching { bskyRepo.getPopfeedLikeSummary(did, review.uri, subs) }.getOrDefault(PopfeedLikeSummary(0, false))
+            val comments = runCatching { bskyRepo.getPopfeedComments(bskyToken, did, review.uri, subs) }.getOrDefault(emptyList())
+            _reviewSocial.value = _reviewSocial.value + (review.uri to ReviewSocialState(loading = false, likeCount = likes.count, likedByMe = likes.likedByMe, comments = comments))
+        }
+    }
+
+    fun toggleReviewLike(review: PopfeedReview) {
+        val did = _bskyDid.value
+        if (did.isBlank()) return
+        val cur = _reviewSocial.value[review.uri] ?: ReviewSocialState()
+        val nowLiked = !cur.likedByMe
+        // Optimistic update — feels instant, same pattern used for
+        // Bluesky's own like button elsewhere in this app.
+        _reviewSocial.value = _reviewSocial.value + (review.uri to cur.copy(likedByMe = nowLiked, likeCount = (cur.likeCount + if (nowLiked) 1 else -1).coerceAtLeast(0)))
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = if (nowLiked) bskyRepo.likePopfeedReview(bskyToken, did, review.uri)
+                         else bskyRepo.unlikePopfeedReview(bskyToken, did, review.uri).map { review.uri }
+            if (result.isFailure) {
+                // Roll back on failure.
+                _reviewSocial.value = _reviewSocial.value + (review.uri to cur)
+            }
+        }
+    }
+
+    fun postReviewComment(review: PopfeedReview, text: String) {
+        val did = _bskyDid.value
+        if (did.isBlank() || text.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            bskyRepo.postPopfeedComment(bskyToken, did, review.uri, text).onSuccess {
+                loadReviewSocial(review)
+            }
+        }
+    }
 
     /** Backlog cards' "full info menu" (Titles feature) — per feedback,
      *  this was meant to cover *every* title card, not just Search's
@@ -2125,15 +2245,15 @@ _bskyDid.value          = session.did
             )
         )
         viewModelScope.launch(Dispatchers.IO) {
-            val overview = runCatching { WikipediaRepository.fetchDescription(item.title, item.imdbId) }.getOrNull()
-            if (overview.isNullOrBlank()) return@launch
+            val result = runCatching { WikipediaRepository.fetchDescription(item.title, item.imdbId) }.getOrNull()
+            if (result == null || result.extract.isBlank()) return@launch
             val cur = _profileOverlay.value ?: return@launch
             if (cur.openTitle?.id == item.uri) {
-                _profileOverlay.value = cur.copy(openTitle = cur.openTitle.copy(overview = overview))
+                _profileOverlay.value = cur.copy(openTitle = cur.openTitle.copy(overview = result.extract, wikipediaArticleUrl = result.pageUrl))
             }
         }
     }
-    fun closeProfileTitle() { _profileOverlay.value = _profileOverlay.value?.copy(openTitle = null) }
+    fun closeProfileTitle() { _profileOverlay.value = _profileOverlay.value?.copy(openTitle = null, openTitlePreselectedReview = null) }
 
     fun toggleProfileFollow() {
         val cur = _profileOverlay.value ?: return

@@ -966,10 +966,36 @@ data class TitleSearchResult(
     // [creator]. Null (no label prefix, just the bare name) when absent.
     val creatorRole: String? = null,
     val genres: List<String> = emptyList(),
-    val tagline: String? = null,
     val overview: String? = null,
-    val mediaCategory: String? = null
+    val mediaCategory: String? = null,
+    // Item 2: the resolved Wikipedia article's own canonical URL (set
+    // alongside [overview] — see WikipediaRepository.fetchDescription and
+    // MainViewModel.openProfileTitle/fetchTitleOverviewFor). Required for
+    // the CC BY-SA attribution row TitleDetailOverlay's description bubble
+    // shows underneath the extract whenever [overview] came from Wikipedia.
+    val wikipediaArticleUrl: String? = null
 )
+
+/** One parsed social.popfeed.feed.comment record, resolved to the author who
+ *  posted it — powers the comment list under an opened review on
+ *  TitleDetailOverlay (item 12). */
+data class PopfeedCommentRecord(
+    val uri: String,
+    val author: AuthorInfo,
+    val text: String,
+    val createdAt: String
+)
+
+/** A minimal "just the AT-URI" handle — used where only a record's own
+ *  address is needed (e.g. finding my own like record so it can be deleted
+ *  again to unlike). */
+data class BskyRecordRef(val uri: String)
+
+/** Best-effort like count/state for one review — see
+ *  BlueskyRepository.getPopfeedLikeSummary's own doc comment for why this
+ *  is scoped to the current account + whichever accounts it subscribes to,
+ *  not a true global count (Popfeed has no aggregation AppView). */
+data class PopfeedLikeSummary(val count: Int, val likedByMe: Boolean)
 
 data class SharedPostMessage(
     val postUri: String,

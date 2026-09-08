@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -24,6 +25,8 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
@@ -37,6 +40,7 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -58,6 +62,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.compose.SubcomposeAsyncImage
 import com.mediaviewer.model.AuthorInfo
+import com.mediaviewer.model.FriendPopfeedReview
 import com.mediaviewer.model.LeafletAlign
 import com.mediaviewer.model.LeafletBlock
 import com.mediaviewer.model.LeafletBlog
@@ -238,6 +243,17 @@ fun ProfileOverlay(
     // MainViewModel.openProfileTitle's own doc comment.
     onOpenTitle: (PopfeedBacklogItem) -> Unit = {},
     onCloseTitle: () -> Unit = {},
+    // Item 10: title page's "Review" bar — opens the composer in Review
+    // mode/status for that exact title.
+    onOpenReviewCompose: (TitleSearchResult) -> Unit = {},
+    // Item 12: the app's local "reviews collected on app start" cache (see
+    // MainViewModel.friendsReviews) — TitleDetailOverlay filters this down
+    // to just the reviews for whichever title is currently open.
+    friendsReviews: List<FriendPopfeedReview> = emptyList(),
+    reviewSocial: Map<String, MainViewModel.ReviewSocialState> = emptyMap(),
+    onLoadReviewSocial: (PopfeedReview) -> Unit = {},
+    onToggleReviewLike: (PopfeedReview) -> Unit = {},
+    onPostReviewComment: (PopfeedReview, String) -> Unit = {},
     // Pinch navigation: the mirror of the post pager's pinch-in. Only takes
     // effect (see pinchOutFromProfile() in the ViewModel) when this profile
     // is the one currently hidden behind a post — hiding it again is what
@@ -496,7 +512,31 @@ fun ProfileOverlay(
             ReviewDetailOverlay(review = review, author = author, liquidGlass = liquidGlass, onClose = onCloseReview)
         }
         state.openTitle?.let { title ->
-            TitleDetailOverlay(title = title, liquidGlass = liquidGlass, onClose = onCloseTitle)
+            // Item 12: local reviews cache filtered down to this exact
+            // title — matched by imdbId when both sides have one (the
+            // reliable case), falling back to a case-insensitive title
+            // match otherwise (e.g. a Backlog item with no imdbId at all).
+            // The review this page was opened *from* (if any — see
+            // MainViewModel.openMutualReview/openProfileReview) is folded
+            // in too, deduped by URI, so it's guaranteed to be present even
+            // if its author isn't someone this account subscribes to.
+            val titleImdb = title.id.removePrefix("imdb:").takeIf { title.id.startsWith("imdb:") }
+            val matched = friendsReviews.filter { fr ->
+                val r = fr.review
+                (titleImdb != null && r.imdbId == titleImdb) ||
+                    (titleImdb == null && r.mediaTitle.equals(title.title, ignoreCase = true))
+            }
+            val withPreselected = (state.openTitlePreselectedReview?.let { pre ->
+                if (matched.any { it.review.uri == pre.review.uri }) matched else matched + pre
+            } ?: matched).sortedByDescending { it.review.createdAt }
+
+            TitleDetailOverlay(
+                title = title, liquidGlass = liquidGlass, onClose = onCloseTitle,
+                reviews = withPreselected, preselectedReviewUri = state.openTitlePreselectedReview?.review?.uri,
+                onOpenReview = onOpenReviewCompose,
+                reviewSocial = reviewSocial, onLoadReviewSocial = onLoadReviewSocial,
+                onToggleReviewLike = onToggleReviewLike, onPostReviewComment = onPostReviewComment
+            )
         }
     }
 }
@@ -1831,12 +1871,22 @@ private fun ReviewRow(review: PopfeedReview, liquidGlass: Boolean, onOpenReview:
 // re-implementing it — per feedback, "look at how Review stars look in the
 // Reviews tab on profiles for reference."
 @Composable
-fun StarRatingPill(rating: Float, liquidGlass: Boolean, tint: Color = NeutralGlassTint, modifier: Modifier = Modifier) {
-    val shape = RoundedCornerShape(10.dp)
+fun StarRatingPill(rating: Float, liquidGlass: Boolean, tint: Color = NeutralGlassTint, modifier: Modifier = Modifier, backdrop: GlassBackdrop? = null, compact: Boolean = false) {
+    // Bug fix: this used to have its own bespoke shape (10.dp corner radius)
+    // and padding (6.dp/3.dp) — visibly smaller/differently-rounded than
+    // every other bubble on TitleDetailOverlay, which all go through
+    // ProfileGlassPill's 14.dp-corner/8.dp-or-12.dp-padding "compact" pill
+    // look. Matching those exactly (and drawing through the same
+    // LiquidGlassSurface + live [backdrop], instead of the flat
+    // [glassPanel] tint) makes this bubble genuinely the same size/style as
+    // its neighbors rather than just visually similar.
+    val shape = RoundedCornerShape(14.dp)
+    val padH = if (compact) 8.dp else 12.dp
+    val padV = if (compact) 3.dp else 6.dp
+    @Composable
+    fun Stars() {
     Row(
-        modifier
-            .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.clip(shape).background(Color.White.copy(0.08f)))
-            .padding(horizontal = 6.dp, vertical = 3.dp),
+        Modifier.padding(horizontal = padH, vertical = padV),
         verticalAlignment = Alignment.CenterVertically
     ) {
         // Round to the nearest half star first (rather than just checking the
@@ -1858,6 +1908,12 @@ fun StarRatingPill(rating: Float, liquidGlass: Boolean, tint: Color = NeutralGla
                 modifier = Modifier.size(11.dp)
             )
         }
+    }
+    }
+    if (liquidGlass) {
+        LiquidGlassSurface(modifier = modifier, shape = shape, tint = tint, backdrop = backdrop) { Stars() }
+    } else {
+        Box(modifier.clip(shape).background(Color.Black.copy(0.55f))) { Stars() }
     }
 }
 
@@ -1921,49 +1977,76 @@ private fun ReviewDetailOverlay(review: PopfeedReview, author: AuthorInfo, liqui
 // ─── Titles (Review Support feature) ───────────────────────────────────────
 
 /**
- * Titles feature: a title card's "full info menu" — used by both Search's
- * Titles tab (currently a placeholder — see MainViewModel.runSearch's
- * TITLES branch) and Profile's Backlog tab (per feedback — "all title
- * cards", not just Search's). Deliberately modeled on
- * [ReviewDetailOverlay] just above — every bubble here, and the background
- * gradient, are tinted from the same dominant-color-of-the-poster pattern
- * that overlay uses — but the layout itself is different:
- *  - A horizontal/landscape banner fills the top with a fade under it
- *    (same idea as the reference screenshot).
- *  - A portrait poster (styled exactly like [TitlePosterCard] above, minus
- *    its title-text footer) sits close to the left edge, slightly
- *    overlapping the bottom of that banner.
- *  - To its right, height-confined to match the poster: the full title
- *    (auto-sizing so it always stays on one row — see [ShrinkToFitText]),
- *    then a row with the numeric release date on the left and the 5-star
- *    rating on the right, then "Directed by" (or whatever the category's
- *    equivalent credit is), then genres, then the tagline — each its own
- *    separate bubble.
- *  - Below all of that, the full description in its own edge-to-edge
- *    bubble.
- *  - A fixed "Review" pill sits where the interaction bar usually would,
- *    pinned to the bottom of the screen.
+ * Titles feature: a title card's "full info menu" — used by Profile's
+ * Backlog tab (Search's Titles tab was removed) and by tapping into a
+ * review anywhere in the app (openMutualReview/openProfileReview route
+ * here now too — see item 12's own reasoning below). Deliberately modeled
+ * on [ReviewDetailOverlay] above for its tint — every bubble here, and the
+ * background, are tinted from the same dominant-color-of-the-poster
+ * pattern that overlay uses — but the layout is its own:
+ *  - A fixed landscape/backdrop image fills the background — it does NOT
+ *    scroll with the rest of the page (see the scroll structure below);
+ *    every glass bubble on this page reads and blurs *that* live layer,
+ *    the exact same [GlassBackdrop]/[LiquidGlassSurface] system the
+ *    feed/timeline's own post bubbles use (item 9/11), rather than the
+ *    flat static-tint [glassPanel] this page used before.
+ *  - A portrait poster sits close to the left edge, slightly overlapping
+ *    the bottom of the backdrop. To its right, height-confined to match
+ *    the poster: the full title, then a row with the release date on the
+ *    left and the star rating on the right, then "Directed by" (or the
+ *    category's equivalent credit), then one separate bubble per genre in
+ *    their own horizontally-scrolling row (item 6) — four rows total now
+ *    that the tagline placeholder row is gone (item 8), each stretched to
+ *    fill the poster's full height evenly instead of leaving the extra
+ *    room as gaps.
+ *  - Everything from here down is scrollable, and can be scrolled up to
+ *    just under the phone's camera notch — only the backdrop stays put
+ *    (item 11).
+ *  - A horizontally-scrolling strip of round bubbles: "Summary" first,
+ *    then one bubble per person (from the local reviews cache — see
+ *    MainViewModel.friendsReviews) who's reviewed this exact title, most
+ *    recent first. Tapping one — or swiping the panel below — switches
+ *    between a Summary panel (the Wikipedia synopsis, plus its required
+ *    attribution row when it's showing real Wikipedia text — see
+ *    WikipediaRepository's own doc comment on why that's a real license
+ *    requirement, not just a courtesy) and that person's full review.
+ *    The selected bubble grows a small connector down into whichever
+ *    panel is showing, so the two visually read as one continuous shape
+ *    — a simplified take on the "extends down and connects, outline
+ *    wraps around" effect from spec; the full elastic edge-locking
+ *    physics described there is approximated here by auto-scrolling the
+ *    strip to keep the selected bubble in view rather than true
+ *    per-frame position-locking.
+ *  - The bottom bar reads "Review" over the Summary panel, and splits
+ *    into even Like/Review/Comment buttons over a review panel (item 12's
+ *    second half) — Review always opens the composer in Review mode for
+ *    this title; Like/Comment act on whichever review is currently open.
  *
- * Uses whatever real data [title] actually carries. Backlog cards now supply
- * real title/poster/backdrop *and* release date/genres/director-or-equivalent
- * (all confirmed real fields in Popfeed's own public lexicon — see
- * MainViewModel.openProfileTitle and BlueskyRepository.getPopfeedBacklog),
- * so all of those show up for real. `description` is filled in a moment
- * after this page opens, from Wikipedia (see WikipediaRepository) — the one
- * field Popfeed's schema has no equivalent for at all — so it briefly shows
- * a muted loading line before either the real synopsis or a "no description
- * found" message replaces it. `tagline` still has no data source anywhere
- * and keeps reading "Placeholder". Tapping "Review" doesn't do anything yet
- * either.
+ * Uses whatever real data [title] actually carries — Backlog cards and
+ * reviews both supply real title/poster/backdrop/release date/genres/
+ * director-or-equivalent (confirmed real fields on Popfeed's public
+ * lexicon). `overview` is filled in a moment after this page opens, from
+ * Wikipedia (see WikipediaRepository) — the one field Popfeed's schema has
+ * no equivalent for at all — so it briefly shows a muted loading line
+ * before either the real synopsis or a "no description found" message
+ * replaces it.
  */
 
 /** Maps Popfeed's raw `mainCreditRole` value (confirmed real lexicon enum:
  *  director/author/artist/showrunner/lead_actor/creator/studio/publisher/
  *  developer/performer/network) to the display prefix shown next to
- *  [TitleSearchResult.creator] — e.g. "director" -> "Directed by". Falls
- *  back to the generic "By" for a role this app doesn't have a specific
- *  label for yet, or none at all. */
-private fun creatorRoleLabel(role: String?): String = when (role?.lowercase()) {
+ *  [TitleSearchResult.creator] — e.g. "director" -> "Directed by".
+ *
+ *  Bug fix: `mainCreditRole` is an optional field on Popfeed's lexicon — a
+ *  fair number of real records carry a `mainCredit` name but no explicit
+ *  role, which used to fall all the way through to the generic "By" even
+ *  for a movie/TV title, where the main credit is overwhelmingly the
+ *  director. [mediaCategory] (the record's own `creativeWorkType`, e.g.
+ *  "movie"/"tv_show") lets that blank-role case default to "Directed by"
+ *  specifically for those two categories instead, while still falling back
+ *  to the generic "By" for everything else (games, books, music, etc.)
+ *  where there's no single safe default to assume. */
+private fun creatorRoleLabel(role: String?, mediaCategory: String? = null): String = when (role?.lowercase()) {
     "director" -> "Directed by"
     "author" -> "Written by"
     "showrunner", "creator" -> "Created by"
@@ -1972,160 +2055,531 @@ private fun creatorRoleLabel(role: String?): String = when (role?.lowercase()) {
     "studio" -> "Studio"
     "network" -> "Network"
     "lead_actor" -> "Starring"
-    else -> "By"
+    "artist", "performer" -> "By"
+    else -> when (mediaCategory?.lowercase()) {
+        "movie", "tv_show", "tv_season", "tv_episode", "episode" -> "Directed by"
+        else -> "By"
+    }
 }
 
 /** Popfeed's `releaseDate` is a raw ISO-8601 datetime string (e.g.
- *  "2010-07-16T00:00:00Z") — this pulls out just the year for the compact
- *  pill on [TitleDetailOverlay]. Null (caller falls back to its own
- *  "Placeholder" text) if [iso] is blank or doesn't start with a 4-digit
- *  year. */
-private fun releaseYearLabel(iso: String): String? =
-    iso.take(4).takeIf { it.length == 4 && it.all(Char::isDigit) }
+ *  "2010-07-16T00:00:00Z"). Popfeed's lexicon carries the *full* date (not
+ *  just a year), so this now formats the whole thing as a short, readable
+ *  date — "Jul 16, 2010" — for [TitleDetailOverlay]'s release pill, instead
+ *  of truncating down to just the 4-digit year. Null (caller falls back to
+ *  its own "Placeholder" text) if [iso] is blank or unparsable. */
+private fun releaseDateLabel(iso: String): String? {
+    if (iso.isBlank()) return null
+    return runCatching {
+        val instant = java.time.Instant.parse(iso)
+        java.time.format.DateTimeFormatter.ofPattern("MMM d, yyyy")
+            .withZone(java.time.ZoneId.of("UTC"))
+            .format(instant)
+    }.getOrNull() ?: iso.take(4).takeIf { it.length == 4 && it.all(Char::isDigit) }
+}
 
 @Composable
-fun TitleDetailOverlay(title: TitleSearchResult, liquidGlass: Boolean, onClose: () -> Unit) {
+fun TitleDetailOverlay(
+    title: TitleSearchResult,
+    liquidGlass: Boolean,
+    onClose: () -> Unit,
+    // Item 12: the caller (ProfileOverlay) hands over the local reviews
+    // cache already filtered down to this exact title and sorted most-
+    // recent-first — see ProfileOverlay's own filtering right above where
+    // this is called.
+    reviews: List<FriendPopfeedReview> = emptyList(),
+    preselectedReviewUri: String? = null,
+    onOpenReview: (TitleSearchResult) -> Unit = {},
+    reviewSocial: Map<String, MainViewModel.ReviewSocialState> = emptyMap(),
+    onLoadReviewSocial: (PopfeedReview) -> Unit = {},
+    onToggleReviewLike: (PopfeedReview) -> Unit = {},
+    onPostReviewComment: (PopfeedReview, String) -> Unit = {}
+) {
     val tint = rememberDominantColor(title.posterUrl ?: title.backdropUrl ?: "")
+    val uriHandler = LocalUriHandler.current
+
+    // Item 9/11: the exact same live "record what's actually drawn behind
+    // the bubbles, then blur/reflect that" system the feed/timeline's own
+    // post bubbles use — see MainFeedScreen's PostContent for the
+    // reference this mirrors. The Box below that records into
+    // [backdropLayer] is the ONLY thing on this page that doesn't scroll
+    // (item 11) — every bubble further down reads this same live layer no
+    // matter how far the page has been scrolled up over it.
+    val backdropLayer = rememberGraphicsLayer()
+    var backdropOrigin by remember { mutableStateOf(Offset.Zero) }
+    val backdrop = if (liquidGlass) remember(backdropLayer) { GlassBackdrop(backdropLayer) { backdropOrigin } } else null
+
+    // Item 11: "scroll up to just under the phone camera notch" — offsets
+    // the scrollable viewport down by the cutout's own height (or a small
+    // fixed minimum on phones with no cutout), so scrolled-up content stops
+    // there instead of continuing all the way to the true top edge.
+    val cutoutTop = WindowInsets.displayCutout.asPaddingValues().calculateTopPadding()
+    val topClearance = maxOf(cutoutTop, 14.dp)
+
+    val bannerHeight = 220.dp
+    val posterWidth = 108.dp
+    val posterHeight = posterWidth * 3f / 2f
+    val overlap = 44.dp
+    val bannerImage = title.backdropUrl ?: title.posterUrl
+
+    // Item 12: index 0 = Summary, 1..n = reviews. Starts on whichever
+    // review this page was opened from (see ProfileOverlay's
+    // preselectedReviewUri), or Summary otherwise.
+    var selectedIndex by remember(title.id) {
+        mutableStateOf(
+            preselectedReviewUri?.let { uri -> reviews.indexOfFirst { it.review.uri == uri } }
+                ?.takeIf { it >= 0 }?.plus(1) ?: 0
+        )
+    }
+    val tabsListState = rememberLazyListState()
+    var selectorCenterX by remember { mutableStateOf<Float?>(null) }
+    var dragAccum by remember { mutableStateOf(0f) }
+
+    LaunchedEffect(selectedIndex) {
+        if (selectedIndex > 0) reviews.getOrNull(selectedIndex - 1)?.let { onLoadReviewSocial(it.review) }
+        // Simplified stand-in for the described edge-locking behavior (see
+        // this function's own doc comment above) — keeps the selected
+        // bubble scrolled into view whenever the tab changes, whether that
+        // was a tap or a swipe.
+        runCatching { tabsListState.animateScrollToItem((selectedIndex - 1).coerceAtLeast(0)) }
+    }
 
     Box(
         Modifier.fillMaxSize()
-            .then(if (liquidGlass) Modifier.background(postBackgroundBrush(tint)) else Modifier.background(OledBlack))
-            // Same "swallow all touches" reasoning as ReviewDetailOverlay
-            // above — a plain .background() isn't hit-testable on its own.
+            // Same "swallow all touches" reasoning as ReviewDetailOverlay —
+            // a plain .background() isn't hit-testable on its own.
             .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null) {}
     ) {
+        // ── Fixed background (item 11) — banner image + fade, recorded
+        // live into backdropLayer for every glass bubble below to read. ──
+        Box(
+            Modifier.fillMaxSize()
+                .onGloballyPositioned { backdropOrigin = it.positionInRoot() }
+                .drawWithContent {
+                    if (liquidGlass) backdropLayer.record { this@drawWithContent.drawContent() }
+                    drawContent()
+                }
+                .then(if (liquidGlass) Modifier.background(postBackgroundBrush(tint)) else Modifier.background(OledBlack))
+        ) {
+            Box(Modifier.fillMaxWidth().height(bannerHeight)) {
+                if (bannerImage != null) {
+                    AsyncImage(model = bannerImage, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                } else {
+                    Box(Modifier.fillMaxSize().background(tint.copy(alpha = 0.35f)), contentAlignment = Alignment.Center) {
+                        Text("Placeholder", color = Color.White.copy(alpha = 0.6f), fontSize = 13.sp)
+                    }
+                }
+                // Fade under the banner into the dark fill covering the
+                // rest of the fixed background beneath it.
+                Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.4f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.85f))))
+            }
+        }
+
         Column(Modifier.fillMaxSize()) {
-            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
-                // ── Banner + overlapping poster + details ──────────────────
-                Box(Modifier.fillMaxWidth()) {
-                    val bannerHeight = 220.dp
-                    val posterWidth = 108.dp
-                    val posterHeight = posterWidth * 3f / 2f
-                    // How far the poster's top edge pokes up into the banner.
-                    val overlap = 44.dp
-                    val bannerImage = title.backdropUrl ?: title.posterUrl
+            Column(
+                Modifier.weight(1f).fillMaxWidth().padding(top = topClearance).verticalScroll(rememberScrollState())
+            ) {
+                Spacer(Modifier.height(bannerHeight - overlap))
 
-                    Box(Modifier.fillMaxWidth().height(bannerHeight)) {
-                        if (bannerImage != null) {
-                            AsyncImage(model = bannerImage, contentDescription = null, contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize())
+                // ── Poster + details row ────────────────────────────────
+                Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 14.dp)) {
+                    val posterShape = RoundedCornerShape(14.dp)
+                    @Composable
+                    fun PosterImage() {
+                        if (title.posterUrl != null) {
+                            AsyncImage(model = title.posterUrl, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                         } else {
-                            Box(Modifier.fillMaxSize().background(tint.copy(alpha = 0.35f)), contentAlignment = Alignment.Center) {
-                                Text("Placeholder", color = Color.White.copy(alpha = 0.6f), fontSize = 13.sp)
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text("Placeholder", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, textAlign = TextAlign.Center)
                             }
                         }
-                        // Fade under the banner, same purpose as the
-                        // reference screenshot's gradient into the page.
-                        Box(
-                            Modifier.fillMaxSize().background(
-                                Brush.verticalGradient(0.4f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.85f))
-                            )
+                    }
+                    if (liquidGlass) {
+                        LiquidGlassSurface(Modifier.width(posterWidth).height(posterHeight), shape = posterShape, tint = tint, backdrop = backdrop) {
+                            Box(Modifier.fillMaxSize().clip(posterShape)) { PosterImage() }
+                        }
+                    } else {
+                        Box(Modifier.width(posterWidth).height(posterHeight).clip(posterShape).background(Color.White.copy(0.10f))) { PosterImage() }
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    // Item 8: tagline row removed — the remaining four rows
+                    // now stretch to fill the poster's full height evenly
+                    // (top edge to bottom edge) instead of leaving the extra
+                    // room as gaps between them.
+                    Column(Modifier.weight(1f).height(posterHeight), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        ShrinkToFitTitleBubble(
+                            title.title.ifBlank { "Placeholder" }, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                            modifier = Modifier.weight(1f).fillMaxWidth()
                         )
-                    }
-                    Box(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars).padding(12.dp)) {
-                        CloseGlassBubble(liquidGlass = liquidGlass, tint = tint, onClick = onClose)
-                    }
-
-                    Row(
-                        Modifier.fillMaxWidth()
-                            .padding(top = bannerHeight - overlap)
-                            .padding(start = 10.dp, end = 14.dp)
-                    ) {
-                        // Portrait poster — same styling as TitlePosterCard's
-                        // image half (rounded corners, glass rim), just
-                        // without its title-text footer, per spec.
-                        val posterShape = RoundedCornerShape(14.dp)
-                        Box(
-                            Modifier.width(posterWidth).height(posterHeight)
-                                .then(
-                                    if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = posterShape)
-                                    else Modifier.clip(posterShape).background(Color.White.copy(0.10f))
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (title.posterUrl != null) {
-                                AsyncImage(model = title.posterUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize().clip(posterShape))
-                            } else {
-                                Text("Placeholder", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-                            }
+                        Row(Modifier.weight(1f).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            // Item 7: Popfeed's own full release date, not
+                            // just the year.
+                            ProfileGlassPill(
+                                text = releaseDateLabel(title.releaseDate) ?: "Placeholder",
+                                liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true,
+                                backdrop = backdrop, modifier = Modifier.fillMaxHeight()
+                            )
+                            Spacer(Modifier.weight(1f))
+                            // Item 4: now the same shape/padding/backdrop as
+                            // every other bubble on this page — see
+                            // StarRatingPill's own doc comment.
+                            StarRatingPill(rating = 0f, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, modifier = Modifier.fillMaxHeight())
                         }
-                        Spacer(Modifier.width(12.dp))
-                        // Details column — height-confined to the poster's
-                        // own height, per spec, with its five rows spread
-                        // evenly across that space. Release date/director-
-                        // or-equivalent/genres now come from real Popfeed
-                        // fields (see this function's own doc comment); any
-                        // one of them still reads "Placeholder" only if the
-                        // specific record it came from happens to leave
-                        // that field blank. The star rating stays 0 — Popfeed
-                        // backlog/watchlist entries genuinely carry no
-                        // rating (that only exists on reviews).
-                        Column(
-                            Modifier.weight(1f).height(posterHeight),
-                            verticalArrangement = Arrangement.SpaceBetween
+                        // Item 5: defaults to "Directed by" for movie/TV
+                        // when the record's own role is blank — see
+                        // creatorRoleLabel's own doc comment.
+                        ProfileGlassPill(
+                            text = title.creator?.let { "${creatorRoleLabel(title.creatorRole, title.mediaCategory)} $it" } ?: "Placeholder",
+                            liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true,
+                            backdrop = backdrop, modifier = Modifier.weight(1f).fillMaxWidth()
+                        )
+                        // Item 6: each genre gets its own bubble now,
+                        // instead of one bubble with a comma-joined string.
+                        Row(
+                            Modifier.weight(1f).fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            ShrinkToFitTitleBubble(title.title.ifBlank { "Placeholder" }, liquidGlass = liquidGlass, tint = tint)
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            val genreList = title.genres.takeIf { it.isNotEmpty() } ?: listOf("Placeholder")
+                            genreList.forEach { g ->
                                 ProfileGlassPill(
-                                    text = releaseYearLabel(title.releaseDate) ?: "Placeholder",
-                                    liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true
+                                    text = g, liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true,
+                                    backdrop = backdrop, modifier = Modifier.fillMaxHeight()
                                 )
-                                Spacer(Modifier.weight(1f))
-                                StarRatingPill(rating = 0f, liquidGlass = liquidGlass, tint = tint)
                             }
-                            ProfileGlassPill(
-                                text = title.creator?.let { "${creatorRoleLabel(title.creatorRole)} $it" } ?: "Placeholder",
-                                liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true
-                            )
-                            ProfileGlassPill(
-                                text = title.genres.takeIf { it.isNotEmpty() }?.joinToString(", ") ?: "Placeholder",
-                                liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true
-                            )
-                            // Tagline has no data source anywhere (Popfeed's
-                            // schema doesn't carry one, and it's out of
-                            // scope for the Wikipedia lookup below) — always
-                            // "Placeholder" for now.
-                            ProfileGlassPill(text = "Placeholder", liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true)
                         }
                     }
                 }
 
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(18.dp))
 
-                // ── Description — full-width, edge-to-edge bubble ──────────
-                // Popfeed carries no synopsis field at all (confirmed
-                // against its public lexicon), so unlike everything above,
-                // this doesn't come from [title] as originally passed in —
-                // MainViewModel.openProfileTitle patches title.overview in
-                // asynchronously, a moment after this page opens, from a
-                // Wikipedia lookup (see WikipediaRepository). Recomposes on
-                // its own once that arrives since `title` is Compose state.
-                val descShape = RoundedCornerShape(16.dp)
+                // ── Item 12: Summary/Reviews tab strip ──────────────────
+                TabBubbleRow(
+                    reviews = reviews, selectedIndex = selectedIndex, listState = tabsListState,
+                    liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                    onSelect = { selectedIndex = it },
+                    onSelectorMoved = { selectorCenterX = it }
+                )
+                TabConnectorNotch(centerX = selectorCenterX, tint = tint, liquidGlass = liquidGlass)
+
+                // Swiping anywhere under the movie info section (on top of
+                // the Summary/Review panel and below) switches tabs — a
+                // discrete "drag far enough, snap to the next/previous tab"
+                // gesture rather than a continuous drag-follow, since the
+                // Summary and Review panels have very different natural
+                // heights and don't fit a fixed-height page format.
                 Box(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp)
-                        .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = descShape) else Modifier.clip(descShape).background(Color.White.copy(0.06f)))
-                        .padding(14.dp)
+                    Modifier.fillMaxWidth().pointerInput(reviews.size) {
+                        detectHorizontalDragGestures(
+                            onDragEnd = {
+                                if (dragAccum < -70f && selectedIndex < reviews.size) selectedIndex++
+                                else if (dragAccum > 70f && selectedIndex > 0) selectedIndex--
+                                dragAccum = 0f
+                            },
+                            onDragCancel = { dragAccum = 0f }
+                        ) { change, amount -> dragAccum += amount; change.consume() }
+                    }
                 ) {
-                    Text(
-                        title.overview ?: "No description found for this title yet.",
-                        color = Color.White.copy(if (title.overview != null) 0.92f else 0.55f),
-                        fontSize = 14.sp, lineHeight = 21.sp
-                    )
+                    if (selectedIndex == 0) {
+                        SummaryPanel(title = title, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, onOpenLink = { uriHandler.openUri(it) })
+                    } else {
+                        val fr = reviews.getOrNull(selectedIndex - 1)
+                        if (fr != null) {
+                            ReviewPanel(fr = fr, social = reviewSocial[fr.review.uri], liquidGlass = liquidGlass, tint = tint, backdrop = backdrop)
+                        }
+                    }
                 }
-                // Room for the fixed "Review" bar below so it never covers
-                // the tail end of the description while scrolled to the
-                // bottom.
+
+                // Room for the fixed bottom bar so it never covers the tail
+                // end of the scrolled content.
                 Spacer(Modifier.height(90.dp))
             }
 
-            // ── Fixed "Review" bar — sits where the interaction bar
-            // usually would. No functionality yet, per spec.
-            val reviewShape = RoundedCornerShape(20.dp)
+            // ── Fixed bottom bar (item 3/12) ────────────────────────────
+            val currentReview = reviews.getOrNull(selectedIndex - 1)
+            if (selectedIndex == 0 || currentReview == null) {
+                TitleReviewBar(liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, onClick = { onOpenReview(title) })
+            } else {
+                var showCommentBox by remember(currentReview.review.uri) { mutableStateOf(false) }
+                val social = reviewSocial[currentReview.review.uri]
+                Column(Modifier.fillMaxWidth()) {
+                    if (showCommentBox) {
+                        CommentComposerRow(
+                            liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                            onSubmit = { text -> onPostReviewComment(currentReview.review, text); showCommentBox = false }
+                        )
+                    }
+                    LikeReviewCommentBar(
+                        liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                        likedByMe = social?.likedByMe == true,
+                        onLike = { onToggleReviewLike(currentReview.review) },
+                        onReview = { onOpenReview(title) },
+                        onComment = { showCommentBox = !showCommentBox }
+                    )
+                }
+            }
+        }
+
+        // Close button — fixed in place, doesn't scroll away with the rest
+        // of the page (item 11 only asks for the *background* to stay put,
+        // but leaving the close control reachable at all times is the
+        // obviously-intended usability behavior here).
+        Box(Modifier.fillMaxWidth().padding(top = topClearance).padding(12.dp)) {
+            CloseGlassBubble(liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, onClick = onClose)
+        }
+    }
+}
+
+/** Item 12: the Summary/Reviews bubble strip between the movie info row and
+ *  the tab content panel — "Summary" first, then one bubble per reviewer
+ *  (icon + display name), most-recent-first. [onSelectorMoved] reports the
+ *  selected bubble's own center-x (in this row's local coordinate space) so
+ *  [TabConnectorNotch] can draw its connector directly beneath it. */
+@Composable
+private fun TabBubbleRow(
+    reviews: List<FriendPopfeedReview>, selectedIndex: Int,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
+    onSelect: (Int) -> Unit, onSelectorMoved: (Float?) -> Unit
+) {
+    var rowLeft by remember { mutableStateOf(0f) }
+    androidx.compose.foundation.lazy.LazyRow(
+        state = listState,
+        modifier = Modifier.fillMaxWidth().onGloballyPositioned { rowLeft = it.positionInRoot().x },
+        contentPadding = PaddingValues(horizontal = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        item {
+            TabBubble(
+                selected = selectedIndex == 0, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                onClick = { onSelect(0) }, onPositioned = { if (selectedIndex == 0) onSelectorMoved(it - rowLeft) }
+            ) {
+                Text("Summary", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+        itemsIndexed(reviews) { i, fr ->
+            val tabIndex = i + 1
+            TabBubble(
+                selected = selectedIndex == tabIndex, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                onClick = { onSelect(tabIndex) }, onPositioned = { if (selectedIndex == tabIndex) onSelectorMoved(it - rowLeft) }
+            ) {
+                AsyncImage(
+                    model = fr.author.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                    modifier = Modifier.size(20.dp).clip(CircleShape).background(Color.White.copy(0.15f))
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    fr.author.displayName.ifBlank { fr.author.handle }, color = Color.White, fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TabBubble(
+    selected: Boolean, liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
+    onClick: () -> Unit, onPositioned: (Float) -> Unit, content: @Composable RowScope.() -> Unit
+) {
+    val shape = RoundedCornerShape(20.dp)
+    // Item 12: the selected bubble reads as visually "extended" via a
+    // stronger fill + rim rather than an actual bottom-edge shape morph —
+    // see this function's own doc comment on TitleDetailOverlay for why
+    // that's a deliberate simplification of the fuller effect described in
+    // spec.
+    val bubbleTint = if (selected) tint.copy(alpha = (tint.alpha + 0.25f).coerceAtMost(1f)) else tint
+    val outerModifier = Modifier
+        .onGloballyPositioned { onPositioned(it.positionInRoot().x + it.size.width / 2f) }
+        .then(if (selected) Modifier.border(1.5.dp, Color.White.copy(0.5f), shape) else Modifier)
+        .clickable(onClick = onClick)
+    @Composable
+    fun Inner() {
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, content = content)
+    }
+    // Item 9/11: every bubble on this page — including these tab
+    // selectors — reads the same live [backdrop] the feed's post bubbles
+    // do, instead of a flat static tint.
+    if (liquidGlass) {
+        LiquidGlassSurface(outerModifier, shape = shape, tint = bubbleTint, backdrop = backdrop) { Inner() }
+    } else {
+        Box(outerModifier.clip(shape).background(Color.White.copy(if (selected) 0.20f else 0.08f))) { Inner() }
+    }
+}
+
+/** Item 12: a small downward notch drawn directly beneath the selected
+ *  bubble, bridging the gap into the tab content panel below — the
+ *  simplified stand-in for the described "outline opens up and wraps
+ *  around" connector effect (see TitleDetailOverlay's own doc comment). */
+@Composable
+private fun TabConnectorNotch(centerX: Float?, tint: Color, liquidGlass: Boolean) {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    Box(Modifier.fillMaxWidth().height(8.dp)) {
+        if (centerX != null && liquidGlass) {
+            val notchWidth = 20.dp
+            val xDp = with(density) { centerX.toDp() } - notchWidth / 2
             Box(
-                Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 14.dp, vertical = 10.dp).height(46.dp)
-                    .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = reviewShape) else Modifier.clip(reviewShape).background(Color.White.copy(0.10f)))
-                    .clickable { /* no functionality yet — per spec */ },
+                Modifier
+                    .offset(x = xDp)
+                    .width(notchWidth).height(8.dp)
+                    .background(tint.copy(alpha = 0.35f), RoundedCornerShape(bottomStart = 3.dp, bottomEnd = 3.dp))
+            )
+        }
+    }
+}
+
+/** Item 12's Summary tab — the same Wikipedia-sourced synopsis this page
+ *  always showed, now living inside the tab strip's first bubble instead of
+ *  a standalone always-visible section. Includes the required CC BY-SA
+ *  attribution row (item 2) whenever [title.overview] actually came from a
+ *  real Wikipedia article (i.e. [title.wikipediaArticleUrl] is set) — see
+ *  WikipediaRepository's class doc comment for why that attribution is a
+ *  real license requirement here, not optional flavor text. */
+@Composable
+private fun SummaryPanel(title: TitleSearchResult, liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, onOpenLink: (String) -> Unit) {
+    val shape = RoundedCornerShape(16.dp)
+    @Composable
+    fun Content() {
+        Column(Modifier.padding(14.dp)) {
+            Text(
+                title.overview ?: "No description found for this title yet.",
+                color = Color.White.copy(if (title.overview != null) 0.92f else 0.55f),
+                fontSize = 14.sp, lineHeight = 21.sp
+            )
+            val wikiUrl = title.wikipediaArticleUrl
+            if (title.overview != null && wikiUrl != null) {
+                HorizontalDivider(Modifier.padding(vertical = 12.dp), color = Color.White.copy(0.12f))
+                Text(
+                    "Attribution", color = Color.White.copy(0.5f), fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 6.dp)
+                )
+                // Item 2: the article text itself is clickable, opening the
+                // full Wikipedia article.
+                Text(
+                    buildAnnotatedString {
+                        append("Synopsis from ")
+                        withStyle(SpanStyle(color = Color.White, fontWeight = FontWeight.SemiBold, textDecoration = TextDecoration.Underline)) {
+                            append("Wikipedia")
+                        }
+                        append(", available under ")
+                    },
+                    color = Color.White.copy(0.65f), fontSize = 12.sp, lineHeight = 17.sp,
+                    modifier = Modifier.clickable { onOpenLink(wikiUrl) }
+                )
+                // Item 2: the license itself is clickable, opening its full
+                // text — CC BY-SA 4.0, the license Wikipedia's own text is
+                // dual-licensed under.
+                Text(
+                    "CC BY-SA 4.0",
+                    color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                    textDecoration = TextDecoration.Underline,
+                    modifier = Modifier.clickable { onOpenLink("https://creativecommons.org/licenses/by-sa/4.0/") }
+                )
+            }
+        }
+    }
+    if (liquidGlass) {
+        LiquidGlassSurface(Modifier.fillMaxWidth().padding(horizontal = 12.dp), shape = shape, tint = tint, backdrop = backdrop) { Content() }
+    } else {
+        Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp).clip(shape).background(Color.White.copy(0.06f))) { Content() }
+    }
+}
+
+/** Item 12's Review tab content — the revised layout ("Actually, we're
+ *  going to lay out the reviews a little differently"): icon + display name
+ *  top-left, rating top-right, the review text, then a bottom row with
+ *  total likes (heart + counter) on the left and the posted date on the
+ *  right, then that review's own comments underneath. */
+@Composable
+private fun ReviewPanel(fr: FriendPopfeedReview, social: MainViewModel.ReviewSocialState?, liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?) {
+    val shape = RoundedCornerShape(16.dp)
+    @Composable
+    fun Content() {
+        Column(Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AsyncImage(
+                    model = fr.author.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                    modifier = Modifier.size(34.dp).clip(CircleShape).background(Color.White.copy(0.15f))
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    fr.author.displayName.ifBlank { fr.author.handle }, color = Color.White, fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(Modifier.width(8.dp))
+                StarRatingPill(rating = fr.review.ratingOutOf5, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, compact = true)
+            }
+            if (fr.review.reviewText.isNotBlank()) {
+                Spacer(Modifier.height(10.dp))
+                Text(fr.review.reviewText, color = Color.White.copy(0.9f), fontSize = 14.sp, lineHeight = 21.sp)
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                val liked = social?.likedByMe == true
+                Icon(
+                    if (liked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                    contentDescription = null, tint = if (liked) Color(0xFFFF4D6D) else Color.White.copy(0.6f),
+                    modifier = Modifier.size(15.dp)
+                )
+                Spacer(Modifier.width(4.dp))
+                Text("${social?.likeCount ?: 0}", color = Color.White.copy(0.7f), fontSize = 12.sp)
+                Spacer(Modifier.weight(1f))
+                Text(formatCreatedAt(fr.review.createdAt), color = Color.White.copy(0.5f), fontSize = 11.sp)
+            }
+            val comments = social?.comments.orEmpty()
+            if (comments.isNotEmpty()) {
+                HorizontalDivider(Modifier.padding(vertical = 12.dp), color = Color.White.copy(0.12f))
+                comments.forEach { comment ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.Top) {
+                        AsyncImage(
+                            model = comment.author.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                            modifier = Modifier.size(22.dp).clip(CircleShape).background(Color.White.copy(0.15f))
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                comment.author.displayName.ifBlank { comment.author.handle },
+                                color = Color.White.copy(0.85f), fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+                            )
+                            Text(comment.text, color = Color.White.copy(0.8f), fontSize = 13.sp, lineHeight = 18.sp)
+                        }
+                    }
+                }
+            } else if (social?.loading == true) {
+                Spacer(Modifier.height(8.dp))
+                Text("Loading comments…", color = Color.White.copy(0.4f), fontSize = 11.sp)
+            }
+        }
+    }
+    if (liquidGlass) {
+        LiquidGlassSurface(Modifier.fillMaxWidth().padding(horizontal = 12.dp), shape = shape, tint = tint, backdrop = backdrop) { Content() }
+    } else {
+        Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp).clip(shape).background(Color.White.copy(0.06f))) { Content() }
+    }
+}
+
+/** Item 3/10: the "Review" bottom bar — now built with the exact same
+ *  modifier/shape/height/padding as the feed's own [ActionRow] bar (see
+ *  MainFeedScreen.ActionRow's single-button "Unblock" state, which this
+ *  mirrors) instead of its own bespoke 46dp/20dp-radius version, so the two
+ *  actually match. */
+@Composable
+private fun TitleReviewBar(liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(26.dp)
+    Box(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).height(60.dp)) {
+        if (liquidGlass) {
+            LiquidGlassSurface(
+                Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp).clickable(onClick = onClick),
+                shape = shape, tint = tint, backdrop = backdrop
+            ) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("Review", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        } else {
+            Box(
+                Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp).clip(shape)
+                    .background(Color.White.copy(0.10f)).clickable(onClick = onClick),
                 contentAlignment = Alignment.Center
             ) {
                 Text("Review", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
@@ -2134,18 +2588,90 @@ fun TitleDetailOverlay(title: TitleSearchResult, liquidGlass: Boolean, onClose: 
     }
 }
 
+/** Item 12's second half: over an opened review, the bottom bar splits into
+ *  three even Like/Review/Comment text buttons instead of the single
+ *  "Review" button — same bar sizing as [TitleReviewBar]/the feed's own
+ *  ActionRow, just partitioned into three equal segments. */
+@Composable
+private fun LikeReviewCommentBar(
+    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, likedByMe: Boolean,
+    onLike: () -> Unit, onReview: () -> Unit, onComment: () -> Unit
+) {
+    val shape = RoundedCornerShape(26.dp)
+    @Composable
+    fun Segment(label: String, active: Boolean, onClick: () -> Unit) {
+        Box(Modifier.weight(1f).fillMaxHeight().clickable(onClick = onClick), contentAlignment = Alignment.Center) {
+            Text(label, color = if (active) Color(0xFFFF4D6D) else Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+    Box(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).height(60.dp)) {
+        @Composable
+        fun Row3() {
+            Row(Modifier.fillMaxSize()) {
+                Segment("Like", likedByMe, onLike)
+                Segment("Review", false, onReview)
+                Segment("Comment", false, onComment)
+            }
+        }
+        if (liquidGlass) {
+            LiquidGlassSurface(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp), shape = shape, tint = tint, backdrop = backdrop) { Row3() }
+        } else {
+            Box(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp).clip(shape).background(Color.White.copy(0.10f))) { Row3() }
+        }
+    }
+}
+
+/** Item 12: the inline "box to comment" — appears above [LikeReviewCommentBar]
+ *  when "Comment" is tapped. */
+@Composable
+private fun CommentComposerRow(liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, onSubmit: (String) -> Unit) {
+    var text by remember { mutableStateOf("") }
+    val shape = RoundedCornerShape(20.dp)
+    @Composable
+    fun Content() {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            androidx.compose.foundation.text.BasicTextField(
+                value = text, onValueChange = { text = it },
+                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp),
+                cursorBrush = SolidColor(Color.White),
+                modifier = Modifier.weight(1f),
+                decorationBox = { inner ->
+                    if (text.isEmpty()) Text("Add a comment…", color = Color.White.copy(0.4f), fontSize = 14.sp)
+                    inner()
+                }
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "Post", color = if (text.isNotBlank()) Color.White else Color.White.copy(0.3f),
+                fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.clickable(enabled = text.isNotBlank()) { onSubmit(text); text = "" }
+            )
+        }
+    }
+    if (liquidGlass) {
+        LiquidGlassSurface(Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(bottom = 8.dp), shape = shape, tint = tint, backdrop = backdrop) { Content() }
+    } else {
+        Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(bottom = 8.dp).clip(shape).background(Color.White.copy(0.08f))) { Content() }
+    }
+}
+
 /** A pill-wrapped [ShrinkToFitText] — the title bubble on [TitleDetailOverlay],
  *  which per spec needs to both (a) look like the page's other bubbles and
  *  (b) always keep the full title on one row by shrinking its font rather
  *  than truncating, the way [TitlePosterCard]'s footer already does. */
 @Composable
-private fun ShrinkToFitTitleBubble(text: String, liquidGlass: Boolean, tint: Color) {
+private fun ShrinkToFitTitleBubble(text: String, liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop? = null, modifier: Modifier = Modifier) {
     val shape = RoundedCornerShape(14.dp)
-    Box(
-        Modifier.fillMaxWidth()
-            .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.clip(shape).background(Color.Black.copy(0.55f)))
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-    ) {
-        ShrinkToFitText(text, baseFontSize = 17.sp, minFontSize = 11.sp)
+    @Composable
+    fun Inner() { ShrinkToFitText(text, baseFontSize = 17.sp, minFontSize = 11.sp) }
+    if (liquidGlass) {
+        LiquidGlassSurface(modifier = modifier.fillMaxWidth(), shape = shape, tint = tint, backdrop = backdrop) {
+            Box(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) { Inner() }
+        }
+    } else {
+        Box(
+            modifier.fillMaxWidth().clip(shape).background(Color.Black.copy(0.55f))
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+        ) { Inner() }
     }
 }

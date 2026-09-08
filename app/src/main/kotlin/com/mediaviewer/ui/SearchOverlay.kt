@@ -44,7 +44,6 @@ import com.mediaviewer.model.MediaItem
 import com.mediaviewer.model.SearchAccountResult
 import com.mediaviewer.model.SearchFeedResult
 import com.mediaviewer.model.SearchStarterPackResult
-import com.mediaviewer.model.TitleSearchResult
 import com.mediaviewer.ui.theme.*
 import com.mediaviewer.viewmodel.MainViewModel
 
@@ -89,14 +88,9 @@ fun SearchOverlay(
     onOpenPost: (Int) -> Unit,
     onOpenAccount: (AuthorInfo) -> Unit,
     onAddFeed: (com.mediaviewer.model.SearchFeedResult) -> Unit = {},
-    // Titles feature: Search's Titles tab — currently a placeholder (no
-    // catalog wired up, see MainViewModel.runSearch's TITLES branch).
-    onSelectTitleSubFilter: (ReviewKindFilter) -> Unit = {},
-    onOpenTitle: (TitleSearchResult) -> Unit = {},
-    onCloseTitle: () -> Unit = {},
     onClose: () -> Unit
 ) {
-    androidx.activity.compose.BackHandler(onBack = { if (state.selectedTitle != null) onCloseTitle() else onClose() })
+    androidx.activity.compose.BackHandler(onBack = onClose)
     val focusRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
 
@@ -241,21 +235,6 @@ fun SearchOverlay(
                 }
             }
 
-            // Titles feature: a second sub-filter row — All/Movies/TV only
-            // (Games/Music/Books aren't part of this placeholder tab's
-            // scope) — same chip styling as the row above, per spec
-            // ("just like...just on a second row"). Only shown while the
-            // Titles tab itself is active.
-            if (state.filter == MainViewModel.SearchFilter.TITLES) {
-                Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 5.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    listOf(ReviewKindFilter.ALL, ReviewKindFilter.MOVIES, ReviewKindFilter.TV).forEach { sub ->
-                        FilterChip(label = sub.label(), active = state.titleFilter == sub, liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop) { onSelectTitleSubFilter(sub) }
-                    }
-                }
-            }
             Spacer(Modifier.height(10.dp))
 
             // ── Results ──────────────────────────────────────────────────
@@ -287,17 +266,6 @@ fun SearchOverlay(
                                     SearchPostCell(item = item, onClick = { onOpenLikedPost(index) })
                                 }
                             }
-                        }
-                    }
-                    // Titles feature: checked before the generic loading/
-                    // hasSearched fallbacks below, same reasoning as the
-                    // Liked tab just above — this tab tracks its own
-                    // `titleLoading`/results rather than the shared ones.
-                    // Currently a placeholder (no catalog wired up) — see
-                    // MainViewModel.runSearch's TITLES branch.
-                    state.filter == MainViewModel.SearchFilter.TITLES -> {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text("Placeholder", color = DimGray, fontSize = 13.sp)
                         }
                     }
                     state.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -386,13 +354,6 @@ fun SearchOverlay(
             }
         }
 
-        // Titles feature: tapping a Title card opens it in its own
-        // overlayed page (per spec) — a later sibling here so it draws on
-        // top of everything else in this overlay, the same "later sibling
-        // = floats above" pattern the suggestions panel above uses.
-        state.selectedTitle?.let { title ->
-            TitleDetailOverlay(title = title, liquidGlass = liquidGlass, onClose = onCloseTitle)
-        }
     }
 }
 
@@ -444,7 +405,6 @@ private fun MainViewModel.SearchFilter.label(): String = when (this) {
     MainViewModel.SearchFilter.ACCOUNTS      -> "People"
     MainViewModel.SearchFilter.POSTS         -> "Posts"
     MainViewModel.SearchFilter.LIKED_TAGS    -> "Tagged"
-    MainViewModel.SearchFilter.TITLES        -> "Titles"
     MainViewModel.SearchFilter.FEEDS         -> "Feeds"
     MainViewModel.SearchFilter.STARTER_PACKS -> "Starter Packs"
 }

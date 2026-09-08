@@ -23,6 +23,9 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Screenshot
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.StarHalf
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -52,6 +55,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import com.mediaviewer.model.AuthorInfo
+import com.mediaviewer.model.TitleSearchResult
 import com.mediaviewer.ui.theme.DimGray
 import com.mediaviewer.ui.theme.RepostGreen
 import kotlinx.coroutines.Dispatchers
@@ -102,7 +106,7 @@ import kotlinx.coroutines.withContext
 private const val POST_CHAR_LIMIT = 300
 private const val MAX_IMAGES = 10
 
-enum class ComposeMode { SINGLE, THREAD, TEXTSHOT, VIDEO }
+enum class ComposeMode { SINGLE, THREAD, TEXTSHOT, VIDEO, REVIEW }
 
 /** One post's worth of content inside a [ComposeMode.THREAD] thread. */
 data class ThreadPostDraft(
@@ -114,13 +118,23 @@ data class ThreadPostDraft(
 /** Everything the composer collected, handed to the caller on "Post". */
 data class ComposePostDraft(
     val mode: ComposeMode,
-    /** SINGLE: exactly one entry. THREAD: two or more, in posting order. */
+    /** SINGLE: exactly one entry. THREAD: two or more, in posting order.
+     *  REVIEW: exactly one entry, carrying just the typed review text (no
+     *  images — see reviewTarget's own doc comment below for why). */
     val posts: List<ThreadPostDraft> = emptyList(),
     val videoUri: Uri? = null,
     val videoThumbnailUri: Uri? = null,
     val videoTitle: String = "",
     val videoDescription: String = "",
-    val textshotText: String = ""
+    val textshotText: String = "",
+    // Item 10: the title being reviewed, and the picked star rating on
+    // Popfeed's own native 0–10 half-star scale (so 0 = unrated, 10 = full
+    // 5 stars) — both only populated for ComposeMode.REVIEW. Image
+    // attach/Textshot/Blog/thread are greyed out for the whole lifetime of
+    // a review draft (see ComposePostScreen's reviewTarget param), so the
+    // review itself is always exactly one plain-text post.
+    val reviewTarget: TitleSearchResult? = null,
+    val reviewRating: Int = 0
 )
 
 @Composable
@@ -129,6 +143,13 @@ fun ComposePostScreen(
     liquidGlass: Boolean,
     dominantColor: Color = NeutralGlassTint,
     submitting: Boolean = false,
+    // Item 10: non-null the moment this composer was opened via a title
+    // page's "Review" bar (see MainViewModel.openReviewCompose) — forces
+    // Review mode/status for the composer's whole lifetime (switching back
+    // to Post/Thread/etc. mid-draft would leave a half-written review with
+    // nowhere sensible to go) and shows the cover/title/rating row below
+    // the author row.
+    reviewTarget: TitleSearchResult? = null,
     onClose: () -> Unit,
     onSubmit: (ComposePostDraft) -> Unit
 ) {
@@ -143,8 +164,20 @@ fun ComposePostScreen(
     // uses for its own `dominantColor` param.
     val dominantColor = selfProfile?.avatarUrl?.let { rememberDominantColor(it) } ?: dominantColor
 
+    // Item 10: tints the whole composer to the title's own poster color
+    // while reviewing, same "match what's on screen" reasoning the profile
+    // avatar shadow above already applies — takes priority since the
+    // title being reviewed is far more the visual subject here than the
+    // reviewer's own avatar is.
+    val dominantColor = reviewTarget?.posterUrl?.let { rememberDominantColor(it) }
+        ?: selfProfile?.avatarUrl?.let { rememberDominantColor(it) } ?: dominantColor
+
     // ── Core state ───────────────────────────────────────────────────────
-    var mode by remember { mutableStateOf(ComposeMode.SINGLE) }
+    var mode by remember { mutableStateOf(if (reviewTarget != null) ComposeMode.REVIEW else ComposeMode.SINGLE) }
+    // Item 10: Popfeed's own native 0–10 half-star scale (0 = unrated,
+    // 10 = full 5 stars) — see PopfeedReview's ratingOutOf5 doc comment for
+    // why /2 is always the right conversion both ways.
+    var reviewRating by remember { mutableStateOf(0) }
     var singleText by remember { mutableStateOf(TextFieldValue("")) }
     var images by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var videoUri by remember { mutableStateOf<Uri?>(null) }
@@ -179,7 +212,7 @@ fun ComposePostScreen(
     fun focusActiveField() {
         try {
             when (mode) {
-                ComposeMode.SINGLE, ComposeMode.TEXTSHOT -> singleFocusRequester.requestFocus()
+                ComposeMode.SINGLE, ComposeMode.TEXTSHOT, ComposeMode.REVIEW -> singleFocusRequester.requestFocus()
                 ComposeMode.THREAD -> threadFocusRequesters.getOrNull(activeThreadIndex)?.requestFocus()
                 ComposeMode.VIDEO -> videoTitleFocusRequester.requestFocus()
             }
@@ -302,6 +335,9 @@ fun ComposePostScreen(
         ComposeMode.THREAD -> threadPosts.getOrNull(activeThreadIndex)?.text?.length.orZero() to
             (POST_CHAR_LIMIT - threadSuffixLength(threadPosts.size))
         ComposeMode.TEXTSHOT -> singleText.text.length to Int.MAX_VALUE
+        // Item 10: "the character indicator shouldn't have a limit" — same
+        // unlimited treatment as Textshot above.
+        ComposeMode.REVIEW -> singleText.text.length to Int.MAX_VALUE
         ComposeMode.SINGLE -> singleText.text.length to POST_CHAR_LIMIT
     }
 
@@ -310,6 +346,10 @@ fun ComposePostScreen(
         ComposeMode.THREAD -> threadPosts.all { it.text.length <= (POST_CHAR_LIMIT - threadSuffixLength(threadPosts.size)) } &&
             threadPosts.any { it.text.isNotBlank() }
         ComposeMode.TEXTSHOT -> singleText.text.isNotBlank()
+        // Item 10: a rating is required (the person must pick 0.5–5 stars),
+        // the written review itself is optional — matches the spec ("pick
+        // a rating and optionally type out a review").
+        ComposeMode.REVIEW -> reviewTarget != null && reviewRating > 0
         ComposeMode.SINGLE -> singleText.text.isNotBlank() && singleText.text.length <= POST_CHAR_LIMIT
     }
 
@@ -332,6 +372,11 @@ fun ComposePostScreen(
                 }
             )
             ComposeMode.TEXTSHOT -> ComposePostDraft(mode = ComposeMode.TEXTSHOT, textshotText = singleText.text)
+            ComposeMode.REVIEW -> ComposePostDraft(
+                mode = ComposeMode.REVIEW,
+                posts = listOf(ThreadPostDraft(text = singleText.text)),
+                reviewTarget = reviewTarget, reviewRating = reviewRating
+            )
             ComposeMode.SINGLE -> ComposePostDraft(
                 mode = ComposeMode.SINGLE,
                 posts = listOf(ThreadPostDraft(text = singleText.text, images = images, video = null))
@@ -344,6 +389,7 @@ fun ComposePostScreen(
     // longer chosen from inside the status bubble (see StatusBubble below),
     // only from the dedicated bottom-bar buttons.
     val statusLabel = when {
+        mode == ComposeMode.REVIEW -> "Review"
         mode == ComposeMode.VIDEO -> "Video"
         mode == ComposeMode.THREAD -> "Thread"
         mode == ComposeMode.TEXTSHOT -> "Textshot"
@@ -424,6 +470,20 @@ fun ComposePostScreen(
                 }
 
                 Spacer(Modifier.height(12.dp))
+
+                // Item 10: cover/title/rating row — sits between the author
+                // row and the text field, only while reviewing. Kept
+                // deliberately short (the row itself, not the cover) since
+                // spec calls this "somewhat short" — the cover is sized off
+                // that row height rather than the other way around.
+                if (mode == ComposeMode.REVIEW && reviewTarget != null) {
+                    ReviewTargetRow(
+                        target = reviewTarget, rating = reviewRating,
+                        liquidGlass = liquidGlass, tint = dominantColor,
+                        onRatingChange = { reviewRating = it }
+                    )
+                    Spacer(Modifier.height(12.dp))
+                }
 
                 when (mode) {
                     ComposeMode.VIDEO -> {
@@ -531,6 +591,15 @@ fun ComposePostScreen(
                         )
                     }
 
+                    ComposeMode.REVIEW -> {
+                        GrowingTextField(
+                            value = singleText,
+                            onValueChange = { singleText = it },
+                            placeholder = "Write a review (optional)…",
+                            focusRequester = singleFocusRequester
+                        )
+                    }
+
                     ComposeMode.SINGLE -> {
                         GrowingTextField(
                             value = singleText,
@@ -594,7 +663,7 @@ fun ComposePostScreen(
                             GlassCircleButton(
                                 icon = Icons.Default.Image, contentDescription = "Attach image or video",
                                 liquidGlass = liquidGlass, tint = dominantColor, size = 40.dp,
-                                enabled = mode != ComposeMode.TEXTSHOT,
+                                enabled = mode != ComposeMode.TEXTSHOT && mode != ComposeMode.REVIEW,
                                 onClick = {
                                     mediaPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                                 }
@@ -605,7 +674,7 @@ fun ComposePostScreen(
                             TextToggleButton(
                                 label = "Blog",
                                 liquidGlass = liquidGlass, tint = dominantColor,
-                                enabled = mode != ComposeMode.VIDEO,
+                                enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW,
                                 selected = isBlogMode,
                                 onClick = {
                                     if (isBlogMode) {
@@ -618,7 +687,7 @@ fun ComposePostScreen(
                             TextToggleButton(
                                 label = "Textshot",
                                 liquidGlass = liquidGlass, tint = dominantColor,
-                                enabled = mode != ComposeMode.VIDEO,
+                                enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW,
                                 selected = mode == ComposeMode.TEXTSHOT,
                                 onClick = {
                                     if (mode == ComposeMode.TEXTSHOT) {
@@ -656,7 +725,7 @@ fun ComposePostScreen(
                         GlassCircleButton(
                             icon = Icons.Default.Add, contentDescription = "Add post to thread",
                             liquidGlass = liquidGlass, tint = dominantColor, size = 36.dp,
-                            enabled = mode != ComposeMode.VIDEO,
+                            enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW,
                             onClick = {
                                 if (mode == ComposeMode.THREAD) addThreadPost() else startThreadFromSingle()
                             }
@@ -668,6 +737,91 @@ fun ComposePostScreen(
     }
 
 // ── Sub-components ──────────────────────────────────────────────────────
+
+/** Item 10: the cover/title/rating row shown between the author row and the
+ *  text field while reviewing. Deliberately short (spec: "this row is
+ *  somewhat short so the cover shouldn't be that big") — the cover's own
+ *  size is derived from [rowHeight] rather than a fixed portrait size, so
+ *  it always reads as a small thumbnail rather than a mini poster card. */
+@Composable
+private fun ReviewTargetRow(
+    target: TitleSearchResult, rating: Int,
+    liquidGlass: Boolean, tint: Color,
+    onRatingChange: (Int) -> Unit
+) {
+    val rowHeight = 52.dp
+    val shape = RoundedCornerShape(14.dp)
+    @Composable
+    fun Content() {
+        Row(
+            Modifier.fillMaxWidth().height(rowHeight).padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val coverShape = RoundedCornerShape(6.dp)
+            Box(Modifier.fillMaxHeight().aspectRatio(2f / 3f).clip(coverShape).background(Color.White.copy(0.10f))) {
+                if (target.posterUrl != null) {
+                    AsyncImage(model = target.posterUrl, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+            Text(
+                target.title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(Modifier.width(10.dp))
+            ReviewStarPicker(rating = rating, onRatingChange = onRatingChange)
+        }
+    }
+    if (liquidGlass) {
+        LiquidGlassSurface(Modifier.fillMaxWidth(), shape = shape, tint = tint) { Content() }
+    } else {
+        Box(Modifier.fillMaxWidth().clip(shape).background(Color.White.copy(0.06f))) { Content() }
+    }
+}
+
+/** Item 10: a tappable .5–5 star picker — each half of each star is its own
+ *  tap target (left half = X.5, right half = X.0) so every half-star value
+ *  is reachable, matching Popfeed's own 0–10 (half-star granularity) rating
+ *  scale. Shows the numeric rating to the right, per spec. */
+@Composable
+private fun ReviewStarPicker(rating: Int, onRatingChange: (Int) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Row {
+            repeat(5) { i ->
+                // rating is on Popfeed's 0–10 scale; each star covers 2
+                // points (a left-half tap = 2*i+1, a right-half/full tap =
+                // 2*i+2).
+                val starFloor = i * 2
+                val icon = when {
+                    rating >= starFloor + 2 -> Icons.Filled.Star
+                    rating == starFloor + 1 -> Icons.Filled.StarHalf
+                    else -> Icons.Filled.StarBorder
+                }
+                Box(Modifier.size(22.dp)) {
+                    Icon(icon, contentDescription = null, tint = Color(0xFFFFC107), modifier = Modifier.fillMaxSize())
+                    // Two invisible tap targets stacked over the one icon —
+                    // left half picks the half-star value, right half picks
+                    // the full-star value.
+                    Row(Modifier.matchParentSize()) {
+                        Box(Modifier.weight(1f).fillMaxHeight().clickable(
+                            interactionSource = remember { MutableInteractionSource() }, indication = null
+                        ) { onRatingChange(starFloor + 1) })
+                        Box(Modifier.weight(1f).fillMaxHeight().clickable(
+                            interactionSource = remember { MutableInteractionSource() }, indication = null
+                        ) { onRatingChange(starFloor + 2) })
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.width(6.dp))
+        Text(
+            if (rating > 0) "${rating / 2f}" else "–",
+            color = Color.White.copy(alpha = if (rating > 0) 0.9f else 0.4f),
+            fontSize = 13.sp, fontWeight = FontWeight.SemiBold
+        )
+    }
+}
 
 @Composable
 private fun GlassCircleButton(

@@ -132,6 +132,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {        super.onCreate(savedInstanceState)
         installCrashHandler(applicationContext)
         enableEdgeToEdge()
+        hideSystemStatusBar()
         setContent {
             var crashLog by remember { mutableStateOf(readCrashLog(applicationContext)) }
             if (crashLog != null) {
@@ -158,6 +159,30 @@ class MainActivity : ComponentActivity() {
     // per-visit/per-refresh PDS fetch off the Subscribe lists — see
     // MainViewModel.loadFriendsReviewsIfNeeded — nothing persistent to
     // reconnect), so there's nothing left for onResume to do here.
+
+    override fun onResume() {
+        super.onResume()
+        // Re-assert immersive mode: the system can bring the status/nav bars
+        // back after things like a permission dialog, keyboard, or app switch.
+        hideSystemStatusBar()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideSystemStatusBar()
+    }
+
+    /**
+     * Fully hides the phone status bar (clock, battery, wifi/signal icons, etc).
+     * Uses immersive-sticky behavior so a swipe from the edge only shows the
+     * bar temporarily and it re-hides itself; the nav bar is left alone.
+     */
+    private fun hideSystemStatusBar() {
+        val controller = androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
+        controller.systemBarsBehavior =
+            androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller.hide(androidx.core.view.WindowInsetsCompat.Type.statusBars())
+    }
 }
 
 @Composable
@@ -214,11 +239,17 @@ private fun AppRoot(viewModel: MainViewModel) {
     val dmThread               by viewModel.dmThread.collectAsState()
     val composePostOpen        by viewModel.composePostOpen.collectAsState()
     val composePostSubmitting  by viewModel.composePostSubmitting.collectAsState()
+    val reviewComposeTarget    by viewModel.reviewComposeTarget.collectAsState()
     // Item 12 follow-up: DM-thread "shared posts" feed loading overlay.
     val dmFeedLoadingOverlay   by viewModel.dmFeedLoadingOverlay.collectAsState()
     // Item 8: Hub Friends/Livestreams sections.
     val friendsReviews        by viewModel.friendsReviews.collectAsState()
     val friendsReviewsLoading by viewModel.friendsReviewsLoading.collectAsState()
+    // Item 12: same cache, handed straight to ProfileOverlay/TitleDetailOverlay
+    // for the "who's reviewed this title" tab strip — plain alias here just
+    // to keep the ProfileOverlay call site's own param name self-explanatory.
+    val friendsReviewsForTitles = friendsReviews
+    val reviewSocial           by viewModel.reviewSocial.collectAsState()
     val friendsBlogs           by viewModel.friendsBlogs.collectAsState()
 
     val liveFriends           by viewModel.liveFriends.collectAsState()
@@ -676,6 +707,7 @@ private fun AppRoot(viewModel: MainViewModel) {
                 liquidGlass    = liquidGlass,
                 dominantColor  = currentDominantColor,
                 submitting     = composePostSubmitting,
+                reviewTarget   = reviewComposeTarget,
                 onClose        = viewModel::closeComposePost,
                 onSubmit       = viewModel::submitComposePost
             )
@@ -710,9 +742,6 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onOpenPost         = viewModel::openPostFromSearch,
                 onOpenAccount      = { author -> viewModel.closeSearch(); viewModel.openProfile(author) },
                 onAddFeed          = viewModel::addSavedFeedFromSearch,
-                onSelectTitleSubFilter = viewModel::setTitleSubFilter,
-                onOpenTitle        = viewModel::openTitleDetail,
-                onCloseTitle       = viewModel::closeTitleDetail,
                 onClose            = viewModel::closeSearch
             )
         }
@@ -771,6 +800,12 @@ private fun AppRoot(viewModel: MainViewModel) {
                     onCloseReview     = viewModel::closeProfileReview,
                     onOpenTitle       = viewModel::openProfileTitle,
                     onCloseTitle      = viewModel::closeProfileTitle,
+                    onOpenReviewCompose = viewModel::openReviewCompose,
+                    friendsReviews    = friendsReviewsForTitles,
+                    reviewSocial      = reviewSocial,
+                    onLoadReviewSocial  = viewModel::loadReviewSocial,
+                    onToggleReviewLike  = viewModel::toggleReviewLike,
+                    onPostReviewComment = viewModel::postReviewComment,
                     onPinchOut        = viewModel::pinchOutFromProfile,
                     onSaveScroll      = viewModel::saveProfileScrollPosition,
                     isReviewSubscribed = currentProfileOverlay.author.did in subscribedReviewDids,
