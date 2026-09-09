@@ -1,8 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.MediaViewer" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:statusBarColor">#FF000000</item>
-        <item name="android:navigationBarColor">#FF000000</item>
+        <!-- Item 1: transparent, not opaque black — enableEdgeToEdge()/
+             hideSystemStatusBar() already remove the status/nav bar icons
+             entirely; leaving these opaque black painted a solid bar over
+             the app's own UI instead of just hiding the icons. Transparent
+             lets whatever the app draws underneath (banner images, etc.)
+             show through the full height of the screen. -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowBackground">#FF000000</item>
+        <!-- Item 1: let content draw under the camera cutout in both
+             portrait and landscape instead of letterboxing around it. -->
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
     </style>
 </resources>

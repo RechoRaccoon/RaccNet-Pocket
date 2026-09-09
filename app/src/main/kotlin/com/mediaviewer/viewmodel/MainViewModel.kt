@@ -2215,6 +2215,26 @@ _bskyDid.value          = session.did
         }
     }
 
+    /** Item 9: deletes the current account's own review outright — the
+     *  "Delete" segment on TitleDetailOverlay's LikeReviewCommentBar, only
+     *  ever shown when the signed-in account is that review's own author
+     *  (see ProfileOverlay's own selfDid check), so there's nothing to
+     *  re-verify here. Drops it from the local friends/reviews cache right
+     *  away so it disappears from every tab strip/list already showing it,
+     *  and clears it as the title page's preselected review if that's the
+     *  one being deleted, before firing the actual delete off. */
+    fun deleteReview(review: PopfeedReview) {
+        val did = _bskyDid.value
+        if (did.isBlank()) return
+        _friendsReviews.value = _friendsReviews.value.filterNot { it.review.uri == review.uri }
+        _profileOverlay.value = _profileOverlay.value?.let { cur ->
+            if (cur.openTitlePreselectedReview?.review?.uri == review.uri) cur.copy(openTitlePreselectedReview = null) else cur
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            bskyRepo.deleteReview(bskyToken, did, review.uri)
+        }
+    }
+
     /** Backlog cards' "full info menu" (Titles feature) — per feedback,
      *  this was meant to cover *every* title card, not just Search's
      *  Titles tab. Converts the tapped [PopfeedBacklogItem] into the same

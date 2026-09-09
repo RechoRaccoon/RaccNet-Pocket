@@ -806,6 +806,7 @@ private fun AppRoot(viewModel: MainViewModel) {
                     onLoadReviewSocial  = viewModel::loadReviewSocial,
                     onToggleReviewLike  = viewModel::toggleReviewLike,
                     onPostReviewComment = viewModel::postReviewComment,
+                    onDeleteReview      = viewModel::deleteReview,
                     onPinchOut        = viewModel::pinchOutFromProfile,
                     onSaveScroll      = viewModel::saveProfileScrollPosition,
                     isReviewSubscribed = currentProfileOverlay.author.did in subscribedReviewDids,

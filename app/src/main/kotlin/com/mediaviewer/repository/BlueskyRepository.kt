@@ -1065,6 +1065,12 @@ class BlueskyRepository {
         val identifiers = mutableMapOf<String, Any>()
         if (target.id.startsWith("imdb:")) identifiers["imdbId"] = target.id.removePrefix("imdb:")
         val record = mutableMapOf<String, Any>(
+            // Item 6: required so Popfeed's own indexer recognizes this as
+            // one of its records at all — see this function's own doc
+            // comment above for why a missing "$type" is exactly what let
+            // a posted review show up in this app's own direct reads while
+            // never actually reaching Popfeed itself.
+            "\$type" to "social.popfeed.feed.review",
             "identifiers" to identifiers,
             "creativeWorkType" to (target.mediaCategory ?: "movie"),
             "rating" to ratingOutOf10.coerceIn(0, 10),
@@ -1072,8 +1078,14 @@ class BlueskyRepository {
             "title" to target.title
         )
         if (text.isNotBlank()) record["text"] = text
-        target.posterUrl?.let { record["posterUrl"] = it }
-        target.backdropUrl?.let { record["backdropUrl"] = it }
+        // Item 6: "poster"/"backdrop" are the field names actually
+        // confirmed against Popfeed's public lexicon (tried first by every
+        // parser in this file, see getPopfeedBacklog's comment) — the
+        // *Url variants are kept alongside them only for backward
+        // compatibility with however this exact record might get read
+        // elsewhere, not because Popfeed itself expects them.
+        target.posterUrl?.let { record["poster"] = it; record["posterUrl"] = it }
+        target.backdropUrl?.let { record["backdrop"] = it; record["backdropUrl"] = it }
         if (target.releaseDate.isNotBlank()) record["releaseDate"] = target.releaseDate
         if (target.genres.isNotEmpty()) record["genres"] = target.genres
         target.creator?.let { record["mainCredit"] = it }
@@ -1089,6 +1101,16 @@ class BlueskyRepository {
      *  is specifically what this needs to disappear from. */
     suspend fun removeBacklogListItem(token: String, did: String, listItemUri: String): Result<Unit> =
         deleteRecord(token, did, "social.popfeed.feed.listItem", listItemUri.rkey())
+
+    /** Item 9: deletes a review outright — the "Delete" action on the
+     *  reviewer's own review (TitleDetailOverlay's LikeReviewCommentBar
+     *  only ever shows it when the signed-in account is that review's own
+     *  author). Reads the collection straight off [reviewUri] itself via
+     *  [collection] rather than hardcoding "social.popfeed.feed.review",
+     *  since a review posted before that collection name settled could
+     *  still live under one of the other names in REVIEW_COLLECTIONS. */
+    suspend fun deleteReview(token: String, did: String, reviewUri: String): Result<Unit> =
+        deleteRecord(token, did, reviewUri.collection(), reviewUri.rkey())
 
     // ── Popfeed likes/comments (item 12) ────────────────────────────────────
     // Popfeed has no dedicated AppView of its own that this app talks to —
@@ -1140,6 +1162,7 @@ class BlueskyRepository {
 
     suspend fun likePopfeedReview(token: String, did: String, subjectUri: String): Result<String> =
         createRecord(token, did, "social.popfeed.feed.like", mapOf(
+            "\$type" to "social.popfeed.feed.like",
             "subjectUri" to subjectUri, "subjectType" to "review", "createdAt" to java.time.Instant.now().toString()
         ))
 
@@ -1175,6 +1198,7 @@ class BlueskyRepository {
 
     suspend fun postPopfeedComment(token: String, did: String, subjectUri: String, text: String): Result<String> =
         createRecord(token, did, "social.popfeed.feed.comment", mapOf(
+            "\$type" to "social.popfeed.feed.comment",
             "text" to text, "subjectUri" to subjectUri, "subjectType" to "review",
             "createdAt" to java.time.Instant.now().toString()
         ))
@@ -2075,6 +2099,11 @@ class BlueskyRepository {
     }
 
     private fun String.rkey() = this.substringAfterLast('/')
+
+    /** The collection segment of an AT-URI (`at://did/collection/rkey`) —
+     *  used by [deleteReview] to delete from whichever of REVIEW_COLLECTIONS
+     *  a given review record actually lives under. */
+    private fun String.collection() = this.removePrefix("at://").split("/").getOrNull(1).orEmpty()
 
     // Item 18 fix: parseFeedItem() can throw for a single malformed post —
     // most likely a "non-null" String field (e.g. BskyImageView.thumb/

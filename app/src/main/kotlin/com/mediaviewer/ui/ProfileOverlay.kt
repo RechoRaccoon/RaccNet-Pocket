@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowUpward
@@ -254,6 +255,10 @@ fun ProfileOverlay(
     onLoadReviewSocial: (PopfeedReview) -> Unit = {},
     onToggleReviewLike: (PopfeedReview) -> Unit = {},
     onPostReviewComment: (PopfeedReview, String) -> Unit = { _, _ -> },
+    // Item 9: the "Delete" segment on a review's own action bar only shows
+    // when it's the signed-in account's own review — TitleDetailOverlay
+    // compares this against the review's own author did.
+    onDeleteReview: (PopfeedReview) -> Unit = {},
     // Pinch navigation: the mirror of the post pager's pinch-in. Only takes
     // effect (see pinchOutFromProfile() in the ViewModel) when this profile
     // is the one currently hidden behind a post — hiding it again is what
@@ -535,7 +540,8 @@ fun ProfileOverlay(
                 reviews = withPreselected, preselectedReviewUri = state.openTitlePreselectedReview?.review?.uri,
                 onOpenReview = onOpenReviewCompose,
                 reviewSocial = reviewSocial, onLoadReviewSocial = onLoadReviewSocial,
-                onToggleReviewLike = onToggleReviewLike, onPostReviewComment = onPostReviewComment
+                onToggleReviewLike = onToggleReviewLike, onPostReviewComment = onPostReviewComment,
+                selfDid = selfDid, onDeleteReview = onDeleteReview
             )
         }
     }
@@ -1871,7 +1877,16 @@ private fun ReviewRow(review: PopfeedReview, liquidGlass: Boolean, onOpenReview:
 // re-implementing it — per feedback, "look at how Review stars look in the
 // Reviews tab on profiles for reference."
 @Composable
-fun StarRatingPill(rating: Float, liquidGlass: Boolean, tint: Color = NeutralGlassTint, modifier: Modifier = Modifier, backdrop: GlassBackdrop? = null, compact: Boolean = false) {
+fun StarRatingPill(
+    rating: Float, liquidGlass: Boolean, tint: Color = NeutralGlassTint, modifier: Modifier = Modifier,
+    backdrop: GlassBackdrop? = null, compact: Boolean = false,
+    // Item 3/2: was a fixed 11dp everywhere, which read as tiny in bubbles
+    // that actually had a lot more room to give it (e.g. TitleDetailOverlay's
+    // own header pill, sized to match the poster's height). Callers with
+    // more room to spare (see the header pill below) pass a bigger value;
+    // everyone else gets this slightly-larger-than-before default.
+    starSize: Dp = if (compact) 13.dp else 15.dp
+) {
     // Bug fix: this used to have its own bespoke shape (10.dp corner radius)
     // and padding (6.dp/3.dp) — visibly smaller/differently-rounded than
     // every other bubble on TitleDetailOverlay, which all go through
@@ -1882,7 +1897,7 @@ fun StarRatingPill(rating: Float, liquidGlass: Boolean, tint: Color = NeutralGla
     // its neighbors rather than just visually similar.
     val shape = RoundedCornerShape(14.dp)
     val padH = if (compact) 8.dp else 12.dp
-    val padV = if (compact) 3.dp else 6.dp
+    val padV = if (compact) 4.dp else 7.dp
     @Composable
     fun Stars() {
     Row(
@@ -1905,7 +1920,7 @@ fun StarRatingPill(rating: Float, liquidGlass: Boolean, tint: Color = NeutralGla
             Icon(
                 icon, contentDescription = null,
                 tint = if (i < full || (i == full && hasHalf)) Color(0xFFFFC107) else Color.White.copy(0.3f),
-                modifier = Modifier.size(11.dp)
+                modifier = Modifier.size(starSize)
             )
         }
     }
@@ -2062,6 +2077,21 @@ private fun creatorRoleLabel(role: String?, mediaCategory: String? = null): Stri
     }
 }
 
+/** Item 5: the header star pill's rating — averaged across every review
+ *  [TitleDetailOverlay] actually has in hand for this title (its own
+ *  `reviews` param: this account's own review, if any, plus whoever it
+ *  subscribes to for Reviews — the exact same set already populating the
+ *  Summary/Reviews tab strip just below). Popfeed doesn't run a server-side
+ *  AppView that indexes every account's reviews into one queryable place
+ *  (see BlueskyRepository's own comment on getPopfeedLikeSummary for the
+ *  same limitation on likes) — an honest "every review across all of
+ *  Popfeed" average isn't something this client, which only ever reads
+ *  individual accounts' own repos, can compute. This is the most complete
+ *  real number available, and it's consistent with what's shown just below
+ *  it: 0 (no stars filled) only when there's truly nothing to average yet. */
+private fun averageRating(reviews: List<FriendPopfeedReview>): Float =
+    if (reviews.isEmpty()) 0f else reviews.map { it.review.ratingOutOf5 }.average().toFloat()
+
 /** Popfeed's `releaseDate` is a raw ISO-8601 datetime string (e.g.
  *  "2010-07-16T00:00:00Z"). Popfeed's lexicon carries the *full* date (not
  *  just a year), so this now formats the whole thing as a short, readable
@@ -2093,7 +2123,10 @@ fun TitleDetailOverlay(
     reviewSocial: Map<String, MainViewModel.ReviewSocialState> = emptyMap(),
     onLoadReviewSocial: (PopfeedReview) -> Unit = {},
     onToggleReviewLike: (PopfeedReview) -> Unit = {},
-    onPostReviewComment: (PopfeedReview, String) -> Unit = { _, _ -> }
+    onPostReviewComment: (PopfeedReview, String) -> Unit = { _, _ -> },
+    // Item 9: which review (if any) currently open belongs to me.
+    selfDid: String = "",
+    onDeleteReview: (PopfeedReview) -> Unit = {}
 ) {
     val tint = rememberDominantColor(title.posterUrl ?: title.backdropUrl ?: "")
     val uriHandler = LocalUriHandler.current
@@ -2176,9 +2209,18 @@ fun TitleDetailOverlay(
         }
 
         Column(Modifier.fillMaxSize()) {
-            Column(
-                Modifier.weight(1f).fillMaxWidth().padding(top = topClearance).verticalScroll(rememberScrollState())
-            ) {
+            // Item 6: BoxWithConstraints just to learn how tall this
+            // viewport actually is at runtime (varies by device/window
+            // size) — the scrollable Column below uses that to floor its
+            // own height at "enough to always scroll the poster clear of
+            // the banner", per this function's own doc comment.
+            BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                val viewportHeight = maxHeight
+                val minScrollableHeight = (viewportHeight - topClearance) + (bannerHeight - overlap)
+                Column(
+                    Modifier.fillMaxWidth().padding(top = topClearance).verticalScroll(rememberScrollState())
+                        .heightIn(min = minScrollableHeight)
+                ) {
                 Spacer(Modifier.height(bannerHeight - overlap))
 
                 // ── Poster + details row ────────────────────────────────
@@ -2223,7 +2265,22 @@ fun TitleDetailOverlay(
                             // Item 4: now the same shape/padding/backdrop as
                             // every other bubble on this page — see
                             // StarRatingPill's own doc comment.
-                            StarRatingPill(rating = 0f, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, modifier = Modifier.fillMaxHeight())
+                            //
+                            // Item 5 (new): averaged from the real reviews
+                            // this client actually has for this title — see
+                            // averageRating's own doc comment just below
+                            // this function for why that's this account's
+                            // own review plus its Reviews-subscriptions,
+                            // not a true site-wide average (Popfeed has no
+                            // aggregation endpoint this app could call for
+                            // that). Bigger stars (item 2) since this pill,
+                            // sized to the poster's own height, has more
+                            // room to spare than the smaller pills elsewhere
+                            // on this page.
+                            StarRatingPill(
+                                rating = averageRating(reviews), liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                                starSize = 18.dp, modifier = Modifier.fillMaxHeight()
+                            )
                         }
                         // Item 5: defaults to "Directed by" for movie/TV
                         // when the record's own role is blank — see
@@ -2292,6 +2349,7 @@ fun TitleDetailOverlay(
                 // Room for the fixed bottom bar so it never covers the tail
                 // end of the scrolled content.
                 Spacer(Modifier.height(90.dp))
+                }
             }
 
             // ── Fixed bottom bar (item 3/12) ────────────────────────────
@@ -2311,9 +2369,12 @@ fun TitleDetailOverlay(
                     LikeReviewCommentBar(
                         liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
                         likedByMe = social?.likedByMe == true,
+                        // Item 9: only my own review gets a Delete segment.
+                        isOwnReview = selfDid.isNotBlank() && currentReview.author.did == selfDid,
                         onLike = { onToggleReviewLike(currentReview.review) },
                         onReview = { onOpenReview(title) },
-                        onComment = { showCommentBox = !showCommentBox }
+                        onComment = { showCommentBox = !showCommentBox },
+                        onDelete = { onDeleteReview(currentReview.review) }
                     )
                 }
             }
@@ -2323,7 +2384,7 @@ fun TitleDetailOverlay(
         // of the page (item 11 only asks for the *background* to stay put,
         // but leaving the close control reachable at all times is the
         // obviously-intended usability behavior here).
-        Box(Modifier.fillMaxWidth().padding(top = topClearance).padding(12.dp)) {
+        Box(Modifier.fillMaxWidth().padding(top = topClearance + 4.dp, start = 12.dp, end = 12.dp)) {
             CloseGlassBubble(liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, onClick = onClose)
         }
     }
@@ -2439,40 +2500,46 @@ private fun SummaryPanel(title: TitleSearchResult, liquidGlass: Boolean, tint: C
     val shape = RoundedCornerShape(16.dp)
     @Composable
     fun Content() {
+        val wikiUrl = title.wikipediaArticleUrl
         Column(Modifier.padding(14.dp)) {
             Text(
                 title.overview ?: "No description found for this title yet.",
                 color = Color.White.copy(if (title.overview != null) 0.92f else 0.55f),
-                fontSize = 14.sp, lineHeight = 21.sp
+                fontSize = 14.sp, lineHeight = 21.sp,
+                // Item 7: tapping the synopsis itself also opens the full
+                // Wikipedia article, same destination as the attribution
+                // row's own "Wikipedia" link below.
+                modifier = if (title.overview != null && wikiUrl != null) Modifier.clickable { onOpenLink(wikiUrl) } else Modifier
             )
-            val wikiUrl = title.wikipediaArticleUrl
             if (title.overview != null && wikiUrl != null) {
-                HorizontalDivider(Modifier.padding(vertical = 12.dp), color = Color.White.copy(0.12f))
-                Text(
-                    "Attribution", color = Color.White.copy(0.5f), fontSize = 10.sp,
-                    fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 6.dp)
-                )
-                // Item 2: the article text itself is clickable, opening the
-                // full Wikipedia article.
-                Text(
-                    buildAnnotatedString {
-                        append("Synopsis from ")
-                        withStyle(SpanStyle(color = Color.White, fontWeight = FontWeight.SemiBold, textDecoration = TextDecoration.Underline)) {
-                            append("Wikipedia")
-                        }
-                        append(", available under ")
-                    },
-                    color = Color.White.copy(0.65f), fontSize = 12.sp, lineHeight = 17.sp,
-                    modifier = Modifier.clickable { onOpenLink(wikiUrl) }
-                )
-                // Item 2: the license itself is clickable, opening its full
-                // text — CC BY-SA 4.0, the license Wikipedia's own text is
-                // dual-licensed under.
-                Text(
-                    "CC BY-SA 4.0",
-                    color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
-                    textDecoration = TextDecoration.Underline,
-                    modifier = Modifier.clickable { onOpenLink("https://creativecommons.org/licenses/by-sa/4.0/") }
+                // Item 7: tight divider spacing (was 12dp/12dp) and the
+                // whole attribution block folded into one compact line
+                // instead of a standalone label plus two stacked
+                // sentences — "Attribution" is now just the line's own
+                // leading word. ClickableText (rather than two separate
+                // Text composables) is what lets "Wikipedia" and
+                // "CC BY-SA 4.0" stay independently tappable while still
+                // living in a single line of text.
+                HorizontalDivider(Modifier.padding(vertical = 6.dp), color = Color.White.copy(0.12f))
+                val ccUrl = "https://creativecommons.org/licenses/by-sa/4.0/"
+                val annotated = buildAnnotatedString {
+                    withStyle(SpanStyle(color = Color.White.copy(0.5f), fontWeight = FontWeight.SemiBold)) { append("Attribution: ") }
+                    append("Synopsis from ")
+                    pushStringAnnotation("url", wikiUrl)
+                    withStyle(SpanStyle(color = Color.White, fontWeight = FontWeight.SemiBold, textDecoration = TextDecoration.Underline)) { append("Wikipedia") }
+                    pop()
+                    append(", available under ")
+                    pushStringAnnotation("url", ccUrl)
+                    withStyle(SpanStyle(color = Color.White, fontWeight = FontWeight.SemiBold, textDecoration = TextDecoration.Underline)) { append("CC BY-SA 4.0") }
+                    pop()
+                }
+                ClickableText(
+                    text = annotated,
+                    style = androidx.compose.ui.text.TextStyle(color = Color.White.copy(0.65f), fontSize = 11.sp),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    onClick = { offset ->
+                        annotated.getStringAnnotations("url", offset, offset).firstOrNull()?.let { onOpenLink(it.item) }
+                    }
                 )
             }
         }
@@ -2545,9 +2612,6 @@ private fun ReviewPanel(fr: FriendPopfeedReview, social: MainViewModel.ReviewSoc
                         }
                     }
                 }
-            } else if (social?.loading == true) {
-                Spacer(Modifier.height(8.dp))
-                Text("Loading comments…", color = Color.White.copy(0.4f), fontSize = 11.sp)
             }
         }
     }
@@ -2588,35 +2652,38 @@ private fun TitleReviewBar(liquidGlass: Boolean, tint: Color, backdrop: GlassBac
     }
 }
 
-/** Item 12's second half: over an opened review, the bottom bar splits into
- *  three even Like/Review/Comment text buttons instead of the single
- *  "Review" button — same bar sizing as [TitleReviewBar]/the feed's own
- *  ActionRow, just partitioned into three equal segments. */
+/** Item 12's second half, reworked for item 10: over an opened review, the
+ *  bottom bar shows Like/Review/Comment as their own individual pill
+ *  bubbles spread evenly across the row — same height and corner
+ *  roundness as one another (and as [TitleReviewBar]'s single "Review"
+ *  pill) — instead of one wide bar with three text labels crammed inside
+ *  it. Item 9 adds a fourth "Delete" bubble, shown only when [isOwnReview]
+ *  is true (the signed-in account's own review). */
 @Composable
 private fun LikeReviewCommentBar(
-    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, likedByMe: Boolean,
-    onLike: () -> Unit, onReview: () -> Unit, onComment: () -> Unit
+    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, likedByMe: Boolean, isOwnReview: Boolean,
+    onLike: () -> Unit, onReview: () -> Unit, onComment: () -> Unit, onDelete: () -> Unit
 ) {
     val shape = RoundedCornerShape(26.dp)
     @Composable
-    fun RowScope.Segment(label: String, active: Boolean, onClick: () -> Unit) {
-        Box(Modifier.weight(1f).fillMaxHeight().clickable(onClick = onClick), contentAlignment = Alignment.Center) {
-            Text(label, color = if (active) Color(0xFFFF4D6D) else Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    fun RowScope.Segment(label: String, textColor: Color, onClick: () -> Unit) {
+        val modifier = Modifier.weight(1f).fillMaxHeight().clickable(onClick = onClick)
+        @Composable
+        fun Label() { Text(label, color = textColor, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+        if (liquidGlass) {
+            LiquidGlassSurface(modifier, shape = shape, tint = tint, backdrop = backdrop) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Label() }
+            }
+        } else {
+            Box(modifier.clip(shape).background(Color.White.copy(0.10f)), contentAlignment = Alignment.Center) { Label() }
         }
     }
-    Box(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).height(60.dp)) {
-        @Composable
-        fun Row3() {
-            Row(Modifier.fillMaxSize()) {
-                Segment("Like", likedByMe, onLike)
-                Segment("Review", false, onReview)
-                Segment("Comment", false, onComment)
-            }
-        }
-        if (liquidGlass) {
-            LiquidGlassSurface(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp), shape = shape, tint = tint, backdrop = backdrop) { Row3() }
-        } else {
-            Box(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp).clip(shape).background(Color.White.copy(0.10f))) { Row3() }
+    Box(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).height(60.dp).padding(horizontal = 12.dp, vertical = 8.dp)) {
+        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Segment("Like", if (likedByMe) Color(0xFFFF4D6D) else Color.White, onLike)
+            Segment("Review", Color.White, onReview)
+            Segment("Comment", Color.White, onComment)
+            if (isOwnReview) Segment("Delete", Color(0xFFFF6B6B), onDelete)
         }
     }
 }
