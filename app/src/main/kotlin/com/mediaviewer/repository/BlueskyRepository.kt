@@ -1060,32 +1060,53 @@ class BlueskyRepository {
      *  native 0–10 half-star scale (see parsePopfeedReviewRecord's own
      *  comment on why rating is always /2'd back to a 0–5 scale for
      *  display) — ComposePostScreen's star picker already produces this
-     *  directly, so no conversion happens here. */
+     *  directly, so no conversion happens here.
+     *
+     *  Shape confirmed against a real dump of Popfeed's own PDS records
+     *  (a `com.atproto.repo.listRecords` pull of an actual account's
+     *  `social.popfeed.feed.review` collection). Two corrections from an
+     *  earlier pass at this function, now fixed:
+     *
+     *  - "poster"/"backdrop" are `blob`-typed fields (an uploaded image:
+     *    `{"$type":"blob","ref":{"$link":cid},"mimeType":...,"size":...}`),
+     *    not plain URL strings — every real image lives only in
+     *    "posterUrl"/"backdropUrl" (plain strings, sometimes a raw TMDB
+     *    URL, sometimes a bsky.app CDN URL derived from an uploaded blob).
+     *    Several real records skip the "poster" blob entirely and *only*
+     *    ever set "posterUrl", proving the blob half is optional and the
+     *    plain string alone is a complete, valid cover. Writing a URL
+     *    string into "poster"/"backdrop" themselves — what this function
+     *    used to do — is a schema type mismatch on a `blob` field, exactly
+     *    the kind of thing a lexicon-validating indexer would reject the
+     *    whole record over. Fixed by just not setting those two keys at
+     *    all and relying on "posterUrl"/"backdropUrl" alone, same as the
+     *    real records that have no uploaded blob.
+     *  - "tags": [], "facets": [], "containsSpoilers": false,
+     *    "isRevisit": false are present on *every* real record, always,
+     *    even trivially empty/false — strong evidence they're required
+     *    fields rather than optional flourishes. A record missing a
+     *    required field is precisely what a strict validator drops rather
+     *    than erroring loudly on, which fits "shows up in this app's own
+     *    unvalidated direct read, never shows up in Popfeed itself"
+     *    exactly as well as the missing "$type" did. */
     suspend fun postPopfeedReview(token: String, did: String, target: TitleSearchResult, ratingOutOf10: Int, text: String): Result<String> {
         val identifiers = mutableMapOf<String, Any>()
         if (target.id.startsWith("imdb:")) identifiers["imdbId"] = target.id.removePrefix("imdb:")
         val record = mutableMapOf<String, Any>(
-            // Item 6: required so Popfeed's own indexer recognizes this as
-            // one of its records at all — see this function's own doc
-            // comment above for why a missing "$type" is exactly what let
-            // a posted review show up in this app's own direct reads while
-            // never actually reaching Popfeed itself.
             "\$type" to "social.popfeed.feed.review",
             "identifiers" to identifiers,
             "creativeWorkType" to (target.mediaCategory ?: "movie"),
             "rating" to ratingOutOf10.coerceIn(0, 10),
             "createdAt" to java.time.Instant.now().toString(),
-            "title" to target.title
+            "title" to target.title,
+            "tags" to emptyList<String>(),
+            "facets" to emptyList<Any>(),
+            "containsSpoilers" to false,
+            "isRevisit" to false
         )
         if (text.isNotBlank()) record["text"] = text
-        // Item 6: "poster"/"backdrop" are the field names actually
-        // confirmed against Popfeed's public lexicon (tried first by every
-        // parser in this file, see getPopfeedBacklog's comment) — the
-        // *Url variants are kept alongside them only for backward
-        // compatibility with however this exact record might get read
-        // elsewhere, not because Popfeed itself expects them.
-        target.posterUrl?.let { record["poster"] = it; record["posterUrl"] = it }
-        target.backdropUrl?.let { record["backdrop"] = it; record["backdropUrl"] = it }
+        target.posterUrl?.let { record["posterUrl"] = it }
+        target.backdropUrl?.let { record["backdropUrl"] = it }
         if (target.releaseDate.isNotBlank()) record["releaseDate"] = target.releaseDate
         if (target.genres.isNotEmpty()) record["genres"] = target.genres
         target.creator?.let { record["mainCredit"] = it }

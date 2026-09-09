@@ -1880,12 +1880,12 @@ private fun ReviewRow(review: PopfeedReview, liquidGlass: Boolean, onOpenReview:
 fun StarRatingPill(
     rating: Float, liquidGlass: Boolean, tint: Color = NeutralGlassTint, modifier: Modifier = Modifier,
     backdrop: GlassBackdrop? = null, compact: Boolean = false,
-    // Item 3/2: was a fixed 11dp everywhere, which read as tiny in bubbles
-    // that actually had a lot more room to give it (e.g. TitleDetailOverlay's
-    // own header pill, sized to match the poster's height). Callers with
-    // more room to spare (see the header pill below) pass a bigger value;
-    // everyone else gets this slightly-larger-than-before default.
-    starSize: Dp = if (compact) 13.dp else 15.dp
+    // Bigger stars are opt-in per call site (TitleDetailOverlay's header
+    // pill and its Reviews tab review-card rows pass their own larger
+    // value) rather than a global default, so every other page that uses
+    // this pill (profile Reviews tab rows, the standalone review popup,
+    // the Hub's mutual review cards) keeps its original, unchanged size.
+    starSize: Dp = 11.dp
 ) {
     // Bug fix: this used to have its own bespoke shape (10.dp corner radius)
     // and padding (6.dp/3.dp) — visibly smaller/differently-rounded than
@@ -1897,7 +1897,7 @@ fun StarRatingPill(
     // its neighbors rather than just visually similar.
     val shape = RoundedCornerShape(14.dp)
     val padH = if (compact) 8.dp else 12.dp
-    val padV = if (compact) 4.dp else 7.dp
+    val padV = if (compact) 3.dp else 6.dp
     @Composable
     fun Stars() {
     Row(
@@ -2146,8 +2146,19 @@ fun TitleDetailOverlay(
     // the scrollable viewport down by the cutout's own height (or a small
     // fixed minimum on phones with no cutout), so scrolled-up content stops
     // there instead of continuing all the way to the true top edge.
+    //
+    // Item 2: unioned with WindowInsets.statusBars' own top inset (which on
+    // many devices still reports the status bar's normal height even while
+    // hidden — the OS deliberately keeps that reserved so hidden-bar apps
+    // don't draw straight into the cutout) and a 32dp floor (a typical real
+    // status bar height, comfortably taller than a small circular camera
+    // cutout) instead of displayCutout alone with a thin 14dp fallback —
+    // that thinner number was always what this actually cleared, it just
+    // went unnoticed while the now-fixed opaque status bar color painted a
+    // solid bar tall enough to cover the shortfall regardless.
     val cutoutTop = WindowInsets.displayCutout.asPaddingValues().calculateTopPadding()
-    val topClearance = maxOf(cutoutTop, 14.dp)
+    val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val topClearance = maxOf(cutoutTop, statusBarTop, 32.dp)
 
     val bannerHeight = 220.dp
     val posterWidth = 108.dp
@@ -2288,7 +2299,8 @@ fun TitleDetailOverlay(
                         ProfileGlassPill(
                             text = title.creator?.let { "${creatorRoleLabel(title.creatorRole, title.mediaCategory)} $it" } ?: "Placeholder",
                             liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true,
-                            backdrop = backdrop, modifier = Modifier.weight(1f).fillMaxWidth()
+                            backdrop = backdrop, textAlign = TextAlign.Center,
+                            modifier = Modifier.weight(1f).fillMaxWidth()
                         )
                         // Item 6: each genre gets its own bubble now,
                         // instead of one bubble with a comma-joined string.
@@ -2574,7 +2586,7 @@ private fun ReviewPanel(fr: FriendPopfeedReview, social: MainViewModel.ReviewSoc
                     modifier = Modifier.weight(1f)
                 )
                 Spacer(Modifier.width(8.dp))
-                StarRatingPill(rating = fr.review.ratingOutOf5, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, compact = true)
+                StarRatingPill(rating = fr.review.ratingOutOf5, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, compact = true, starSize = 14.dp)
             }
             if (fr.review.reviewText.isNotBlank()) {
                 Spacer(Modifier.height(10.dp))
@@ -2730,7 +2742,7 @@ private fun CommentComposerRow(liquidGlass: Boolean, tint: Color, backdrop: Glas
 private fun ShrinkToFitTitleBubble(text: String, liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop? = null, modifier: Modifier = Modifier) {
     val shape = RoundedCornerShape(14.dp)
     @Composable
-    fun Inner() { ShrinkToFitText(text, baseFontSize = 17.sp, minFontSize = 11.sp) }
+    fun Inner() { ShrinkToFitText(text, baseFontSize = 20.sp, minFontSize = 13.sp) }
     if (liquidGlass) {
         LiquidGlassSurface(modifier = modifier.fillMaxWidth(), shape = shape, tint = tint, backdrop = backdrop) {
             Box(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) { Inner() }
