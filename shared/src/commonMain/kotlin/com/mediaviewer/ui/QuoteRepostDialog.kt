@@ -1,5 +1,6 @@
 package com.mediaviewer.ui
 
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.backhandler.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -29,6 +30,7 @@ private const val BSKY_POST_LIMIT = 300
 // in-place (never a separate Dialog window) so its glass sheet can share the
 // current post's live backdrop layer, and in Glass mode shows no outer scrim
 // of its own so the post stays visible around it.
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun QuoteRepostDialog(
     target: MediaItem?,
