@@ -1,5 +1,6 @@
 package com.mediaviewer.ui
 
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.backhandler.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -137,6 +138,7 @@ data class ComposePostDraft(
     val reviewRating: Int = 0
 )
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun ComposePostScreen(
     selfProfile: AuthorInfo?,
