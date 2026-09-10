@@ -582,6 +582,7 @@ private fun SettingsPageContent(
     // of the default Slider overload, which always draws its thumb inside
     // that reserved touch box) removes it entirely; the row's height then
     // just follows the same tight padding every other compact row uses.
+    @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     fun CompactSlider(value: Float, onValueChange: (Float) -> Unit, modifier: Modifier = Modifier) {
         Slider(
@@ -2577,7 +2578,7 @@ private fun launchImportFilePicker(): String =
     TODO("PORT: launch platform open-file picker for application/json (was ActivityResultContracts.OpenDocument); result feeds onImportDataset")
 
 /** PORT: launch the platform file picker for a font file (was
- *  ActivityResultContracts.GetContent with "*/*"); the picked URI string
- *  feeds onPickFontFile. */
+ *  ActivityResultContracts.GetContent with any MIME type); the picked URI
+ *  string feeds onPickFontFile. */
 private fun launchFontFilePicker(): String =
     TODO("PORT: launch platform font-file picker (was ActivityResultContracts.GetContent); result feeds onPickFontFile")
