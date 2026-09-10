@@ -131,7 +131,11 @@ internal class LocalStorageObservableSettings : ObservableSettings {
     private fun addListener(key: String, notify: () -> Unit): SettingsListener {
         val entry: (String) -> Unit = { changed -> if (changed == key) notify() }
         listeners += entry
-        return SettingsListener { listeners -= entry }
+        return object : SettingsListener {
+            override fun deactivate() {
+                listeners -= entry
+            }
+        }
     }
 
     override fun addBooleanListener(key: String, defaultValue: Boolean, callback: (Boolean) -> Unit): SettingsListener =
@@ -148,6 +152,14 @@ internal class LocalStorageObservableSettings : ObservableSettings {
         addListener(key) { callback(getString(key, defaultValue)) }
     override fun addStringOrNullListener(key: String, callback: (String?) -> Unit): SettingsListener =
         addListener(key) { callback(getStringOrNull(key)) }
+    override fun addIntOrNullListener(key: String, callback: (Int?) -> Unit): SettingsListener =
+        addListener(key) { callback(getIntOrNull(key)) }
+    override fun addLongOrNullListener(key: String, callback: (Long?) -> Unit): SettingsListener =
+        addListener(key) { callback(getLongOrNull(key)) }
+    override fun addFloatOrNullListener(key: String, callback: (Float?) -> Unit): SettingsListener =
+        addListener(key) { callback(getFloatOrNull(key)) }
+    override fun addDoubleOrNullListener(key: String, callback: (Double?) -> Unit): SettingsListener =
+        addListener(key) { callback(getDoubleOrNull(key)) }
     // NOTE: 1.3.0 has no addStringSetListener/addStringSetOrNullListener.
 }
 
