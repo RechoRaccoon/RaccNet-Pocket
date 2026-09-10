@@ -1,5 +1,6 @@
 package com.mediaviewer.ui
 
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.backhandler.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -44,6 +45,7 @@ import com.mediaviewer.ui.theme.*
 // menu), it can share that same backdrop, and in Glass mode there's no outer
 // scrim at all, so the post is genuinely visible behind the popup, not just
 // dimmed toward it.
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun SendDmDialog(
     target: MediaItem?,
