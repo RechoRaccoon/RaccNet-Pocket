@@ -1,0 +1,155 @@
+# RaccNet Pocket (KMP) — CI
+#
+# Builds both products from the single shared codebase:
+#   Android -> :androidApp:assembleRelease  (signed release APK, push to main)
+#           -> :androidApp:assembleDebug    (unsigned debug APK, pull requests)
+#   Web     -> :webApp:wasmJsBrowserDistribution, deployed to GitHub Pages
+#
+# REQUIRED SETUP (one time, by the repo owner):
+#   1. Generate a NEW release keystore. Do NOT reuse raccnetlite-release.jks
+#      from the legacy repo — it was committed to git with its password in the
+#      old workflow, so it must be treated as compromised (see README).
+#         keytool -genkeypair -v -keystore raccnet-release.keystore \
+#           -alias raccnet -keyalg RSA -keysize 2048 -validity 10000
+#   2. Repo Settings -> Secrets and variables -> Actions -> New repository secret:
+#         KEYSTORE_BASE64          base64 -w0 raccnet-release.keystore
+#         KEYSTORE_STORE_PASSWORD  <the keystore password you chose>
+#         KEYSTORE_KEY_ALIAS       raccnet
+#         KEYSTORE_KEY_PASSWORD    <the key password you chose>
+#   3. Repo Settings -> Pages -> Build and deployment -> Source: "GitHub Actions".
+#
+# Secrets are NOT available to pull requests from forks; PR builds therefore
+# assemble an unsigned debug APK (still a full compile check of all code).
+
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Serializes Pages deployments; never cancel a live deploy.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Android: release APK (signed, main branch) or debug APK (PRs, unsigned)
+  # ---------------------------------------------------------------------------
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Verify signing secrets are present
+        if: github.event_name == 'push'
+        run: |
+          missing=0
+          for v in KEYSTORE_BASE64 KEYSTORE_STORE_PASSWORD KEYSTORE_KEY_ALIAS KEYSTORE_KEY_PASSWORD; do
+            if [ -z "${!v}" ]; then echo "::error::Repository secret $v is not set"; missing=1; fi
+          done
+          exit $missing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_STORE_PASSWORD: ${{ secrets.KEYSTORE_STORE_PASSWORD }}
+          KEYSTORE_KEY_ALIAS: ${{ secrets.KEYSTORE_KEY_ALIAS }}
+          KEYSTORE_KEY_PASSWORD: ${{ secrets.KEYSTORE_KEY_PASSWORD }}
+
+      - name: Restore release keystore from secret
+        if: github.event_name == 'push'
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          echo "KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+
+      - name: Assemble signed release APK
+        if: github.event_name == 'push'
+        run: gradle :androidApp:assembleRelease --stacktrace
+        env:
+          KEYSTORE_STORE_PASSWORD: ${{ secrets.KEYSTORE_STORE_PASSWORD }}
+          KEYSTORE_KEY_ALIAS: ${{ secrets.KEYSTORE_KEY_ALIAS }}
+          KEYSTORE_KEY_PASSWORD: ${{ secrets.KEYSTORE_KEY_PASSWORD }}
+
+      - name: Assemble debug APK (PR verification, unsigned)
+        if: github.event_name == 'pull_request'
+        run: gradle :androidApp:assembleDebug --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: raccnet-pocket-apk
+          path: |
+            androidApp/build/outputs/apk/release/*.apk
+            androidApp/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Web: compile the wasmJs distribution (build verified on PRs too)
+  # ---------------------------------------------------------------------------
+  web:
+    name: Web distribution
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Build wasmJs browser distribution
+        run: gradle :webApp:wasmJsBrowserDistribution --stacktrace
+
+      - name: Upload Pages artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: webApp/build/dist/wasmJs/productionExecutable
+
+  # ---------------------------------------------------------------------------
+  # Deploy the built web distribution to GitHub Pages (main branch only)
+  # ---------------------------------------------------------------------------
+  deploy-pages:
+    name: Deploy to GitHub Pages
+    if: github.event_name == 'push'
+    needs: web
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
