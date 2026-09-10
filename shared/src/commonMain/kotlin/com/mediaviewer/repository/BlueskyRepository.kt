@@ -29,6 +29,72 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonObject
 
+// Manual UTF-8 codec: kotlin.text's String.toByteArray()/ByteArray.decodeToString()
+// extensions do not resolve on the wasmJs target in this build (Kotlin 2.2.0),
+// so we encode/decode by hand. Behavior matches UTF-8.
+private fun String.toUtf8Bytes(): ByteArray {
+    val out = mutableListOf<Byte>()
+    var i = 0
+    while (i < length) {
+        val c = this[i].code
+        when {
+            c < 0x80 -> out.add(c.toByte())
+            c < 0x800 -> {
+                out.add((0xC0 or (c shr 6)).toByte())
+                out.add((0x80 or (c and 0x3F)).toByte())
+            }
+            c in 0xD800..0xDBFF && i + 1 < length && this[i + 1].code in 0xDC00..0xDFFF -> {
+                val cp = 0x10000 + ((c and 0x3FF) shl 10) + (this[i + 1].code and 0x3FF)
+                out.add((0xF0 or (cp shr 18)).toByte())
+                out.add((0x80 or ((cp shr 12) and 0x3F)).toByte())
+                out.add((0x80 or ((cp shr 6) and 0x3F)).toByte())
+                out.add((0x80 or (cp and 0x3F)).toByte())
+                i++
+            }
+            else -> {
+                out.add((0xE0 or (c shr 12)).toByte())
+                out.add((0x80 or ((c shr 6) and 0x3F)).toByte())
+                out.add((0x80 or (c and 0x3F)).toByte())
+            }
+        }
+        i++
+    }
+    return out.toByteArray()
+}
+
+private fun ByteArray.toUtf8String(): String {
+    val sb = StringBuilder()
+    var i = 0
+    while (i < size) {
+        val b0 = this[i].toInt() and 0xFF
+        when {
+            b0 < 0x80 -> { sb.append(b0.toChar()); i++ }
+            b0 < 0xE0 && i + 1 < size -> {
+                val b1 = this[i + 1].toInt() and 0xFF
+                sb.append(((b0 and 0x1F) shl 6 or (b1 and 0x3F)).toChar())
+                i += 2
+            }
+            b0 < 0xF0 && i + 2 < size -> {
+                val b1 = this[i + 1].toInt() and 0xFF
+                val b2 = this[i + 2].toInt() and 0xFF
+                sb.append(((b0 and 0x0F) shl 12 or ((b1 and 0x3F) shl 6) or (b2 and 0x3F)).toChar())
+                i += 3
+            }
+            i + 3 < size -> {
+                val b1 = this[i + 1].toInt() and 0xFF
+                val b2 = this[i + 2].toInt() and 0xFF
+                val b3 = this[i + 3].toInt() and 0xFF
+                val cp = ((b0 and 0x07) shl 18) or ((b1 and 0x3F) shl 12) or ((b2 and 0x3F) shl 6) or (b3 and 0x3F)
+                sb.append((((cp - 0x10000) shr 10) + 0xD800).toChar())
+                sb.append((((cp - 0x10000) and 0x3FF) + 0xDC00).toChar())
+                i += 4
+            }
+            else -> i++
+        }
+    }
+    return sb.toString()
+}
+
 class BlueskyRepository {
 
     private var api: BlueskyApi = NetworkClient.buildBlueskyApi()
@@ -443,7 +509,7 @@ class BlueskyRepository {
         // richtext-facet shape Bluesky posts themselves use.
         fun textSpansOf(block: JsonObject): List<LeafletTextSpan> {
             val plaintext = rawTextOf(block) ?: return emptyList()
-            val bytes = plaintext.toByteArray()
+            val bytes = plaintext.toUtf8Bytes()
             val boldRanges = mutableListOf<IntRange>()
             val facets = block["facets"] as? JsonArray
             if (facets != null) {
@@ -468,7 +534,7 @@ class BlueskyRepository {
             for (i in 0 until sortedCuts.size - 1) {
                 val s = sortedCuts[i]; val e = sortedCuts[i + 1]
                 if (s >= e) continue
-                val runText = runCatching { bytes.copyOfRange(s, e).decodeToString() }.getOrNull() ?: continue
+                val runText = runCatching { bytes.copyOfRange(s, e).toUtf8String() }.getOrNull() ?: continue
                 val isBold = boldRanges.any { s >= it.first && e <= it.last + 1 }
                 if (runText.isNotEmpty()) spans += LeafletTextSpan(runText, isBold)
             }
@@ -1500,8 +1566,8 @@ class BlueskyRepository {
         val regex = Regex("(?<=^|[\\s])#([a-zA-Z0-9_]+)")
         return regex.findAll(text).map { m ->
             val tag = m.groupValues[1]
-            val byteStart = text.substring(0, m.range.first).toByteArray().size
-            val byteEnd   = text.substring(0, m.range.last + 1).toByteArray().size
+            val byteStart = text.substring(0, m.range.first).toUtf8Bytes().size
+            val byteEnd   = text.substring(0, m.range.last + 1).toUtf8Bytes().size
             mapOf(
                 "index" to buildJsonObject {
                     put("byteStart", JsonPrimitive(byteStart))
