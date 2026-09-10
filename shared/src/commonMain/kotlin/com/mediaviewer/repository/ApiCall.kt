@@ -56,7 +56,7 @@ internal fun JsonElement?.asObj(): JsonObject? = this as? JsonObject
 /** Null-safe string extraction — mirrors Gson's optString (missing *or*
  *  explicit-null both yield null rather than throwing). */
 internal fun JsonElement?.asStr(): String? =
-    (this as? JsonPrimitive)?.takeIf { !it.isNull }?.content
+    (this as? JsonPrimitive)?.takeIf { it !is JsonNull }?.content
 
 /**
  * Converts the legacy Gson-era `Map<String, Any>` record shapes this package
