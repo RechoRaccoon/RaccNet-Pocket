@@ -1,0 +1,821 @@
+package com.mediaviewer
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
+import com.mediaviewer.model.AppMode
+import com.mediaviewer.model.ScreenState
+import com.mediaviewer.platform.createPlatformDeps
+import com.mediaviewer.platform.isWebPlatform
+import com.mediaviewer.ui.ComposePostScreen
+import com.mediaviewer.ui.DmInboxOverlay
+import com.mediaviewer.ui.GlassBackdrop
+import com.mediaviewer.ui.ListPickerDialog
+import com.mediaviewer.ui.LiveNowPlayerOverlay
+import com.mediaviewer.ui.LocalGlassIntensity
+import com.mediaviewer.ui.LocalGlassRimIntensity
+import com.mediaviewer.ui.MainFeedScreen
+import com.mediaviewer.ui.NeutralGlassTint
+import com.mediaviewer.ui.PixelMatrixOverlay
+import com.mediaviewer.ui.PixelPhase
+import com.mediaviewer.ui.ProfileOverlay
+import com.mediaviewer.ui.QuoteRepostDialog
+import com.mediaviewer.ui.ReplyDialog
+import com.mediaviewer.ui.SearchOverlay
+import com.mediaviewer.ui.SendDmDialog
+import com.mediaviewer.ui.TaggingOverlay
+import com.mediaviewer.ui.fetchDominantColor
+import com.mediaviewer.ui.rememberPixelTransitionController
+import com.mediaviewer.ui.theme.MediaViewerTheme
+import com.mediaviewer.viewmodel.MainViewModel
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+
+// ── Android-host concerns that stay OUT of shared code ───────────────────
+// Everything below used to live in MainActivity.onCreate and has no shared
+// equivalent; each target's host entry point (androidApp's MainActivity /
+// webApp's main) owns its own version:
+// - installCrashHandler/readCrashLog/clearCrashLog/CrashLogScreen: wrote
+//   uncaught-exception stack traces to the app's internal last_crash.txt
+//   and showed them as copyable text on next launch (no adb in the build
+//   workflow). File I/O + the default uncaught-exception handler are
+//   Android-only; the web target has no equivalent.
+// - enableEdgeToEdge() + hideSystemStatusBar() (immersive-sticky, re-
+//   asserted in onResume/onWindowFocusChanged): window/insets management is
+//   host work — the web target has no status bar to hide.
+// - Notification channels (DownloadManager's downloads): owned by the
+//   platform PlatformNotifier/PlatformDownloader actuals, no-op on web.
+// - ExoPlayer/media playback lifecycle: owned by the platform VideoPlayer
+//   actual (androidMain media3 / wasmJsMain <video>), not the app shell.
+// - Activity lifecycle (onResume nudges etc.): nothing left to do — the
+//   Jetstream/firehose reconnect this used to nudge is gone (Reviews/Blogs
+//   are a direct per-visit PDS fetch now).
+
+/**
+ * Shared app entry point — called by each target's host (androidApp's
+ * MainActivity via setContent, webApp's main). Builds the platform
+ * dependency graph once, then runs the whole app (theme → AppRoot) off it.
+ */
+@Composable
+fun App() {
+    val deps = remember { createPlatformDeps() }
+    val viewModel = remember { MainViewModel(deps) }
+    // Phase 4 — custom font pack: rebuilt only when the stored path
+    // actually changes, not on every recomposition. loadFontFamily is the
+    // platform seam (below); a null path — or a file that's gone missing —
+    // falls back to null (MediaViewerTheme's own default Typography).
+    val customFontPath by viewModel.customFontPath.collectAsState()
+    val customFontFamily = remember(customFontPath) { loadFontFamily(customFontPath) }
+    MediaViewerTheme(customFontFamily = customFontFamily) { AppRoot(viewModel) }
+}
+
+/**
+ * Phase 4 — "change the app's universal font via a custom pack": builds a
+ * [FontFamily] from a user-picked .ttf/.otf file path (whatever the
+ * platform's file picker returned and the ViewModel persisted).
+ *
+ * PORT (Android-only): the legacy implementation did
+ * `File(path).let { if (it.exists()) FontFamily(Font(it)) else null }` —
+ * plain filesystem font loading, which has no shared equivalent (wasmJs
+ * can't turn a file path into a FontFamily at all). The androidMain actual
+ * keeps that implementation verbatim; the wasmJsMain actual returns null.
+ */
+expect fun loadFontFamily(path: String?): FontFamily?
+
+@Composable
+private fun AppRoot(viewModel: MainViewModel) {
+    val mediaItems         by viewModel.mediaItems.collectAsState()
+    val currentIndex       by viewModel.currentIndex.collectAsState()
+    val currentItem        by viewModel.currentItem.collectAsState()
+    val screenState        by viewModel.screenState.collectAsState()
+    val hasVisitedFeed     by viewModel.hasVisitedFeed.collectAsState()
+    val appMode            by viewModel.appMode.collectAsState()
+    val navDirection       by viewModel.navDirection.collectAsState()
+    val reducedAnimations  by viewModel.reducedAnimations.collectAsState()
+    val liquidGlass        by viewModel.liquidGlass.collectAsState()
+    val liquidGlassIntensity by viewModel.liquidGlassIntensity.collectAsState()
+    val glassRimIntensity  by viewModel.glassRimIntensity.collectAsState()
+    val availableFeeds     by viewModel.availableFeeds.collectAsState()
+    val selectedFeed       by viewModel.selectedFeedUri.collectAsState()
+    val authorFeedState    by viewModel.authorFeedState.collectAsState()
+    // Item 9: gates the More menu's "Show more/less like this" to only
+    // feeds that can actually act on the interaction signal.
+    val supportsFeedInteractions by viewModel.supportsFeedInteractions.collectAsState()
+    val comments           by viewModel.comments.collectAsState()
+    val commentsLoad       by viewModel.commentsLoading.collectAsState()
+    val downloadOnLike     by viewModel.downloadOnLike.collectAsState()
+    val downloadProgress   by viewModel.downloadProgress.collectAsState()
+    val e621Tags           by viewModel.e621SearchTags.collectAsState()
+    val isLoading          by viewModel.isLoading.collectAsState()
+    val bskyLoggedIn       by viewModel.bskyLoggedIn.collectAsState()
+    val e621LoggedIn       by viewModel.e621LoggedIn.collectAsState()
+    val errorMessage       by viewModel.errorMessage.collectAsState()
+    val listPickerDid      by viewModel.listPickerTargetDid.collectAsState()
+    val userLists          by viewModel.userLists.collectAsState()
+    val userStarterPacks   by viewModel.userStarterPacks.collectAsState()
+    val userListsLoading   by viewModel.userListsLoading.collectAsState()
+    val lastPickerTab      by viewModel.lastPickerTab.collectAsState()
+    val combineListsPacks  by viewModel.combineListsAndPacks.collectAsState()
+    val autoAddToOnFollow  by viewModel.autoAddToOnFollow.collectAsState()
+    val dmConversations       by viewModel.dmConversations.collectAsState()
+    val dmConversationsLoading by viewModel.dmConversationsLoading.collectAsState()
+    val sendPopupTarget       by viewModel.sendPopupTarget.collectAsState()
+    val sendPopupSelected     by viewModel.sendPopupSelected.collectAsState()
+    val sendPopupSending      by viewModel.sendPopupSending.collectAsState()
+    val quoteRepostTarget     by viewModel.quoteRepostTarget.collectAsState()
+    val quoteRepostSubmitting by viewModel.quoteRepostSubmitting.collectAsState()
+    val replyToConvo          by viewModel.replyToConvo.collectAsState()
+    val sentByExpanded        by viewModel.sentByExpanded.collectAsState()
+    val friendsFeedLoadingOverlay by viewModel.friendsFeedLoadingOverlay.collectAsState()
+    val profileOverlay         by viewModel.profileOverlay.collectAsState()
+    val selfProfile            by viewModel.selfProfile.collectAsState()
+    val appInitialized         by viewModel.appInitialized.collectAsState()
+    val hideTextOnlyPosts      by viewModel.hideTextOnlyPosts.collectAsState()
+    val bskyDid                by viewModel.bskyDid.collectAsState()
+    val dmInboxOpen            by viewModel.dmInboxOpen.collectAsState()
+    val dmThread               by viewModel.dmThread.collectAsState()
+    val composePostOpen        by viewModel.composePostOpen.collectAsState()
+    val composePostSubmitting  by viewModel.composePostSubmitting.collectAsState()
+    val reviewComposeTarget    by viewModel.reviewComposeTarget.collectAsState()
+    // Item 12 follow-up: DM-thread "shared posts" feed loading overlay.
+    val dmFeedLoadingOverlay   by viewModel.dmFeedLoadingOverlay.collectAsState()
+    // Item 8: Hub Friends/Livestreams sections.
+    val friendsReviews        by viewModel.friendsReviews.collectAsState()
+    val friendsReviewsLoading by viewModel.friendsReviewsLoading.collectAsState()
+    // Item 12: same cache, handed straight to ProfileOverlay/TitleDetailOverlay
+    // for the "who's reviewed this title" tab strip — plain alias here just
+    // to keep the ProfileOverlay call site's own param name self-explanatory.
+    val friendsReviewsForTitles = friendsReviews
+    val reviewSocial           by viewModel.reviewSocial.collectAsState()
+    val friendsBlogs           by viewModel.friendsBlogs.collectAsState()
+
+    val liveFriends           by viewModel.liveFriends.collectAsState()
+    val liveFriendsLoading    by viewModel.liveFriendsLoading.collectAsState()
+    val blueskyLiveNow        by viewModel.blueskyLiveNow.collectAsState()
+    val blueskyLiveNowLoading by viewModel.blueskyLiveNowLoading.collectAsState()
+    val playingLive           by viewModel.playingLive.collectAsState()
+    val subscribedReviewDids  by viewModel.subscribedReviewDids.collectAsState()
+    val subscribedBlogDids    by viewModel.subscribedBlogDids.collectAsState()
+    val searchOpen             by viewModel.searchOpen.collectAsState()
+    val searchState            by viewModel.searchState.collectAsState()
+    // AI Tagging feature
+    val taggingOverlayOpen     by viewModel.taggingOverlayOpen.collectAsState()
+    val taggingUiState         by viewModel.taggingUiState.collectAsState()
+    val hasTaggedDataset       by viewModel.hasTaggedDataset.collectAsState()
+    val likedTagSearchResults  by viewModel.likedTagSearchResults.collectAsState()
+    val tagSuggestions         by viewModel.tagSuggestions.collectAsState()
+    val tagPostWhenLiked       by viewModel.tagPostWhenLiked.collectAsState()
+    val importedDatasets       by viewModel.importedDatasets.collectAsState()
+    // Phase 4
+    val translationEnabled     by viewModel.translationEnabled.collectAsState()
+    val translationTargetLang  by viewModel.translationTargetLang.collectAsState()
+    val customFontName         by viewModel.customFontName.collectAsState()
+
+    // Big Update #10: the currently-on-screen post's live backdrop + dominant
+    // color, reported up from inside the pager (see PostContent's onBackdropChanged)
+    // so overlays that live above the whole pager — Share, Add To — can show the
+    // same real-time reflection the in-post glass panels do, instead of a plain
+    // static tint.
+    var currentBackdrop by remember { mutableStateOf<GlassBackdrop?>(null) }
+    var currentDominantColor by remember { mutableStateOf(NeutralGlassTint) }
+
+    // ── Retro pixel-matrix transition/loading overlay ──────────────────────
+    // One shared controller drives every scenario described in the design
+    // spec: the cold-boot splash, profile-navigation transitions, and
+    // opening a feed from the Feeds row. See PixelTransitionOverlay.kt for
+    // the state machine and rendering; everything below is just real app
+    // events (never artificial timers) driving it.
+    val pixelController = rememberPixelTransitionController()
+    // PORT: legacy read LocalContext.current here for fetchDominantColor —
+    // the shared fetchDominantColor(url) needs no Context (see GlassTheme.kt).
+    val rootScope = rememberCoroutineScope()
+
+    // Bug fix (item 3 — Login page/real UI flashing before the loading
+    // animation even starts): the real UI (MainFeedScreen, which shows the
+    // Login page until auth-restore from prefs finishes) used to be visible,
+    // uncovered, for however many frames elapsed between first composition
+    // and the pixel overlay's own LaunchedEffect(Unit) actually getting to
+    // run — plus however much further into the wipe-in sweep it takes for
+    // the pixel grid to reach full coverage (the sweep itself starts nearly
+    // empty and fills in gradually, so real content is still visible through
+    // its gaps for a portion of that animation too). This scrim is `true`
+    // from the very first frame with no LaunchedEffect required to set an
+    // initial value — nothing under it is ever reachable — and flips false
+    // exactly once, the moment the very first wipe-in genuinely finishes
+    // covering the whole screen (phase advancing past WIPE_IN), at which
+    // point the pixel grid's own full-opacity LOADING coverage takes over
+    // seamlessly with no gap in between.
+    var coldLaunchCovered by remember { mutableStateOf(true) }
+    LaunchedEffect(pixelController.phase) {
+        if (coldLaunchCovered && pixelController.phase != PixelPhase.HIDDEN && pixelController.phase != PixelPhase.WIPE_IN) {
+            coldLaunchCovered = false
+        }
+    }
+
+    // Scenario A — cold boot: wipe in black the instant the app launches,
+    // hue-shift to the logged-in user's own color the instant it's fetched,
+    // then wipe out only once BOTH the auth-restore/init sequence has
+    // actually finished (appInitialized) AND that color fetch has actually
+    // resolved and been applied — not before either one.
+    //
+    // Bug fix (per feedback — transition used to end way too early / "seems
+    // to instantly stop after starting"): `appInitialized` flips true the
+    // moment local prefs have merely been *read* and the real loads kicked
+    // off (see MainViewModel's init{}) — well before those loads, including
+    // `loadSelfProfile()`, have actually finished. This used to gate
+    // `selfColorReady` on `appInitialized` directly and treat whatever
+    // `selfProfile` happened to be at that exact instant (usually still
+    // null) as "no avatar to fetch," unblocking the transition immediately
+    // instead of waiting for the real fetch. It now waits for `selfProfile`
+    // itself to genuinely settle — populated by startHubBackgroundWarmup's
+    // retry loop — before deciding one way or the other; a logged-out
+    // session (which never expects a selfProfile at all) still unblocks
+    // immediately once appInitialized, since there's truly nothing to wait
+    // for there.
+    var selfThemeColor by remember { mutableStateOf(Color.Black) }
+    var selfColorReady by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        // Bug fix (item 1): this used to start from Color.Black. The wipe-in
+        // grid is drawn on top of an opaque black cold-launch scrim (see
+        // `coldLaunchCovered` below), so a black-on-black wipe is completely
+        // invisible — the screen just sits there looking static for the
+        // whole WIPE_IN duration, and by the time anything is visible the
+        // wipe has already silently finished. Starting from white instead
+        // means the "swiping in and covering it with white pixels" motion
+        // is actually visible against the black scrim, before it hue-shifts
+        // into the user's profile color once that's fetched.
+        pixelController.start(Color.White)
+    }
+    LaunchedEffect(appInitialized, bskyLoggedIn, selfProfile) {
+        if (!appInitialized) return@LaunchedEffect
+        if (!bskyLoggedIn) { selfColorReady = true; return@LaunchedEffect }
+        val profile = selfProfile ?: return@LaunchedEffect // still loading — wait for the real fetch
+        val url = profile.author.avatarUrl
+        if (!url.isNullOrBlank()) {
+            val c = fetchDominantColor(url)
+            selfThemeColor = c
+            if (pixelController.phase == PixelPhase.WIPE_IN || pixelController.phase == PixelPhase.LOADING) {
+                pixelController.updateColor(c)
+            }
+        }
+        selfColorReady = true
+    }
+    LaunchedEffect(appInitialized, selfColorReady) {
+        if (appInitialized && selfColorReady && pixelController.phase != PixelPhase.HIDDEN) pixelController.finish()
+    }
+
+    // Scenario B — profile navigation: the instant a *new* profile overlay
+    // opens, wipe in using the viewer's own theme color; hue-shift to the
+    // target profile's color as soon as its avatar resolves; wipe out the
+    // instant that profile's data has actually finished loading
+    // (loadingProfile flips false).
+    //
+    // Bug fix (per feedback — playing on an already-loaded profile): a
+    // profile overlay is also reused, hidden rather than torn down, when
+    // the user pinches into a post from it (see ProfileOverlayState.hidden)
+    // — un-hiding it to go back is instant, nothing to load, so it must NOT
+    // replay the transition. This used to reset `trackedProfileDid` to null
+    // any time the overlay was hidden, which made un-hiding the SAME
+    // profile look identical to opening a brand new one next time this
+    // effect ran. It's now left untouched while hidden, and this effect
+    // exits immediately whenever hidden is true, so the transition only
+    // ever plays for a `did` that's genuinely never been tracked before.
+    var trackedProfileDid by remember { mutableStateOf<String?>(null) }
+    // Bug fix (item 3 — profile flashes on screen, then shows the hub
+    // again, before the wipe-in curtain has covered it): this used to be a
+    // plain `mutableStateOf(true)` boolean, flipped to `false` and back to
+    // `true` from *inside* the LaunchedEffect below. That effect's body only
+    // runs *after* Compose has already completed the composition where
+    // `profileOverlay` first became non-null — so for exactly that first
+    // frame (and every frame until the effect's own `rootScope.launch` gets
+    // scheduled and actually runs), the flag was still sitting at its old
+    // value (`true`), so the Box below rendered the brand-new, still-loading
+    // profile at full size immediately. Only a moment later did the effect
+    // finally flip it to `false` (hiding it again, revealing the hub
+    // underneath) before the wipe curtain caught up and it reappeared for
+    // good — exactly the flash → hub → wipe → profile sequence reported.
+    //
+    // Fixed by making "armed" a synchronous, pure computation instead of an
+    // effect-driven one: a `did` is armed once it's in this set, and set
+    // membership is checked directly during composition — so the very first
+    // composition that ever sees a new `did` already computes "not armed"
+    // and renders at zero size, with no window for a flash. Cleared back to
+    // empty whenever the overlay fully closes (mirroring `trackedProfileDid`
+    // above) so reopening the same profile later replays the transition
+    // instead of skipping it.
+    var revealedProfileDids by remember { mutableStateOf<Set<String>>(emptySet()) }
+    val profileRevealArmed = profileOverlay?.author?.did?.let { it in revealedProfileDids } ?: true
+    // Bug fix (item 4 — color visibly detours through a dull blue-grey
+    // before settling on the profile's real color): this used to read
+    // `rememberDominantColor(...)`, a separately memoized Composable whose
+    // state resets to a hardcoded dark blue-grey placeholder (0xFF2A2A2E)
+    // the instant the avatar URL key changes, then updates asynchronously
+    // once its own fetch resolves. This effect below runs off the SAME
+    // recomposition as that reset and, being a plain state read rather than
+    // a suspend call, had no way to wait for the real fetch — it would
+    // usually still be showing that placeholder at the exact moment this
+    // effect captured `targetColor` and fired `pixelController.updateColor`
+    // with it. The genuinely correct color would only arrive later via a
+    // second, unrelated recomposition (when `loadingProfile` itself flips,
+    // re-running this same effect) — giving the on-screen sequence "viewer
+    // color -> blue-grey placeholder -> real color" instead of a single
+    // clean hue shift straight to the real color. Fetching the color
+    // directly with the same suspend function Scenario A/C already use,
+    // right here inside the coroutine that's about to consume it, removes
+    // the placeholder step entirely.
+    //
+    // Bug fix (per feedback — the loading animation stops moving partway
+    // through the color-change/swipe-away step): start()/updateColor()/
+    // finish() used to be suspended directly inside this LaunchedEffect's
+    // own body — but its key list includes `loadingProfile`, which flips
+    // false the instant the profile's data actually finishes loading. That
+    // is a change to one of THIS effect's own keys, so Compose cancels
+    // whichever call happened to be suspended at that exact moment (often
+    // exactly the wipe-out) and restarts the effect from scratch, visibly
+    // freezing the animation wherever it got cut off. Dispatching the real
+    // work onto the stable `rootScope` instead means this effect's body only
+    // ever makes a quick, synchronous decision and returns — nothing it
+    // kicks off can be cancelled by its own key changing underneath it.
+    LaunchedEffect(profileOverlay?.author?.did, profileOverlay?.loadingProfile, profileOverlay?.hidden) {
+        val overlay = profileOverlay
+        if (overlay == null) { trackedProfileDid = null; revealedProfileDids = emptySet(); return@LaunchedEffect }
+        if (overlay.hidden) return@LaunchedEffect
+        val isNewProfile = overlay.author.did != trackedProfileDid
+        if (isNewProfile) trackedProfileDid = overlay.author.did
+        val avatarUrl = overlay.author.avatarUrl
+        val stillLoading = overlay.loadingProfile
+        rootScope.launch {
+            if (isNewProfile) {
+                pixelController.start(selfThemeColor)
+                // Wipe-in has now genuinely reached full coverage (start()
+                // only returns once phase has advanced past WIPE_IN) —
+                // safe to swap the real profile in behind it.
+                revealedProfileDids = revealedProfileDids + overlay.author.did
+            }
+            if (!avatarUrl.isNullOrBlank()) {
+                val targetColor = fetchDominantColor(avatarUrl)
+                pixelController.updateColor(targetColor)
+            }
+            if (!stillLoading && pixelController.phase != PixelPhase.HIDDEN) pixelController.finish()
+        }
+    }
+
+    // Item 12: set true right before handleSelectFeed switches to FEED, so
+    // MainFeedScreen's screenState AnimatedContent can skip its normal
+    // SETTINGS -> FEED slide transition for just that one switch (the pixel
+    // curtain is already covering the whole screen at that point, so a
+    // slide underneath it is pure redundant motion). Reset back to false
+    // once FEED has actually been reached, so the next genuine "Return to
+    // Feed" tap gets its slide animation back.
+    var skipFeedEntryAnim by remember { mutableStateOf(false) }
+    LaunchedEffect(screenState) {
+        if (screenState == ScreenState.FEED) skipFeedEntryAnim = false
+    }
+
+    // Scenario C — opening a feed from the Feeds row (item 4/7): tapping a
+    // *different* feed chip plays the same transition while the feed
+    // actually loads, then hue-shifts to that feed's own first post before
+    // revealing it — and, per feedback, the screen no longer switches to
+    // FEED until that load has genuinely finished (it used to switch
+    // immediately, scrolling into a feed that hadn't loaded yet). Tapping
+    // "Return to Feed"/swipe-up (onSwipeToFeed, wired separately in
+    // MainFeedScreen — never routes through this function) is deliberately
+    // NOT wrapped here: that's just scrolling into an already-loaded feed
+    // and should stay instant.
+    val handleSelectFeed: (String?) -> Unit = { uri ->
+        rootScope.launch {
+            // Bug fix (item 4): this used to start from `currentDominantColor`
+            // — the live backdrop color of whatever post happens to be on
+            // screen right now, which is essentially "the color the *previous*
+            // transition happened to end on" (it tracks whatever the last
+            // reveal settled the feed on). Every other transition after the
+            // cold-boot one is supposed to always start from the user's own
+            // profile color, same as Scenario B — so start from
+            // `selfThemeColor` here too.
+            pixelController.start(selfThemeColor)
+            viewModel.selectFeedFromAnyContext(uri)
+            // selectFeedFromAnyContext's "same feed, restore exactly from
+            // cache" fast-path (see its own doc comment) never flips
+            // isLoading at all — this short timeout only disambiguates
+            // that real, instant code path from a genuine network fetch;
+            // it is not standing in for network latency itself.
+            withTimeoutOrNull(300) { viewModel.isLoading.first { it } }
+            viewModel.isLoading.first { !it }
+            val firstMedia = viewModel.mediaItems.value.firstOrNull()
+            val feedColor = if (firstMedia != null) {
+                fetchDominantColor(firstMedia.thumbUrl.ifBlank { firstMedia.mediaUrl })
+            } else currentDominantColor
+            pixelController.updateColor(feedColor)
+            // Bug fix (item 12): the screen is already fully covered by the
+            // opaque pixel curtain at this point, so the FEED screen
+            // switching in underneath should be invisible either way — but
+            // MainFeedScreen's AnimatedContent normally plays a slide/scroll
+            // transition on every SETTINGS -> FEED switch, regardless of
+            // what triggered it. That's correct for the explicit "Return to
+            // Feed" button (which has no pixel curtain covering it), but for
+            // this feed-menu path it means a slide animation is quietly
+            // happening underneath — and sometimes bleeding through — the
+            // wipe. Flip this flag right before switching so MainFeedScreen
+            // skips the slide just this once.
+            skipFeedEntryAnim = true
+            viewModel.setScreen(ScreenState.FEED)
+            pixelController.finish()
+        }
+    }
+
+    // Item 26: makes the glass-intensity dial reach every LiquidGlassSurface/
+    // glassPanel below without threading a Float through every composable's
+    // parameter list.
+    CompositionLocalProvider(
+        LocalGlassIntensity provides liquidGlassIntensity,
+        LocalGlassRimIntensity provides glassRimIntensity
+    ) {
+    Box(Modifier.fillMaxSize()) {
+        MainFeedScreen(
+            mediaItems                = mediaItems,
+            currentIndex              = currentIndex,
+            currentItem               = currentItem,
+            screenState               = screenState,
+            skipFeedEntryAnim         = skipFeedEntryAnim,
+            hasVisitedFeed            = hasVisitedFeed,
+            appMode                   = appMode,
+            navDirection              = navDirection,
+            reducedAnimations         = reducedAnimations,
+            liquidGlass               = liquidGlass,
+            onToggleLiquidGlass       = viewModel::setLiquidGlass,
+            liquidGlassIntensity      = liquidGlassIntensity,
+            onSetLiquidGlassIntensity = viewModel::setLiquidGlassIntensity,
+            glassRimIntensity         = glassRimIntensity,
+            onSetGlassRimIntensity    = viewModel::setGlassRimIntensity,
+            dmConversations           = dmConversations,
+            dmConversationsLoading    = dmConversationsLoading,
+            friendsReviews            = friendsReviews,
+            friendsReviewsLoading     = friendsReviewsLoading,
+            onLoadFriendsReviews      = viewModel::loadFriendsReviewsIfNeeded,
+            onOpenReview              = viewModel::openMutualReview,
+            onOpenProfile             = { author -> viewModel.openProfile(author) },
+            friendsBlogs              = friendsBlogs,
+            onOpenBlog                = viewModel::openMutualBlog,
+            onRefreshHub              = viewModel::refreshHub,
+            liveFriends               = liveFriends,
+            liveFriendsLoading        = liveFriendsLoading,
+            onLoadLiveFriends         = viewModel::loadLiveFriendsIfNeeded,
+            blueskyLiveNow            = blueskyLiveNow,
+            blueskyLiveNowLoading     = blueskyLiveNowLoading,
+            onLoadBlueskyLiveNow      = viewModel::loadBlueskyLiveNowIfNeeded,
+            onOpenLivePlayer          = viewModel::openLivePlayer,
+            onEnsureFriends           = viewModel::ensureDmConversationsLoaded,
+            selfAvatarUrl             = selfProfile?.author?.avatarUrl,
+            availableFeeds            = availableFeeds,
+            selectedFeedUri           = selectedFeed,
+            authorFeedState           = authorFeedState,
+            comments                  = comments,
+            commentsLoading           = commentsLoad,
+            downloadOnLike            = downloadOnLike,
+            downloadProgress          = downloadProgress,
+            e621SearchTags            = e621Tags,
+            isLoading                 = isLoading,
+            bskyLoggedIn              = bskyLoggedIn,
+            e621LoggedIn              = e621LoggedIn,
+            bskyHandle                = viewModel.bskyHandle,
+            e621Username              = viewModel.e621Username,
+            errorMessage              = errorMessage,
+            onNavigateNext            = viewModel::navigateNext,
+            onNavigatePrev            = viewModel::navigatePrev,
+            onNavigateTo              = viewModel::navigateTo,
+            onSetScreen               = viewModel::setScreen,
+            onToggleLike              = viewModel::toggleLike,
+            onToggleRepost            = viewModel::toggleRepost,
+            onToggleBookmark          = viewModel::toggleBookmark,
+            onToggleFollow            = viewModel::toggleFollow,
+            onE621Vote                = viewModel::e621Vote,
+            onPostComment             = { text, replyTo -> viewModel.postComment(text, replyTo) },
+            onLikeComment             = viewModel::likeComment,
+            onVoteComment             = viewModel::voteComment,
+            // All feed-chip selections route through selectFeedFromAnyContext so that
+            // selecting the previous feed while in an author overlay restores scroll position
+            onSelectFeed              = handleSelectFeed,
+            onToggleDownloadOnLike    = viewModel::setDownloadOnLike,
+            onDownloadAllLiked        = viewModel::downloadAllLiked,
+            onCancelDownload          = viewModel::cancelDownloadAll,
+            tagPostWhenLiked          = tagPostWhenLiked,
+            onToggleTagPostWhenLiked  = viewModel::setTagPostWhenLiked,
+            taggingRunning            = taggingUiState.isRunning,
+            taggingScanned            = taggingUiState.scanned,
+            taggingTagged             = taggingUiState.tagged,
+            onLocallyTagAllLiked      = viewModel::startTaggingAllLiked,
+            onDeleteTaggedDatabase    = viewModel::deleteTaggedDatabase,
+            importedDatasets          = importedDatasets,
+            // PORT: legacy took android.net.Uri here — the shared UI keys
+            // picked files as plain strings (see SettingsSheet.kt), so these
+            // resolve against the KMP ViewModel's (String, String)/(String)
+            // overloads.
+            onExportDataset           = viewModel::exportDataset,
+            onImportDataset           = viewModel::importDatasetFromUri,
+            onDeleteImportedDataset   = viewModel::deleteImportedDataset,
+            onShowLikes               = viewModel::showBskyLikes,
+            onShowFriends             = viewModel::showFriendsFeed,
+            onShowE621Following       = viewModel::searchFollowingE621,
+            onToggleReducedAnimations = viewModel::setReducedAnimations,
+            combineListsAndPacks      = combineListsPacks,
+            onToggleCombineListsPacks = viewModel::setCombineListsAndPacks,
+            autoAddToOnFollow         = autoAddToOnFollow,
+            onToggleAutoAddToOnFollow = viewModel::setAutoAddToOnFollow,
+            onLoginBluesky            = viewModel::loginBluesky,
+            onLogoutBluesky           = viewModel::logoutBluesky,
+            onSaveE621Credentials     = viewModel::saveE621Credentials,
+            onLogoutE621              = viewModel::logoutE621,
+            onSearchE621              = { tags -> viewModel.setE621SearchTags(tags); viewModel.searchE621() },
+            onShowE621Favorites       = viewModel::showE621Favorites,
+            onSwipeToMode             = viewModel::setMode,
+            onLoadMore                = viewModel::loadMore,
+            onDownloadCurrent         = viewModel::downloadCurrentItem,
+            onRefresh                 = { viewModel.loadFeed(reset = true) },
+            // Profile Overhaul: tapping an account now opens the full Profile
+            // Overlay instead of swapping the pager to their feed directly.
+            // e621 has no notion of an account profile, so tapping an artist
+            // there keeps the old behavior of searching that artist's tag.
+            // If the post being viewed is text-only, open straight into that
+            // profile's Text Posts tab instead of the default Media tab.
+            onTapAuthor               = { item ->
+                if (appMode == AppMode.BLUESKY) {
+                    val tab = if (item.isTextOnly) MainViewModel.ProfileTab.TEXT_POSTS else MainViewModel.ProfileTab.MEDIA
+                    viewModel.openProfile(item.author, initialTab = tab)
+                } else viewModel.showAuthorFeed(item)
+            },
+            onPinchIn                 = viewModel::pinchInFromPost,
+            // Item 1: pause whatever's playing behind a visible (non-hidden)
+            // profile overlay — see the doc comment on this param in
+            // MainFeedScreen for why the grid case doesn't need this too.
+            externallyPaused           = profileOverlay?.hidden == false,
+            onTagClick                = { tag -> viewModel.searchSingleTag(tag) },
+            onTagAdd                  = { tag -> viewModel.addTagToSearch(tag, exclude = false) },
+            onTagExclude              = { tag -> viewModel.addTagToSearch(tag, exclude = true) },
+            onSendPost                = viewModel::openSendPopup,
+            onQuoteRepost             = viewModel::openQuoteRepost,
+            onBlockAccount            = viewModel::toggleBlockCurrentAuthor,
+            onDownloadGif             = viewModel::downloadCurrentItemAsGif,
+            // Item 4: "More" menu on the interaction bar.
+            onShowMoreLikeThis        = viewModel::sendShowMoreLikeThisForCurrentItem,
+            onShowLessLikeThis        = viewModel::sendShowLessLikeThisForCurrentItem,
+            onAddAccountToList        = viewModel::openListPickerForCurrentAuthor,
+            supportsFeedInteractions  = supportsFeedInteractions,
+            sentByExpanded            = sentByExpanded,
+            onToggleSentByExpanded    = viewModel::toggleSentByExpanded,
+            onOpenReplyToSender       = viewModel::openReplyToSender,
+            // Item 27: tapping the sender's avatar in the "Sent by" header
+            // (From Friends feed) opens their profile.
+            onTapSentByAuthor         = { author -> viewModel.openProfile(author) },
+            friendsFeedLoadingOverlay = friendsFeedLoadingOverlay,
+            onCurrentBackdropChanged  = { backdrop, color -> currentBackdrop = backdrop; currentDominantColor = color },
+            selfProfile               = selfProfile,
+            hideTextOnlyPosts         = hideTextOnlyPosts,
+            onToggleHideTextOnlyPosts = viewModel::setHideTextOnlyPosts,
+            onOpenOwnProfile          = viewModel::openOwnProfile,
+            onShowSaves               = viewModel::showSaves,
+            onShowHistory             = viewModel::showHistory,
+            onOpenDmInbox             = viewModel::openDmInbox,
+            onOpenComposePost         = viewModel::openComposePost,
+            onOpenSearch              = viewModel::openSearch,
+            translationEnabled        = translationEnabled,
+            translationTargetLang     = translationTargetLang,
+            onToggleTranslation       = viewModel::setTranslationEnabled,
+            onSelectTranslationLanguage = viewModel::setTranslationTargetLang,
+            customFontName            = customFontName,
+            // PORT: legacy took android.net.Uri — shared UI keys the picked
+            // font file as a plain string (see SettingsSheet.kt).
+            onPickFontFile            = viewModel::setCustomFontFromUri,
+            onResetFont               = viewModel::resetCustomFont
+        )
+
+        if (dmInboxOpen) {
+            DmInboxOverlay(
+                conversations   = dmConversations,
+                loading         = dmConversationsLoading,
+                thread          = dmThread,
+                liquidGlass     = liquidGlass,
+                selfAvatarUrl   = selfProfile?.author?.avatarUrl,
+                onSelectConvo   = viewModel::openDmThread,
+                onCloseThread   = viewModel::closeDmThread,
+                onSendReply     = viewModel::sendDmThreadReply,
+                onClose         = viewModel::closeDmInbox,
+                onTapAuthor     = { author -> viewModel.closeDmInbox(); viewModel.openProfile(author) },
+                onLoadMoreMessages   = viewModel::loadMoreDmMessages,
+                onOpenSharedPostsFeed = viewModel::openDmThreadSharedPostsFeed
+            )
+        }
+
+        if (composePostOpen) {
+            ComposePostScreen(
+                selfProfile    = selfProfile?.author,
+                liquidGlass    = liquidGlass,
+                dominantColor  = currentDominantColor,
+                submitting     = composePostSubmitting,
+                reviewTarget   = reviewComposeTarget,
+                onClose        = viewModel::closeComposePost,
+                onSubmit       = viewModel::submitComposePost
+            )
+        }
+
+        // Item 12 follow-up: shown only while fetching a DM thread's shared-
+        // posts feed — same pattern as the "From Friends" loading overlay.
+        if (dmFeedLoadingOverlay) {
+            Box(
+                modifier = Modifier.fillMaxSize().background(Color.Black).zIndex(10f),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("Loading Shared Posts…", color = Color.White, fontSize = 15.sp)
+            }
+        }
+
+        if (searchOpen) {
+            SearchOverlay(
+                state              = searchState,
+                liquidGlass        = liquidGlass,
+                selfAvatarUrl      = selfProfile?.author?.avatarUrl,
+                hasTaggedDataset   = hasTaggedDataset,
+                likedTagResults    = likedTagSearchResults,
+                onStartTagging     = viewModel::startTaggingAllLiked,
+                onOpenLikedPost    = viewModel::openLikedPostFromSearch,
+                tagSuggestions     = tagSuggestions,
+                onQueryChange      = viewModel::runSearch,
+                onLikedQueryTextChange = viewModel::updateLikedQueryText,
+                onLikedSearchSubmit    = viewModel::submitLikedSearch,
+                onTagSuggestionSelected = viewModel::applyTagSuggestion,
+                onSelectFilter     = viewModel::setSearchFilter,
+                onOpenPost         = viewModel::openPostFromSearch,
+                onOpenAccount      = { author -> viewModel.closeSearch(); viewModel.openProfile(author) },
+                onAddFeed          = viewModel::addSavedFeedFromSearch,
+                onClose            = viewModel::closeSearch
+            )
+        }
+
+        // AI Tagging feature: full-screen "tagging in progress / complete"
+        // overlay — opened by either the Search page's "Start Tagging"
+        // button or Settings' "Locally Tag All Liked Posts" row, both of
+        // which just call startTaggingAllLiked(). Layered like every other
+        // full-screen overlay (Search, DM inbox, Live player) below.
+        // APP-EXCLUSIVE: hidden wherever the platform tagger engine is
+        // unavailable (== !deps.tagger.isAvailable per the platform
+        // contracts) — on web startTaggingAllLiked() is a no-op, but this
+        // gate makes the surface itself unreachable there regardless.
+        if (taggingOverlayOpen && !isWebPlatform) {
+            TaggingOverlay(
+                state          = taggingUiState,
+                liquidGlass    = liquidGlass,
+                selfAvatarUrl  = selfProfile?.author?.avatarUrl,
+                // TODO("PORT: wire model-download progress"): legacy read it
+                // from the Android-only TaggerModelManager.State; there is no
+                // shared model-manager seam yet, so TaggingOverlay's
+                // modelDownloadBytes/modelDownloadTotalBytes params keep
+                // their defaults (the "Downloading Tagging Model" card stays
+                // hidden) until one lands.
+                onDismiss      = viewModel::dismissTaggingOverlay,
+                onSearchLiked  = {
+                    viewModel.dismissTaggingOverlay()
+                    viewModel.openSearch()
+                    viewModel.setSearchFilter(MainViewModel.SearchFilter.LIKED_TAGS)
+                }
+            )
+        }
+
+        // Item (this session): both Live sources (Streamplace + Bluesky Live
+        // Now) open this now, not just Bluesky's — layered the same way
+        // every other full-screen overlay in this app is (DM inbox, Search),
+        // on top of everything else.
+        val currentPlayingLive = playingLive
+        if (currentPlayingLive != null) {
+            LiveNowPlayerOverlay(stream = currentPlayingLive, onClose = viewModel::closeLivePlayer)
+        }
+
+        val currentProfileOverlay = profileOverlay
+        if (currentProfileOverlay != null) {
+            // Pinch navigation: a "hidden" profile (tapped a post from inside
+            // it — see openPostFromProfileTab) stays fully composed at zero
+            // size instead of being removed, so its LazyListState (scroll
+            // position), loaded tabs, etc. survive untouched. Zero size means
+            // it can't be seen or hit-test any touches, so the pager
+            // underneath is fully interactive again — pinching back in
+            // (pinchInFromPost) just flips this back to full size.
+            Box(if (currentProfileOverlay.hidden || !profileRevealArmed) Modifier.size(0.dp) else Modifier.fillMaxSize()) {
+                ProfileOverlay(
+                    state             = currentProfileOverlay,
+                    liquidGlass       = liquidGlass,
+                    reducedAnimations = reducedAnimations,
+                    selfDid           = bskyDid,
+                    onClose           = viewModel::closeProfile,
+                    onSelectTab       = viewModel::selectProfileTab,
+                    onLoadMore        = viewModel::loadMoreProfileTab,
+                    onToggleFollow    = viewModel::toggleProfileFollow,
+                    onTapItem         = viewModel::openPostFromProfileTab,
+                    onOpenBlog        = viewModel::openProfileBlog,
+                    onCloseBlog       = viewModel::closeProfileBlog,
+                    onOpenReview      = viewModel::openProfileReview,
+                    onCloseReview     = viewModel::closeProfileReview,
+                    onOpenTitle       = viewModel::openProfileTitle,
+                    onCloseTitle      = viewModel::closeProfileTitle,
+                    onOpenReviewCompose = viewModel::openReviewCompose,
+                    friendsReviews    = friendsReviewsForTitles,
+                    reviewSocial      = reviewSocial,
+                    onLoadReviewSocial  = viewModel::loadReviewSocial,
+                    onToggleReviewLike  = viewModel::toggleReviewLike,
+                    onPostReviewComment = viewModel::postReviewComment,
+                    onDeleteReview      = viewModel::deleteReview,
+                    onPinchOut        = viewModel::pinchOutFromProfile,
+                    onSaveScroll      = viewModel::saveProfileScrollPosition,
+                    isReviewSubscribed = currentProfileOverlay.author.did in subscribedReviewDids,
+                    isBlogSubscribed   = currentProfileOverlay.author.did in subscribedBlogDids,
+                    onToggleReviewSubscribe = { viewModel.toggleReviewSubscription(currentProfileOverlay.author) },
+                    onToggleBlogSubscribe   = { viewModel.toggleBlogSubscription(currentProfileOverlay.author) }
+                )
+            }
+        }
+
+        val currentSendTarget = sendPopupTarget
+        if (currentSendTarget != null) {
+            SendDmDialog(
+                target          = currentSendTarget,
+                conversations   = dmConversations,
+                loading         = dmConversationsLoading,
+                selected        = sendPopupSelected,
+                sending         = sendPopupSending,
+                liquidGlass     = liquidGlass,
+                dominantColor   = currentDominantColor,
+                backdrop        = currentBackdrop,
+                onToggleSelect  = viewModel::toggleSendRecipient,
+                onSend          = viewModel::sendToSelectedRecipients,
+                onDismiss       = viewModel::dismissSendPopup
+            )
+        }
+
+        val currentQuoteTarget = quoteRepostTarget
+        if (currentQuoteTarget != null) {
+            QuoteRepostDialog(
+                target      = currentQuoteTarget,
+                submitting  = quoteRepostSubmitting,
+                liquidGlass   = liquidGlass,
+                dominantColor = currentDominantColor,
+                backdrop      = currentBackdrop,
+                onSubmit    = viewModel::submitQuoteRepost,
+                onDismiss   = viewModel::dismissQuoteRepost
+            )
+        }
+
+        val currentReplyConvo = replyToConvo
+        if (currentReplyConvo != null) {
+            ReplyDialog(
+                convo     = currentReplyConvo,
+                onSend    = viewModel::sendReply,
+                onDismiss = viewModel::dismissReplyPopup
+            )
+        }
+
+        if (listPickerDid != null) {
+            ListPickerDialog(
+                lists         = userLists,
+                starterPacks  = userStarterPacks,
+                listsLoading  = userListsLoading,
+                initialTab    = lastPickerTab,
+                combineMode   = combineListsPacks,
+                liquidGlass   = liquidGlass,
+                dominantColor = currentDominantColor,
+                backdrop      = currentBackdrop,
+                onTabChange   = { tab -> viewModel.setPickerTab(tab) },
+                onSelectList  = { listUri, additionalUri -> viewModel.addAccountToList(listUri, additionalUri) },
+                onDismiss     = { viewModel.dismissListPicker() }
+            )
+        }
+
+        // Bug fix (item 3): unconditional opaque backing for the cold-boot
+        // window described above — sits above every other layer (matching
+        // PixelMatrixOverlay's own z-order) so nothing real is reachable
+        // until the very first wipe-in has genuinely finished covering the
+        // screen, regardless of how many frames that takes to kick off.
+        if (coldLaunchCovered) {
+            Box(Modifier.fillMaxSize().background(Color.Black))
+        }
+
+        // Retro pixel-matrix transition overlay — last child so it draws
+        // above every other layer (feed, Hub, profile, dialogs) while a
+        // transition is in progress; renders nothing once HIDDEN.
+        PixelMatrixOverlay(controller = pixelController, modifier = Modifier.fillMaxSize())
+    }
+    }
+
+    LaunchedEffect(errorMessage) {
+        if (errorMessage != null) {
+            kotlinx.coroutines.delay(6000)
+            viewModel.clearError()
+        }
+    }
+}

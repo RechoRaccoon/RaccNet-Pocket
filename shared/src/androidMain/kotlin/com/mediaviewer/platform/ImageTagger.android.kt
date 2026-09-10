@@ -1,0 +1,316 @@
+package com.mediaviewer.platform
+
+import ai.onnxruntime.OnnxTensor
+import ai.onnxruntime.OrtEnvironment
+import ai.onnxruntime.OrtSession
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import com.mediaviewer.tagging.TaggerModelManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.BufferedReader
+import java.io.File
+import java.io.FileReader
+import java.nio.FloatBuffer
+
+/**
+ * Android actual: the Z3D-E621-Convnext tagger. [ensureReady] maps to the
+ * legacy TaggerModelManager (one-time HuggingFace download with progress);
+ * [tagImage] maps to the legacy ImageTagger (bitmap in, tags out), taking
+ * encoded image bytes instead of an Android Bitmap so the signature can
+ * live in common code — bytes are decoded with BitmapFactory here.
+ */
+actual class PlatformImageTagger actual constructor() {
+
+    actual val isAvailable: Boolean = true
+
+    private val modelManager = TaggerModelManager()
+
+    @Volatile private var tagger: OnnxImageTagger? = null
+
+    actual suspend fun ensureReady(onProgress: (Float) -> Unit): Boolean {
+        tagger?.let { return true }
+        // The legacy manager reports per-file byte progress; the contract
+        // wants a single 0..1 fraction, so map the combined download onto
+        // 0..0.99 and report 1.0 only once the session actually exists.
+        var ready = false
+        modelManager.ensureReady { state ->
+            when (state) {
+                is TaggerModelManager.State.Downloading -> {
+                    val total = state.totalBytes
+                    onProgress(
+                        if (total > 0) (state.bytesDownloaded.toFloat() / total)
+                            .coerceIn(0f, 1f) * 0.99f
+                        else 0f
+                    )
+                }
+                is TaggerModelManager.State.Ready -> { ready = true }
+                is TaggerModelManager.State.Failed -> { ready = false }
+                is TaggerModelManager.State.NotDownloaded -> onProgress(0f)
+            }
+        }
+        if (!ready || !modelManager.isReady()) return false
+        return try {
+            // Session construction (graph compile + warm-up, see
+            // OnnxImageTagger) can take seconds — keep it off the caller.
+            withContext(Dispatchers.IO) {
+                tagger = OnnxImageTagger(modelManager.modelFile, modelManager.tagsFile)
+            }
+            onProgress(1f)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    actual suspend fun tagImage(imageBytes: ByteArray): List<PredictedTag> {
+        val t = tagger ?: return emptyList()
+        return withContext(Dispatchers.IO) {
+            val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+                ?: return@withContext emptyList()
+            try {
+                t.tag(bitmap).map { (name, confidence) -> PredictedTag(name, confidence) }
+            } finally {
+                // The bitmap here is always decoded by this call (never a
+                // shared cache instance), so it's always ours to recycle.
+                bitmap.recycle()
+            }
+        }
+    }
+}
+
+/** Runs the Z3D-E621-Convnext tagger (see TaggerModelManager's doc comment
+ *  for why this model, not the spec's "JTP-3") on a single decoded bitmap
+ *  and returns every tag whose confidence clears the spec's 0.25 threshold.
+ *
+ *  Ported from legacy tagging/ImageTagger.kt — everything here is 100%
+ *  local inference — no network call, no telemetry, no content-moderation
+ *  filtering layer of any kind, matching the spec's "Uncensored Local
+ *  Inference" requirement. */
+internal class OnnxImageTagger(modelFile: File, tagsFile: File) : AutoCloseable {
+
+    private data class TagEntry(val name: String, val category: Int)
+
+    private val env = OrtEnvironment.getEnvironment()
+    private val session: OrtSession
+    private val inputName: String
+    private val tagEntries: List<TagEntry>
+    private val inputSize = 448
+
+    init {
+        // Leaves one core free for the UI thread (tagging can run while the
+        // person is actively scrolling the feed) rather than the old
+        // coerceIn(2, 6), which left 2-3 of the 8a's 9 cores idle for no
+        // reason on a batch/background workload like this.
+        val threads = (Runtime.getRuntime().availableProcessors() - 1).coerceIn(2, 8)
+        val options = OrtSession.SessionOptions().apply {
+            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+            // Bug fix (this is the real fix for the "10-20s/image" report —
+            // NNAPI was the culprit, not raw compute speed): this used to
+            // also call addNnapi() ahead of XNNPACK, on the theory that
+            // "NNAPI for whatever it can claim, XNNPACK for the rest" could
+            // only ever help. In practice, for *this* graph, it made things
+            // dramatically worse. ConvNeXt interleaves depthwise Conv (an
+            // NNAPI op) with LayerNorm and GELU (not NNAPI ops) in literally
+            // every block — so NNAPI doesn't cleanly own "most of the graph"
+            // or "none of it", it ends up claiming a huge number of *tiny*,
+            // scattered single-op partitions threaded through dozens of
+            // blocks. Every one of those partition boundaries is a hand-off
+            // through Android's NNAPI HAL (real IPC/driver overhead, paid on
+            // *every* inference, not just once at session creation) before
+            // control returns to XNNPACK for the next unsupported op and
+            // back again. That per-block round-trip overhead, multiplied by
+            // however many blocks this ConvNeXt has, is a far more likely
+            // explanation for 10-20s/image than fp32 conv math itself (which
+            // XNNPACK alone handles in low single-digit seconds on this
+            // class of phone) — and it matches known ORT/NNAPI guidance that
+            // heavily-fragmented partitioning frequently loses to just not
+            // using NNAPI at all. Dropping addNnapi() and letting XNNPACK
+            // run the *entire* graph as one coherent optimized pass removes
+            // that fragmentation overhead entirely.
+            //
+            // This is also, if anything, a small *accuracy* positive, not a
+            // trade-off: NNAPI drivers are free to run the ops they accept
+            // at reduced precision under the hood (a fp16 or even quantized
+            // fast path) without this app ever choosing that — so removing
+            // NNAPI also guarantees every op now runs through one consistent
+            // fp32 path (XNNPACK, falling back to ORT's own CPU EP for
+            // anything XNNPACK itself doesn't cover), instead of silently
+            // mixing in whatever precision the device's specific NNAPI
+            // driver happened to pick for the fraction of the graph it
+            // could claim.
+            try { addXnnpack(mapOf("intra_op_num_threads" to threads.toString())) } catch (_: Throwable) { /* AAR build doesn't include it — falls back to ORT's generic CPU EP */ }
+            setIntraOpNumThreads(threads)
+            // Free perf win, zero accuracy impact: without this, x86/ARM FPUs
+            // drop into a much slower microcoded path any time an
+            // intermediate value underflows into the denormal range, which
+            // happens routinely inside conv/norm layers. Flushing denormals
+            // to zero sidesteps that slow path; the values involved are
+            // already numerically insignificant (many orders of magnitude
+            // below the 0.15/0.25 confidence thresholds this model's output
+            // is ever compared against), so this can't change which tags
+            // clear threshold.
+            addConfigEntry("session.set_denormal_as_zero", "1")
+        }
+        session = env.createSession(modelFile.absolutePath, options)
+        inputName = session.inputNames.iterator().next()
+        tagEntries = parseTagsCsv(tagsFile)
+
+        // NNAPI/XNNPACK compile+cache the graph on their first Run() call —
+        // anywhere from ~100ms to a couple seconds depending on device/
+        // driver. Paid here, once, right after the session is built (this
+        // constructor already only ever runs on a background thread — see
+        // PlatformImageTagger.ensureReady), it's invisible. Left alone, it's
+        // paid on the very first liked post tagged instead, which is what
+        // was actually making that first image (and the overlay's early
+        // "scanned" rate) look much slower than the real steady-state speed.
+        try {
+            val warmBuffer = FloatBuffer.allocate(inputSize * inputSize * 3)
+            val warmShape = longArrayOf(1, inputSize.toLong(), inputSize.toLong(), 3)
+            OnnxTensor.createTensor(env, warmBuffer, warmShape).use { t ->
+                session.run(mapOf(inputName to t)).close()
+            }
+        } catch (_: Throwable) { /* best-effort — a failed warm-up just means the first real image pays the cost instead */ }
+    }
+
+    /** WD/Z3D-family taggers ship a `selected_tags.csv`/`tags-selected.csv`
+     *  with a header row and columns like `tag_id,name,category,count` —
+     *  this pulls whichever columns are literally named "name"/"category"
+     *  (falling back to positions 1/2, where they live in every known
+     *  variant of this file) so a header reshuffle in a future model update
+     *  doesn't silently break parsing. Category matters here (see [tag]'s
+     *  doc comment on why character/species get their own threshold), e621
+     *  category ids: 0 general, 1 artist, 3 copyright, 4 character,
+     *  5 species, 7 meta, 8 lore. */
+    private fun parseTagsCsv(file: File): List<TagEntry> {
+        val lines = BufferedReader(FileReader(file)).readLines()
+        if (lines.isEmpty()) return emptyList()
+        val header = lines.first().split(",")
+        val nameIdx = header.indexOfFirst { it.trim().equals("name", ignoreCase = true) }
+            .let { if (it >= 0) it else 1.coerceAtMost(header.lastIndex) }
+        val categoryIdx = header.indexOfFirst { it.trim().equals("category", ignoreCase = true) }
+            .let { if (it >= 0) it else 2.coerceAtMost(header.lastIndex) }
+        return lines.drop(1).map { line ->
+            val cols = line.split(",")
+            val name = cols.getOrNull(nameIdx)?.trim()?.trim('"') ?: ""
+            val category = cols.getOrNull(categoryIdx)?.trim()?.toIntOrNull() ?: -1
+            TagEntry(name, category)
+        }
+    }
+
+    // Reused across tag() calls instead of freshly allocated (and then
+    // garbage-collected) every single image — a batch run tags hundreds of
+    // posts back to back, and repeatedly allocating a 448x448 Bitmap +
+    // IntArray + FloatBuffer (~2.5MB combined) per image is enough sustained
+    // garbage to cause real GC-pause stutter on a phone's heap. ThreadLocal
+    // rather than plain instance fields because TaggingRepository's
+    // "posts tagged at once" concurrency setting can call tag() on this same
+    // tagger from several coroutines at once — shared mutable buffers
+    // would let concurrent calls corrupt each other's pixel data.
+    //
+    // (Note: the ported TaggingRepository still funnels inference through
+    // one serial consumer, so in practice these ThreadLocals are only ever
+    // touched from one thread — they're kept because they're also what
+    // makes concurrent use *safe* if that ever changes.)
+    private val letterboxTargetTL = ThreadLocal.withInitial { Bitmap.createBitmap(inputSize, inputSize, Bitmap.Config.ARGB_8888) }
+    private val pixelsTL = ThreadLocal.withInitial { IntArray(inputSize * inputSize) }
+    private val floatBufferTL = ThreadLocal.withInitial { FloatBuffer.allocate(inputSize * inputSize * 3) }
+
+    /** Preprocesses [bitmap] to a 448x448 NHWC float tensor with RAW [0,255]
+     *  pixel values in BGR channel order (this model was trained via a
+     *  cv2-based Keras pipeline that loads images BGR by default, and that
+     *  channel order is baked into the graph's learned weights — the
+     *  reference `app.py` for this model explicitly does
+     *  `image_array[:, :, ::-1]` to flip PIL's native RGB to BGR before
+     *  inference), runs one forward pass, and returns every tag that clears
+     *  its threshold, sorted highest confidence first.
+     *
+     *  Two separate thresholds, not one: character/species tags (e621
+     *  categories 4/5) are picking one answer out of ~8,800 mostly-similar
+     *  candidate classes, so even a *correct* prediction structurally lands
+     *  at a much lower raw score than a general tag like "solo" or "anthro"
+     *  ever needs to — there's just more probability mass split across more
+     *  plausible-looking options. A single flat cutoff tuned for general
+     *  tags (this model's reference demo uses 0.35) starves character/
+     *  species recall regardless of preprocessing correctness. Giving them
+     *  their own, much more lenient threshold is the standard fix for this
+     *  exact "character tags don't show up" complaint in this tagger
+     *  family — not something to "solve" by lowering the general threshold
+     *  across the board (which would just add noise everywhere else) or
+     *  raising it (which only removes tags). generalThreshold stays at this
+     *  app's original 0.25 default (not the reference demo's 0.35 — that
+     *  was a red herring, not the fix). */
+    fun tag(
+        bitmap: Bitmap,
+        generalThreshold: Float = 0.25f,
+        characterThreshold: Float = 0.15f
+    ): List<Pair<String, Float>> {
+        val letterboxed = letterbox(bitmap, inputSize, letterboxTargetTL.get())
+        val floatBuffer = floatBufferTL.get().also { it.clear() }
+        val pixels = pixelsTL.get()
+        letterboxed.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
+        for (pixel in pixels) {
+            // NHWC, BGR (see doc comment above), RAW [0,255] floats.
+            floatBuffer.put((pixel and 0xFF).toFloat())            // B
+            floatBuffer.put(((pixel shr 8) and 0xFF).toFloat())    // G
+            floatBuffer.put(((pixel shr 16) and 0xFF).toFloat())   // R
+        }
+        floatBuffer.rewind()
+
+        val shape = longArrayOf(1, inputSize.toLong(), inputSize.toLong(), 3)
+        OnnxTensor.createTensor(env, floatBuffer, shape).use { inputTensor ->
+            session.run(mapOf(inputName to inputTensor)).use { results ->
+                val output = results[0].value
+                val scores: FloatArray = when (output) {
+                    is Array<*> -> (output[0] as FloatArray)
+                    is FloatArray -> output
+                    else -> return emptyList()
+                }
+                val tagged = mutableListOf<Pair<String, Float>>()
+                for (i in scores.indices) {
+                    val confidence = scores[i]
+                    val entry = tagEntries.getOrNull(i) ?: continue
+                    val threshold = if (entry.category == 4 || entry.category == 5) characterThreshold else generalThreshold
+                    if (confidence >= threshold && entry.name.isNotBlank()) {
+                        tagged.add(entry.name to confidence)
+                    }
+                }
+                return tagged.sortedByDescending { it.second }
+            }
+        }
+    }
+
+    /** Aspect-ratio-preserving resize of [src] onto [target] (a [size]x[size]
+     *  canvas, reused across calls — see the ThreadLocal buffers above),
+     *  filled white (white, not black/transparent, since this tagger family
+     *  is trained on e621 posts composited on white — matching the fill
+     *  color a squashed/naive resize implicitly doesn't). Non-square source
+     *  images get letterboxed rather than stretched, which otherwise
+     *  distorts proportions the model was trained to recognize (e.g.
+     *  squashing a portrait image measurably hurts species/body-shape tags).
+     *  Safe to reuse [target] between calls because drawColor(WHITE) below
+     *  always repaints every pixel before anything else is drawn — nothing
+     *  from a previous call can show through. */
+    private fun letterbox(src: Bitmap, size: Int, target: Bitmap): Bitmap {
+        val scale = minOf(size.toFloat() / src.width, size.toFloat() / src.height)
+        val scaledW = (src.width * scale).toInt().coerceAtLeast(1)
+        val scaledH = (src.height * scale).toInt().coerceAtLeast(1)
+        val scaled = Bitmap.createScaledBitmap(src, scaledW, scaledH, true)
+
+        Canvas(target).apply {
+            drawColor(Color.WHITE)
+            val left = (size - scaledW) / 2f
+            val top = (size - scaledH) / 2f
+            drawBitmap(scaled, left, top, Paint(Paint.FILTER_BITMAP_FLAG))
+        }
+        if (scaled !== src) scaled.recycle()
+        return target
+    }
+
+    override fun close() {
+        session.close()
+    }
+}
