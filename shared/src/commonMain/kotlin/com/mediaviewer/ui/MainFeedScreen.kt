@@ -78,7 +78,7 @@ private enum class QuickAction { TOP, TOP_RIGHT, RIGHT, BOTTOM_RIGHT, BOTTOM, BO
 private fun getHoveredAction(pos: Offset, center: Offset): QuickAction? {
     val dx = pos.x - center.x; val dy = pos.y - center.y
     if (sqrt(dx * dx + dy * dy) < 40f) return null
-    val angle = Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())) // -180..180, 0=right, 90=down
+    val angle = atan2(dy.toDouble(), dx.toDouble()) * 180 / PI // -180..180, 0=right, 90=down
     return when {
         angle < -157.5 || angle >= 157.5 -> QuickAction.LEFT
         angle < -112.5                   -> QuickAction.TOP_LEFT
@@ -895,7 +895,7 @@ private fun PostContent(
         if (cached != null && cached.targetLangTag == translationTargetLang) return@LaunchedEffect
         onSetTranslationState(TranslationState(status = TranslationStatus.TRANSLATING, targetLangTag = translationTargetLang))
         when (val outcome = com.mediaviewer.util.TranslationManager.translate(item.text, translationTargetLang)) {
-            is com.mediaviewer.util.TranslationManager.Outcome.Success -> {
+            is com.mediaviewer.platform.TranslationOutcome.Success -> {
                 onSetTranslationState(
                     TranslationState(
                         status = TranslationStatus.DONE,
@@ -907,8 +907,8 @@ private fun PostContent(
                     )
                 )
             }
-            is com.mediaviewer.util.TranslationManager.Outcome.Skipped,
-            is com.mediaviewer.util.TranslationManager.Outcome.Failure ->
+            is com.mediaviewer.platform.TranslationOutcome.Skipped,
+            is com.mediaviewer.platform.TranslationOutcome.Failure ->
                 onSetTranslationState(TranslationState(status = TranslationStatus.IDLE, targetLangTag = translationTargetLang))
         }
     }
