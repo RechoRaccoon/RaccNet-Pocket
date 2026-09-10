@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.RssFeed
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.backhandler.BackHandler
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
@@ -53,6 +54,7 @@ import com.mediaviewer.viewmodel.MainViewModel
  *  matching the profile page's close button style (see CloseGlassBubble in
  *  ProfileOverlay.kt — mirrored here rather than imported since that one's
  *  private and hard-coded to "Close profile" semantics). */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun SearchOverlay(
     state: MainViewModel.SearchState,
