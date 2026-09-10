@@ -776,7 +776,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
      * — this stub keeps the call shape so the compose-post path compiles
      * until it does.
      */
-    private suspend fun resolveDraftImageBlob(uri: Any): Result<Any> {
+    private suspend fun resolveDraftImageBlob(uri: Any): Result<BskyBlob> {
         // PORT: compose image upload needs a platform media-bytes seam.
         TODO("PORT: compose image upload needs a platform media-bytes seam")
     }
