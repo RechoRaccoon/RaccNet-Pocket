@@ -301,10 +301,24 @@ private fun DismissButton(liquidGlass: Boolean, tint: Color, label: String, onCl
 }
 
 private fun formatBytes(bytes: Long): String = when {
-    bytes >= 1_000_000_000L -> "%.2f GB".format(bytes / 1_000_000_000.0)
-    bytes >= 1_000_000L -> "%.1f MB".format(bytes / 1_000_000.0)
+    bytes >= 1_000_000_000L -> formatFixed(bytes / 1_000_000_000.0, 2) + " GB"
+    bytes >= 1_000_000L -> formatFixed(bytes / 1_000_000.0, 1) + " MB"
     bytes >= 1_000L -> "${(bytes / 1000.0).roundToInt()} KB"
     else -> "$bytes B"
+}
+
+// Portable replacement for "%.Nf".format(): String.format is JVM-only and
+// does not exist in commonMain/wasmJs.
+private fun formatFixed(value: Double, decimals: Int): String {
+    val factor = when (decimals) {
+        1 -> 10L
+        2 -> 100L
+        else -> 1L
+    }
+    val scaled = kotlin.math.round(value * factor)
+    val whole = scaled / factor
+    val frac = kotlin.math.abs(scaled % factor).toString().padStart(decimals, '0')
+    return if (decimals == 0) "$whole" else "$whole.$frac"
 }
 
 /** Intercepts the system back gesture/button while the overlay is up. */

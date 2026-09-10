@@ -18,6 +18,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.datetime.Clock
+import kotlin.concurrent.Volatile
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -971,7 +972,7 @@ class BlueskyRepository {
             if (!cid.isNullOrBlank()) {
                 // PORT: BlueskyBlobResolver.resolveBlobUrl is now a suspend
                 // Ktor call (was blocking OkHttp wrapped in
-                // withContext(Dispatchers.IO)); no dispatcher switch needed.
+                // withContext(Dispatchers.Default)); no dispatcher switch needed.
                 val resolved = runCatching { BlueskyBlobResolver.resolveBlobUrl(ownerDid, cid) }.getOrNull()
                 if (resolved != null) return resolved
             }

@@ -1,0 +1,21 @@
+# RaccNet Pocket (KMP)
+# One shared codebase that builds the native Android app AND the website.
+
+# --- build outputs (never commit) ---
+build/
+.gradle/
+local.properties
+
+# --- IDE ---
+.idea/
+*.iml
+.DS_Store
+
+# --- Android ---
+*.apk
+*.aab
+
+# --- secrets (the legacy repo accidentally committed its release keystore;
+#     see README "Security note". Never commit keystores or passwords here.) ---
+*.jks
+*.keystore

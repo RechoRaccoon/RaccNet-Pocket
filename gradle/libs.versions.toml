@@ -15,6 +15,12 @@
 # direct network connections Gradle's Java HTTP client needs, so plugin and
 # library downloads never completed). First full resolve happens in CI. If a
 # version fails to resolve, prefer the newest stable of the same artifact.
+#
+# CORRECTIONS (2026-09-10, verified against Maven Central):
+# - multiplatform-settings: 1.3.7 does not exist -> pinned to 1.3.0 (latest).
+# - material-icons-extended: discontinued by JetBrains after 1.7.3 -> pinned
+#   to 1.7.3 (official guidance; the compose plugin does the same internally).
+#   Longer term, migrate icon usage to Material Symbols.
 
 [versions]
 kotlin = "2.2.0"
@@ -51,6 +57,14 @@ kotlinx-datetime = { module = "org.jetbrains.kotlinx:kotlinx-datetime", version.
 multiplatform-settings = { module = "com.russhwolf:multiplatform-settings", version.ref = "multiplatform-settings" }
 multiplatform-settings-coroutines = { module = "com.russhwolf:multiplatform-settings-coroutines", version.ref = "multiplatform-settings" }
 coil3-compose = { module = "io.coil-kt.coil3:coil-compose", version.ref = "coil3" }
+# DOM bindings for wasmJs (document/window/localStorage/fetch). May arrive
+# transitively via compose.ui, but declare explicitly so both wasmJs source
+# sets compile regardless of the scope JetBrains publishes it with.
+kotlinx-browser = { module = "org.jetbrains.kotlinx:kotlinx-browser", version = "0.3" }
+# NOTE: JetBrains discontinued material-icons-extended after 1.7.3 (the artifact
+# is intentionally pinned there; newer versions are never published). The compose
+# plugin's own materialIconsExtended accessor pins to 1.7.3 for the same reason.
+# Do NOT tie this to version.ref = "compose-multiplatform".
 compose-material-icons-extended = { module = "org.jetbrains.compose.material:material-icons-extended", version = "1.7.3" }
 compose-ui-backhandler = { module = "org.jetbrains.compose.ui:ui-backhandler", version.ref = "compose-multiplatform" }
 

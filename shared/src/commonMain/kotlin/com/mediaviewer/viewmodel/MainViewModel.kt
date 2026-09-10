@@ -33,6 +33,7 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.floatOrNull
 import kotlinx.serialization.json.longOrNull
+import kotlin.concurrent.Volatile
 
 class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
 
@@ -337,7 +338,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
 
     private fun loadSelfProfile() {
         if (!_bskyLoggedIn.value) return
-        launch(Dispatchers.IO) { loadSelfProfileSuspend() }
+        launch(Dispatchers.Default) { loadSelfProfileSuspend() }
     }
 
     // Bug fix (per feedback — Hub's reflective profile colors don't show
@@ -551,7 +552,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
     // ── Saves / Bookmarks (Settings Update) ─────────────────────────────────────
     fun showSaves() {
         if (!_bskyLoggedIn.value) return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             _isLoading.value = true
             _currentIndex.value = 0
             if (_authorFeedState.value == null) {
@@ -576,7 +577,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
     }
 
     private fun loadMoreSaves() {
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             isLoadingMore = true
             var result = bskyRepo.getBookmarkedPosts(bskyToken, feedCursor)
             if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
@@ -686,7 +687,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
     fun submitComposePost(draft: com.mediaviewer.ui.ComposePostDraft) {
         if (_composePostSubmitting.value) return
         _composePostSubmitting.value = true
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             var result = runCatchingComposePost(draft)
             if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
                 if (refreshBskyTokenIfPossible()) result = runCatchingComposePost(draft)
@@ -833,7 +834,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
             // was already typed — rather than the live-search-on-keystroke
             // behavior the other tabs use.
             _tagSuggestions.value = emptyList()
-            launch(Dispatchers.IO) { performLikedTagSearch(_searchState.value.query) }
+            launch(Dispatchers.Default) { performLikedTagSearch(_searchState.value.query) }
         } else if (_searchState.value.query.isNotBlank()) runSearch(_searchState.value.query)
     }
 
@@ -847,7 +848,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
             return
         }
         val filter = _searchState.value.filter
-        searchJob = launch(Dispatchers.IO) {
+        searchJob = launch(Dispatchers.Default) {
             _searchState.value = _searchState.value.copy(loading = true)
             when (filter) {
                 SearchFilter.POSTS -> {
@@ -891,7 +892,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
      *  the Hub's own feed-picker list so it shows up there immediately
      *  without needing to reopen the app. */
     fun addSavedFeedFromSearch(feed: SearchFeedResult) {
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             bskyRepo.addSavedFeed(bskyToken, feed.uri).onSuccess {
                 loadAvailableFeeds()
             }
@@ -925,7 +926,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
     fun openDmThread(convo: DmConversation) {
         if (convo.convoId.isBlank()) return // no history yet — nothing to show
         _dmThread.value = DmThreadState(convo = convo, loading = true)
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             bskyRepo.getConvoMessages(bskyToken, _bskyDid.value, convo.convoId)
                 .onSuccess { (messages, cursor) ->
                     _dmThread.value = _dmThread.value?.copy(
@@ -955,7 +956,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
         val thread = _dmThread.value ?: return
         if (thread.loadingMore || thread.loading || thread.cursor == null) return
         _dmThread.value = thread.copy(loadingMore = true)
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             bskyRepo.getConvoMessages(bskyToken, _bskyDid.value, thread.convo.convoId, thread.cursor)
                 .onSuccess { (olderMessages, newCursor) ->
                     val current = _dmThread.value ?: return@onSuccess
@@ -982,7 +983,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
 
     fun openDmThreadSharedPostsFeed() {
         val convo = _dmThread.value?.convo ?: return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             _dmFeedLoadingOverlay.value = true
             bskyRepo.getFriendsSharedPosts(bskyToken, _bskyDid.value, listOf(convo), includeSelfSent = true)
                 .onSuccess { items ->
@@ -1049,7 +1050,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
      *  state, read from subscribedReviewDids) reflects the change right
      *  away rather than only on the next Hub visit. */
     fun toggleReviewSubscription(author: AuthorInfo) {
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             prefs.toggleSubscribedReviewDid(author.did)
             reviewsBlogsLoaded = false
             loadFriendsReviewsIfNeeded(force = true)
@@ -1058,7 +1059,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
 
     /** Blogs-tab equivalent of [toggleReviewSubscription]. */
     fun toggleBlogSubscription(author: AuthorInfo) {
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             prefs.toggleSubscribedBlogDid(author.did)
             reviewsBlogsLoaded = false
             loadFriendsReviewsIfNeeded(force = true)
@@ -1083,7 +1084,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
         // LaunchedEffect(Unit) calls this the instant AtProtocolPageContent
         // composes (on the Main thread) at essentially the same moment
         // startHubBackgroundWarmup's retry loop (this session's earlier
-        // fix) also calls it — from Dispatchers.IO, a genuinely
+        // fix) also calls it — from Dispatchers.Default, a genuinely
         // multi-threaded dispatcher. Both can read `_friendsReviewsLoading`
         // as false before either has had a chance to set it true, so both
         // proceed: two independent coroutines both re-run the "load cache
@@ -1102,7 +1103,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
         // the same guarantee `if` + separate assignment was only *supposed*
         // to provide.
         if (!_friendsReviewsLoading.compareAndSet(false, true)) return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             // Bug fix (reviews/blogs getting stuck on "not loading"): the
             // actual network fetch below used to run un-guarded — any
             // exception from it (a real network failure, a malformed
@@ -1214,7 +1215,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
      *  short-circuit if a list is already loaded, which is exactly the
      *  "already loaded" guard this button needs to bypass. */
     fun refreshHub() {
-        launch(Dispatchers.IO) { loadDmConversationsBlocking(silent = true) }
+        launch(Dispatchers.Default) { loadDmConversationsBlocking(silent = true) }
         loadFriendsReviewsIfNeeded(force = true)
     }
 
@@ -1248,7 +1249,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
         // dispatcher) and the Hub's own composition (Main dispatcher) at
         // essentially the same moment on a Hub-first cold start.
         if (!_liveFriendsLoading.compareAndSet(false, true)) return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             // Bug fix + roadmap: same dmConversations-not-loaded-yet issue as
             // Reviews above, and broadened to everyone the user follows
             // rather than just DM contacts, per feedback.
@@ -1293,7 +1294,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
         // Bug fix: same check-then-act race as loadFriendsReviewsIfNeeded's
         // own compareAndSet fix above — see that function's comment.
         if (!_blueskyLiveNowLoading.compareAndSet(false, true)) return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             // Same "don't cache a transient failure as done" principle as
             // Reviews/Streamplace above — only latch loaded on genuine success.
             val followsResult = followedDidsForLiveSections()
@@ -1325,7 +1326,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
         val thread = _dmThread.value ?: return
         if (text.isBlank() || thread.convo.convoId.isBlank()) return
         _dmThread.value = thread.copy(sending = true)
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             bskyRepo.sendMessage(bskyToken, _bskyDid.value, thread.convo.convoId, text)
                 .onSuccess {
                     // Re-fetch the thread so the new message shows up in the linear history.
@@ -1485,7 +1486,7 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
         // get kicked off below — decouples "show what's on disk" from all
         // of that entirely, so it can never be starved out by unrelated
         // network traffic the way it apparently was.
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             if (_dmConversations.value.isEmpty()) {
                 runCatching {
                     val cached = (cacheJson.parseToJsonElement(prefs.hubMutualsCacheJson.first()) as? JsonArray)
@@ -1723,7 +1724,7 @@ _bskyDid.value          = session.did
         logD("RaccNet-FeedState", "loadFeed(reset=$reset)")
         if (_appMode.value == AppMode.E621) { loadE621Posts(reset); return }
         if (!_bskyLoggedIn.value) return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             if (reset) {
                 _isLoading.value = true; feedCursor = null; _currentIndex.value = 0
                 activeFeedMode = ActiveFeedMode.NORMAL; activeFeedActorDid = null
@@ -1778,7 +1779,7 @@ _bskyDid.value          = session.did
 
     private fun loadMoreAuthorFeed() {
         val did = activeFeedActorDid ?: return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             isLoadingMore = true
             var result = bskyRepo.getAuthorFeed(bskyToken, did, feedCursor)
             if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
@@ -1794,7 +1795,7 @@ _bskyDid.value          = session.did
 
     private fun loadMoreLikes() {
         val did = activeFeedActorDid ?: _bskyDid.value
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             isLoadingMore = true
             var result = bskyRepo.getActorLikes(bskyToken, did, feedCursor)
             if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
@@ -1810,7 +1811,7 @@ _bskyDid.value          = session.did
 
     fun loadAvailableFeeds() {
         if (!_bskyLoggedIn.value) return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             var result = bskyRepo.getSavedFeeds(bskyToken, _bskyDid.value)
             if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
                 if (refreshBskyTokenIfPossible()) result = bskyRepo.getSavedFeeds(bskyToken, _bskyDid.value)
@@ -1862,7 +1863,7 @@ _bskyDid.value          = session.did
         if (_appMode.value == AppMode.E621) { searchSingleTag(item.author.handle); return }
         if (!_bskyLoggedIn.value) return
         val did = item.author.did
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             _isLoading.value = true
             var result = bskyRepo.getAuthorFeed(bskyToken, did)
             if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
@@ -1918,7 +1919,7 @@ _bskyDid.value          = session.did
             openTitle = title, openTitlePreselectedReview = preselectedReview
         )
 
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             var result = bskyRepo.getFullProfile(bskyToken, author.did)
             if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
                 if (refreshBskyTokenIfPossible()) result = bskyRepo.getFullProfile(bskyToken, author.did)
@@ -1932,7 +1933,7 @@ _bskyDid.value          = session.did
 
         loadProfileTab(initialTab, reset = true)
 
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             val blogs = runCatching { bskyRepo.getLeafletBlogs(author.did) }.getOrDefault(emptyList())
             if (blogs.isEmpty()) return@launch
             val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
@@ -1941,7 +1942,7 @@ _bskyDid.value          = session.did
                 tabStates = cur.tabStates + (ProfileTab.BLOGS to ProfileTabState(blogs = blogs, loaded = true))
             )
         }
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             val reviews = runCatching { bskyRepo.getPopfeedReviews(author.did) }.getOrDefault(emptyList())
             if (reviews.isEmpty()) return@launch
             val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
@@ -1950,7 +1951,7 @@ _bskyDid.value          = session.did
                 tabStates = cur.tabStates + (ProfileTab.REVIEWS to ProfileTabState(reviews = reviews, loaded = true))
             )
         }
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             val backlog = runCatching { bskyRepo.getPopfeedBacklog(author.did) }.getOrDefault(emptyList())
             if (backlog.isEmpty()) return@launch
             val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
@@ -1962,7 +1963,7 @@ _bskyDid.value          = session.did
         // Item 19: VODs tab, only shown once we actually find any — most
         // accounts won't have Streamplace VODs, and that's a normal empty
         // result, not an error, so we stay silent on failure/empty here.
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             val vods = streamplaceRepo.getVods(author.handle).getOrNull()?.first ?: emptyList()
             if (vods.isEmpty()) return@launch
             val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
@@ -2046,7 +2047,7 @@ _bskyDid.value          = session.did
         val cursorToUse = if (reset) null else existing.cursor
         _profileOverlay.value = cur.copy(tabStates = cur.tabStates + (tab to existing.copy(loading = true)))
 
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             // Media and Text Posts both come from the account's own posts feed —
             // Bluesky has no separate "media only"/"text only" endpoint — so both
             // tabs fetch the same underlying feed independently (own cursor, own
@@ -2217,7 +2218,7 @@ _bskyDid.value          = session.did
      *  attribution TitleDetailOverlay's description bubble shows underneath
      *  the extract (see WikipediaRepository's class doc comment). */
     private fun fetchTitleOverviewFor(review: PopfeedReview) {
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             val result = runCatching { WikipediaRepository.fetchDescription(review.mediaTitle, review.imdbId) }.getOrNull() ?: return@launch
             val cur = _profileOverlay.value ?: return@launch
             if (cur.openTitle?.title == review.mediaTitle) {
@@ -2272,7 +2273,7 @@ _bskyDid.value          = session.did
         val did = _bskyDid.value
         if (did.isBlank()) return
         _reviewSocial.value = _reviewSocial.value + (review.uri to (_reviewSocial.value[review.uri] ?: ReviewSocialState()).copy(loading = true))
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             val subs = _subscribedReviewDids.value.toList()
             val likes = runCatching { bskyRepo.getPopfeedLikeSummary(did, review.uri, subs) }.getOrDefault(PopfeedLikeSummary(0, false))
             val comments = runCatching { bskyRepo.getPopfeedComments(bskyToken, did, review.uri, subs) }.getOrDefault(emptyList())
@@ -2288,7 +2289,7 @@ _bskyDid.value          = session.did
         // Optimistic update — feels instant, same pattern used for
         // Bluesky's own like button elsewhere in this app.
         _reviewSocial.value = _reviewSocial.value + (review.uri to cur.copy(likedByMe = nowLiked, likeCount = (cur.likeCount + if (nowLiked) 1 else -1).coerceAtLeast(0)))
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             val result = if (nowLiked) bskyRepo.likePopfeedReview(bskyToken, did, review.uri)
                          else bskyRepo.unlikePopfeedReview(bskyToken, did, review.uri).map { review.uri }
             if (result.isFailure) {
@@ -2301,7 +2302,7 @@ _bskyDid.value          = session.did
     fun postReviewComment(review: PopfeedReview, text: String) {
         val did = _bskyDid.value
         if (did.isBlank() || text.isBlank()) return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             bskyRepo.postPopfeedComment(bskyToken, did, review.uri, text).onSuccess {
                 loadReviewSocial(review)
             }
@@ -2323,7 +2324,7 @@ _bskyDid.value          = session.did
         _profileOverlay.value = _profileOverlay.value?.let { cur ->
             if (cur.openTitlePreselectedReview?.review?.uri == review.uri) cur.copy(openTitlePreselectedReview = null) else cur
         }
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             bskyRepo.deleteReview(bskyToken, did, review.uri)
         }
     }
@@ -2357,7 +2358,7 @@ _bskyDid.value          = session.did
                 creatorRole = item.mainCreditRole, genres = item.genres
             )
         )
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             val result = runCatching { WikipediaRepository.fetchDescription(item.title, item.imdbId) }.getOrNull()
             if (result == null || result.extract.isBlank()) return@launch
             val cur = _profileOverlay.value ?: return@launch
@@ -2387,7 +2388,7 @@ _bskyDid.value          = session.did
             if (it.author.did == author.did) it.copy(author = it.author.copy(isFollowing = willFollow)) else it
         }
 
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             if (!willFollow) {
                 bskyRepo.unfollowUser(bskyToken, _bskyDid.value, author.followingUri ?: return@launch)
                     .onFailure {
@@ -2456,7 +2457,7 @@ _bskyDid.value          = session.did
         // loadFeed()'s matching Log.d above.
         logD("RaccNet-FeedState", "loadE621Posts(reset=$reset)")
         if (!_e621LoggedIn.value) return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             if (reset) { e621Page = 1; _isLoading.value = true; _currentIndex.value = 0 }
             try {
                 // Bug fix: guarantee this can never leave _isLoading stuck
@@ -2557,7 +2558,7 @@ _bskyDid.value          = session.did
 
     fun showBskyLikes() {
         if (!_bskyLoggedIn.value) return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             _isLoading.value = true
             _currentIndex.value = 0
             // Save current state so user can restore
@@ -2592,7 +2593,7 @@ _bskyDid.value          = session.did
     private fun preloadFriendsFeed() {
         if (friendsFeedPreloadStarted) return
         friendsFeedPreloadStarted = true
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             ensureDmConversationsLoadedSuspend(silent = true)
             val realConvos = _dmConversations.value.filter { it.convoId.isNotBlank() }
             bskyRepo.getFriendsSharedPosts(bskyToken, _bskyDid.value, realConvos)
@@ -2642,7 +2643,7 @@ _bskyDid.value          = session.did
         }
         // Not ready yet: show the full-screen "Loading From Friends feed…" overlay
         // (handled in the UI layer) while we fetch it live.
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             _friendsFeedLoadingOverlay.value = true
             ensureDmConversationsLoadedSuspend(silent = true)
             val realConvos = _dmConversations.value.filter { it.convoId.isNotBlank() }
@@ -2661,7 +2662,7 @@ _bskyDid.value          = session.did
      *  appending rather than prepending/resorting so it doesn't shift the
      *  index of whatever the user is currently looking at. */
     private fun refreshFriendsFeedInBackground() {
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             val realConvos = _dmConversations.value.filter { it.convoId.isNotBlank() }
             bskyRepo.getFriendsSharedPosts(bskyToken, _bskyDid.value, realConvos)
                 .onSuccess { fresh ->
@@ -2694,7 +2695,7 @@ _bskyDid.value          = session.did
         val convo = _replyToConvo.value ?: return
         if (text.isBlank()) return
         _replyToConvo.value = null
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             bskyRepo.sendMessage(bskyToken, _bskyDid.value, convo.convoId, text)
                 .onSuccess { showToast("Reply sent") }
                 .onFailure { _errorMessage.value = "Reply failed: ${it.message}" }
@@ -2713,7 +2714,7 @@ _bskyDid.value          = session.did
             _mediaItems.value = _mediaItems.value.map {
                 if (it.author.did == targetDid) it.copy(isBlocked = false, blockUri = null) else it
             }
-            launch(Dispatchers.IO) {
+            launch(Dispatchers.Default) {
                 if (uri != null) {
                     bskyRepo.unblockUser(bskyToken, _bskyDid.value, uri)
                         .onSuccess { showToast("Unblocked @${item.author.handle}") }
@@ -2728,7 +2729,7 @@ _bskyDid.value          = session.did
             }
         } else {
             // Block
-            launch(Dispatchers.IO) {
+            launch(Dispatchers.Default) {
                 bskyRepo.blockUser(bskyToken, _bskyDid.value, targetDid)
                     .onSuccess { uri ->
                         showToast("Blocked @${item.author.handle}")
@@ -2752,7 +2753,7 @@ _bskyDid.value          = session.did
         val item = currentItem.value ?: return
         if (_appMode.value != AppMode.BLUESKY) return
         val generatorDid = _selectedFeedUri.value?.let { _feedGeneratorDid.value[it] }
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             bskyRepo.sendFeedInteraction(bskyToken, item.postUri, wantMore = true, feedContext = item.feedContext, generatorDid = generatorDid)
                 .onSuccess { showToast("Showing more like this") }
                 .onFailure { _errorMessage.value = "Couldn't send feedback: ${it.message}" }
@@ -2763,7 +2764,7 @@ _bskyDid.value          = session.did
         val item = currentItem.value ?: return
         if (_appMode.value != AppMode.BLUESKY) return
         val generatorDid = _selectedFeedUri.value?.let { _feedGeneratorDid.value[it] }
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             bskyRepo.sendFeedInteraction(bskyToken, item.postUri, wantMore = false, feedContext = item.feedContext, generatorDid = generatorDid)
                 .onSuccess { showToast("Showing less like this") }
                 .onFailure { _errorMessage.value = "Couldn't send feedback: ${it.message}" }
@@ -2797,7 +2798,7 @@ _bskyDid.value          = session.did
     fun submitQuoteRepost(text: String) {
         val item = _quoteRepostTarget.value ?: return
         if (_quoteRepostSubmitting.value) return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             _quoteRepostSubmitting.value = true
             bskyRepo.quoteRepost(bskyToken, _bskyDid.value, text, item.postUri, item.postCid)
                 .onSuccess {
@@ -2861,7 +2862,7 @@ _bskyDid.value          = session.did
 
     fun loadDmConversations(silent: Boolean = false) {
         if (!_bskyLoggedIn.value) return
-        launch(Dispatchers.IO) { ensureDmConversationsLoadedSuspend(silent) }
+        launch(Dispatchers.Default) { ensureDmConversationsLoadedSuspend(silent) }
     }
 
     /** Public, fire-and-forget entry point for the Hub's AT Protocol page to
@@ -2871,7 +2872,7 @@ _bskyDid.value          = session.did
      *  to self-heal if the cold-start load happened to fail. */
     fun ensureDmConversationsLoaded() {
         if (!_bskyLoggedIn.value) return
-        launch(Dispatchers.IO) { ensureDmConversationsLoadedSuspend(silent = true) }
+        launch(Dispatchers.Default) { ensureDmConversationsLoadedSuspend(silent = true) }
     }
 
     // Feature (this session): Mutuals/Latest Reviews/Livestreams used to
@@ -2896,12 +2897,12 @@ _bskyDid.value          = session.did
     // and stops retrying once its data has actually loaded (or the user's
     // logged out), so a healthy app isn't left doing pointless work forever.
     private fun startHubBackgroundWarmup() {
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             retryWithBackoff(isDone = { _dmConversations.value.isNotEmpty() || !_bskyLoggedIn.value }) {
                 ensureDmConversationsLoadedSuspend(silent = true)
             }
         }
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             retryWithBackoff(isDone = { reviewsBlogsLoaded || !_bskyLoggedIn.value }) {
                 // loadFriendsReviewsIfNeeded() launches its own coroutine and
                 // returns immediately (it's the same public entry point the
@@ -2913,19 +2914,19 @@ _bskyDid.value          = session.did
                 while (_friendsReviewsLoading.value) delay(300)
             }
         }
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             retryWithBackoff(isDone = { liveFriendsLoaded || !_bskyLoggedIn.value }) {
                 loadLiveFriendsIfNeeded()
                 while (_liveFriendsLoading.value) delay(300)
             }
         }
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             retryWithBackoff(isDone = { blueskyLiveNowLoaded || !_bskyLoggedIn.value }) {
                 loadBlueskyLiveNowIfNeeded()
                 while (_blueskyLiveNowLoading.value) delay(300)
             }
         }
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             retryWithBackoff(isDone = { _selfProfile.value != null || !_bskyLoggedIn.value }) {
                 loadSelfProfileSuspend()
             }
@@ -2945,7 +2946,7 @@ _bskyDid.value          = session.did
 
     fun startDmLivePolling() {
         if (dmLivePollingJob?.isActive == true || !_bskyLoggedIn.value) return
-        dmLivePollingJob = launch(Dispatchers.IO) {
+        dmLivePollingJob = launch(Dispatchers.Default) {
             // Seed the cursor with one no-op call so the first real poll
             // only returns messages that arrive from here on, instead of
             // replaying recent history as if it just happened.
@@ -2974,7 +2975,7 @@ _bskyDid.value          = session.did
         // — cheapest correct fix is a normal refresh, same call the DM inbox
         // itself already uses. Existing convos are just bumped in place.
         if (hasUnknownConvo) {
-            launch(Dispatchers.IO) { loadDmConversationsBlocking(silent = true) }
+            launch(Dispatchers.Default) { loadDmConversationsBlocking(silent = true) }
         } else {
             val byConvo = messageEntries.groupBy { it.convoId!! }
             _dmConversations.value = _dmConversations.value.map { convo ->
@@ -3076,7 +3077,7 @@ _bskyDid.value          = session.did
         val item = _sendPopupTarget.value ?: return
         val recipients = _dmConversations.value.filter { _sendPopupSelected.value.contains(it.member.did) }
         if (recipients.isEmpty()) return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             _sendPopupSending.value = true
             var failures = 0
             var lastError: String? = null
@@ -3213,7 +3214,7 @@ _bskyDid.value          = session.did
         val idx = _currentIndex.value
         val item = _mediaItems.value.getOrNull(idx) ?: return
         if (item.tags.isNotBlank() || item.postUri.isBlank()) return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             val aiTags = taggingRepo.tagsForPost(item.postUri)
             if (aiTags.isEmpty()) return@launch
             withContext(Dispatchers.Main) {
@@ -3260,14 +3261,14 @@ _bskyDid.value          = session.did
             if (item.isLiked) {
                 // Optimistic unlike
                 updateCurrentItem { it.copy(isLiked = false, likeUri = null, likeCount = (it.likeCount - 1).coerceAtLeast(0)) }
-                launch(Dispatchers.IO) {
+                launch(Dispatchers.Default) {
                     bskyRepo.unlikePost(bskyToken, _bskyDid.value, item.likeUri ?: return@launch)
                         .onFailure { updateCurrentItem { it.copy(isLiked = true, likeUri = item.likeUri, likeCount = item.likeCount) } }
                 }
             } else {
                 // Optimistic like
                 updateCurrentItem { it.copy(isLiked = true, likeCount = it.likeCount + 1) }
-                launch(Dispatchers.IO) {
+                launch(Dispatchers.Default) {
                     bskyRepo.likePost(bskyToken, _bskyDid.value, item.postUri, item.postCid)
                         .onSuccess { uri ->
                             updateCurrentItem { it.copy(likeUri = uri) }
@@ -3288,13 +3289,13 @@ _bskyDid.value          = session.did
         if (_appMode.value != AppMode.BLUESKY) return
         if (item.isReposted) {
             updateCurrentItem { it.copy(isReposted = false, repostUri = null, repostCount = (it.repostCount - 1).coerceAtLeast(0)) }
-            launch(Dispatchers.IO) {
+            launch(Dispatchers.Default) {
                 bskyRepo.unrepost(bskyToken, _bskyDid.value, item.repostUri ?: return@launch)
                     .onFailure { updateCurrentItem { it.copy(isReposted = true, repostUri = item.repostUri, repostCount = item.repostCount) } }
             }
         } else {
             updateCurrentItem { it.copy(isReposted = true, repostCount = it.repostCount + 1) }
-            launch(Dispatchers.IO) {
+            launch(Dispatchers.Default) {
                 bskyRepo.repostPost(bskyToken, _bskyDid.value, item.postUri, item.postCid)
                     .onSuccess { uri -> updateCurrentItem { it.copy(repostUri = uri) } }
                     .onFailure { updateCurrentItem { it.copy(isReposted = false, repostCount = item.repostCount) } }
@@ -3308,13 +3309,13 @@ _bskyDid.value          = session.did
             val pid = item.e621PostId ?: return
             if (item.isBookmarked) {
                 updateCurrentItem { it.copy(isBookmarked = false) }
-                launch(Dispatchers.IO) {
+                launch(Dispatchers.Default) {
                     e621Repo.removeFavorite(e621Username, e621ApiKey, pid)
                         .onFailure { updateCurrentItem { it.copy(isBookmarked = true) } }
                 }
             } else {
                 updateCurrentItem { it.copy(isBookmarked = true) }
-                launch(Dispatchers.IO) {
+                launch(Dispatchers.Default) {
                     e621Repo.addFavorite(e621Username, e621ApiKey, pid)
                         .onSuccess {
                             if (_downloadOnLike.value) {
@@ -3329,7 +3330,7 @@ _bskyDid.value          = session.did
         } else {
             val wasBookmarked = item.isBookmarked
             updateCurrentItem { it.copy(isBookmarked = !wasBookmarked) }
-            launch(Dispatchers.IO) {
+            launch(Dispatchers.Default) {
                 if (wasBookmarked) {
                     bskyRepo.removeBookmark(bskyToken, item.postUri)
                         .onFailure { updateCurrentItem { it.copy(isBookmarked = true) } }
@@ -3346,7 +3347,7 @@ _bskyDid.value          = session.did
         val pid  = item.e621PostId ?: return
         val newVote = if (item.e621UserVote == vote) 0 else vote
         updateCurrentItem { it.copy(e621UserVote = newVote) }
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             e621Repo.votePost(e621Username, e621ApiKey, pid, if (newVote == 0) (vote * -1) else newVote)
                 .onFailure { updateCurrentItem { it.copy(e621UserVote = item.e621UserVote) } }
         }
@@ -3358,13 +3359,13 @@ _bskyDid.value          = session.did
         val author = item.author
         if (author.isFollowing) {
             updateCurrentItemAuthor { it.copy(isFollowing = false, followingUri = null) }
-            launch(Dispatchers.IO) {
+            launch(Dispatchers.Default) {
                 bskyRepo.unfollowUser(bskyToken, _bskyDid.value, author.followingUri ?: return@launch)
                     .onFailure { updateCurrentItemAuthor { it.copy(isFollowing = true, followingUri = author.followingUri) } }
             }
         } else {
             updateCurrentItemAuthor { it.copy(isFollowing = true) }
-            launch(Dispatchers.IO) {
+            launch(Dispatchers.Default) {
                 bskyRepo.followUser(bskyToken, _bskyDid.value, author.did)
                     .onSuccess { uri ->
                         updateCurrentItemAuthor { it.copy(followingUri = uri) }
@@ -3394,7 +3395,7 @@ _bskyDid.value          = session.did
      *  Called right after login so the picker opens instantly. */
     private fun prefetchUserLists() {
         if (!_bskyLoggedIn.value || _bskyDid.value.isBlank()) return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             val listJob = launch {
                 bskyRepo.getUserLists(bskyToken, _bskyDid.value)
                     .onSuccess { _userLists.value = it; prefetchListAvatars(it) }
@@ -3415,7 +3416,7 @@ _bskyDid.value          = session.did
             return
         }
         // Otherwise fetch now (first login or cleared cache)
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             _userListsLoading.value = true
             val listJob = launch {
                 bskyRepo.getUserLists(bskyToken, _bskyDid.value)
@@ -3437,7 +3438,7 @@ _bskyDid.value          = session.did
     fun addAccountToList(listUri: String, additionalListUri: String? = null) {
         val targetDid = _listPickerTargetDid.value ?: return
         _listPickerTargetDid.value = null
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             bskyRepo.addToList(bskyToken, _bskyDid.value, listUri, targetDid)
                 .onSuccess { showToast("Added to list") }
                 .onFailure { _errorMessage.value = "Add to list failed: ${it.message}" }
@@ -3475,7 +3476,7 @@ _bskyDid.value          = session.did
 
     private fun loadComments() {
         val item = currentItem.value ?: return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             _commentsLoading.value = true
             _comments.value = emptyList()
             if (_appMode.value == AppMode.BLUESKY)
@@ -3499,7 +3500,7 @@ _bskyDid.value          = session.did
     // as Bluesky's own reply-thread semantics.
     fun postComment(text: String, replyTo: CommentItem? = null) {
         val item = currentItem.value ?: return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             if (_appMode.value == AppMode.BLUESKY) {
                 val parentUri = replyTo?.uri?.takeIf { it.isNotBlank() } ?: item.postUri
                 val parentCid = replyTo?.cid?.takeIf { it.isNotBlank() } ?: item.postCid
@@ -3519,7 +3520,7 @@ _bskyDid.value          = session.did
         if (_appMode.value != AppMode.BLUESKY) return
         val newLiked = !comment.isLiked
         updateComment(comment.id) { it.copy(isLiked = newLiked, likeCount = if (newLiked) it.likeCount + 1 else (it.likeCount - 1).coerceAtLeast(0)) }
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             if (comment.isLiked) {
                 bskyRepo.unlikeComment(bskyToken, _bskyDid.value, comment.likeUri ?: return@launch)
                     .onFailure { updateComment(comment.id) { it.copy(isLiked = comment.isLiked, likeCount = comment.likeCount) } }
@@ -3535,7 +3536,7 @@ _bskyDid.value          = session.did
         if (_appMode.value != AppMode.E621) return
         val newVote = if (comment.e621UserVote == vote) 0 else vote
         updateComment(comment.id) { it.copy(e621UserVote = newVote) }
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             val id = comment.id.toIntOrNull() ?: return@launch
             e621Repo.voteComment(e621Username, e621ApiKey, id, if (newVote == 0) vote * -1 else newVote)
                 .onFailure { updateComment(comment.id) { it.copy(e621UserVote = comment.e621UserVote) } }
@@ -3570,7 +3571,7 @@ _bskyDid.value          = session.did
     }
 
     private fun downloadAllBskyLiked() {
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             _downloadProgress.value = DownloadProgress(0, true)
             var cursor: String? = null
             var total = 0
@@ -3589,7 +3590,7 @@ _bskyDid.value          = session.did
     }
 
     private fun downloadAllE621Favorites() {
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             _downloadProgress.value = DownloadProgress(0, true)
             var page  = 1
             var total = 0
@@ -3735,7 +3736,7 @@ _bskyDid.value          = session.did
     }
 
     private fun refreshTaggingCounts() {
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             val (scanned, tagged) = taggingRepo.currentCounts()
             _hasTaggedDataset.value = scanned > 0
             _taggingUiState.value = _taggingUiState.value.copy(scanned = scanned, tagged = tagged, datasetBytes = taggingRepo.datasetSizeBytes())
@@ -3743,7 +3744,7 @@ _bskyDid.value          = session.did
     }
 
     private fun refreshImportedDatasets() {
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             _importedDatasets.value = taggingRepo.listImportedDatasets()
         }
     }
@@ -3754,7 +3755,7 @@ _bskyDid.value          = session.did
 
     private fun maybeTagOnLike(item: MediaItem) {
         if (!tagPostWhenLiked.value) return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             taggingRepo.tagOnLike(item)
             refreshTaggingCounts()
         }
@@ -3768,7 +3769,7 @@ _bskyDid.value          = session.did
         if (_taggingUiState.value.isRunning) return
         _taggingOverlayOpen.value = true
         _taggingUiState.value = _taggingUiState.value.copy(isRunning = true, isComplete = false, errorMessage = null)
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             taggingRepo.tagAllLiked(
                 isBlueskyMode = _appMode.value == AppMode.BLUESKY,
                 bskyToken = bskyToken,
@@ -3813,7 +3814,7 @@ _bskyDid.value          = session.did
      *  the next unrelated refresh happened to overwrite them. */
     fun deleteTaggedDatabase() {
         if (_taggingUiState.value.isRunning) taggingRepo.cancel()
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             taggingRepo.deleteDatabase()
             _hasTaggedDataset.value = false
             _taggingUiState.value = TaggingUiState()
@@ -3875,7 +3876,7 @@ _bskyDid.value          = session.did
      *  full backup/share of "their dataset" as a whole rather than picking
      *  one dataset to export. */
     fun exportDataset(name: String, uri: Any) {
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             try {
                 val json = buildDatasetExportJson(name)
                 // PORT: the legacy wrote `json` to the picked document via
@@ -3895,7 +3896,7 @@ _bskyDid.value          = session.did
      *  it separate from every other dataset already on the device (see that
      *  method's own doc comment). */
     fun importDatasetFromUri(uri: Any) {
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             try {
                 // PORT: the legacy read the picked file's bytes via Android's
                 // contentResolver — no platform file-read seam in the current
@@ -3928,7 +3929,7 @@ _bskyDid.value          = session.did
      *  comment for why every other dataset (including the local one) is
      *  untouched. */
     fun deleteImportedDataset(id: String) {
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             taggingRepo.deleteDataset(id)
             refreshImportedDatasets()
             refreshTaggingCounts()
@@ -3946,7 +3947,7 @@ _bskyDid.value          = session.did
         // Item 2: land back on the Liked tab's default "everything, most
         // recent first" browse rather than whatever stale search results
         // (or lack thereof) were showing before tagging started.
-        launch(Dispatchers.IO) { performLikedTagSearch("") }
+        launch(Dispatchers.Default) { performLikedTagSearch("") }
     }
 
     /** Item 2: the query text field's live value updates on every
@@ -3967,7 +3968,7 @@ _bskyDid.value          = session.did
             _tagSuggestions.value = emptyList()
             return
         }
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             val vocabulary = taggingRepo.tagVocabulary()
             _tagSuggestions.value = suggestTagMatches(lastWord, vocabulary)
         }
@@ -4003,7 +4004,7 @@ _bskyDid.value          = session.did
 
     fun submitLikedSearch() {
         _tagSuggestions.value = emptyList()
-        launch(Dispatchers.IO) { performLikedTagSearch(_searchState.value.query) }
+        launch(Dispatchers.Default) { performLikedTagSearch(_searchState.value.query) }
     }
 
     /** Item 2: blank query browses everything tagged so far, most recent
@@ -4051,7 +4052,7 @@ _bskyDid.value          = session.did
     fun openLikedPostFromSearch(index: Int) {
         val results = _likedTagSearchResults.value
         if (index !in results.indices) return
-        launch(Dispatchers.IO) {
+        launch(Dispatchers.Default) {
             val withTags = results.map { item ->
                 if (item.tags.isNotBlank()) item
                 else {

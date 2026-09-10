@@ -7,7 +7,10 @@ pluginManagement {
 }
 
 dependencyResolutionManagement {
-    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    // PREFER_SETTINGS (not FAIL_ON_PROJECT_REPOS): the Kotlin wasmJs toolchain
+    // downloads Node.js from https://nodejs.org/dist and registers that
+    // repository itself — the strict mode rejects it and breaks the web build.
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
     repositories {
         google()
         mavenCentral()

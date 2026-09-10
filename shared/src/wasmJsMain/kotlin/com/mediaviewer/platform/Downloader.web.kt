@@ -32,7 +32,10 @@ actual class PlatformDownloader actual constructor() {
         mimeType: String,
         onProgress: (downloadedBytes: Long, totalBytes: Long?) -> Unit,
     ) {
-        val response = window.fetch(url).await()
+        // Top-level fetch() from org.w3c.fetch (imported above); on the wasmJs
+        // DOM bindings it is not a member of `window`.
+        // await() on JsPromise returns a nullable result in coroutines 1.10.x.
+        val response = fetch(url).await() ?: error("Fetch failed: $url")
         if (!response.ok) error("HTTP ${response.status} downloading $url")
         val total = response.headers.get("content-length")?.toLongOrNull()
         val stream = response.body ?: error("Empty body downloading $url")
@@ -42,7 +45,7 @@ actual class PlatformDownloader actual constructor() {
         var received = 0L
         try {
             while (true) {
-                val result = reader.read().await()
+                val result = reader.read().await() ?: break
                 if (result.done) break
                 val chunk = result.value as? Uint8Array ?: continue
                 val bytes = ByteArray(chunk.length) { i -> chunk[i] }

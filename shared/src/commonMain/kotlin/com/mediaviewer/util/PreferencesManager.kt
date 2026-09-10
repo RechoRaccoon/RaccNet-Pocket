@@ -6,6 +6,7 @@ import com.russhwolf.settings.coroutines.getFloatFlow
 import com.russhwolf.settings.coroutines.getIntFlow
 import com.russhwolf.settings.coroutines.getLongFlow
 import com.russhwolf.settings.coroutines.getStringFlow
+import com.russhwolf.settings.coroutines.getStringOrNullFlow
 import com.russhwolf.settings.coroutines.getStringSetFlow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -98,18 +99,18 @@ class PreferencesManager(private val settings: ObservableSettings) {
     // use DataStore's atomic edit{} here, so they serialize on this mutex.
     private val editMutex = Mutex()
 
-    val bskyAccessJwt: Flow<String?>  = settings.getStringFlow(PrefKeys.BSKY_ACCESS_JWT, null)
-    val bskyRefreshJwt: Flow<String?> = settings.getStringFlow(PrefKeys.BSKY_REFRESH_JWT, null)
-    val bskyDid: Flow<String?>        = settings.getStringFlow(PrefKeys.BSKY_DID, null)
-    val bskyHandle: Flow<String?>     = settings.getStringFlow(PrefKeys.BSKY_HANDLE, null)
+    val bskyAccessJwt: Flow<String?>  = settings.getStringOrNullFlow(PrefKeys.BSKY_ACCESS_JWT)
+    val bskyRefreshJwt: Flow<String?> = settings.getStringOrNullFlow(PrefKeys.BSKY_REFRESH_JWT)
+    val bskyDid: Flow<String?>        = settings.getStringOrNullFlow(PrefKeys.BSKY_DID)
+    val bskyHandle: Flow<String?>     = settings.getStringOrNullFlow(PrefKeys.BSKY_HANDLE)
     val bskyServiceUrl: Flow<String>  = settings.getStringFlow(PrefKeys.BSKY_SERVICE_URL, "https://bsky.social/")
-    val e621Username: Flow<String?>   = settings.getStringFlow(PrefKeys.E621_USERNAME, null)
-    val e621ApiKey: Flow<String?>     = settings.getStringFlow(PrefKeys.E621_API_KEY, null)
+    val e621Username: Flow<String?>   = settings.getStringOrNullFlow(PrefKeys.E621_USERNAME)
+    val e621ApiKey: Flow<String?>     = settings.getStringOrNullFlow(PrefKeys.E621_API_KEY)
     val downloadOnLike: Flow<Boolean> = settings.getBooleanFlow(PrefKeys.DOWNLOAD_ON_LIKE, false)
     val lastMode: Flow<String>        = settings.getStringFlow(PrefKeys.LAST_MODE, "BLUESKY")
     val reducedAnimations: Flow<Boolean> = settings.getBooleanFlow(PrefKeys.REDUCED_ANIMATIONS, false)
-    val lastFeedUri: Flow<String?>    = settings.getStringFlow(PrefKeys.LAST_FEED_URI, null)
-    val lastE621Tags: Flow<String?>   = settings.getStringFlow(PrefKeys.LAST_E621_TAGS, null)
+    val lastFeedUri: Flow<String?>    = settings.getStringOrNullFlow(PrefKeys.LAST_FEED_URI)
+    val lastE621Tags: Flow<String?>   = settings.getStringOrNullFlow(PrefKeys.LAST_E621_TAGS)
     val lastPickerTab: Flow<String>   = settings.getStringFlow(PrefKeys.LAST_PICKER_TAB, "LISTS")
     val e621FollowedArtists: Flow<Set<String>> = settings.getStringSetFlow(PrefKeys.E621_FOLLOWED_ARTISTS, emptySet())
     val combineListsAndPacks: Flow<Boolean>    = settings.getBooleanFlow(PrefKeys.COMBINE_LISTS_PACKS, false)
@@ -139,8 +140,8 @@ class PreferencesManager(private val settings: ObservableSettings) {
     val translateTargetLang: Flow<String>      = settings.getStringFlow(PrefKeys.TRANSLATE_TARGET_LANG, defaultLanguageTag())
     // Phase 4: custom font pack — absolute path to the copied-in font file on
     // internal storage, plus its original display name for the Settings row.
-    val customFontPath: Flow<String?>          = settings.getStringFlow(PrefKeys.CUSTOM_FONT_PATH, null)
-    val customFontName: Flow<String?>          = settings.getStringFlow(PrefKeys.CUSTOM_FONT_NAME, null)
+    val customFontPath: Flow<String?>          = settings.getStringOrNullFlow(PrefKeys.CUSTOM_FONT_PATH)
+    val customFontName: Flow<String?>          = settings.getStringOrNullFlow(PrefKeys.CUSTOM_FONT_NAME)
     val tagPostWhenLiked: Flow<Boolean>        = settings.getBooleanFlow(PrefKeys.TAG_POST_WHEN_LIKED, false)
     val tagConcurrency: Flow<Int>              = settings.getIntFlow(PrefKeys.TAG_CONCURRENCY, 3).map { it.coerceIn(1, 10) }
 

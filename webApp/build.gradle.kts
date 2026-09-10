@@ -17,6 +17,11 @@ kotlin {
     sourceSets {
         wasmJsMain.dependencies {
             implementation(project(":shared"))
+            // Main.kt references ComposeViewport/@Composable directly; :shared only
+            // exposes them as `implementation`, so they must be declared here too.
+            implementation(compose.runtime)
+            implementation(compose.ui)
+            implementation(libs.kotlinx.browser)
         }
     }
 }

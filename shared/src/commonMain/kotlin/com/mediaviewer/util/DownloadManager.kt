@@ -2,6 +2,7 @@ package com.mediaviewer.util
 
 import com.mediaviewer.platform.PlatformDeps
 import com.mediaviewer.repository.BlueskyBlobResolver
+import kotlinx.datetime.Clock
 
 /**
  * Shared download orchestration — the commonMain half of the legacy
@@ -66,7 +67,7 @@ class DownloadManager(private val deps: PlatformDeps) {
         // function this call compiles unchanged; if it stays blocking, the
         // caller is already inside a suspend function so it also compiles.
         val url = BlueskyBlobResolver.resolveBlobUrl(did, cid)
-        val filename = "simpleOSFeed_${postId}_${System.currentTimeMillis()}.mp4"
+        val filename = "simpleOSFeed_${postId}_${Clock.System.now().toEpochMilliseconds()}.mp4"
         enqueue(url, filename, "video/mp4", postId)
     }
 
@@ -109,5 +110,5 @@ fun urlToDownloadInfo(url: String, postId: String, isVideo: Boolean = false): Tr
         ext == "webp"              -> "image/webp"
         else -> "image/jpeg"
     }
-    return Triple(url, "simpleOSFeed_${postId}_${System.currentTimeMillis()}.$ext", mimeType)
+    return Triple(url, "simpleOSFeed_${postId}_${Clock.System.now().toEpochMilliseconds()}.$ext", mimeType)
 }

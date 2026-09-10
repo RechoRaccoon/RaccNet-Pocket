@@ -9,20 +9,20 @@ import com.mediaviewer.model.MediaItem
  */
 actual class TaggingController actual constructor() {
 
-    fun currentCounts(): Pair<Int, Int> = 0 to 0
-    fun datasetSizeBytes(): Long = 0L
-    fun isModelReady(): Boolean = false
-    fun tagVocabulary(): List<String> = emptyList()
-    fun cancel() = Unit
+    actual fun currentCounts(): Pair<Int, Int> = 0 to 0
+    actual fun datasetSizeBytes(): Long = 0L
+    actual fun isModelReady(): Boolean = false
+    actual fun tagVocabulary(): List<String> = emptyList()
+    actual fun cancel() = Unit
 
-    suspend fun deleteDatabase() = Unit
-    suspend fun exportAllPosts(): List<ExportedPost> = emptyList()
-    suspend fun importDataset(name: String, posts: List<ExportedPost>): DatasetInfo =
+    actual suspend fun deleteDatabase() = Unit
+    actual suspend fun exportAllPosts(): List<ExportedPost> = emptyList()
+    actual suspend fun importDataset(name: String, posts: List<ExportedPost>): DatasetInfo =
         DatasetInfo(id = "", name = name, importedAt = 0L, postCount = 0)
-    suspend fun listImportedDatasets(): List<DatasetInfo> = emptyList()
-    suspend fun deleteDataset(id: String) = Unit
+    actual suspend fun listImportedDatasets(): List<DatasetInfo> = emptyList()
+    actual suspend fun deleteDataset(id: String) = Unit
 
-    suspend fun tagAllLiked(
+    actual suspend fun tagAllLiked(
         isBlueskyMode: Boolean,
         bskyToken: String,
         bskyDid: String,
@@ -32,9 +32,9 @@ actual class TaggingController actual constructor() {
         onProgress: (TaggingProgress) -> Unit,
     ) = Unit
 
-    suspend fun tagOnLike(item: MediaItem) = Unit
+    actual suspend fun tagOnLike(item: MediaItem) = Unit
 
-    fun search(query: String): List<String> = emptyList()
-    fun browseAllTagged(limit: Int): List<String> = emptyList()
-    fun tagsForPost(postUri: String): List<String> = emptyList()
+    actual fun search(query: String): List<String> = emptyList()
+    actual fun browseAllTagged(limit: Int): List<String> = emptyList()
+    actual fun tagsForPost(postUri: String): List<String> = emptyList()
 }

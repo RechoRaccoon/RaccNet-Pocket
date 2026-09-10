@@ -76,7 +76,7 @@ object WikipediaRepository {
      *  doc comment) and used as the "open full article" link. */
     data class WikipediaExtract(val extract: String, val pageTitle: String, val pageUrl: String)
 
-    // PORT: Dispatchers.IO doesn't exist in commonMain — Dispatchers.Default
+    // PORT: Dispatchers.Default doesn't exist in commonMain — Dispatchers.Default
     // (Ktor never blocks a thread here anyway).
     suspend fun fetchDescription(title: String, imdbId: String? = null): WikipediaExtract? = withContext(Dispatchers.Default) {
         val sitelinkTitle = imdbId?.takeIf { it.isNotBlank() }?.let { resolveEnwikiTitleByImdbId(it) }

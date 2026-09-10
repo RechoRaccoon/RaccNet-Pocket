@@ -59,6 +59,7 @@ import com.mediaviewer.ui.theme.*
 import com.mediaviewer.viewmodel.MainViewModel
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.*
+import kotlinx.datetime.Clock
 
 private val SWIPE_ANIM = tween<IntOffset>(200, easing = FastOutSlowInEasing)
 
@@ -977,7 +978,7 @@ private fun PostContent(
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         val downPos = down.position
-                        val downTime = System.currentTimeMillis()
+                        val downTime = Clock.System.now().toEpochMilliseconds()
                         val prevPos = lastTapPos
                         val isNearLastTap = prevPos != null && run {
                             val ddx = downPos.x - prevPos.x; val ddy = downPos.y - prevPos.y
@@ -1036,7 +1037,7 @@ private fun PostContent(
                         var externallyClaimed = false
 
                         while (true) {
-                            val elapsed = System.currentTimeMillis() - downTime
+                            val elapsed = Clock.System.now().toEpochMilliseconds() - downTime
                             if (!menuOpen && !longPressFired && !pointerCountEverTwo && !externallyClaimed &&
                                 elapsed >= 450L && abs(stillDx) < 28f && abs(stillDy) < 28f) {
                                 longPressFired = true
