@@ -2,10 +2,8 @@ package com.mediaviewer.webapp
 
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.window.ComposeViewport
-import coil3.ImageLoader
-import coil3.compose.setSingletonImageLoaderFactory
-import coil3.network.ktor3.KtorNetworkFetcherFactory
 import com.mediaviewer.App
+import com.mediaviewer.platform.ConfigureWebImageLoader
 import kotlinx.browser.document
 
 /**
@@ -17,15 +15,7 @@ import kotlinx.browser.document
 fun main() {
     val body = document.body ?: error("index.html has no <body>")
     ComposeViewport(body) {
-        // Coil 3 ships without a network fetcher — without this, AsyncImage
-        // silently fails to load any network images on web.
-        setSingletonImageLoaderFactory { context ->
-            ImageLoader.Builder(context)
-                .components {
-                    add(KtorNetworkFetcherFactory())
-                }
-                .build()
-        }
+        ConfigureWebImageLoader()
         App()
     }
 }
