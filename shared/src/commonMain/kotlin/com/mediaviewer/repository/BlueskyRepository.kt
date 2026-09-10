@@ -19,7 +19,6 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.datetime.Clock
 import kotlin.concurrent.Volatile
-import kotlin.text.Charsets
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -444,7 +443,7 @@ class BlueskyRepository {
         // richtext-facet shape Bluesky posts themselves use.
         fun textSpansOf(block: JsonObject): List<LeafletTextSpan> {
             val plaintext = rawTextOf(block) ?: return emptyList()
-            val bytes = plaintext.toByteArray(Charsets.UTF_8)
+            val bytes = plaintext.toByteArray()
             val boldRanges = mutableListOf<IntRange>()
             val facets = block["facets"] as? JsonArray
             if (facets != null) {
@@ -1501,8 +1500,8 @@ class BlueskyRepository {
         val regex = Regex("(?<=^|[\\s])#([a-zA-Z0-9_]+)")
         return regex.findAll(text).map { m ->
             val tag = m.groupValues[1]
-            val byteStart = text.substring(0, m.range.first).toByteArray(Charsets.UTF_8).size
-            val byteEnd   = text.substring(0, m.range.last + 1).toByteArray(Charsets.UTF_8).size
+            val byteStart = text.substring(0, m.range.first).toByteArray().size
+            val byteEnd   = text.substring(0, m.range.last + 1).toByteArray().size
             mapOf(
                 "index" to buildJsonObject {
                     put("byteStart", JsonPrimitive(byteStart))
