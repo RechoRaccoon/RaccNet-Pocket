@@ -1,17 +1,20 @@
 package com.mediaviewer.util
 
 import com.russhwolf.settings.ObservableSettings
+import com.russhwolf.settings.Settings
 import com.russhwolf.settings.coroutines.getBooleanFlow
 import com.russhwolf.settings.coroutines.getFloatFlow
 import com.russhwolf.settings.coroutines.getIntFlow
 import com.russhwolf.settings.coroutines.getLongFlow
 import com.russhwolf.settings.coroutines.getStringFlow
 import com.russhwolf.settings.coroutines.getStringOrNullFlow
-import com.russhwolf.settings.coroutines.getStringSetFlow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.builtins.SetSerializer
+import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.json.Json
 
 /**
  * Default BCP-47 language tag used when no translation target language has
@@ -22,6 +25,33 @@ import kotlinx.coroutines.sync.withLock
  * this helper later.
  */
 fun defaultLanguageTag(): String = "en"
+
+// ── StringSet support (not in multiplatform-settings 1.3.0) ─────────────
+// The legacy Android build used DataStore's stringSetPreferencesKey. The
+// multiplatform-settings 1.3.0 API has no StringSet type, so sets are
+// stored as JSON-encoded strings. Keys are unchanged, so existing
+// installs keep their values (the JSON format is new, but the old
+// DataStore values don't transfer to the KMP build anyway).
+private val stringSetJson = Json { encodeDefaults = true }
+
+private fun encodeStringSet(value: Set<String>): String =
+    stringSetJson.encodeToString(SetSerializer(String.serializer()), value)
+
+private fun decodeStringSet(encoded: String): Set<String> = runCatching {
+    stringSetJson.decodeFromString(SetSerializer(String.serializer()), encoded)
+}.getOrDefault(emptySet())
+
+fun Settings.getStringSetOrNull(key: String): Set<String>? {
+    val encoded = getStringOrNull(key) ?: return null
+    return decodeStringSet(encoded)
+}
+
+fun Settings.putStringSet(key: String, value: Set<String>) {
+    putString(key, encodeStringSet(value))
+}
+
+fun ObservableSettings.getStringSetFlow(key: String, defaultValue: Set<String>): Flow<Set<String>> =
+    getStringOrNullFlow(key).map { it?.let(::decodeStringSet) ?: defaultValue }
 
 /** Preference key names — kept identical to the legacy DataStore build so
  *  existing Android installs keep their stored values after migration. */
