@@ -38,7 +38,7 @@ object NetworkClient {
             json(json)
         }
         install(Logging) {
-            level = LogLevel.BASIC
+            level = LogLevel.INFO
         }
         install(HttpTimeout) {
             connectTimeoutMillis = 30_000
