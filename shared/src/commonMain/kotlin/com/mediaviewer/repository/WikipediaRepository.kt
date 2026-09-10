@@ -140,7 +140,7 @@ object WikipediaRepository {
         // already-underscore/percent-encoded sitelink title here is
         // harmless — '_' passes through unchanged either way.
         // PORT: java.net.URLEncoder -> Ktor encodeURLPathPart.
-        val encoded = encodeURLPathPart(pageTitle.replace(' ', '_'))
+        val encoded = pageTitle.replace(' ', '_').encodeURLPathPart()
         val resp = http.get(WIKIPEDIA_SUMMARY + encoded)
         if (!resp.status.isSuccess()) return@runCatching null
         val bodyStr = resp.bodyAsText()
@@ -158,7 +158,7 @@ object WikipediaRepository {
             ?.get("desktop")?.jsonObject
             ?.get("page")?.jsonPrimitive?.content
             ?.takeIf { it.isNotBlank() }
-            ?: "https://en.wikipedia.org/wiki/${encodeURLPathPart(canonicalTitle.replace(' ', '_'))}"
+            ?: "https://en.wikipedia.org/wiki/${canonicalTitle.replace(' ', '_').encodeURLPathPart()}"
         WikipediaExtract(extract = extract, pageTitle = canonicalTitle, pageUrl = pageUrl)
     }.getOrNull()
 }
