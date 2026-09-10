@@ -1,5 +1,6 @@
 package com.mediaviewer.ui
 
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.backhandler.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
@@ -47,6 +48,7 @@ private data class CombinedEntry(
 // post's live backdrop layer and, in Glass mode, show no outer background of
 // its own — the post stays genuinely visible around it instead of being
 // dimmed toward it.
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun ListPickerDialog(
     lists: List<BskyList>,
