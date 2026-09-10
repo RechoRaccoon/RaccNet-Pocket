@@ -1,7 +1,7 @@
 package com.mediaviewer.platform
 
+import com.russhwolf.settings.Listener
 import com.russhwolf.settings.ObservableSettings
-import com.russhwolf.settings.Settings
 import kotlinx.browser.localStorage
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
@@ -14,6 +14,15 @@ import kotlinx.serialization.json.Json
  * primitives via their string form, string sets as JSON arrays. This keeps
  * login tokens, theme, feed filters and every other preference across page
  * reloads — the earlier in-memory fallback lost all of them on refresh.
+ *
+ * Written against multiplatform-settings 1.3.0's API:
+ * - put/remove/clear are synchronous (not suspend like 2.x)
+ * - there is no StringSet API at all (getStringSet/putStringSet are plain
+ *   methods here; PreferencesManager's commonMain extensions provide the
+ *   public StringSet API on top of the String methods)
+ * - there are no addStringSetListener/addStringSetOrNullListener overrides
+ * - Listener is a top-level type (com.russhwolf.settings.Listener),
+ *   not nested in Settings
  *
  * Listeners are same-tab only (the StorageEvent fires in *other* tabs, which
  * is out of scope for this app's usage).
@@ -80,8 +89,7 @@ internal class LocalStorageObservableSettings : ObservableSettings {
     override fun getStringOrNull(key: String): String? = raw(key)
 
     // Not overrides: multiplatform-settings 1.3.0 has no StringSet API.
-    // Kept as regular methods for the addStringSetListener helpers below;
-    // the PreferencesManager extensions provide the public API.
+    // The PreferencesManager commonMain extensions provide the public API.
     fun getStringSet(key: String, defaultValue: Set<String>): Set<String> =
         getStringSetOrNull(key) ?: defaultValue
     fun getStringSetOrNull(key: String): Set<String>? = raw(key)?.let {
@@ -120,30 +128,27 @@ internal class LocalStorageObservableSettings : ObservableSettings {
         removed.forEach(::notify)
     }
 
-    private fun addListener(key: String, notify: () -> Unit): Settings.Listener {
+    private fun addListener(key: String, notify: () -> Unit): Listener {
         val entry: (String) -> Unit = { changed -> if (changed == key) notify() }
         listeners += entry
-        return Settings.Listener { listeners -= entry }
+        return Listener { listeners -= entry }
     }
 
-    override fun addBooleanListener(key: String, defaultValue: Boolean, callback: (Boolean) -> Unit): Settings.Listener =
+    override fun addBooleanListener(key: String, defaultValue: Boolean, callback: (Boolean) -> Unit): Listener =
         addListener(key) { callback(getBoolean(key, defaultValue)) }
-    override fun addIntListener(key: String, defaultValue: Int, callback: (Int) -> Unit): Settings.Listener =
+    override fun addIntListener(key: String, defaultValue: Int, callback: (Int) -> Unit): Listener =
         addListener(key) { callback(getInt(key, defaultValue)) }
-    override fun addLongListener(key: String, defaultValue: Long, callback: (Long) -> Unit): Settings.Listener =
+    override fun addLongListener(key: String, defaultValue: Long, callback: (Long) -> Unit): Listener =
         addListener(key) { callback(getLong(key, defaultValue)) }
-    override fun addFloatListener(key: String, defaultValue: Float, callback: (Float) -> Unit): Settings.Listener =
+    override fun addFloatListener(key: String, defaultValue: Float, callback: (Float) -> Unit): Listener =
         addListener(key) { callback(getFloat(key, defaultValue)) }
-    override fun addDoubleListener(key: String, defaultValue: Double, callback: (Double) -> Unit): Settings.Listener =
+    override fun addDoubleListener(key: String, defaultValue: Double, callback: (Double) -> Unit): Listener =
         addListener(key) { callback(getDouble(key, defaultValue)) }
-    override fun addStringListener(key: String, defaultValue: String, callback: (String) -> Unit): Settings.Listener =
+    override fun addStringListener(key: String, defaultValue: String, callback: (String) -> Unit): Listener =
         addListener(key) { callback(getString(key, defaultValue)) }
-    override fun addStringOrNullListener(key: String, callback: (String?) -> Unit): Settings.Listener =
+    override fun addStringOrNullListener(key: String, callback: (String?) -> Unit): Listener =
         addListener(key) { callback(getStringOrNull(key)) }
-    override fun addStringSetListener(key: String, defaultValue: Set<String>, callback: (Set<String>) -> Unit): Settings.Listener =
-        addListener(key) { callback(getStringSet(key, defaultValue)) }
-    override fun addStringSetOrNullListener(key: String, callback: (Set<String>?) -> Unit): Settings.Listener =
-        addListener(key) { callback(getStringSetOrNull(key)) }
+    // NOTE: 1.3.0 has no addStringSetListener/addStringSetOrNullListener.
 }
 
 actual fun createObservableSettings(): ObservableSettings = LocalStorageObservableSettings()
