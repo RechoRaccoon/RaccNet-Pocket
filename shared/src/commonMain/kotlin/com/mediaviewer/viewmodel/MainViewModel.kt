@@ -402,8 +402,8 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
     private fun JsonObject.obj(key: String): JsonObject? = this[key] as? JsonObject
 
     private fun AuthorInfo.toCacheJson(): JsonObject = buildJsonObject {
-        put("did", did); put("handle", handle); put("displayName", displayName)
-        put("avatarUrl", avatarUrl); put("followingUri", followingUri); put("isFollowing", isFollowing)
+        put("did", JsonPrimitive(did)); put("handle", JsonPrimitive(handle)); put("displayName", JsonPrimitive(displayName))
+        put("avatarUrl", JsonPrimitive(avatarUrl)); put("followingUri", JsonPrimitive(followingUri)); put("isFollowing", JsonPrimitive(isFollowing))
     }
     private fun JsonObject.toAuthorInfo(): AuthorInfo = AuthorInfo(
         did = str("did"), handle = str("handle"), displayName = str("displayName"),
@@ -412,10 +412,10 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
     )
 
     private fun HistoryEntry.toCacheJson(): JsonObject = buildJsonObject {
-        put("uri", uri); put("cid", cid); put("mediaUrl", mediaUrl); put("thumbUrl", thumbUrl)
-        put("isVideo", isVideo); put("text", text); put("authorDid", authorDid)
-        put("authorHandle", authorHandle); put("authorDisplayName", authorDisplayName)
-        put("authorAvatarUrl", authorAvatarUrl); put("viewedAt", viewedAt)
+        put("uri", JsonPrimitive(uri)); put("cid", JsonPrimitive(cid)); put("mediaUrl", JsonPrimitive(mediaUrl)); put("thumbUrl", JsonPrimitive(thumbUrl))
+        put("isVideo", JsonPrimitive(isVideo)); put("text", JsonPrimitive(text)); put("authorDid", JsonPrimitive(authorDid))
+        put("authorHandle", JsonPrimitive(authorHandle)); put("authorDisplayName", JsonPrimitive(authorDisplayName))
+        put("authorAvatarUrl", JsonPrimitive(authorAvatarUrl)); put("viewedAt", JsonPrimitive(viewedAt))
     }
     private fun JsonObject.toHistoryEntry(): HistoryEntry = HistoryEntry(
         uri = str("uri"), cid = str("cid"), mediaUrl = str("mediaUrl"), thumbUrl = str("thumbUrl"),
@@ -425,8 +425,8 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
     )
 
     private fun DmConversation.toCacheJson(): JsonObject = buildJsonObject {
-        put("convoId", convoId); put("member", member.toCacheJson())
-        put("lastSentByUsAt", lastSentByUsAt); put("lastActivityAt", lastActivityAt)
+        put("convoId", JsonPrimitive(convoId)); put("member", member.toCacheJson())
+        put("lastSentByUsAt", JsonPrimitive(lastSentByUsAt)); put("lastActivityAt", JsonPrimitive(lastActivityAt))
     }
     // A missing nested object skips the entry — the same leniency the legacy
     // Gson readers this replaces were written for (see the dmCacheGson note
@@ -440,11 +440,11 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
     }
 
     private fun PopfeedReview.toCacheJson(): JsonObject = buildJsonObject {
-        put("uri", uri); put("mediaTitle", mediaTitle); put("mediaImageUrl", mediaImageUrl)
-        put("mediaBackdropUrl", mediaBackdropUrl); put("ratingOutOf5", ratingOutOf5)
-        put("reviewText", reviewText); put("createdAt", createdAt); put("mediaCategory", mediaCategory)
-        put("releaseDate", releaseDate); put("genres", JsonArray(genres.map { JsonPrimitive(it) }))
-        put("mainCredit", mainCredit); put("mainCreditRole", mainCreditRole); put("imdbId", imdbId)
+        put("uri", JsonPrimitive(uri)); put("mediaTitle", JsonPrimitive(mediaTitle)); put("mediaImageUrl", JsonPrimitive(mediaImageUrl))
+        put("mediaBackdropUrl", JsonPrimitive(mediaBackdropUrl)); put("ratingOutOf5", JsonPrimitive(ratingOutOf5))
+        put("reviewText", JsonPrimitive(reviewText)); put("createdAt", JsonPrimitive(createdAt)); put("mediaCategory", JsonPrimitive(mediaCategory))
+        put("releaseDate", JsonPrimitive(releaseDate)); put("genres", JsonArray(genres.map { JsonPrimitive(it) }))
+        put("mainCredit", JsonPrimitive(mainCredit)); put("mainCreditRole", JsonPrimitive(mainCreditRole)); put("imdbId", JsonPrimitive(imdbId))
     }
     private fun JsonObject.toPopfeedReview(): PopfeedReview = PopfeedReview(
         uri = str("uri"), mediaTitle = str("mediaTitle"), mediaImageUrl = nullableStr("mediaImageUrl"),
@@ -457,8 +457,8 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
     private fun LeafletBlog.toCacheJson(): JsonObject = buildJsonObject {
         // `blocks` is @Transient in the legacy model (never written to the
         // cache) — the reader below likewise always leaves it emptyList().
-        put("uri", uri); put("title", title); put("bodyText", bodyText); put("createdAt", createdAt)
-        put("description", description); put("thumbnailUrl", thumbnailUrl)
+        put("uri", JsonPrimitive(uri)); put("title", JsonPrimitive(title)); put("bodyText", JsonPrimitive(bodyText)); put("createdAt", JsonPrimitive(createdAt))
+        put("description", JsonPrimitive(description)); put("thumbnailUrl", JsonPrimitive(thumbnailUrl))
     }
     private fun JsonObject.toLeafletBlog(): LeafletBlog = LeafletBlog(
         uri = str("uri"), title = str("title"), bodyText = str("bodyText"), createdAt = str("createdAt"),
