@@ -527,9 +527,11 @@ class BlueskyRepository {
                 }
             }
             if (boldRanges.isEmpty()) return listOf(LeafletTextSpan(plaintext, bold = false))
-            val cuts = sortedSetOf(0, bytes.size)
-            boldRanges.forEach { cuts.add(it.first); cuts.add(it.last + 1) }
-            val sortedCuts = cuts.sorted()
+            // NOTE: sortedSetOf() doesn't resolve on wasmJs in this build;
+            // use a list + distinct() + sorted() instead.
+            val cutList = mutableListOf(0, bytes.size)
+            boldRanges.forEach { cutList.add(it.first); cutList.add(it.last + 1) }
+            val sortedCuts = cutList.distinct().sorted()
             val spans = mutableListOf<LeafletTextSpan>()
             for (i in 0 until sortedCuts.size - 1) {
                 val s = sortedCuts[i]; val e = sortedCuts[i + 1]
