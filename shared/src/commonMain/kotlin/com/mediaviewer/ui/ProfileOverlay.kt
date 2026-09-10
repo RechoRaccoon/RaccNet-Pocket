@@ -1,5 +1,6 @@
 package com.mediaviewer.ui
 
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -572,6 +573,7 @@ private fun ScrollToTopBubble(liquidGlass: Boolean, tint: Color, onClick: () -> 
 }
 
 /** Intercepts the system back gesture/button while the overlay is up. */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun BackHandler(onClose: () -> Unit) {
     // PORT: legacy used androidx.activity.compose.BackHandler (Android-only);
