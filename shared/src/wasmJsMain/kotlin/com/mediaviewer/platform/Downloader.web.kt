@@ -3,6 +3,7 @@ package com.mediaviewer.platform
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsChannel
+import io.ktor.client.statement.contentLength
 import io.ktor.http.isSuccess
 import io.ktor.utils.io.readAvailable
 import kotlinx.browser.document
