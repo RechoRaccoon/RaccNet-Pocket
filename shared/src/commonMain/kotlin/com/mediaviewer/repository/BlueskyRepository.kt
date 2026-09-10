@@ -19,6 +19,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.datetime.Clock
 import kotlin.concurrent.Volatile
+import kotlin.text.Charsets
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -937,7 +938,7 @@ class BlueskyRepository {
      *  elvis-default at every call site. */
     private fun stringArrayField(obj: JsonObject?, key: String): List<String> {
         val arr = obj?.get(key) as? JsonArray ?: return emptyList()
-        return arr.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> !p.isNull }?.content }
+        return arr.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p !is JsonNull }?.content }
             .filter { it.isNotBlank() }
     }
 
@@ -1332,10 +1333,10 @@ class BlueskyRepository {
         }
 
         val newItem = buildJsonObject {
-            put("type", "feed")
-            put("value", feedUri)
-            put("pinned", false)
-            put("id", randomId())
+            put("type", JsonPrimitive("feed"))
+            put("value", JsonPrimitive(feedUri))
+            put("pinned", JsonPrimitive(false))
+            put("id", JsonPrimitive(randomId()))
         }
 
         if (v2Index >= 0) {
@@ -1354,7 +1355,7 @@ class BlueskyRepository {
             }
         } else {
             val newPref = buildJsonObject {
-                put("\$type", "app.bsky.actor.defs#savedFeedsPrefV2")
+                put("\$type", JsonPrimitive("app.bsky.actor.defs#savedFeedsPrefV2"))
                 put("items", buildJsonArray { add(newItem) })
             }
             preferences.add(newPref)
@@ -1504,13 +1505,13 @@ class BlueskyRepository {
             val byteEnd   = text.substring(0, m.range.last + 1).toByteArray(Charsets.UTF_8).size
             mapOf(
                 "index" to buildJsonObject {
-                    put("byteStart", byteStart)
-                    put("byteEnd", byteEnd)
+                    put("byteStart", JsonPrimitive(byteStart))
+                    put("byteEnd", JsonPrimitive(byteEnd))
                 },
                 "features" to buildJsonArray {
                     add(buildJsonObject {
-                        put("\$type", "app.bsky.richtext.facet#tag")
-                        put("tag", tag)
+                        put("\$type", JsonPrimitive("app.bsky.richtext.facet#tag"))
+                        put("tag", JsonPrimitive(tag))
                     })
                 }
             )
@@ -1708,8 +1709,8 @@ class BlueskyRepository {
         val embed  = if (embedPostUri != null && embedPostCid != null) JsonObject(mapOf(
             "\$type" to JsonPrimitive("app.bsky.embed.record"),
             "record" to buildJsonObject {
-                put("uri", embedPostUri)
-                put("cid", embedPostCid)
+                put("uri", JsonPrimitive(embedPostUri))
+                put("cid", JsonPrimitive(embedPostCid))
             }
         )) else null
         apiCall("SendMessage") {
