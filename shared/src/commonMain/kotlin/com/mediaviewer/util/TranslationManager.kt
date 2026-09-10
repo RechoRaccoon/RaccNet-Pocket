@@ -17,9 +17,6 @@ import com.mediaviewer.platform.TranslationOutcome
  */
 object TranslationManager {
 
-    /** Legacy name for the shared outcome model (see platform/Translator.kt). */
-    typealias Outcome = TranslationOutcome
-
     private val engine = PlatformTranslator()
 
     /** False on platforms without a translation engine (web). */
