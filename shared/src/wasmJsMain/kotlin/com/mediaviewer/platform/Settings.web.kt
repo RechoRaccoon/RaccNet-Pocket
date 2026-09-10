@@ -79,9 +79,12 @@ internal class LocalStorageObservableSettings : ObservableSettings {
         raw(key) ?: defaultValue
     override fun getStringOrNull(key: String): String? = raw(key)
 
-    override fun getStringSet(key: String, defaultValue: Set<String>): Set<String> =
+    // Not overrides: multiplatform-settings 1.3.0 has no StringSet API.
+    // Kept as regular methods for the addStringSetListener helpers below;
+    // the PreferencesManager extensions provide the public API.
+    fun getStringSet(key: String, defaultValue: Set<String>): Set<String> =
         getStringSetOrNull(key) ?: defaultValue
-    override fun getStringSetOrNull(key: String): Set<String>? = raw(key)?.let {
+    fun getStringSetOrNull(key: String): Set<String>? = raw(key)?.let {
         try {
             Json.decodeFromString(setSerializer, it).toSet()
         } catch (_: Exception) {
@@ -89,17 +92,18 @@ internal class LocalStorageObservableSettings : ObservableSettings {
         }
     }
 
-    override suspend fun putBoolean(key: String, value: Boolean) = putRaw(key, value.toString())
-    override suspend fun putInt(key: String, value: Int) = putRaw(key, value.toString())
-    override suspend fun putLong(key: String, value: Long) = putRaw(key, value.toString())
-    override suspend fun putFloat(key: String, value: Float) = putRaw(key, value.toString())
-    override suspend fun putDouble(key: String, value: Double) = putRaw(key, value.toString())
-    override suspend fun putString(key: String, value: String) = putRaw(key, value)
+    // 1.3.0 Settings API is synchronous (not suspend like 2.x).
+    override fun putBoolean(key: String, value: Boolean) = putRaw(key, value.toString())
+    override fun putInt(key: String, value: Int) = putRaw(key, value.toString())
+    override fun putLong(key: String, value: Long) = putRaw(key, value.toString())
+    override fun putFloat(key: String, value: Float) = putRaw(key, value.toString())
+    override fun putDouble(key: String, value: Double) = putRaw(key, value.toString())
+    override fun putString(key: String, value: String) = putRaw(key, value)
 
-    override suspend fun putStringSet(key: String, value: Set<String>) =
+    fun putStringSet(key: String, value: Set<String>) =
         putRaw(key, Json.encodeToString(setSerializer, value.toList()))
 
-    override suspend fun remove(key: String) {
+    override fun remove(key: String) {
         try {
             localStorage.removeItem(prefix + key)
         } catch (_: Exception) {
@@ -107,7 +111,7 @@ internal class LocalStorageObservableSettings : ObservableSettings {
         notify(key)
     }
 
-    override suspend fun clear() {
+    override fun clear() {
         val removed = keys
         try {
             removed.forEach { localStorage.removeItem(prefix + it) }
