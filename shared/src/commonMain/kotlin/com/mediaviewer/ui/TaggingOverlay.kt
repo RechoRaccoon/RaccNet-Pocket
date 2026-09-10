@@ -1,5 +1,6 @@
 package com.mediaviewer.ui
 
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -322,6 +323,7 @@ private fun formatFixed(value: Double, decimals: Int): String {
 }
 
 /** Intercepts the system back gesture/button while the overlay is up. */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun BackHandler(onClose: () -> Unit) {
     // PORT: legacy used androidx.activity.compose.BackHandler (Android-only);
