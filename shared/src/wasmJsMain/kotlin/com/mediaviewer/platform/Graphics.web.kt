@@ -2,11 +2,10 @@ package com.mediaviewer.platform
 
 import kotlinx.browser.document
 import org.w3c.dom.CanvasRenderingContext2D
-import org.w3c.dom.CanvasTextAlign
-import org.w3c.dom.CanvasTextBaseline
 import org.w3c.dom.HTMLCanvasElement
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
+import kotlin.js.asDynamic
 
 /**
  * Renders textshot lines to PNG bytes via the canvas 2D API — best effort.
@@ -52,9 +51,13 @@ actual fun renderTextshot(lines: List<TextshotLine>, widthPx: Int): ByteArray {
         fontSize -= 4.0 * scale
     }
 
-    ctx.fillStyle = "white"
-    ctx.textAlign = CanvasTextAlign.CENTER
-    ctx.textBaseline = CanvasTextBaseline.MIDDLE
+    // Use dynamic interop for canvas style properties: the typed bindings
+    // type these as JsAny? and the CanvasTextAlign/Baseline enums don't
+    // exist in this build.
+    val dctx = ctx.asDynamic()
+    dctx.fillStyle = "white"
+    dctx.textAlign = "center"
+    dctx.textBaseline = "middle"
     val lineHeight = fontSize * 1.1
     val blockHeight = lineHeight * lines.size
     // Vertically center the block (it may be shorter than the full height
