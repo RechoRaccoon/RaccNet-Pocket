@@ -24,7 +24,7 @@ object TranslationManager {
 
     /** Identifies the source language and translates to [targetLanguageTag]
      *  (BCP-47 tag). Never throws — failures come back as [Outcome.Failure]. */
-    suspend fun translate(text: String, targetLanguageTag: String): Outcome =
+    suspend fun translate(text: String, targetLanguageTag: String): TranslationOutcome =
         engine.translate(text, targetLanguageTag)
 
     /** Human-readable display name for a BCP-47 tag, e.g. "ja" -> "Japanese". */
