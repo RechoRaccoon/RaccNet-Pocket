@@ -160,6 +160,8 @@ internal class LocalStorageObservableSettings : ObservableSettings {
         addListener(key) { callback(getFloatOrNull(key)) }
     override fun addDoubleOrNullListener(key: String, callback: (Double?) -> Unit): SettingsListener =
         addListener(key) { callback(getDoubleOrNull(key)) }
+    override fun addBooleanOrNullListener(key: String, callback: (Boolean?) -> Unit): SettingsListener =
+        addListener(key) { callback(getBooleanOrNull(key)) }
     // NOTE: 1.3.0 has no addStringSetListener/addStringSetOrNullListener.
 }
 
