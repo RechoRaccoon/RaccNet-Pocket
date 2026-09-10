@@ -8,7 +8,6 @@ import kotlinx.serialization.json.Json
 import org.khronos.webgl.Uint8Array
 import org.w3c.dom.HTMLAnchorElement
 import org.w3c.dom.url.URL
-import org.w3c.fetch.fetch
 import org.w3c.files.Blob
 import org.w3c.files.BlobPropertyBag
 
@@ -32,10 +31,10 @@ actual class PlatformDownloader actual constructor() {
         mimeType: String,
         onProgress: (downloadedBytes: Long, totalBytes: Long?) -> Unit,
     ) {
-        // Top-level fetch() from org.w3c.fetch (imported above); on the wasmJs
-        // DOM bindings it is not a member of `window`.
+        // window.fetch() from kotlinx.browser; the top-level org.w3c.fetch.fetch
+        // does not exist in these DOM bindings.
         // await() on JsPromise returns a nullable result in coroutines 1.10.x.
-        val response = fetch(url).await() ?: error("Fetch failed: $url")
+        val response = window.fetch(url).await() ?: error("Fetch failed: $url")
         if (!response.ok) error("HTTP ${response.status} downloading $url")
         val total = response.headers.get("content-length")?.toLongOrNull()
         val stream = response.body ?: error("Empty body downloading $url")
