@@ -42,6 +42,9 @@ import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalViewConfiguration
 import coil3.compose.AsyncImage
+import coil3.SingletonImageLoader
+import coil3.compose.LocalPlatformContext
+import coil3.request.ImageRequest
 import com.mediaviewer.platform.VideoPlayer
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
@@ -702,6 +705,32 @@ private fun FeedView(
 ) {
     // TODO(PORT): Coil 2 ahead-prefetch of the next 3 posts dropped — coil3's
     // common API has no equivalent one-liner here.
+
+    // Perf: restore the dropped Coil 2 ahead-prefetch — Coil 3's common
+    // equivalent is enqueue() on the singleton ImageLoader. Warming the next
+    // posts' images while the current one is on screen is what makes swiping
+    // feel instant instead of fetching each post from scratch on arrival.
+    // Videos are skipped (their bytes don't go through the image pipeline).
+    val platformContext = LocalPlatformContext.current
+    val prefetchLoader = remember(platformContext) { SingletonImageLoader.get(platformContext) }
+    LaunchedEffect(currentIndex, mediaItems) {
+        for (offset in 1..3) {
+            val upcoming = mediaItems.getOrNull(currentIndex + offset) ?: continue
+            if (upcoming.isVideo) continue
+            val thumb = upcoming.thumbUrl.ifBlank { upcoming.mediaUrl }
+            if (thumb.isNotBlank()) {
+                prefetchLoader.enqueue(ImageRequest.Builder(platformContext).data(thumb).build())
+            }
+            // The full-resolution layer fades in right after the thumbnail,
+            // so warm it too for the nearest upcoming posts.
+            if (offset <= 2) {
+                val full = upcoming.mediaUrl
+                if (full.isNotBlank() && full != thumb) {
+                    prefetchLoader.enqueue(ImageRequest.Builder(platformContext).data(full).build())
+                }
+            }
+        }
+    }
 
     Box(Modifier.fillMaxSize().background(OledBlack)) {
         if (isLoading && currentItem == null) {
