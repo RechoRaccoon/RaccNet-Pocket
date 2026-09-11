@@ -85,4 +85,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
+    lint {
+        // AGP's lint crashes on Kotlin 2.2.0 metadata in the
+        // NullSafeMutableLiveData detector (IncompatibleClassChangeError).
+        // Disable just that check; see run 34656150083.
+        disable.add("NullSafeMutableLiveData")
+    }
 }
