@@ -312,6 +312,14 @@ private fun shade(c: Color, factor: Float): Color = Color(
     alpha = 1f
 )
 
+/** Master switch for the pixel-matrix transition/loading overlay.
+ *  `false` disables it everywhere (cold boot, profile navigation, feed
+ *  transitions) while keeping every line of the implementation and all of
+ *  its call sites intact — the controller still runs its state machine so
+ *  dependent logic (e.g. the cold-launch cover) behaves exactly as before,
+ *  only nothing pixelated is ever drawn. Set back to `true` to restore it. */
+const val PIXEL_TRANSITIONS_ENABLED = false
+
 /** Full-screen retro-digital pixel matrix used for both the app's cold-boot
  *  splash and profile-navigation transitions (see the two Scenario flows
  *  described in the design spec this implements):
@@ -327,6 +335,7 @@ private fun shade(c: Color, factor: Float): Color = Color(
  *  Renders nothing when [controller].phase is HIDDEN. */
 @Composable
 fun PixelMatrixOverlay(controller: PixelTransitionController, modifier: Modifier = Modifier) {
+    if (!PIXEL_TRANSITIONS_ENABLED) return
     if (controller.phase == PixelPhase.HIDDEN) return
 
     val cellDp = 24.dp
