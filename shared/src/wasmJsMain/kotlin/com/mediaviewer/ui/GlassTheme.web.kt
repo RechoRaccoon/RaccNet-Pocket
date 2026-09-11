@@ -3,6 +3,7 @@ package com.mediaviewer.ui
 import androidx.compose.ui.graphics.Color
 import kotlinx.browser.document
 import kotlinx.coroutines.suspendCancellableCoroutine
+import org.khronos.webgl.DataView
 import org.w3c.dom.CanvasRenderingContext2D
 import org.w3c.dom.HTMLCanvasElement
 import org.w3c.dom.HTMLImageElement
@@ -73,17 +74,20 @@ private suspend fun sampleViaCanvas(url: String): Color {
     ctx.drawImage(img, 0.0, 0.0, 16.0, 16.0)
 
     // Throws SecurityError if the canvas is tainted; caller maps to fallback.
-    val data = ctx.getImageData(0.0, 0.0, 16.0, 16.0).data
+    // Read via DataView: Uint8ClampedArray's indexed access doesn't expose a
+    // Kotlin-visible numeric type on this target, but DataView.getUint8()
+    // returns Short which converts cleanly.
+    val view = DataView(ctx.getImageData(0.0, 0.0, 16.0, 16.0).data.buffer)
     var r = 0L
     var g = 0L
     var b = 0L
     var n = 0
     var i = 0
-    while (i + 3 < data.length) {
+    while (i + 3 < view.byteLength) {
         // getImageData returns un-premultiplied RGBA bytes.
-        r += data[i].toInt() and 0xFF
-        g += data[i + 1].toInt() and 0xFF
-        b += data[i + 2].toInt() and 0xFF
+        r += view.getUint8(i).toInt()
+        g += view.getUint8(i + 1).toInt()
+        b += view.getUint8(i + 2).toInt()
         n++
         i += 4
     }
