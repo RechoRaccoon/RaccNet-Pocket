@@ -75,7 +75,7 @@ android {
     // Library namespace; the user-facing applicationId lives in :androidApp.
     // Package com.mediaviewer is kept deliberately (legacy rebrand incomplete).
     namespace = "com.mediaviewer.shared"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         minSdk = 26
