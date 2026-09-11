@@ -62,14 +62,37 @@ private class BrowserImageFetcher(
 ) : Fetcher {
 
     override suspend fun fetch(): FetchResult? {
-        // Perf: cdn.bsky.app never sends CORS headers, so the <img> attempt
-        // below can never succeed for it — skip straight to the proxy and
-        // save a wasted round-trip on every image from that host.
-        val bytes = if (isKnownNoCorsHost(url)) {
+        // Perf: a host that doesn't send CORS headers can never succeed via
+        // the <img> element path — it downloads the full image over the
+        // wire, decodes it, draws it to canvas, and only THEN fails (on
+        // toDataURL/getImageData, once the canvas is discovered to be
+        // tainted). That means every image from that host is downloaded
+        // twice: once wasted on the failed <img> attempt, once for real via
+        // the proxy fallback. cdn.bsky.app is hardcoded below since it's
+        // known upfront, but e621's media CDN, stream.place, and anything
+        // else are NOT in that list, so they were paying the double-download
+        // tax on every single image. Instead, remember which hosts failed
+        // the <img> path the first time and skip straight to the proxy for
+        // every subsequent image from that host, for the rest of the
+        // session — turns "double download on every image from that CDN"
+        // into "double download once per CDN host, ever".
+        val host = hostOf(url)
+        // GIFs can never take the <img>-element path: canvas.drawImage only
+        // ever captures the frame that's current at draw time, so a canvas
+        // round-trip silently flattens an animated GIF to a static first
+        // frame. Route straight to the proxy, which returns the original
+        // animated bytes untouched (proxySizeParams already skips resizing
+        // for .gif for the same reason) — this also skips paying for a
+        // doomed <img> attempt on every GIF.
+        val isGif = url.substringBefore("?").lowercase().endsWith(".gif")
+        val bytes = if (isGif || isKnownNoCorsHost(url) || host in learnedNoCorsHosts) {
             runCatching { loadViaProxy(url) }.getOrNull()
         } else {
             runCatching { loadViaImageElement(url) }.getOrNull()
-                ?: runCatching { loadViaProxy(url) }.getOrNull()
+                ?: run {
+                    if (host != null) learnedNoCorsHosts.add(host)
+                    runCatching { loadViaProxy(url) }.getOrNull()
+                }
         } ?: return null
 
         return SourceFetchResult(
@@ -84,10 +107,7 @@ private class BrowserImageFetcher(
         )
     }
 
-    private fun isKnownNoCorsHost(url: String): Boolean {
-        val host = url.substringAfter("://").substringBefore("/").substringBefore(":").lowercase()
-        return host == "cdn.bsky.app"
-    }
+    private fun isKnownNoCorsHost(url: String): Boolean = hostOf(url) == "cdn.bsky.app"
 
     /**
      * Loads [url] through a browser `<img>` element and re-encodes it to PNG
@@ -195,5 +215,19 @@ private class BrowserImageFetcher(
         const val PROXY_BASE = "https://images.weserv.nl/?url="
 
         val proxyHttpClient by lazy { HttpClient() }
+
+        // Session-lifetime memory of hosts that failed the <img> element
+        // path once — see the comment in fetch() above. Lives on the
+        // companion object (one instance per process, not per fetch)
+        // specifically so the discovery is shared across every
+        // BrowserImageFetcher instance, i.e. every image in the app.
+        val learnedNoCorsHosts = mutableSetOf<String>()
     }
 }
+
+private fun hostOf(url: String): String? =
+    url.substringAfter("://", missingDelimiterValue = "")
+        .substringBefore("/")
+        .substringBefore(":")
+        .lowercase()
+        .ifBlank { null }
