@@ -51,7 +51,8 @@ actual class PlatformDownloader actual constructor() {
         fileName: String,
         mimeType: String,
         onProgress: (downloadedBytes: Long, totalBytes: Long?) -> Unit,
-    ) = withContext(Dispatchers.IO) {
+    ) {
+        withContext(Dispatchers.IO) {
         val response = httpClient.get(url)
         if (!response.status.isSuccess()) error("HTTP ${response.status.value} downloading $url")
         val channel = response.bodyAsChannel()
@@ -91,6 +92,7 @@ actual class PlatformDownloader actual constructor() {
             // Don't leave a half-written pending row behind in the gallery.
             resolver.delete(itemUri, null, null)
             throw e
+        }
         }
     }
 
