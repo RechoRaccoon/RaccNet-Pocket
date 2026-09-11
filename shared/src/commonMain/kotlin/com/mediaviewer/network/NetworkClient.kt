@@ -38,7 +38,14 @@ object NetworkClient {
             json(json)
         }
         install(Logging) {
-            level = LogLevel.INFO
+            // Perf: was LogLevel.INFO unconditionally, including in release/
+            // production builds. Ktor's Logging plugin has to intercept and
+            // buffer every request/response to log it regardless of level,
+            // which is real overhead paid on every single network call this
+            // app ever makes (every feed page, every avatar lookup, every
+            // Hub fetch) for output nobody's reading outside active
+            // debugging. NONE skips that interception entirely.
+            level = LogLevel.NONE
         }
         install(HttpTimeout) {
             connectTimeoutMillis = 30_000
