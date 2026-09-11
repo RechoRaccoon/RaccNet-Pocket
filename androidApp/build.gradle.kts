@@ -14,7 +14,7 @@ android {
     // (package com.mediaviewer, id rechoraccoon.raccnetlite). Changing these
     // now would break updates for existing installs, so they stay.
     namespace = "com.mediaviewer"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "rechoraccoon.raccnetlite"
