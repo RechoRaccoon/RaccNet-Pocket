@@ -8,6 +8,7 @@ import coil3.fetch.FetchResult
 import coil3.fetch.Fetcher
 import coil3.fetch.SourceFetchResult
 import coil3.request.Options
+import coil3.size.pxOrElse
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsBytes
@@ -61,14 +62,14 @@ private class BrowserImageFetcher(
 ) : Fetcher {
 
     override suspend fun fetch(): FetchResult? {
-        val bytes = try {
-            loadViaImageElement(url)
-        } catch (e: Exception) {
-            null
-        } ?: try {
-            loadViaProxy(url)
-        } catch (e: Exception) {
-            null
+        // Perf: cdn.bsky.app never sends CORS headers, so the <img> attempt
+        // below can never succeed for it — skip straight to the proxy and
+        // save a wasted round-trip on every image from that host.
+        val bytes = if (isKnownNoCorsHost(url)) {
+            runCatching { loadViaProxy(url) }.getOrNull()
+        } else {
+            runCatching { loadViaImageElement(url) }.getOrNull()
+                ?: runCatching { loadViaProxy(url) }.getOrNull()
         } ?: return null
 
         return SourceFetchResult(
@@ -81,6 +82,11 @@ private class BrowserImageFetcher(
             mimeType = null,
             dataSource = DataSource.NETWORK,
         )
+    }
+
+    private fun isKnownNoCorsHost(url: String): Boolean {
+        val host = url.substringAfter("://").substringBefore("/").substringBefore(":").lowercase()
+        return host == "cdn.bsky.app"
     }
 
     /**
@@ -105,11 +111,28 @@ private class BrowserImageFetcher(
         val height = img.naturalHeight
         check(width > 0 && height > 0) { "Image has no intrinsic size: $url" }
 
+        // Perf: draw the canvas at the size Coil actually asked for instead
+        // of the source's natural size — re-encoding a multi-megapixel photo
+        // to PNG just to display it at a few hundred px wastes CPU, memory,
+        // and time on every image.
+        val reqW = options.size.width.pxOrElse { 0 }
+        val reqH = options.size.height.pxOrElse { 0 }
+        val targetW: Int
+        val targetH: Int
+        if (reqW > 0 && reqH > 0) {
+            val scale = minOf(reqW / width.toFloat(), reqH / height.toFloat(), 1f)
+            targetW = maxOf(1, (width * scale).toInt())
+            targetH = maxOf(1, (height * scale).toInt())
+        } else {
+            targetW = width
+            targetH = height
+        }
+
         val canvas = document.createElement("canvas") as HTMLCanvasElement
-        canvas.width = width
-        canvas.height = height
+        canvas.width = targetW
+        canvas.height = targetH
         val ctx = canvas.getContext("2d") as CanvasRenderingContext2D
-        ctx.drawImage(img, 0.0, 0.0)
+        ctx.drawImage(img, 0.0, 0.0, targetW.toDouble(), targetH.toDouble())
 
         // Throws SecurityError when the canvas is tainted (no CORS headers).
         val dataUrl = canvas.toDataURL("image/png")
@@ -128,10 +151,44 @@ private class BrowserImageFetcher(
      */
     private suspend fun loadViaProxy(url: String): ByteArray {
         val stripped = url.removePrefix("https://").removePrefix("http://")
-        val proxyUrl = "$PROXY_BASE$stripped"
+        val proxyUrl = "$PROXY_BASE${encodeWeservUrlParam(stripped)}${proxySizeParams(url)}"
         val response = proxyHttpClient.get(proxyUrl)
         check(response.status.isSuccess()) { "Proxy request failed: ${response.status}" }
         return response.bodyAsBytes()
+    }
+
+    /**
+     * Ask images.weserv.nl to downscale server-side to the size Coil asked
+     * for, so a 96px avatar or a 1080px feed image downloads kilobytes
+     * instead of the multi-MB original. Skipped when Coil didn't specify a
+     * size (Size.ORIGINAL) or the image is animated — weserv would flatten a
+     * GIF to its first frame.
+     */
+    private fun proxySizeParams(url: String): String {
+        if (url.substringBefore("?").lowercase().endsWith(".gif")) return ""
+        val w = options.size.width.pxOrElse { 0 }
+        val h = options.size.height.pxOrElse { 0 }
+        if (w <= 0 || h <= 0) return ""
+        // fit=inside keeps the aspect ratio; we = don't enlarge small sources.
+        return "&w=$w&h=$h&fit=inside&we"
+    }
+
+    /** Percent-encodes just the characters that would break out of
+     *  images.weserv.nl's `url` query parameter (`?`, `&`, `#`, …) — a
+     *  source URL containing its own query string would otherwise be parsed
+     *  as weserv's own parameters. */
+    private fun encodeWeservUrlParam(value: String): String = buildString(value.length) {
+        for (c in value) {
+            when (c) {
+                '&' -> append("%26")
+                '?' -> append("%3F")
+                '#' -> append("%23")
+                '%' -> append("%25")
+                '+' -> append("%2B")
+                ' ' -> append("%20")
+                else -> append(c)
+            }
+        }
     }
 
     private companion object {
