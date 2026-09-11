@@ -7,6 +7,7 @@ import coil3.BitmapImage
 import coil3.ImageLoader
 import coil3.request.ImageRequest
 import coil3.request.SuccessResult
+import coil3.request.allowHardware
 import coil3.size.Size
 import com.mediaviewer.model.MediaItem
 import com.mediaviewer.platform.AndroidAppContext
