@@ -34,6 +34,16 @@ object NetworkClient {
         requestTimeoutMillis: Long = 60_000,
         socketTimeoutMillis: Long = 60_000
     ): HttpClient = HttpClient {
+        // The repository layer's contract (see ApiCall.kt) is that HTTP
+        // errors THROW as Ktor ResponseException so apiCall() can turn them
+        // into "<label> <code>: ..." errors. Ktor's default is
+        // expectSuccess = false, which instead feeds the *error body* into
+        // the success-model parser — e.g. an expired-token 400
+        // {"error":"ExpiredToken",...} parsed as BskyTimelineResponse blows
+        // up with "Field 'feed' is required ... missing at path: $", a
+        // message isAuthError() can't recognize, so the token-refresh retry
+        // never fires and the user just sees a cryptic toast.
+        expectSuccess = true
         install(ContentNegotiation) {
             json(json)
         }
