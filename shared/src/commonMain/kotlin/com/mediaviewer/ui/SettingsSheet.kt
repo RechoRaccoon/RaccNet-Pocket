@@ -533,6 +533,37 @@ private fun SettingsPageContent(
     // site, which passes no PlatformDeps.
     val translationAvailable = !isWebPlatform
     val taggingAvailable = !isWebPlatform
+
+    // A single reusable "this is an app-exclusive feature" row: instead of
+    // hiding app-exclusive sections outright on web (which made them look
+    // like they didn't exist at all), every gated section now always shows
+    // its header, and swaps its real controls for this dimmed placeholder
+    // when unavailable on the current platform — so people on web can see
+    // the feature exists and know why it's inert, rather than wondering if
+    // something's broken.
+    @Composable
+    fun PlatformUnavailableRow(message: String) {
+        val shape = RoundedCornerShape(14.dp)
+        @Composable
+        fun Content() {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(message, color = DimGray, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                Text(
+                    "ANDROID ONLY",
+                    color = DimGray, fontSize = 9.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color.White.copy(alpha = 0.06f))
+                        .padding(horizontal = 6.dp, vertical = 3.dp)
+                )
+            }
+        }
+        Box(Modifier.fillMaxWidth().clip(shape).background(Color.White.copy(alpha = 0.02f))) { Content() }
+    }
     // Phase 4 — on-device translation: the curated picker list + display
     // names were ported verbatim from the legacy TranslationManager object
     // into PlatformTranslator (shared code); only the ML Kit engine stayed
@@ -706,10 +737,14 @@ private fun SettingsPageContent(
             Box(Modifier.fillMaxWidth().clip(glassShape).background(Color.White.copy(0.04f))) { GlassBubbleContent() }
         }
 
-        // Phase 4 — on-device translation (APP-EXCLUSIVE): the whole
-        // bubble is hidden wherever the platform engine is unavailable
-        // (see translationAvailable at the top of this function).
-        if (translationAvailable) {
+        // Phase 4 — on-device translation (APP-EXCLUSIVE): always shown so
+        // web visitors can see the feature exists; only the real controls
+        // are swapped for a dimmed placeholder when the platform engine is
+        // unavailable (see translationAvailable at the top of this
+        // function).
+        if (!translationAvailable) {
+            PlatformUnavailableRow("Translate Post Text — needs on-device translation.")
+        } else {
             // Item 6: Translate Post Text + Translate To merged into one bubble
             // with an internal divider, instead of two separate ones.
             val translateShape = RoundedCornerShape(14.dp)
@@ -914,12 +949,17 @@ private fun SettingsPageContent(
         // ── AI Tagging (this session) ─────────────────────────────────────
         // Available in both AT Protocol and e621 modes — whichever is
         // currently logged in is what startTaggingAllLiked() reads.
-        // APP-EXCLUSIVE: the whole section is hidden wherever the platform
-        // tagger engine is unavailable (see taggingAvailable at the top of
-        // this function) — no tag-on-like row, no bulk tagging, no
-        // dataset database/import/export.
-        if (taggingAvailable && (bskyLoggedIn || e621LoggedIn)) {
+        // APP-EXCLUSIVE: the section header always shows once logged in;
+        // only the real controls (tag-on-like row, bulk tagging, dataset
+        // database/import/export — see taggingAvailable at the top of this
+        // function) are swapped for a dimmed placeholder when the platform
+        // tagger engine is unavailable, instead of disappearing entirely.
+        if (bskyLoggedIn || e621LoggedIn) {
             SectionDivider("AI Tagging")
+
+            if (!taggingAvailable) {
+                PlatformUnavailableRow("AI Tagging — on-device image recognition.")
+            } else {
 
             // Item 1 (this session): "Locally Tag All Liked Posts" used to be
             // the top row *inside* the AI Tagging glass bubble below,
@@ -1104,6 +1144,7 @@ private fun SettingsPageContent(
                 } else {
                     Box(Modifier.fillMaxWidth().clip(listShape).background(Color.White.copy(0.04f))) { ImportedDatasetsListContent() }
                 }
+            }
             }
         }
 
