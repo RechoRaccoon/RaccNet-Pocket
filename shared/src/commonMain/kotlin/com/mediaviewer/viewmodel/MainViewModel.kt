@@ -1236,9 +1236,26 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
      *  Bluesky Live Now), which are still scoped to "everyone you follow"
      *  (unlike Reviews/Blogs, which moved to the Subscribe-list model this
      *  session — see loadFriendsReviewsIfNeeded). No indexer/cache to check
-     *  first anymore, just a direct call. */
-    private suspend fun followedDidsForLiveSections(): Result<Set<String>> =
-        bskyRepo.getAllFollows(bskyToken, _bskyDid.value).map { list -> list.map { it.did }.toSet() }
+     *  first anymore, just a direct call.
+     *
+     *  Perf: both Live loaders run in parallel during the Hub warmup and each
+     *  used to paginate getFollows independently (up to 3 sequential pages +
+     *  the blocked-DIDs lookup, done twice) — one mutex-guarded fetch now
+     *  serves both. Keyed by DID so an account switch can't serve the
+     *  previous account's list. */
+    private val followsForLiveMutex = Mutex()
+    private var cachedFollowDidsForLive: Pair<String, Set<String>>? = null
+
+    private suspend fun followedDidsForLiveSections(): Result<Set<String>> {
+        val myDid = _bskyDid.value
+        cachedFollowDidsForLive?.takeIf { it.first == myDid }?.let { return Result.success(it.second) }
+        return followsForLiveMutex.withLock {
+            cachedFollowDidsForLive?.takeIf { it.first == myDid }?.let { return Result.success(it.second) }
+            bskyRepo.getAllFollows(bskyToken, myDid)
+                .map { list -> list.map { it.did }.toSet() }
+                .onSuccess { cachedFollowDidsForLive = myDid to it }
+        }
+    }
 
     fun loadLiveFriendsIfNeeded() {
         if (liveFriendsLoaded) return
