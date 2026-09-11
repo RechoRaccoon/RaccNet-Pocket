@@ -1581,13 +1581,19 @@ class MainViewModel(private val deps: PlatformDeps) : CoroutineScope {
             try {
                 if (_bskyLoggedIn.value) {
                     _appMode.value = AppMode.BLUESKY
-                    loadFeed()
-                    loadAvailableFeeds()
-                    prefetchUserLists()   // preload so list picker opens instantly
-                    startHubBackgroundWarmup() // item 6/this session: Mutuals/Reviews/Livestreams, see its own comment
-                    startDmLivePolling()
-                    preloadFriendsFeed()  // item 7: warm the From Friends feed in the background too
-                    loadSelfProfile()     // Settings Update: warm the Profile button's avatar/banner preview
+                    // Perf: the feed loads to completion first, then the
+                    // rest — see loadFeedInternal's doc comment for why
+                    // these used to all fire in the same instant and what
+                    // that cost on web specifically.
+                    launch(Dispatchers.Default) {
+                        loadFeedInternal(reset = true)
+                        loadAvailableFeeds()
+                        prefetchUserLists()   // preload so list picker opens instantly
+                        startHubBackgroundWarmup() // item 6/this session: Mutuals/Reviews/Livestreams, see its own comment
+                        startDmLivePolling()
+                        preloadFriendsFeed()  // item 7: warm the From Friends feed in the background too
+                        loadSelfProfile()     // Settings Update: warm the Profile button's avatar/banner preview
+                    }
                 }
             } finally {
                 // Stay on SETTINGS (the Hub) either way — and always flip
@@ -1616,12 +1622,17 @@ _bskyDid.value          = session.did
                     _appMode.value = AppMode.BLUESKY
                     prefs.setLastMode("BLUESKY")
                     _screenState.value = ScreenState.FEED
-                    loadFeed()
-                    loadAvailableFeeds()
-                    prefetchUserLists()   // preload so list picker opens instantly
-                    startHubBackgroundWarmup()
-                    startDmLivePolling()
-                    loadSelfProfile()
+                    // Perf: see loadFeedInternal's doc comment — sequence
+                    // the feed first, then the secondary warmup, instead of
+                    // firing all of it at once.
+                    launch(Dispatchers.Default) {
+                        loadFeedInternal(reset = true)
+                        loadAvailableFeeds()
+                        prefetchUserLists()   // preload so list picker opens instantly
+                        startHubBackgroundWarmup()
+                        startDmLivePolling()
+                        loadSelfProfile()
+                    }
                 }
                 .onFailure { _errorMessage.value = it.message ?: "Login failed" }
             _isLoading.value = false
@@ -1741,13 +1752,35 @@ _bskyDid.value          = session.did
         logD("RaccNet-FeedState", "loadFeed(reset=$reset)")
         if (_appMode.value == AppMode.E621) { loadE621Posts(reset); return }
         if (!_bskyLoggedIn.value) return
-        launch(Dispatchers.Default) {
-            if (reset) {
+        launch(Dispatchers.Default) { loadFeedInternal(reset) }
+    }
+
+    /** The actual body of [loadFeed], factored out so cold-start/login (see
+     *  below) can run it to completion *before* kicking off the half-dozen
+     *  secondary warmup fetches, instead of firing all seven at once.
+     *
+     *  Perf: on Android, Dispatchers.Default is a real thread pool, so
+     *  firing loadFeed + loadAvailableFeeds + prefetchUserLists +
+     *  startHubBackgroundWarmup + startDmLivePolling + preloadFriendsFeed +
+     *  loadSelfProfile simultaneously genuinely runs them in parallel with
+     *  no cost to the feed the person is staring at. A browser has no such
+     *  parallelism — wasmJs has one thread, so those seven JSON-decode +
+     *  state-update jobs all time-slice the same thread the actual feed
+     *  needs to parse its response and paint on. The visible symptom is
+     *  exactly "posts (and Hub icons) take a while to show up" even though
+     *  the feed's own request is a single fast call — it's stuck taking
+     *  turns with six other things nobody's looking at yet. Sequencing the
+     *  feed first (see the two call sites below) costs nothing on Android
+     *  (still all fires within a moment of cold start) and gets the actual
+     *  feed to paint before the low-priority background warmup starts
+     *  competing for cycles. */
+    private suspend fun loadFeedInternal(reset: Boolean) {
+        if (reset) {
                 _isLoading.value = true; feedCursor = null; _currentIndex.value = 0
                 activeFeedMode = ActiveFeedMode.NORMAL; activeFeedActorDid = null
                 _authorFeedState.value = null   // clear any saved overlay state
             }
-            if (isLoadingMore && !reset) return@launch
+            if (isLoadingMore && !reset) return
             isLoadingMore = true
 
             suspend fun attempt(): Result<Pair<List<MediaItem>, String?>> {
@@ -1773,7 +1806,6 @@ _bskyDid.value          = session.did
             }.onFailure { _errorMessage.value = it.message }
             _isLoading.value = false
             isLoadingMore = false
-        }
     }
 
     /** Settings Update: "Hide Text Only Posts" — universally drops posts with
