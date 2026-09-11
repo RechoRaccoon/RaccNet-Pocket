@@ -2,13 +2,12 @@ package com.mediaviewer.tagging
 
 import com.mediaviewer.platform.AndroidAppContext
 import io.ktor.client.HttpClient
-import io.ktor.client.call.bodyAsChannel
+import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.get
 import io.ktor.http.HttpHeaders
 import io.ktor.http.isSuccess
-import io.ktor.utils.io.isClosedForRead
 import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
