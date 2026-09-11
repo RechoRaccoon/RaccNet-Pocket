@@ -130,7 +130,22 @@ jobs:
           gradle-version: '8.10.2'
 
       - name: Build wasmJs browser distribution
-        run: gradle :webApp:wasmJsBrowserDistribution --stacktrace
+        # --no-build-cache: a poisoned build-cache entry once restored a dist
+        # whose .wasm binary was missing (site hung on the loading splash
+        # with a 404 on the wasm). The wasm must always be genuinely rebuilt.
+        run: gradle :webApp:wasmJsBrowserDistribution --stacktrace --no-build-cache
+
+      - name: Verify wasm binary is in the dist
+        run: |
+          DIST=webApp/build/dist/wasmJs/productionExecutable
+          WASM=$(grep -o '"\./[^"]*\.wasm"' "$DIST/raccnet-pocket.js" | head -n 1 | tr -d '"' | cut -c3-)
+          echo "Loader expects wasm: $WASM"
+          if [ -z "$WASM" ] || [ ! -s "$DIST/$WASM" ]; then
+            echo "::error::Expected wasm '$WASM' is missing from $DIST — refusing to deploy a broken site"
+            ls -la "$DIST"
+            exit 1
+          fi
+          echo "OK: $WASM present ($(stat -c%s "$DIST/$WASM") bytes)"
 
       - name: Upload Pages artifact
         if: github.event_name == 'push'
