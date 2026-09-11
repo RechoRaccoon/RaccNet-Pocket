@@ -35,10 +35,11 @@ permissions:
   pages: write
   id-token: write
 
-# Serializes Pages deployments; never cancel a live deploy.
+# One run per branch: a new push cancels the previous in-progress run, so
+# stale builds don't pile up behind it.
 concurrency:
-  group: "pages"
-  cancel-in-progress: false
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
 
 jobs:
   # ---------------------------------------------------------------------------
