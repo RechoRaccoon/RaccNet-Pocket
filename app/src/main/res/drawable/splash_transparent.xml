@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Item (this session): stand-in "icon" for the API 31+ system splash
+     screen. Android always shows *something* as the splash's animated
+     icon on 31+ — leaving windowSplashScreenAnimatedIcon unset falls back
+     to the launcher icon, which is the "app icon splash screen" the app
+     should no longer show. Pointing that attribute at this fully
+     transparent 1x1 shape instead means the splash surface (already set to
+     solid black — see values-v31/themes.xml) reads as a plain black
+     screen, right up until the pixel-matrix transition takes over. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="@android:color/transparent" />
+    <size android:width="1dp" android:height="1dp" />
+</shape>

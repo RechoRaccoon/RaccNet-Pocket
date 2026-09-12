@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Item 4: PlayerView's surface type can only be set via XML/AttributeSet at
+  construction time (Media3 has no runtime/programmatic setter for it), so
+  the video player is inflated from this layout instead of built with
+  `PlayerView(context)`. TextureView (rather than the default SurfaceView)
+  is required for the video to actually be captured by our live
+  GraphicsLayer backdrop — SurfaceView renders through its own independent
+  hardware layer that bypasses normal View drawing entirely, so a
+  SurfaceView-backed player would show up as blank/black in the blurred
+  glass backdrop instead of the real playing video.
+-->
+<androidx.media3.ui.PlayerView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/player_view"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    app:surface_type="texture_view" />
