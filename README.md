@@ -17,3 +17,5 @@ v3.0 will feature some significant updates, including:
 - **UI Refinements:** A more consistent and customizable UI language, allowing custom user-generated themes.
 - **Profile Tab Overhaul:** Long-form, short-form, and image based tabs will be available on profile pages, each with their own unique layout.
 - **Enhanced Feed Browsing:** The "Return to Feed" button in the Hub will be split into sperate "Timeline" and "Explore" buttons. Timeline will open the feed as normal, whereas Explore will open an overhauled Grid mode with unique layouts for viewing different types of media.
+## Web Version
+This is an experimental web version based on version 1.11: https://rechoraccoon.github.io/RaccNet-Pocket/
