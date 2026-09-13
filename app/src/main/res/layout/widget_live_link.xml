@@ -10,57 +10,63 @@
         android:scaleType="fitXY"
         android:contentDescription="@null" />
 
+    <!-- TextView, not Button: a RemoteViews Button keeps the platform's
+         forced min-height/padding/elevation even with a custom background,
+         which is what made the previous version look like a stock oversized
+         Android button instead of a compact glass pill. A plain clickable
+         TextView (setOnClickPendingIntent works on any view id, not just
+         Button) carries none of that chrome. -->
     <LinearLayout
         android:id="@+id/widget_content"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:orientation="vertical"
         android:gravity="center"
-        android:padding="12dp">
+        android:padding="8dp">
 
-        <Button
+        <TextView
             android:id="@+id/btn_twitch"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
-            android:layout_marginBottom="5dp"
-            android:minHeight="0dp"
-            android:minWidth="0dp"
-            android:paddingHorizontal="6dp"
+            android:layout_marginBottom="4dp"
+            android:gravity="center"
+            android:maxLines="1"
+            android:ellipsize="end"
             android:text="@string/widget_activate_twitch"
-            android:textAllCaps="false"
             android:textColor="#FFFFFFFF"
-            android:textSize="12sp"
+            android:textSize="11sp"
+            android:textStyle="bold"
             android:background="@drawable/widget_button_twitch"
             android:visibility="gone" />
 
-        <Button
+        <TextView
             android:id="@+id/btn_youtube"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
-            android:layout_marginTop="5dp"
-            android:minHeight="0dp"
-            android:minWidth="0dp"
-            android:paddingHorizontal="6dp"
+            android:layout_marginTop="4dp"
+            android:gravity="center"
+            android:maxLines="1"
+            android:ellipsize="end"
             android:text="@string/widget_activate_youtube"
-            android:textAllCaps="false"
             android:textColor="#FFFFFFFF"
-            android:textSize="12sp"
+            android:textSize="11sp"
+            android:textStyle="bold"
             android:background="@drawable/widget_button_youtube"
             android:visibility="gone" />
 
-        <Button
+        <TextView
             android:id="@+id/btn_end"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:minHeight="0dp"
-            android:minWidth="0dp"
-            android:paddingHorizontal="6dp"
+            android:gravity="center"
+            android:maxLines="1"
+            android:ellipsize="end"
             android:text="@string/widget_end_link"
-            android:textAllCaps="false"
             android:textColor="#FFFFFFFF"
-            android:textSize="13sp"
+            android:textSize="12sp"
+            android:textStyle="bold"
             android:background="@drawable/widget_button_end"
             android:visibility="gone" />
 
