@@ -27,6 +27,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -43,6 +44,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
@@ -59,6 +61,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -212,7 +215,21 @@ fun SettingsSheet(
     // Feature (this session): the logged-in user's own avatar URL, so the
     // Hub's rims/background can reflect the user's own profile color
     // instead of whatever post they were last looking at (see below).
-    selfAvatarUrl: String? = null
+    selfAvatarUrl: String? = null,
+    // Live Link widget feature: saved Twitch/YouTube channel URLs (Settings
+    // input), the live state shared with the widget/periodic worker
+    // (LiveLinkManager/PreferencesManager are the actual source of truth —
+    // these are just read-outs of it for this composition), and the three
+    // actions every one of the widget/Settings/Hub-row surfaces funnels
+    // through the exact same way.
+    liveTwitchUrl: String? = null,
+    liveYoutubeUrl: String? = null,
+    liveActivePlatform: com.mediaviewer.model.LiveNowPlatform? = null,
+    onSaveLiveTwitchUrl: (String) -> Unit = {},
+    onSaveLiveYoutubeUrl: (String) -> Unit = {},
+    onCreateLiveLinkWidget: () -> Unit = {},
+    onToggleLiveLink: (com.mediaviewer.model.LiveNowPlatform) -> Unit = {},
+    onEndLiveLink: () -> Unit = {}
 ) {
     // Feature (this session): every rim/background tint throughout the Hub
     // (all three pages — Settings/AT Protocol/e621 — plus the background
@@ -324,7 +341,7 @@ fun SettingsSheet(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .windowInsetsPadding(WindowInsets.statusBars),
+                .padding(top = rememberTopCutoutClearance()),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Spacer(Modifier.height(8.dp))
@@ -379,7 +396,10 @@ fun SettingsSheet(
                             combineListsAndPacks = combineListsAndPacks, onToggleCombineListsPacks = onToggleCombineListsPacks,
                             autoAddToOnFollow = autoAddToOnFollow, onToggleAutoAddToOnFollow = onToggleAutoAddToOnFollow,
                             onLogoutBluesky = onLogoutBluesky, onLogoutE621 = onLogoutE621,
-                            dominantColor = dominantColor, backdrop = backdrop
+                            dominantColor = dominantColor, backdrop = backdrop,
+                            liveTwitchUrl = liveTwitchUrl, liveYoutubeUrl = liveYoutubeUrl,
+                            onSaveLiveTwitchUrl = onSaveLiveTwitchUrl, onSaveLiveYoutubeUrl = onSaveLiveYoutubeUrl,
+                            onCreateLiveLinkWidget = onCreateLiveLinkWidget
                         )
                         HubPage.AT_PROTOCOL -> AtProtocolPageContent(
                             bskyLoggedIn = bskyLoggedIn, bskyHandle = bskyHandle,
@@ -402,7 +422,10 @@ fun SettingsSheet(
                             friendsBlogs = friendsBlogs, onOpenBlog = onOpenBlog,
                             onRefreshHub = onRefreshHub,
                             onReturnToFeed = { onReturnToFeed() },
-                            hasVisitedFeed = hasVisitedFeed
+                            hasVisitedFeed = hasVisitedFeed,
+                            liveTwitchUrl = liveTwitchUrl, liveYoutubeUrl = liveYoutubeUrl,
+                            liveActivePlatform = liveActivePlatform,
+                            onToggleLiveLink = onToggleLiveLink, onEndLiveLink = onEndLiveLink
                         )
                         HubPage.E621 -> E621PageContent(
                             e621LoggedIn = e621LoggedIn, e621SearchTags = e621SearchTags,
@@ -523,7 +546,13 @@ private fun SettingsPageContent(
     onLogoutBluesky: () -> Unit,
     onLogoutE621: () -> Unit,
     dominantColor: Color,
-    backdrop: GlassBackdrop?
+    backdrop: GlassBackdrop?,
+    // Live Link widget feature
+    liveTwitchUrl: String? = null,
+    liveYoutubeUrl: String? = null,
+    onSaveLiveTwitchUrl: (String) -> Unit = {},
+    onSaveLiveYoutubeUrl: (String) -> Unit = {},
+    onCreateLiveLinkWidget: () -> Unit = {}
 ) {
     @Composable
     fun CompactRow(content: @Composable RowScope.() -> Unit) {
@@ -835,6 +864,76 @@ private fun SettingsPageContent(
                 Text("Logout", color = Color(0xFFEF5350), fontSize = 12.sp, fontWeight = FontWeight.Medium,
                     modifier = Modifier.clickable(onClick = onLogoutBluesky))
             }
+
+            // ── Live Link widget feature ──────────────────────────────
+            // Save a Twitch and/or YouTube channel URL here, then the
+            // "Create Widget" button (only enabled once at least one is
+            // saved — see the feature request) requests the resizable
+            // home-screen widget be pinned. The widget itself, and this
+            // same toggle mirrored as a row at the bottom of the AT
+            // Protocol Hub page, both read these two saved URLs and act on
+            // them identically via LiveLinkManager.
+            SectionDivider("Live Link")
+            var twitchField by remember(liveTwitchUrl) { mutableStateOf(liveTwitchUrl.orEmpty()) }
+            var youtubeField by remember(liveYoutubeUrl) { mutableStateOf(liveYoutubeUrl.orEmpty()) }
+            OutlinedTextField(value = twitchField, onValueChange = { twitchField = it },
+                label = { Text("Twitch channel URL", fontSize = 12.sp) },
+                singleLine = true, modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { onSaveLiveTwitchUrl(twitchField) }),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White, unfocusedTextColor = Color.White,
+                    focusedBorderColor = dominantColor, unfocusedBorderColor = DimGray,
+                    cursorColor = dominantColor, focusedLabelColor = dominantColor, unfocusedLabelColor = DimGray
+                )
+            )
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(value = youtubeField, onValueChange = { youtubeField = it },
+                label = { Text("YouTube channel URL", fontSize = 12.sp) },
+                singleLine = true, modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { onSaveLiveYoutubeUrl(youtubeField) }),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White, unfocusedTextColor = Color.White,
+                    focusedBorderColor = dominantColor, unfocusedBorderColor = DimGray,
+                    cursorColor = dominantColor, focusedLabelColor = dominantColor, unfocusedLabelColor = DimGray
+                )
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                @Composable
+                fun SaveLinksBubbleContent() {
+                    Box(Modifier.fillMaxSize().clickable {
+                        onSaveLiveTwitchUrl(twitchField)
+                        onSaveLiveYoutubeUrl(youtubeField)
+                    }, contentAlignment = Alignment.Center) {
+                        Text("Save Links", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    }
+                }
+                val widgetEnabled = twitchField.isNotBlank() || youtubeField.isNotBlank() ||
+                    !liveTwitchUrl.isNullOrBlank() || !liveYoutubeUrl.isNullOrBlank()
+                @Composable
+                fun CreateWidgetBubbleContent() {
+                    Box(
+                        Modifier.fillMaxSize().alpha(if (widgetEnabled) 1f else 0.4f)
+                            .clickable(enabled = widgetEnabled, onClick = onCreateLiveLinkWidget),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("Create Widget", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center)
+                    }
+                }
+                if (liquidGlass) {
+                    LiquidGlassSurface(modifier = Modifier.weight(1f).height(44.dp), tint = dominantColor, backdrop = backdrop) { SaveLinksBubbleContent() }
+                    LiquidGlassSurface(modifier = Modifier.weight(1f).height(44.dp), tint = dominantColor, backdrop = backdrop) { CreateWidgetBubbleContent() }
+                } else {
+                    Box(Modifier.weight(1f).height(44.dp).clip(RoundedCornerShape(14.dp)).background(Color.White.copy(0.08f))) { SaveLinksBubbleContent() }
+                    Box(Modifier.weight(1f).height(44.dp).clip(RoundedCornerShape(14.dp)).background(Color.White.copy(0.08f))) { CreateWidgetBubbleContent() }
+                }
+            }
+            Text(
+                "The widget can only be created once at least one link is saved.",
+                color = DimGray, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp)
+            )
         }
 
         // ── e621 Settings (moved from the e621 page) ─────────────────────
@@ -1124,7 +1223,15 @@ private fun AtProtocolPageContent(
     onRefreshHub: () -> Unit = {},
     // Item (this session): replaces the removed swipe-up-to-feed gesture.
     onReturnToFeed: () -> Unit = {},
-    hasVisitedFeed: Boolean = false
+    hasVisitedFeed: Boolean = false,
+    // Live Link widget feature: mirrors the widget's own toggle as the very
+    // bottom row of this page, per the feature request — only rendered once
+    // at least one channel URL is saved (see the bottom of this function).
+    liveTwitchUrl: String? = null,
+    liveYoutubeUrl: String? = null,
+    liveActivePlatform: com.mediaviewer.model.LiveNowPlatform? = null,
+    onToggleLiveLink: (com.mediaviewer.model.LiveNowPlatform) -> Unit = {},
+    onEndLiveLink: () -> Unit = {}
 ) {
     // Item 8: both of the new sections' fetches are lazy — kick them off once
     // when this page first composes rather than eagerly for every Hub visit
@@ -1554,6 +1661,64 @@ private fun AtProtocolPageContent(
             }
         }
 
+        // ── Live Link widget feature: mirrored row at the very bottom of
+        // the Hub — per the feature request, only shown once at least one
+        // channel link is saved, and shaped for a single full-width row
+        // (side-by-side toggle buttons) rather than the widget's own
+        // stacked top/bottom layout, which was sized for a small home-
+        // screen bubble instead of the Hub's full page width. Every tap
+        // here funnels through the exact same LiveLinkManager/prefs path
+        // as the widget, so the two surfaces can never disagree about
+        // whether a Live Link is currently active. ─────────────────────
+        val hasTwitchLink = !liveTwitchUrl.isNullOrBlank()
+        val hasYoutubeLink = !liveYoutubeUrl.isNullOrBlank()
+        if (hasTwitchLink || hasYoutubeLink) {
+            Spacer(Modifier.height(10.dp))
+            val rowShape = RoundedCornerShape(20.dp)
+            @Composable
+            fun LiveLinkRowContent() {
+                if (liveActivePlatform != null) {
+                    val label = if (liveActivePlatform == com.mediaviewer.model.LiveNowPlatform.TWITCH) "End Twitch Link" else "End YouTube Link"
+                    val bg = if (liveActivePlatform == com.mediaviewer.model.LiveNowPlatform.TWITCH) TwitchPurple else YouTubeRed
+                    Box(
+                        Modifier.fillMaxSize().padding(4.dp).clip(RoundedCornerShape(16.dp))
+                            .background(bg.copy(alpha = 0.85f)).clickable(onClick = onEndLiveLink),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(7.dp).clip(CircleShape).background(Color.White))
+                            Spacer(Modifier.width(6.dp))
+                            Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                } else {
+                    Row(Modifier.fillMaxSize().padding(4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (hasTwitchLink) {
+                            Box(
+                                Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(16.dp))
+                                    .background(TwitchPurple.copy(alpha = 0.85f))
+                                    .clickable { onToggleLiveLink(com.mediaviewer.model.LiveNowPlatform.TWITCH) },
+                                contentAlignment = Alignment.Center
+                            ) { Text("Activate Twitch Link", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center) }
+                        }
+                        if (hasYoutubeLink) {
+                            Box(
+                                Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(16.dp))
+                                    .background(YouTubeRed.copy(alpha = 0.85f))
+                                    .clickable { onToggleLiveLink(com.mediaviewer.model.LiveNowPlatform.YOUTUBE) },
+                                contentAlignment = Alignment.Center
+                            ) { Text("Activate YouTube Link", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center) }
+                        }
+                    }
+                }
+            }
+            if (liquidGlass) {
+                LiquidGlassSurface(Modifier.fillMaxWidth().height(52.dp), shape = rowShape, tint = dominantColor, backdrop = backdrop) { LiveLinkRowContent() }
+            } else {
+                Box(Modifier.fillMaxWidth().height(52.dp).clip(rowShape).background(Color.White.copy(0.06f))) { LiveLinkRowContent() }
+            }
+        }
+
         Spacer(Modifier.height(8.dp))
     }
 }
@@ -1686,7 +1851,7 @@ fun LiveNowPlayerOverlay(stream: com.mediaviewer.viewmodel.MainViewModel.Playing
         Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.92f)).blockClicksBehind(),
         contentAlignment = Alignment.Center
     ) {
-        Column(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars)) {
+        Column(Modifier.fillMaxWidth().padding(top = rememberTopCutoutClearance())) {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically

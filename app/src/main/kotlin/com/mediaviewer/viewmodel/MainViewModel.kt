@@ -1,6 +1,7 @@
 package com.mediaviewer.viewmodel
 
 import android.app.Application
+import android.content.Context
 import android.util.Log
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
@@ -381,7 +382,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Blogs/Livestreams, independent of navigation entirely.
     private suspend fun loadSelfProfileSuspend() {
         if (!_bskyLoggedIn.value) return
-        bskyRepo.getFullProfile(bskyToken, _bskyDid.value).onSuccess { _selfProfile.value = it }
+        bskyRepo.getFullProfile(bskyToken, _bskyDid.value).onSuccess {
+            _selfProfile.value = it
+            // Live Link widget feature: keeps a cached copy of the avatar
+            // URL in prefs so the widget (a separate RemoteViews surface
+            // with no ViewModel/network session of its own) can tint itself
+            // to the profile color without needing its own auth round trip
+            // — see PreferencesManager.SELF_AVATAR_URL_CACHE's doc comment.
+            prefs.setSelfAvatarUrlCache(it.author.avatarUrl)
+        }
     }
 
     /** Opens the logged-in user's own Profile Overlay — used by the Settings
@@ -3971,6 +3980,62 @@ _bskyDid.value          = session.did
 
     private fun updateComment(commentId: String, transform: (CommentItem) -> CommentItem) {
         _comments.value = _comments.value.map { if (it.id == commentId) transform(it) else it }
+    }
+
+    // ── Live Link widget feature ────────────────────────────────────────
+    // Single bundled StateFlow (see LiveLinkState's doc comment in
+    // Models.kt for why it's one flow, not three) — the Settings section,
+    // the Hub's bottom row, and (indirectly, via the same
+    // PreferencesManager the widget/worker also read) the widget itself all
+    // observe this same underlying prefs data, so a toggle from any one of
+    // those three surfaces is instantly reflected in the other two without
+    // this ViewModel needing to manually push updates to each.
+    val liveLinkState: StateFlow<com.mediaviewer.model.LiveLinkState> =
+        prefs.liveLinkState.stateIn(viewModelScope, SharingStarted.Eagerly, com.mediaviewer.model.LiveLinkState())
+
+    fun saveLiveTwitchUrl(url: String) = viewModelScope.launch { prefs.setLiveTwitchUrl(url) }
+    fun saveLiveYoutubeUrl(url: String) = viewModelScope.launch { prefs.setLiveYoutubeUrl(url) }
+
+    /** Turns a Live Link ON — used by both the Hub row and (for symmetry,
+     *  though the widget itself calls LiveLinkManager directly since it has
+     *  no ViewModel of its own) anything else in the UI layer that might
+     *  want to. All the actual work (Bluesky status write, prefs, worker
+     *  scheduling, widget refresh) lives in LiveLinkManager — see its own
+     *  doc comment for why this is a shared standalone object rather than
+     *  logic duplicated here. */
+    fun toggleLiveLink(platform: com.mediaviewer.model.LiveNowPlatform) {
+        viewModelScope.launch {
+            val state = liveLinkState.value
+            val url = if (platform == com.mediaviewer.model.LiveNowPlatform.TWITCH) state.twitchUrl else state.youtubeUrl
+            if (url.isNullOrBlank()) return@launch
+            com.mediaviewer.util.LiveLinkManager.goLive(getApplication(), platform, url)
+                .onFailure { showToast("Couldn't start Live Link: ${it.message}") }
+        }
+    }
+
+    fun endLiveLink() {
+        viewModelScope.launch {
+            com.mediaviewer.util.LiveLinkManager.endLive(getApplication())
+                .onFailure { showToast("Couldn't end Live Link: ${it.message}") }
+        }
+    }
+
+    /** Settings' "Create Widget" button — requests the launcher pin the
+     *  Live Link widget directly, per the feature request ("should only be
+     *  creatable from the app via a button next to the links in settings").
+     *  Silently no-ops if the launcher doesn't support this (very old/
+     *  unusual launchers) rather than crashing; there's no in-app fallback
+     *  UI for "drag it from the widget picker yourself" since that picker
+     *  entry point is intentionally what this feature avoids relying on. */
+    fun createLiveLinkWidget() {
+        val context: Context = getApplication()
+        val appWidgetManager = android.appwidget.AppWidgetManager.getInstance(context)
+        val provider = android.content.ComponentName(context, com.mediaviewer.widget.LiveLinkWidgetProvider::class.java)
+        if (appWidgetManager.isRequestPinAppWidgetSupported) {
+            appWidgetManager.requestPinAppWidget(provider, null, null)
+        } else {
+            showToast("Your launcher doesn't support pinning widgets from apps")
+        }
     }
 
     fun clearError() { _errorMessage.value = null }

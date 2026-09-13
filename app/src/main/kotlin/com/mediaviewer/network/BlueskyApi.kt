@@ -127,6 +127,14 @@ interface BlueskyApi {
         @Body request: BskyDeleteRecordRequest
     ): Response<Unit>
 
+    // Live Link widget: upserts app.bsky.actor.status (rkey "self") — see
+    // BskyPutRecordRequest's comment for why this needs put, not create.
+    @POST("xrpc/com.atproto.repo.putRecord")
+    suspend fun putRecord(
+        @Header("Authorization") token: String,
+        @Body request: BskyPutRecordRequest
+    ): Response<BskyPutRecordResponse>
+
     @GET("xrpc/app.bsky.actor.getPreferences")
     suspend fun getPreferences(
         @Header("Authorization") token: String

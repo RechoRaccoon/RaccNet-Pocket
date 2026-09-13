@@ -420,7 +420,7 @@ fun ComposePostScreen(
                 Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())
                     .padding(horizontal = 14.dp)
             ) {
-                Spacer(Modifier.windowInsetsTopHeight(WindowInsets.statusBars))
+                Spacer(Modifier.height(rememberTopCutoutClearance()))
                 Spacer(Modifier.height(6.dp))
 
                 // Top row: X close — status bubble — Post button

@@ -144,7 +144,7 @@ fun SearchOverlay(
                 )
         )
 
-        Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
+        Column(Modifier.fillMaxSize().padding(top = rememberTopCutoutClearance())) {
             Spacer(Modifier.height(16.dp))
 
             // ── Bar: close bubble + round search field ──────────────────────

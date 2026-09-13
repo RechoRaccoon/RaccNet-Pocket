@@ -40,11 +40,36 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import coil.request.ImageRequest
 import com.mediaviewer.ui.theme.DimGray
+
+/** Bug fix: top-of-screen interactive rows (the feed's AuthorRow, the Hub
+ *  header, Search/DM overlays' headers, …) used to pad themselves down by
+ *  `WindowInsets.statusBars` alone. That works fine on a device with a
+ *  normal status bar showing, but this app hides the status bar entirely
+ *  (see MainActivity.hideSystemStatusBar) — and with it hidden, several
+ *  devices report `WindowInsets.statusBars` as 0 instead of still holding
+ *  space for the physical camera cutout, so real UI ends up drawn underneath
+ *  it and gets visually clipped/obscured. [ProfileOverlay] already worked
+ *  around this same issue locally with its own `topClearance` calculation;
+ *  this is that same fix pulled out into one shared helper so every other
+ *  top-of-screen surface can use it too: take whichever is tallest of the
+ *  status bar inset, the display cutout inset, and a sane minimum, so
+ *  content clears the cutout on every device regardless of whether the
+ *  hidden status bar's own inset happens to still be reported or not.
+ *  Deliberately only ever used for *top* padding on specific interactive
+ *  rows, never as a full-screen inset — the background/title art behind
+ *  those rows is still meant to extend all the way up under the cutout. */
+@Composable
+fun rememberTopCutoutClearance(minimum: Dp = 32.dp): Dp {
+    val cutoutTop = WindowInsets.displayCutout.asPaddingValues().calculateTopPadding()
+    val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    return maxOf(cutoutTop, statusBarTop, minimum)
+}
 
 /** The actual color-sampling work behind [rememberDominantColor], factored
  *  out as a plain suspend function so non-composable call sites (the

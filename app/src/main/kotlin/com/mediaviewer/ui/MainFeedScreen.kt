@@ -170,6 +170,13 @@ fun MainFeedScreen(
     onOpenLivePlayer: (String, String, String) -> Unit = { _, _, _ -> },
     onEnsureFriends: () -> Unit = {},
     selfAvatarUrl: String? = null,
+    // Live Link widget feature
+    liveLinkState: com.mediaviewer.model.LiveLinkState = com.mediaviewer.model.LiveLinkState(),
+    onSaveLiveTwitchUrl: (String) -> Unit = {},
+    onSaveLiveYoutubeUrl: (String) -> Unit = {},
+    onCreateLiveLinkWidget: () -> Unit = {},
+    onToggleLiveLink: (com.mediaviewer.model.LiveNowPlatform) -> Unit = {},
+    onEndLiveLink: () -> Unit = {},
     availableFeeds: List<BskyFeedInfo>,
     selectedFeedUri: String?,
     authorFeedState: MainViewModel.AuthorFeedSavedState?,
@@ -527,7 +534,15 @@ fun MainFeedScreen(
                         onLoadBlueskyLiveNow      = onLoadBlueskyLiveNow,
                         onOpenLivePlayer          = onOpenLivePlayer,
                         onEnsureFriends           = onEnsureFriends,
-                        selfAvatarUrl             = selfAvatarUrl
+                        selfAvatarUrl             = selfAvatarUrl,
+                        liveTwitchUrl             = liveLinkState.twitchUrl,
+                        liveYoutubeUrl            = liveLinkState.youtubeUrl,
+                        liveActivePlatform        = liveLinkState.activePlatform,
+                        onSaveLiveTwitchUrl       = onSaveLiveTwitchUrl,
+                        onSaveLiveYoutubeUrl      = onSaveLiveYoutubeUrl,
+                        onCreateLiveLinkWidget    = onCreateLiveLinkWidget,
+                        onToggleLiveLink          = onToggleLiveLink,
+                        onEndLiveLink             = onEndLiveLink
                     )
                     ScreenState.GRID -> GridScreen(
                         items           = mediaItems,
@@ -1429,7 +1444,7 @@ private fun PostContent(
                         showReply = !item.sentByIsRepost,
                         modifier = Modifier.fillMaxWidth()
                             .background(Color.Black.copy(0.55f))
-                            .windowInsetsPadding(WindowInsets.statusBars)
+                            .padding(top = rememberTopCutoutClearance())
                             .padding(horizontal = 10.dp, vertical = 6.dp)
                     )
                 }
@@ -1442,7 +1457,7 @@ private fun PostContent(
                 if (!item.isBlocked) {
                     AuthorRow(item, appMode, onToggleFollow, onTapAuthor,
                         Modifier.fillMaxWidth()
-                            .then(if (item.sentByAuthor == null) Modifier.windowInsetsPadding(WindowInsets.statusBars) else Modifier),
+                            .then(if (item.sentByAuthor == null) Modifier.padding(top = rememberTopCutoutClearance()) else Modifier),
                         liquidGlass = liquidGlass,
                         dominantColor = dominantColor,
                         backdrop = glassBackdrop,

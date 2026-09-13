@@ -1,6 +1,7 @@
 package com.mediaviewer
 
 import android.content.Context
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -133,6 +134,22 @@ class MainActivity : ComponentActivity() {
         installCrashHandler(applicationContext)
         enableEdgeToEdge()
         hideSystemStatusBar()
+        // Bug fix: lets the background/media draw all the way up under the
+        // camera cutout instead of the system reserving a blank strip there
+        // — the cutout area should show background color/art only, with
+        // real interactive UI padded clear of it instead (see
+        // rememberTopCutoutClearance in GlassTheme.kt for that half of the
+        // fix). ALWAYS is available from API 28; SHORT_EDGES is the closest
+        // equivalent on 27, and there's no cutout API at all below that.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode = android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            }
+        } else if (Build.VERSION.SDK_INT == Build.VERSION_CODES.O_MR1) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode = android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
         setContent {
             var crashLog by remember { mutableStateOf(readCrashLog(applicationContext)) }
             if (crashLog != null) {
@@ -253,6 +270,7 @@ private fun AppRoot(viewModel: MainViewModel) {
     val friendsBlogs           by viewModel.friendsBlogs.collectAsState()
 
     val liveFriends           by viewModel.liveFriends.collectAsState()
+    val liveLinkState         by viewModel.liveLinkState.collectAsState()
     val liveFriendsLoading    by viewModel.liveFriendsLoading.collectAsState()
     val blueskyLiveNow        by viewModel.blueskyLiveNow.collectAsState()
     val blueskyLiveNowLoading by viewModel.blueskyLiveNowLoading.collectAsState()
@@ -568,6 +586,12 @@ private fun AppRoot(viewModel: MainViewModel) {
             onOpenLivePlayer          = viewModel::openLivePlayer,
             onEnsureFriends           = viewModel::ensureDmConversationsLoaded,
             selfAvatarUrl             = selfProfile?.author?.avatarUrl,
+            liveLinkState             = liveLinkState,
+            onSaveLiveTwitchUrl       = viewModel::saveLiveTwitchUrl,
+            onSaveLiveYoutubeUrl      = viewModel::saveLiveYoutubeUrl,
+            onCreateLiveLinkWidget    = viewModel::createLiveLinkWidget,
+            onToggleLiveLink          = viewModel::toggleLiveLink,
+            onEndLiveLink             = viewModel::endLiveLink,
             availableFeeds            = availableFeeds,
             selectedFeedUri           = selectedFeed,
             authorFeedState           = authorFeedState,

@@ -913,6 +913,56 @@ class BlueskyRepository {
         }
     }
 
+    /** Live Link widget: turns ON this account's own Bluesky "Live Now"
+     *  badge — writes app.bsky.actor.status (confirmed real lexicon: status
+     *  record, key literal:"self", fields status/embed/durationMinutes/
+     *  createdAt — see LiveLinkState's comment in Models.kt). Uses putRecord
+     *  (upsert), not createRecord, since "self" already exists after the
+     *  first time this is ever called and createRecord would then 400.
+     *  durationMinutes is fixed at the max the real Bluesky client itself
+     *  offers (4 hours) — see LiveLinkManager, which re-calls this on every
+     *  periodic check while the stream is confirmed still up, "bumping" the
+     *  expiry back out to the max rather than letting it run down, and lets
+     *  it actually expire (or calls [clearLiveNowStatus]) once the stream's
+     *  confirmed to have ended. Bluesky's own "Go Live" sheet (as of this
+     *  session) lists Twitch, Streamplace, Bluecast, YouTube, Substack, and
+     *  Beehiiv as enabled services for the badge, so both Twitch and
+     *  YouTube links are expected to render the badge normally.
+     */
+    suspend fun setLiveNowStatus(
+        token: String, did: String, streamUrl: String, title: String, durationMinutes: Int = 240
+    ): Result<String> = runCatching {
+        val record = mapOf(
+            "\$type" to "app.bsky.actor.status",
+            "status" to "app.bsky.actor.status#live",
+            "createdAt" to Instant.now().toString(),
+            "durationMinutes" to durationMinutes,
+            "embed" to mapOf(
+                "\$type" to "app.bsky.embed.external",
+                "external" to mapOf(
+                    "\$type" to "app.bsky.embed.external.external",
+                    "uri" to streamUrl,
+                    "title" to title,
+                    "description" to ""
+                )
+            )
+        )
+        val resp = api.putRecord("Bearer $token", BskyPutRecordRequest(did, "app.bsky.actor.status", "self", record))
+        if (!resp.isSuccessful) error("setLiveNowStatus failed: ${resp.code()} ${resp.errorBody()?.string()}")
+        resp.body()?.uri ?: ""
+    }
+
+    /** Live Link widget: turns the badge back OFF (either the person tapped
+     *  "End ... Link", or the periodic check found the stream had already
+     *  ended). Deleting a record that's already gone (e.g. it naturally
+     *  expired on its own between checks) 404s — tolerated as success here
+     *  rather than surfaced as a failure, since the end state ("no live
+     *  status") is the same either way. */
+    suspend fun clearLiveNowStatus(token: String, did: String): Result<Unit> = runCatching {
+        val resp = api.deleteRecord("Bearer $token", BskyDeleteRecordRequest(did, "app.bsky.actor.status", "self"))
+        if (!resp.isSuccessful && resp.code() != 404) error("clearLiveNowStatus failed: ${resp.code()}")
+    }
+
     private fun liveNowPlatformFor(uri: String): LiveNowPlatform {
         val host = runCatching { java.net.URI(uri).host?.lowercase() }.getOrNull() ?: ""
         return when {

@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <ImageView
+        android:id="@+id/widget_bubble_bg"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="fitXY"
+        android:contentDescription="@null" />
+
+    <LinearLayout
+        android:id="@+id/widget_content"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="12dp">
+
+        <Button
+            android:id="@+id/btn_twitch"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:layout_marginBottom="5dp"
+            android:minHeight="0dp"
+            android:minWidth="0dp"
+            android:paddingHorizontal="6dp"
+            android:text="@string/widget_activate_twitch"
+            android:textAllCaps="false"
+            android:textColor="#FFFFFFFF"
+            android:textSize="12sp"
+            android:background="@drawable/widget_button_twitch"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/btn_youtube"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:layout_marginTop="5dp"
+            android:minHeight="0dp"
+            android:minWidth="0dp"
+            android:paddingHorizontal="6dp"
+            android:text="@string/widget_activate_youtube"
+            android:textAllCaps="false"
+            android:textColor="#FFFFFFFF"
+            android:textSize="12sp"
+            android:background="@drawable/widget_button_youtube"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/btn_end"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:minHeight="0dp"
+            android:minWidth="0dp"
+            android:paddingHorizontal="6dp"
+            android:text="@string/widget_end_link"
+            android:textAllCaps="false"
+            android:textColor="#FFFFFFFF"
+            android:textSize="13sp"
+            android:background="@drawable/widget_button_end"
+            android:visibility="gone" />
+
+    </LinearLayout>
+</FrameLayout>

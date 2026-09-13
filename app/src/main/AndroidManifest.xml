@@ -30,5 +30,26 @@
             </intent-filter>
         </activity>
 
+        <!-- Live Link widget: only ever created from within the app via
+             requestPinAppWidget() (Settings' "Create Widget" button) — see
+             the feature request ("should only be creatable from the app via
+             a button next to the links in settings"), never surfaced in the
+             system's normal long-press widget picker flow, though Android
+             itself doesn't allow fully hiding a provider from that picker;
+             it just won't be functional without a saved link either way. -->
+        <receiver
+            android:name=".widget.LiveLinkWidgetProvider"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.mediaviewer.widget.ACTION_TWITCH" />
+                <action android:name="com.mediaviewer.widget.ACTION_YOUTUBE" />
+                <action android:name="com.mediaviewer.widget.ACTION_END" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/live_link_widget_info" />
+        </receiver>
+
     </application>
 </manifest>

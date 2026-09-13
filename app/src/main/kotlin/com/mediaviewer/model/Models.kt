@@ -305,6 +305,21 @@ data class BskyDeleteRecordRequest(
     val rkey: String
 )
 
+// Feature (Live Link widget): com.atproto.repo.putRecord — an upsert (unlike
+// createRecord, safe to call again with the same rkey), which is what
+// app.bsky.actor.status needs since its lexicon key is literal:"self" (one
+// status record per account, always at the same rkey). `swapRecord`/`swapCid`
+// left null: this app doesn't need optimistic-concurrency compare-and-swap
+// for a self-owned status record.
+data class BskyPutRecordRequest(
+    val repo: String,
+    val collection: String,
+    val rkey: String,
+    val record: Map<String, Any>
+)
+
+data class BskyPutRecordResponse(val uri: String, val cid: String)
+
 data class BskyThreadResponse(val thread: BskyThreadView)
 
 data class BskyThreadView(
@@ -854,6 +869,23 @@ data class BlueskyLiveNowStream(
 )
 
 enum class LiveNowPlatform { TWITCH, YOUTUBE, OTHER }
+
+/** Live Link widget/Hub row feature: this account's OWN Bluesky "Live Now"
+ *  status (as opposed to [BlueskyLiveNowStream], which is a mutual's). Reuses
+ *  [LiveNowPlatform] but only ever holds TWITCH/YOUTUBE for this feature
+ *  (never OTHER — the widget only ever offers those two toggles). Persisted
+ *  in PreferencesManager so the widget (a separate process/RemoteViews
+ *  surface with no ViewModel of its own) and the periodic check worker can
+ *  both read/act on it without going through the UI layer at all. */
+data class LiveLinkState(
+    val twitchUrl: String? = null,
+    val youtubeUrl: String? = null,
+    val activePlatform: LiveNowPlatform? = null,
+    val expiresAtEpochMs: Long = 0L
+) {
+    val hasAnyLink: Boolean get() = !twitchUrl.isNullOrBlank() || !youtubeUrl.isNullOrBlank()
+    val isLive: Boolean get() = activePlatform != null
+}
 
 /** Item 8: one friend's recent Popfeed review, for the Hub's Friends →
  *  Reviews sub-tab — an aggregate across every friend/DM contact's own

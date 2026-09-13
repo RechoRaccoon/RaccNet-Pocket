@@ -104,7 +104,7 @@ fun DmInboxOverlay(
                 )
         )
 
-        Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
+        Column(Modifier.fillMaxSize().padding(top = rememberTopCutoutClearance())) {
             // ── Header ──
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),

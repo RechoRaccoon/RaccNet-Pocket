@@ -387,7 +387,7 @@ fun ProfileOverlay(
             // against that — keeps the last item fully visible and clear
             // of it once scrolled all the way down.
             contentPadding = PaddingValues(bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 16.dp),
-            modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)
+            modifier = Modifier.fillMaxSize().padding(top = rememberTopCutoutClearance())
         ) {
             item(key = "profile_header") {
                 ProfileHeaderSection(
@@ -498,7 +498,7 @@ fun ProfileOverlay(
             visible = pastTabs,
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(top = rememberTopCutoutClearance())
                 .padding(top = 8.dp),
             enter = fadeIn(tween(if (reducedAnimations) 0 else 180)) + scaleIn(initialScale = 0.8f),
             exit = fadeOut(tween(if (reducedAnimations) 0 else 180)) + scaleOut(targetScale = 0.8f)
@@ -1637,7 +1637,7 @@ private fun BlogDetailOverlay(blog: LeafletBlog, author: AuthorInfo, liquidGlass
             // through to whatever's rendered beneath the popup.
             .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null) {}
     ) {
-        Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
+        Column(Modifier.fillMaxSize().padding(top = rememberTopCutoutClearance())) {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween
@@ -1948,7 +1948,7 @@ private fun ReviewDetailOverlay(review: PopfeedReview, author: AuthorInfo, liqui
             // through to whatever's rendered beneath the popup.
             .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null) {}
     ) {
-        Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
+        Column(Modifier.fillMaxSize().padding(top = rememberTopCutoutClearance())) {
             Row(
                 Modifier.fillMaxWidth().padding(12.dp).height(IntrinsicSize.Min),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween

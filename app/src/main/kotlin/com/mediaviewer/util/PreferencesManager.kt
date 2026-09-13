@@ -68,6 +68,30 @@ object PrefKeys {
     val TAG_POST_WHEN_LIKED    = booleanPreferencesKey("tag_post_when_liked")
     // Item 6: parallel tagging slider (1-10 posts at once).
     val TAG_CONCURRENCY        = intPreferencesKey("tag_concurrency")
+
+    // ── Live Link widget ─────────────────────────────────────────────────
+    // Saved channel URLs (Settings input) — either/both may be set. The
+    // widget/Hub row's toggle buttons only appear for whichever of these is
+    // non-blank.
+    val LIVE_TWITCH_URL       = stringPreferencesKey("live_twitch_url")
+    val LIVE_YOUTUBE_URL      = stringPreferencesKey("live_youtube_url")
+    // Which platform's badge is currently ON ("TWITCH"/"YOUTUBE"), or absent
+    // if neither. Read by the widget (a separate RemoteViews surface with no
+    // ViewModel) and the periodic check worker, so it's the single source of
+    // truth for "is a Live Link currently active" — not just UI state.
+    val LIVE_ACTIVE_PLATFORM  = stringPreferencesKey("live_active_platform")
+    // Epoch-millis this account's app.bsky.actor.status record is set to
+    // expire at — used to show "time remaining" and as the periodic worker's
+    // own fallback (if a check is somehow missed, the badge still expires on
+    // Bluesky's side on its own at this same moment).
+    val LIVE_EXPIRES_AT_MS    = longPreferencesKey("live_expires_at_ms")
+    // Cached copy of the logged-in account's own avatar URL — kept in sync
+    // whenever loadSelfProfileSuspend() resolves (see MainViewModel), purely
+    // so the widget (a separate process/RemoteViews surface that can't run
+    // Compose/Coil the normal way) has something to sample a bubble tint
+    // from without needing its own network+auth round trip just to color
+    // itself.
+    val SELF_AVATAR_URL_CACHE = stringPreferencesKey("self_avatar_url_cache")
 }
 
 
@@ -120,6 +144,66 @@ class PreferencesManager(private val context: Context) {
     val customFontName: Flow<String?>          = context.dataStore.data.map { it[PrefKeys.CUSTOM_FONT_NAME] }
     val tagPostWhenLiked: Flow<Boolean>        = context.dataStore.data.map { it[PrefKeys.TAG_POST_WHEN_LIKED] ?: false }
     val tagConcurrency: Flow<Int>              = context.dataStore.data.map { (it[PrefKeys.TAG_CONCURRENCY] ?: 3).coerceIn(1, 10) }
+
+    // ── Live Link widget ─────────────────────────────────────────────────
+    val liveTwitchUrl: Flow<String?>   = context.dataStore.data.map { it[PrefKeys.LIVE_TWITCH_URL] }
+    val liveYoutubeUrl: Flow<String?>  = context.dataStore.data.map { it[PrefKeys.LIVE_YOUTUBE_URL] }
+    val selfAvatarUrlCache: Flow<String?> = context.dataStore.data.map { it[PrefKeys.SELF_AVATAR_URL_CACHE] }
+    // Bundled into one LiveLinkState Flow (rather than three separate ones)
+    // so the Hub row and widget-preview code observe one atomic snapshot —
+    // never a torn read where activePlatform updated but expiresAt hasn't
+    // caught up yet (or vice versa).
+    val liveLinkState: Flow<com.mediaviewer.model.LiveLinkState> = context.dataStore.data.map { prefs ->
+        com.mediaviewer.model.LiveLinkState(
+            twitchUrl = prefs[PrefKeys.LIVE_TWITCH_URL],
+            youtubeUrl = prefs[PrefKeys.LIVE_YOUTUBE_URL],
+            activePlatform = when (prefs[PrefKeys.LIVE_ACTIVE_PLATFORM]) {
+                "TWITCH" -> com.mediaviewer.model.LiveNowPlatform.TWITCH
+                "YOUTUBE" -> com.mediaviewer.model.LiveNowPlatform.YOUTUBE
+                else -> null
+            },
+            expiresAtEpochMs = prefs[PrefKeys.LIVE_EXPIRES_AT_MS] ?: 0L
+        )
+    }
+
+    suspend fun setLiveTwitchUrl(url: String?) {
+        context.dataStore.edit { prefs ->
+            if (url.isNullOrBlank()) prefs.remove(PrefKeys.LIVE_TWITCH_URL) else prefs[PrefKeys.LIVE_TWITCH_URL] = url.trim()
+        }
+    }
+
+    suspend fun setLiveYoutubeUrl(url: String?) {
+        context.dataStore.edit { prefs ->
+            if (url.isNullOrBlank()) prefs.remove(PrefKeys.LIVE_YOUTUBE_URL) else prefs[PrefKeys.LIVE_YOUTUBE_URL] = url.trim()
+        }
+    }
+
+    /** Marks a Live Link as active — called right after the Bluesky status
+     *  record write succeeds. One write covers both fields for the same
+     *  reason setHubCache does: never a torn read of "active platform" vs.
+     *  "expires at" for two different toggles. */
+    suspend fun setLiveActive(platform: com.mediaviewer.model.LiveNowPlatform, expiresAtEpochMs: Long) {
+        context.dataStore.edit { prefs ->
+            prefs[PrefKeys.LIVE_ACTIVE_PLATFORM] = platform.name
+            prefs[PrefKeys.LIVE_EXPIRES_AT_MS] = expiresAtEpochMs
+        }
+    }
+
+    /** Clears the active Live Link — called once the badge is confirmed torn
+     *  down on Bluesky's side (manual "End Link" tap, or the periodic worker
+     *  finding the stream itself has ended). */
+    suspend fun clearLiveActive() {
+        context.dataStore.edit { prefs ->
+            prefs.remove(PrefKeys.LIVE_ACTIVE_PLATFORM)
+            prefs.remove(PrefKeys.LIVE_EXPIRES_AT_MS)
+        }
+    }
+
+    suspend fun setSelfAvatarUrlCache(url: String?) {
+        context.dataStore.edit { prefs ->
+            if (url.isNullOrBlank()) prefs.remove(PrefKeys.SELF_AVATAR_URL_CACHE) else prefs[PrefKeys.SELF_AVATAR_URL_CACHE] = url
+        }
+    }
 
     suspend fun setTagPostWhenLiked(enabled: Boolean) {
         context.dataStore.edit { prefs -> prefs[PrefKeys.TAG_POST_WHEN_LIKED] = enabled }

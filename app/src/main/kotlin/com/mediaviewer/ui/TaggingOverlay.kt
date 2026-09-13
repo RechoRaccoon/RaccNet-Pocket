@@ -144,7 +144,7 @@ fun TaggingOverlay(
         // so it's reachable in every state above, including the full-screen
         // post view.
         Box(
-            Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars).padding(16.dp),
+            Modifier.fillMaxSize().padding(top = rememberTopCutoutClearance()).padding(16.dp),
             contentAlignment = Alignment.TopStart
         ) {
             TaggingCloseBubble(liquidGlass = liquidGlass, tint = profileTint, backdrop = backdrop, onClick = onDismiss)
@@ -200,7 +200,7 @@ private fun ActiveTaggingView(
     backdrop: GlassBackdrop?
 ) {
     Box(
-        Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)
+        Modifier.fillMaxSize().padding(top = rememberTopCutoutClearance())
             .padding(horizontal = 18.dp)
             .padding(top = 64.dp, bottom = 24.dp),
         contentAlignment = Alignment.Center

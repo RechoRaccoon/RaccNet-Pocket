@@ -84,7 +84,7 @@ fun GridScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(OledBlack)
-            .windowInsetsPadding(WindowInsets.statusBars)
+            .padding(top = rememberTopCutoutClearance())
     ) {
         // ── Feed selector / search bar ─────────────────────────────────────────
         if (appMode == AppMode.BLUESKY) {
