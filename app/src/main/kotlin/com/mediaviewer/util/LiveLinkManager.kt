@@ -4,6 +4,7 @@ import android.content.Context
 import com.mediaviewer.model.LiveNowPlatform
 import com.mediaviewer.repository.BlueskyRepository
 import com.mediaviewer.widget.LiveLinkWidgetProvider
+import com.mediaviewer.worker.LiveLinkScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
