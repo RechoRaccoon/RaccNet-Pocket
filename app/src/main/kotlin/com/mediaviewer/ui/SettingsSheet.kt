@@ -872,6 +872,11 @@ private fun SettingsPageContent(
             // same toggle mirrored as a row at the bottom of the AT
             // Protocol Hub page, both read these two saved URLs and act on
             // them identically via LiveLinkManager.
+            //
+            // Gated behind FeatureFlags.LIVE_LINK_ENABLED: the feature isn't
+            // finished yet, so it's hidden from the app for now, but every
+            // line below stays in place to resume from later.
+            if (com.mediaviewer.util.FeatureFlags.LIVE_LINK_ENABLED) {
             SectionDivider("Live Link")
             var twitchField by remember(liveTwitchUrl) { mutableStateOf(liveTwitchUrl.orEmpty()) }
             var youtubeField by remember(liveYoutubeUrl) { mutableStateOf(liveYoutubeUrl.orEmpty()) }
@@ -933,6 +938,7 @@ private fun SettingsPageContent(
                 "The widget can only be created once at least one link is saved.",
                 color = DimGray, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp)
             )
+            }
         }
 
         // ── e621 Settings (moved from the e621 page) ─────────────────────
@@ -1669,6 +1675,10 @@ private fun AtProtocolPageContent(
         // here funnels through the exact same LiveLinkManager/prefs path
         // as the widget, so the two surfaces can never disagree about
         // whether a Live Link is currently active. ─────────────────────
+        //
+        // Gated behind FeatureFlags.LIVE_LINK_ENABLED — hidden for now,
+        // left in place to pick back up later.
+        if (com.mediaviewer.util.FeatureFlags.LIVE_LINK_ENABLED) {
         val hasTwitchLink = !liveTwitchUrl.isNullOrBlank()
         val hasYoutubeLink = !liveYoutubeUrl.isNullOrBlank()
         if (hasTwitchLink || hasYoutubeLink) {
@@ -1716,6 +1726,7 @@ private fun AtProtocolPageContent(
             } else {
                 Box(Modifier.fillMaxWidth().height(52.dp).clip(rowShape).background(Color.White.copy(0.06f))) { LiveLinkRowContent() }
             }
+        }
         }
 
         Spacer(Modifier.height(8.dp))

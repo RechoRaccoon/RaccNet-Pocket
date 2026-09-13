@@ -2273,6 +2273,11 @@ class BlueskyRepository {
                         val t = img.thumb
                         return if (!t.isNullOrBlank()) t else img.thumbnail?.takeIf { it.isNotBlank() } ?: img.fullsize
                     }
+                    // Profile "Posts" tab redesign: width/height ratio, when
+                    // Bluesky's embed view reported one, for the Pinterest-
+                    // style grid to size tiles to their true proportions.
+                    fun resolvedRatio(img: BskyImageView): Float? =
+                        img.aspectRatio?.takeIf { it.height > 0 }?.let { it.width.toFloat() / it.height.toFloat() }
                     val images = (embed.images?.takeIf { it.isNotEmpty() } ?: embed.items ?: emptyList())
                         .filter { !it.fullsize.isNullOrBlank() && (!it.thumb.isNullOrBlank() || !it.thumbnail.isNullOrBlank()) }
                     if (images.isEmpty()) textOnlyItem() else {
@@ -2294,9 +2299,10 @@ class BlueskyRepository {
                                 likeCount = post.likeCount ?: 0, replyCount = post.replyCount ?: 0,
                                 repostCount = post.repostCount ?: 0, altText = first.alt ?: "",
                                 mediaGroup = if (images.size > 1) images.map {
-                                    MediaGroupItem(mediaUrl = it.fullsize, thumbUrl = resolvedThumb(it), altText = it.alt ?: "")
+                                    MediaGroupItem(mediaUrl = it.fullsize, thumbUrl = resolvedThumb(it), altText = it.alt ?: "", aspectRatio = resolvedRatio(it))
                                 } else emptyList(),
-                                text = text
+                                text = text,
+                                aspectRatio = resolvedRatio(first)
                             )
                         )
                     }
@@ -2309,7 +2315,11 @@ class BlueskyRepository {
                         author = author, likeUri = post.viewer?.like, repostUri = post.viewer?.repost,
                         isLiked = post.viewer?.like != null, isReposted = post.viewer?.repost != null,
                         likeCount = post.likeCount ?: 0, replyCount = post.replyCount ?: 0,
-                        repostCount = post.repostCount ?: 0, text = text
+                        repostCount = post.repostCount ?: 0, text = text,
+                        // Profile "Posts" tab redesign: lets the Horizontal
+                        // Videos / Vertical Videos sub-tabs classify this
+                        // video without decoding it.
+                        aspectRatio = embed.aspectRatio?.takeIf { it.height > 0 }?.let { it.width.toFloat() / it.height.toFloat() }
                     )
                 )
                 embed.type.contains("recordWithMedia") ->
@@ -2376,7 +2386,9 @@ class BlueskyRepository {
                                 repostCount = post.repostCount ?: 0,
                                 altText = quotedImage?.alt ?: "",
                                 text = quoted.value?.text ?: "",
-                                sentByAuthor = author, sentByMessage = text, sentByIsRepost = true
+                                sentByAuthor = author, sentByMessage = text, sentByIsRepost = true,
+                                aspectRatio = (quotedVideo?.aspectRatio ?: quotedImage?.aspectRatio)
+                                    ?.takeIf { it.height > 0 }?.let { it.width.toFloat() / it.height.toFloat() }
                             )
                         )
                     }

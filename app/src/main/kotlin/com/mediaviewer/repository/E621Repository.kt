@@ -88,6 +88,11 @@ class E621Repository {
         val thumb = preview.url ?: sample?.url ?: url
         val isVid = file.ext in listOf("webm", "mp4")
         val artist = tags.artist.firstOrNull() ?: "unknown"
+        // Profile "Posts" tab redesign: e621 always reports the original
+        // file's pixel dimensions, so the ratio is exact (unlike Bluesky,
+        // where it's only present when the poster's client bothered to
+        // report one).
+        val ratio = if (file.width > 0 && file.height > 0) file.width.toFloat() / file.height.toFloat() else null
         return MediaItem(
             id               = id.toString(),
             mediaUrl         = url,
@@ -109,7 +114,8 @@ class E621Repository {
             replyCount       = comment_count,
             e621PostId       = id,
             e621Score        = score.total,
-            tags             = (tags.general + tags.species + tags.character + tags.artist).take(20).joinToString(" ")
+            tags             = (tags.general + tags.species + tags.character + tags.artist).take(20).joinToString(" "),
+            aspectRatio      = ratio
         )
     }
 }

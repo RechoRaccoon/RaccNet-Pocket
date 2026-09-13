@@ -78,8 +78,7 @@ import com.mediaviewer.viewmodel.MainViewModel
 import kotlinx.coroutines.launch
 
 private fun MainViewModel.ProfileTab.label(): String = when (this) {
-    MainViewModel.ProfileTab.MEDIA      -> "Media"
-    MainViewModel.ProfileTab.TEXT_POSTS -> "Text Posts"
+    MainViewModel.ProfileTab.POSTS      -> "Posts"
     MainViewModel.ProfileTab.REPOSTS    -> "Reposts"
     MainViewModel.ProfileTab.LIKES      -> "Likes"
     MainViewModel.ProfileTab.BLOGS      -> "Blogs"
@@ -91,8 +90,8 @@ private fun MainViewModel.ProfileTab.label(): String = when (this) {
 // ─── Profile tabs sub-filter row ────────────────────────────────────────────
 // A second, half-height row of pills under the main tab row (Popfeed does
 // this too — a type filter directly under the tab strip). Only shown for
-// tabs where it means something: Media/Reposts/Likes filter by
-// image-vs-video, Reviews/Backlog filter by the media's own category.
+// tabs where it means something: Posts/Reposts/Likes filter by content
+// type, Reviews/Backlog filter by the media's own category.
 
 private enum class MediaKindFilter { ALL, IMAGES, VIDEOS }
 private fun MediaKindFilter.label() = when (this) {
@@ -102,6 +101,25 @@ private fun MediaKindFilter.matches(item: MediaItem) = when (this) {
     MediaKindFilter.ALL -> true
     MediaKindFilter.IMAGES -> !item.isVideo
     MediaKindFilter.VIDEOS -> item.isVideo
+}
+
+// Profile "Posts" tab redesign: replaces the old MEDIA/TEXT_POSTS pair of
+// top-level tabs with a single POSTS tab and this five-way sub-filter row.
+// Each option gets its own distinct layout — see PostsLayoutRows below.
+enum class PostKindFilter { ALL, IMAGES, TEXT_POSTS, HORIZONTAL_VIDEOS, VERTICAL_VIDEOS }
+private fun PostKindFilter.label() = when (this) {
+    PostKindFilter.ALL               -> "All"
+    PostKindFilter.IMAGES             -> "Images"
+    PostKindFilter.TEXT_POSTS         -> "Text Posts"
+    PostKindFilter.HORIZONTAL_VIDEOS  -> "Horizontal Videos"
+    PostKindFilter.VERTICAL_VIDEOS    -> "Vertical Videos"
+}
+private fun PostKindFilter.matches(item: MediaItem) = when (this) {
+    PostKindFilter.ALL              -> true
+    PostKindFilter.IMAGES            -> !item.isVideo && !item.isTextOnly
+    PostKindFilter.TEXT_POSTS        -> item.isTextOnly
+    PostKindFilter.HORIZONTAL_VIDEOS -> item.isHorizontalVideo
+    PostKindFilter.VERTICAL_VIDEOS   -> item.isVerticalVideo
 }
 
 // Not private: Search's Titles tab (SearchOverlay.kt) reuses this exact
@@ -338,6 +356,7 @@ fun ProfileOverlay(
     // tab changes so switching tabs/profiles doesn't carry over a stale
     // filter selection from a completely different tab's category set.
     var mediaKindFilter by remember(author.did, state.selectedTab) { mutableStateOf(MediaKindFilter.ALL) }
+    var postKindFilter by remember(author.did, state.selectedTab) { mutableStateOf(PostKindFilter.ALL) }
     var reviewKindFilter by remember(author.did, state.selectedTab) { mutableStateOf(ReviewKindFilter.ALL) }
 
     Box(
@@ -426,7 +445,14 @@ fun ProfileOverlay(
                     // where a type filter means something; other tabs (Text
                     // Posts, Blogs, Vods) show nothing extra here.
                     when (state.selectedTab) {
-                        MainViewModel.ProfileTab.MEDIA, MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES -> {
+                        MainViewModel.ProfileTab.POSTS -> {
+                            ProfileSubFilterRow(
+                                options = PostKindFilter.entries.toList(), selected = postKindFilter,
+                                liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
+                                onSelect = { postKindFilter = it }
+                            )
+                        }
+                        MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES -> {
                             ProfileSubFilterRow(
                                 options = MediaKindFilter.entries.toList(), selected = mediaKindFilter,
                                 liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
@@ -467,6 +493,7 @@ fun ProfileOverlay(
                 state = state,
                 liquidGlass = liquidGlass,
                 mediaKindFilter = mediaKindFilter,
+                postKindFilter = postKindFilter,
                 reviewKindFilter = reviewKindFilter,
                 profileTint = blended,
                 onLoadMore = onLoadMore,
@@ -973,6 +1000,7 @@ private fun LazyListScope.profileResultsContent(
     liquidGlass: Boolean,
     profileTint: Color,
     mediaKindFilter: MediaKindFilter,
+    postKindFilter: PostKindFilter,
     reviewKindFilter: ReviewKindFilter,
     onLoadMore: () -> Unit,
     onTapItem: (Int) -> Unit,
@@ -983,7 +1011,38 @@ private fun LazyListScope.profileResultsContent(
     val tabState = state.tabStates[state.selectedTab]
 
     when (state.selectedTab) {
-        MainViewModel.ProfileTab.MEDIA, MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES -> {
+        // Profile "Posts" tab redesign: one tab, one fetch, one unfiltered
+        // items list — which of five completely different layouts renders
+        // is decided purely by the sub-filter row (PostKindFilter), same
+        // "pass the predicate in, keep indices pointing at the real list"
+        // contract as the old Media/Reposts/Likes grid used.
+        MainViewModel.ProfileTab.POSTS -> {
+            val allItems = tabState?.items ?: emptyList()
+            val loading = tabState?.loading == true
+            when (postKindFilter) {
+                PostKindFilter.ALL, PostKindFilter.IMAGES -> postsPinterestGridRows(
+                    items = allItems, loading = loading, profileTint = profileTint,
+                    onTapItem = onTapItem, onLoadMore = onLoadMore,
+                    filter = { postKindFilter.matches(it) }
+                )
+                PostKindFilter.TEXT_POSTS -> postsTextRows(
+                    items = allItems, loading = loading, liquidGlass = liquidGlass, profileTint = profileTint,
+                    onTapItem = onTapItem, onLoadMore = onLoadMore,
+                    filter = { postKindFilter.matches(it) }
+                )
+                PostKindFilter.HORIZONTAL_VIDEOS -> postsHorizontalVideoRows(
+                    items = allItems, loading = loading, profileTint = profileTint,
+                    onTapItem = onTapItem, onLoadMore = onLoadMore,
+                    filter = { postKindFilter.matches(it) }
+                )
+                PostKindFilter.VERTICAL_VIDEOS -> postsVerticalVideoGridRows(
+                    items = allItems, loading = loading, profileTint = profileTint,
+                    onTapItem = onTapItem, onLoadMore = onLoadMore,
+                    filter = { postKindFilter.matches(it) }
+                )
+            }
+        }
+        MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES -> {
             val allItems = tabState?.items ?: emptyList()
             // See profileMediaGridRows' own doc comment on `filter` for why
             // this passes the full, unfiltered list through plus a
@@ -995,29 +1054,6 @@ private fun LazyListScope.profileResultsContent(
                 onTapItem = onTapItem, onLoadMore = onLoadMore,
                 filter = { mediaKindFilter.matches(it) }
             )
-        }
-        MainViewModel.ProfileTab.TEXT_POSTS -> {
-            val items = tabState?.items ?: emptyList()
-            val loading = tabState?.loading == true
-            itemsIndexed(items, key = { i, item -> "textpost_${item.id}_$i" }) { index, item ->
-                if (!loading && items.isNotEmpty() && index >= items.size - 4) {
-                    LaunchedEffect(index, items.size) { onLoadMore() }
-                }
-                TextPostBubble(item = item, liquidGlass = liquidGlass, tint = profileTint, onOpen = { onTapItem(index) },
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
-            }
-            // Only show a "load more" spinner here when there are already
-            // items on screen — on the very first load (items empty) the
-            // shared "results_loading" spinner below already covers it, and
-            // showing both at once was rendering two spinners stacked on
-            // top of each other.
-            if (loading && items.isNotEmpty()) {
-                item(key = "textposts_loading_more") {
-                    Box(Modifier.fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 1.5.dp)
-                    }
-                }
-            }
         }
         MainViewModel.ProfileTab.BLOGS -> {
             items(tabState?.blogs ?: emptyList(), key = { "blog_${it.uri}" }) { blog ->
@@ -1079,11 +1115,15 @@ private fun LazyListScope.profileMediaGridRows(
     // was on screen.
     filter: (MediaItem) -> Boolean = { true }
 ) {
+    // Multi-image posts (per feature request): show only the post's first
+    // image, not one tile per image in the group — a small "1/N" counter
+    // badge (added below) marks that there's more to see once it's opened.
     val flattened = items.mapIndexed { postIndex, item ->
-        if (!filter(item)) return@mapIndexed emptyList()
-        if (item.mediaGroup.size > 1) item.mediaGroup.map { img -> postIndex to img.thumbUrl.ifBlank { img.mediaUrl } }
-        else listOf(postIndex to item.thumbUrl.ifBlank { item.mediaUrl })
-    }.flatten()
+        if (!filter(item)) return@mapIndexed null
+        val thumb = item.mediaGroup.firstOrNull()?.thumbUrl?.ifBlank { item.mediaGroup.firstOrNull()?.mediaUrl }
+            ?: item.thumbUrl.ifBlank { item.mediaUrl }
+        postIndex to thumb
+    }.filterNotNull()
     val rows = flattened.chunked(3)
 
     // Edge case: a sub-filter (e.g. "Videos") can match nothing in the
@@ -1119,6 +1159,9 @@ private fun LazyListScope.profileMediaGridRows(
                         Icon(Icons.Filled.PlayArrow, contentDescription = "Video", tint = Color.White.copy(0.85f),
                             modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(16.dp))
                     }
+                    if (item.mediaGroup.size > 1) {
+                        MultiImageCountBadge(count = item.mediaGroup.size, modifier = Modifier.align(Alignment.BottomEnd).padding(4.dp))
+                    }
                 }
             }
             // Pad out a short last row so cells keep their square aspect ratio and stay left-aligned.
@@ -1135,6 +1178,231 @@ private fun LazyListScope.profileMediaGridRows(
                 CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 1.5.dp)
             }
         }
+    }
+}
+
+// ─── Posts tab: shared row helpers ──────────────────────────────────────────
+// Every one of the four helpers below follows the same contract as
+// profileMediaGridRows: `filter` is applied while walking the full, un-
+// filtered `items` list rather than pre-filtering it, so the postIndex
+// passed to onTapItem always points at the right place in tabState.items
+// (see openPostFromProfileTab) no matter which sub-tab is active. Each also
+// fires onLoadMore once it's rendering near its own tail, and shows the
+// same "empty-after-filter, keep paging" fallback as the old grid.
+
+/** A stand-in aspect ratio for tiles that don't carry a real one — clamped
+ *  so a bad/extreme value from a source API can't blow up a whole masonry
+ *  row's height. Text posts default to a slightly-portrait card since they
+ *  have no natural media shape of their own. */
+private fun MediaItem.tileAspectRatio(): Float = when {
+    isTextOnly -> 0.8f
+    else -> aspectRatio?.takeIf { it in 0.2f..5f } ?: 1f
+}
+
+private fun <T> emptyAfterFilterLoadMore(
+    scope: LazyListScope, matched: List<T>, rawItems: List<*>, loading: Boolean, onLoadMore: () -> Unit, key: String
+) {
+    if (matched.isEmpty() && rawItems.isNotEmpty() && !loading) {
+        scope.item(key = key) { LaunchedEffect(rawItems.size) { onLoadMore() } }
+    }
+}
+
+@Composable
+private fun ThumbBox(item: MediaItem, tint: Color, shape: RoundedCornerShape, modifier: Modifier, playIconSize: Dp = 18.dp, onClick: () -> Unit) {
+    Box(
+        modifier
+            .clip(shape)
+            .border(1.dp, tint.copy(alpha = 0.4f), shape)
+            .clickable(onClick = onClick)
+    ) {
+        if (item.isTextOnly) {
+            Box(Modifier.fillMaxSize().background(OledBlack).padding(10.dp), contentAlignment = Alignment.Center) {
+                Text(item.text, color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp, maxLines = 8, overflow = TextOverflow.Ellipsis)
+            }
+        } else {
+            val thumb = item.mediaGroup.firstOrNull()?.thumbUrl?.ifBlank { item.mediaGroup.firstOrNull()?.mediaUrl }
+                ?: item.thumbUrl.ifBlank { item.mediaUrl }
+            AsyncImage(model = thumb, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+        }
+        if (item.isVideo) {
+            Icon(Icons.Filled.PlayArrow, contentDescription = "Video", tint = Color.White.copy(0.9f),
+                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(playIconSize))
+        }
+        if (item.mediaGroup.size > 1) {
+            MultiImageCountBadge(count = item.mediaGroup.size, modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp))
+        }
+    }
+}
+
+// ─── Posts tab: "All" and "Images" — Pinterest-style masonry ────────────────
+// True two-column masonry (not fixed-height cells with letterboxing): each
+// tile keeps its source image's own aspect ratio, and a greedy
+// shortest-column assignment keeps the two columns close in height. Batched
+// into groups so the outer LazyColumn still gets some virtualization instead
+// of one unbounded item — each batch does its own local column balancing.
+private fun LazyListScope.postsPinterestGridRows(
+    items: List<MediaItem>, loading: Boolean, profileTint: Color,
+    onTapItem: (Int) -> Unit, onLoadMore: () -> Unit, filter: (MediaItem) -> Boolean
+) {
+    val matched = items.mapIndexedNotNull { i, item -> if (filter(item)) i to item else null }
+    emptyAfterFilterLoadMore(this, matched, items, loading, onLoadMore, "pinterest_filtered_empty_loadmore")
+
+    val batches = matched.chunked(16)
+    val shape = RoundedCornerShape(14.dp)
+    itemsIndexed(batches, key = { i, batch -> "pinterest_batch_${i}_${batch.firstOrNull()?.first ?: i}" }) { batchIndex, batch ->
+        if (!loading && items.isNotEmpty() && batchIndex >= batches.size - 2) {
+            LaunchedEffect(batchIndex, matched.size) { onLoadMore() }
+        }
+        val leftCol = mutableListOf<Pair<Int, MediaItem>>()
+        val rightCol = mutableListOf<Pair<Int, MediaItem>>()
+        var leftHeight = 0f
+        var rightHeight = 0f
+        batch.forEach { (postIndex, item) ->
+            val h = 1f / item.tileAspectRatio()
+            if (leftHeight <= rightHeight) { leftCol += postIndex to item; leftHeight += h }
+            else { rightCol += postIndex to item; rightHeight += h }
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                leftCol.forEach { (postIndex, item) ->
+                    ThumbBox(item, profileTint, shape, Modifier.fillMaxWidth().aspectRatio(item.tileAspectRatio())) { onTapItem(postIndex) }
+                }
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                rightCol.forEach { (postIndex, item) ->
+                    ThumbBox(item, profileTint, shape, Modifier.fillMaxWidth().aspectRatio(item.tileAspectRatio())) { onTapItem(postIndex) }
+                }
+            }
+        }
+    }
+    if (loading && items.isNotEmpty()) {
+        item(key = "pinterest_loading_more") {
+            Box(Modifier.fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 1.5.dp)
+            }
+        }
+    }
+}
+
+// ─── Posts tab: "Text Posts" — unchanged from the old top-level tab, just
+// moved under the Posts sub-filter row instead of being its own tab. ───────
+private fun LazyListScope.postsTextRows(
+    items: List<MediaItem>, loading: Boolean, liquidGlass: Boolean, profileTint: Color,
+    onTapItem: (Int) -> Unit, onLoadMore: () -> Unit, filter: (MediaItem) -> Boolean
+) {
+    val matched = items.mapIndexedNotNull { i, item -> if (filter(item)) i to item else null }
+    emptyAfterFilterLoadMore(this, matched, items, loading, onLoadMore, "textposts_filtered_empty_loadmore")
+
+    itemsIndexed(matched, key = { i, pair -> "textpost_${pair.second.id}_${pair.first}" }) { rowIndex, (postIndex, item) ->
+        if (!loading && items.isNotEmpty() && rowIndex >= matched.size - 4) {
+            LaunchedEffect(rowIndex, matched.size) { onLoadMore() }
+        }
+        TextPostBubble(item = item, liquidGlass = liquidGlass, tint = profileTint, onOpen = { onTapItem(postIndex) },
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
+    }
+    if (loading && items.isNotEmpty()) {
+        item(key = "textposts_loading_more") {
+            Box(Modifier.fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 1.5.dp)
+            }
+        }
+    }
+}
+
+// ─── Posts tab: "Horizontal Videos" — YouTube-style edge-to-edge list,
+// thumbnail on the left, title/meta on the right. ───────────────────────────
+private fun LazyListScope.postsHorizontalVideoRows(
+    items: List<MediaItem>, loading: Boolean, profileTint: Color,
+    onTapItem: (Int) -> Unit, onLoadMore: () -> Unit, filter: (MediaItem) -> Boolean
+) {
+    val matched = items.mapIndexedNotNull { i, item -> if (filter(item)) i to item else null }
+    emptyAfterFilterLoadMore(this, matched, items, loading, onLoadMore, "hvideo_filtered_empty_loadmore")
+    val shape = RoundedCornerShape(10.dp)
+
+    itemsIndexed(matched, key = { i, pair -> "hvideo_${pair.second.id}_${pair.first}" }) { rowIndex, (postIndex, item) ->
+        if (!loading && items.isNotEmpty() && rowIndex >= matched.size - 4) {
+            LaunchedEffect(rowIndex, matched.size) { onLoadMore() }
+        }
+        Row(
+            Modifier.fillMaxWidth().clickable { onTapItem(postIndex) }.padding(horizontal = 10.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            ThumbBox(
+                item, profileTint, shape,
+                Modifier.width(168.dp).aspectRatio(16f / 9f),
+                onClick = { onTapItem(postIndex) },
+                playIconSize = 20.dp
+            )
+            Column(Modifier.weight(1f).padding(top = 2.dp)) {
+                Text(
+                    item.text.ifBlank { "@${item.author.handle}" }, color = Color.White, fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(item.author.displayName.ifBlank { item.author.handle }, color = DimGray, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(2.dp))
+                Text("${item.likeCount} likes · ${item.replyCount} replies", color = DimGray, fontSize = 11.sp)
+            }
+        }
+    }
+    if (loading && items.isNotEmpty()) {
+        item(key = "hvideo_loading_more") {
+            Box(Modifier.fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 1.5.dp)
+            }
+        }
+    }
+}
+
+// ─── Posts tab: "Vertical Videos" — TikTok-style grid, fixed 9:16 tiles
+// instead of squares. Square/non-landscape videos live here too (see
+// MediaItem.isVerticalVideo). ────────────────────────────────────────────────
+private fun LazyListScope.postsVerticalVideoGridRows(
+    items: List<MediaItem>, loading: Boolean, profileTint: Color,
+    onTapItem: (Int) -> Unit, onLoadMore: () -> Unit, filter: (MediaItem) -> Boolean
+) {
+    val columns = 3
+    val matched = items.mapIndexedNotNull { i, item -> if (filter(item)) i to item else null }
+    emptyAfterFilterLoadMore(this, matched, items, loading, onLoadMore, "vvideo_filtered_empty_loadmore")
+    val rows = matched.chunked(columns)
+    val shape = RoundedCornerShape(10.dp)
+
+    itemsIndexed(rows, key = { i, row -> "vvideo_row_${i}_${row.firstOrNull()?.first ?: i}" }) { rowIndex, row ->
+        if (!loading && items.isNotEmpty() && rowIndex >= rows.size - 4) {
+            LaunchedEffect(rowIndex, matched.size) { onLoadMore() }
+        }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            row.forEach { (postIndex, item) ->
+                ThumbBox(item, profileTint, shape, Modifier.weight(1f).aspectRatio(9f / 16f)) { onTapItem(postIndex) }
+            }
+            repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
+        }
+    }
+    if (loading && items.isNotEmpty()) {
+        item(key = "vvideo_loading_more") {
+            Box(Modifier.fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 1.5.dp)
+            }
+        }
+    }
+}
+
+// ─── Shared: multi-image post cover badge ───────────────────────────────────
+// Per feature request: grids across the app show only a multi-image post's
+// first image, with this small pill marking how many more there are, rather
+// than laying out every image in the post as its own separate tile.
+@Composable
+private fun MultiImageCountBadge(count: Int, modifier: Modifier = Modifier) {
+    Box(
+        modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(Color.Black.copy(alpha = 0.55f))
+            .padding(horizontal = 5.dp, vertical = 2.dp)
+    ) {
+        Text("1/$count", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 

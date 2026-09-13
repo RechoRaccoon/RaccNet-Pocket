@@ -11,7 +11,12 @@ data class DownloadProgress(val count: Int, val isRunning: Boolean)
 data class MediaGroupItem(
     val mediaUrl: String,
     val thumbUrl: String,
-    val altText: String = ""
+    val altText: String = "",
+    // Profile "Posts" tab redesign: this image's own width/height ratio
+    // (width / height), when the source API reported one. Lets a Pinterest-
+    // style grid size each tile to its real proportions instead of forcing
+    // a square crop. Null when unknown — callers fall back to a square.
+    val aspectRatio: Float? = null
 )
 
 data class MediaItem(
@@ -83,11 +88,29 @@ data class MediaItem(
     val mediaGroup: List<MediaGroupItem> = emptyList(),
     // Big Update #2/#3: the post's own text body. Shown inside the expandable
     // author pill for media posts, or as the sole content of a text-only post.
-    val text: String = ""
+    val text: String = "",
+    // Profile "Posts" tab redesign: this item's own width/height ratio
+    // (width / height) — for an image, the image's own dimensions; for a
+    // video, the video frame's dimensions. Used to (a) size tiles in the
+    // Pinterest-style Images/All layout to their true proportions instead of
+    // a forced square crop, and (b) classify a video as "horizontal" or
+    // "vertical" for the Horizontal Videos / Vertical Videos sub-tabs. Null
+    // when the source API didn't report dimensions.
+    val aspectRatio: Float? = null
 ) {
     /** True when this post has no image/video to show — feed renders it as a
      *  standalone liquid-glass text card instead of a media tile. */
     val isTextOnly: Boolean get() = mediaUrl.isBlank() && thumbUrl.isBlank() && !isVideo
+
+    /** A square (1:1) or wider frame counts as "horizontal"; anything
+     *  taller than it is wide (including exactly-square, per the feature
+     *  request: "Square videos/non landscape videos can appear in the
+     *  vertical videos tab") counts as "vertical". Unknown aspect ratio
+     *  (null) is treated as vertical too, since TikTok-style fixed 9:16
+     *  tiles degrade more gracefully for an unknown shape than a YouTube-
+     *  style row sized for a wide thumbnail would. */
+    val isHorizontalVideo: Boolean get() = isVideo && (aspectRatio ?: 0f) > 1f
+    val isVerticalVideo: Boolean get() = isVideo && !isHorizontalVideo
 }
 
 data class AuthorInfo(

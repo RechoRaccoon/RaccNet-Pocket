@@ -657,12 +657,13 @@ private fun AppRoot(viewModel: MainViewModel) {
             // Overlay instead of swapping the pager to their feed directly.
             // e621 has no notion of an account profile, so tapping an artist
             // there keeps the old behavior of searching that artist's tag.
-            // If the post being viewed is text-only, open straight into that
-            // profile's Text Posts tab instead of the default Media tab.
+            // Profile "Posts" tab redesign: Media and Text Posts are now one
+            // "Posts" tab (with a sub-filter row for type), so there's no
+            // separate tab to route into by item type anymore — always open
+            // straight into Posts.
             onTapAuthor               = { item ->
                 if (appMode == AppMode.BLUESKY) {
-                    val tab = if (item.isTextOnly) MainViewModel.ProfileTab.TEXT_POSTS else MainViewModel.ProfileTab.MEDIA
-                    viewModel.openProfile(item.author, initialTab = tab)
+                    viewModel.openProfile(item.author, initialTab = MainViewModel.ProfileTab.POSTS)
                 } else viewModel.showAuthorFeed(item)
             },
             onPinchIn                 = viewModel::pinchInFromPost,

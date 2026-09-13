@@ -283,7 +283,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val authorFeedState: StateFlow<AuthorFeedSavedState?> = _authorFeedState
 
     // ── Profile Overlay (Profile Overhaul) ──────────────────────────────────
-    enum class ProfileTab { MEDIA, TEXT_POSTS, VODS, REPOSTS, LIKES, BLOGS, REVIEWS, BACKLOG }
+    // Profile "Posts" tab redesign: MEDIA and TEXT_POSTS used to be two
+    // separate top-level tabs backed by two separate (redundant) fetches of
+    // the exact same underlying post list, just client-side filtered two
+    // different ways. Per the feature request they're now a single POSTS
+    // tab with a sub-filter row (All/Images/Text Posts/Horizontal Videos/
+    // Vertical Videos) — see ProfileOverlay's PostKindFilter.
+    enum class ProfileTab { POSTS, VODS, REPOSTS, LIKES, BLOGS, REVIEWS, BACKLOG }
 
     data class ProfileTabState(
         val items: List<MediaItem> = emptyList(),
@@ -301,11 +307,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val author: AuthorInfo,
         val profile: ProfileData? = null,
         val loadingProfile: Boolean = true,
-        val selectedTab: ProfileTab = ProfileTab.MEDIA,
+        val selectedTab: ProfileTab = ProfileTab.POSTS,
         // Blogs/Reviews/Backlog are added to this set only once probing
         // confirms the account actually has Leaflet/Popfeed content — see
         // openProfile().
-        val availableTabs: Set<ProfileTab> = setOf(ProfileTab.MEDIA, ProfileTab.TEXT_POSTS, ProfileTab.REPOSTS, ProfileTab.LIKES),
+        val availableTabs: Set<ProfileTab> = setOf(ProfileTab.POSTS, ProfileTab.REPOSTS, ProfileTab.LIKES),
         val tabStates: Map<ProfileTab, ProfileTabState> = emptyMap(),
         val openBlog: LeafletBlog? = null,
         val openReview: PopfeedReview? = null,
@@ -1821,7 +1827,7 @@ _bskyDid.value          = session.did
     // — the exact same visual result as opening the profile normally,
     // going to its Reviews tab, and tapping that review, just in one step.
     fun openProfile(
-        author: AuthorInfo, initialTab: ProfileTab = ProfileTab.MEDIA, review: PopfeedReview? = null, blog: LeafletBlog? = null,
+        author: AuthorInfo, initialTab: ProfileTab = ProfileTab.POSTS, review: PopfeedReview? = null, blog: LeafletBlog? = null,
         title: TitleSearchResult? = null, preselectedReview: FriendPopfeedReview? = null
     ) {
         if (!_bskyLoggedIn.value) return
@@ -1963,42 +1969,25 @@ _bskyDid.value          = session.did
         _profileOverlay.value = cur.copy(tabStates = cur.tabStates + (tab to existing.copy(loading = true)))
 
         viewModelScope.launch(Dispatchers.IO) {
-            // Media and Text Posts both come from the account's own posts feed —
-            // Bluesky has no separate "media only"/"text only" endpoint — so both
-            // tabs fetch the same underlying feed independently (own cursor, own
-            // paging) and each keeps only the items it cares about.
+            // Profile "Posts" tab redesign: POSTS used to be two separate
+            // tabs (Media/Text Posts) each filtering the same underlying
+            // feed down to only the type it cared about. Now that they're
+            // one tab with a client-side sub-filter row (see
+            // ProfileOverlay's PostKindFilter), the fetch keeps everything
+            // unfiltered, exactly like Reposts/Likes already did.
             suspend fun fetchPage(cursor: String?) = when (tab) {
-                ProfileTab.MEDIA, ProfileTab.TEXT_POSTS -> bskyRepo.getProfilePosts(bskyToken, did, cursor)
+                ProfileTab.POSTS   -> bskyRepo.getProfilePosts(bskyToken, did, cursor)
                 ProfileTab.REPOSTS -> bskyRepo.getProfileReposts(bskyToken, did, cursor)
                 ProfileTab.LIKES   -> bskyRepo.getProfileLikes(bskyToken, _bskyDid.value, did, cursor)
                 else -> error("unreachable")
             }
-            fun filterForTab(fetched: List<MediaItem>): List<MediaItem> = filterHidden(fetched).let { items ->
-                when (tab) {
-                    ProfileTab.MEDIA      -> items.filterNot { it.isTextOnly }
-                    ProfileTab.TEXT_POSTS -> items.filter { it.isTextOnly }
-                    else -> items
-                }
-            }
+            fun filterForTab(fetched: List<MediaItem>): List<MediaItem> = filterHidden(fetched)
 
             var cursorNow = cursorToUse
             val accumulated = mutableListOf<MediaItem>()
             var authRetried = false
             var succeeded = false
-            // Media/Text Posts filter client-side (MEDIA keeps non-text-only
-            // posts, TEXT_POSTS keeps text-only ones) — a raw page can come
-            // back entirely the *other* type and filter down to zero results,
-            // even though there's more content on the next page. Without
-            // auto-continuing past those empty-after-filter pages, nothing
-            // would render, so no grid row would ever compose to trigger the
-            // usual "near the bottom" auto-load, and the tab would look
-            // permanently empty despite loaded=true. Capped so an account
-            // that's e.g. entirely text-only can't spin through their whole
-            // history in a single call — remaining pages still load normally
-            // via the regular scroll-triggered load-more once something's on
-            // screen. Reposts/Likes don't filter, so they always stop after
-            // one page exactly as before.
-            val maxAutoPages = if (tab == ProfileTab.MEDIA || tab == ProfileTab.TEXT_POSTS) 6 else 1
+            val maxAutoPages = 1
             var pagesFetched = 0
             while (pagesFetched < maxAutoPages) {
                 pagesFetched++
