@@ -352,7 +352,17 @@ class BlueskyRepository {
      *  callers use that to decide whether the Blogs tab appears at all. */
     @Volatile private var knownLeafletCollection: String? = null
 
-    suspend fun getLeafletBlogs(did: String): List<LeafletBlog> {
+    // Feature request #9: `probeConcurrently` lets a caller that only cares
+    // about ONE account (openProfile's own Blogs-tab probe) race the
+    // candidate collection names instead of trying them one at a time, so
+    // that tab can appear after roughly one round trip's worth of latency
+    // instead of paying for every earlier miss's full round trip first.
+    // Defaults to false — and MUST stay false for getSubscribedBlogs' bulk,
+    // many-accounts-at-once path below, which already paces its own
+    // per-account concurrency against Bluesky's rate limits (see its own
+    // doc comment); racing 2-3 requests per account on top of that would
+    // multiply its carefully-sized burst size by 2-3x.
+    suspend fun getLeafletBlogs(did: String, probeConcurrently: Boolean = false): List<LeafletBlog> {
         // Same known-collection fast path as getPopfeedReviews below — once
         // any account's blogs are found under one of the two candidate
         // collection names, try that one first for every other account,
@@ -370,15 +380,28 @@ class BlueskyRepository {
                 if (blogs.isNotEmpty()) return blogs.sortedByDescending { it.createdAt }
             }
         }
-        for (collection in LEAFLET_COLLECTIONS.filterNot { it == knownLeafletCollection }) {
+        suspend fun tryCollection(collection: String): List<LeafletBlog>? {
             val resp = runCatching { api.listRecords(null, did, collection, 50, null) }.getOrNull()
-            val body = resp?.takeIf { it.isSuccessful }?.body() ?: continue
-            if (body.records.isEmpty()) continue
+            val body = resp?.takeIf { it.isSuccessful }?.body() ?: return null
+            if (body.records.isEmpty()) return null
             val blogs = body.records.mapNotNull { rec ->
                 val obj = rec.value?.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
                 parseLeafletBlogRecord(did, rec.uri, obj)
             }
-            if (blogs.isNotEmpty()) { knownLeafletCollection = collection; return blogs.sortedByDescending { it.createdAt } }
+            return blogs.takeIf { it.isNotEmpty() }
+        }
+        val candidates = LEAFLET_COLLECTIONS.filterNot { it == knownLeafletCollection }
+        if (probeConcurrently) {
+            val hits = coroutineScope { candidates.map { c -> async { c to tryCollection(c) } }.awaitAll() }
+            val (collection, blogs) = candidates.firstNotNullOfOrNull { c -> hits.find { it.first == c && it.second != null } }
+                ?: return emptyList()
+            knownLeafletCollection = collection
+            return blogs!!.sortedByDescending { it.createdAt }
+        }
+        for (collection in candidates) {
+            val hit = tryCollection(collection) ?: continue
+            knownLeafletCollection = collection
+            return hit.sortedByDescending { it.createdAt }
         }
         return emptyList()
     }
@@ -648,7 +671,11 @@ class BlueskyRepository {
         )
     }
 
-    suspend fun getPopfeedReviews(did: String): List<PopfeedReview> {
+    // `probeConcurrently` (feature request #9): only openProfile's
+    // single-account Reviews-tab probe should pass true — see
+    // getLeafletBlogs' matching doc comment for why getSubscribedReviews'
+    // bulk, many-accounts-at-once path below must keep this false.
+    suspend fun getPopfeedReviews(did: String, probeConcurrently: Boolean = false): List<PopfeedReview> {
         suspend fun tryCollection(collection: String): List<PopfeedReview>? {
             val resp = runCatching { api.listRecords(null, did, collection, 50, null) }.getOrNull()
             val body = resp?.takeIf { it.isSuccessful }?.body() ?: return null
@@ -668,6 +695,15 @@ class BlueskyRepository {
             tryCollection(known)?.let { return it.sortedByDescending { r -> r.createdAt } }
         }
 
+        val remaining = allCollections.filterNot { it == knownPopfeedCollection }
+        if (probeConcurrently) {
+            val hits = coroutineScope { remaining.map { c -> async { c to tryCollection(c) } }.awaitAll() }
+            val (collection, reviews) = remaining.firstNotNullOfOrNull { c -> hits.find { it.first == c && it.second != null } }
+                ?: return emptyList()
+            knownPopfeedCollection = collection
+            return reviews!!.sortedByDescending { it.createdAt }
+        }
+
         // Otherwise (first lookup this session, or this specific account
         // just has no reviews under the known collection) check the rest
         // one at a time, not in parallel — this used to fire all of them
@@ -680,7 +716,7 @@ class BlueskyRepository {
         // down to a single request, so this sequential fallback path is
         // only ever actually slow for the very first few accounts of a
         // session, not the whole follow list.
-        for (collection in allCollections.filterNot { it == knownPopfeedCollection }) {
+        for (collection in remaining) {
             val hit = tryCollection(collection)
             if (hit != null) {
                 knownPopfeedCollection = collection

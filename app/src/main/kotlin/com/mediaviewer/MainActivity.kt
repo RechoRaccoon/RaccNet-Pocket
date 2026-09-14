@@ -551,7 +551,14 @@ private fun AppRoot(viewModel: MainViewModel) {
         LocalGlassRimIntensity provides glassRimIntensity
     ) {
     Box(Modifier.fillMaxSize()) {
+        // Feature request #8: lifted out of MainFeedScreen so a multi-image
+        // grid tile in ProfileOverlay's Pinterest/All layout can seed which
+        // image within a post's group the pager should open on, before
+        // handing off to MainFeedScreen to actually show it (see
+        // onSeedSubImageIndex below and ProfileOverlay.onSeedSubImageIndex).
+        val subImageIndices = remember { mutableStateMapOf<String, Int>() }
         MainFeedScreen(
+            subImageIndices           = subImageIndices,
             mediaItems                = mediaItems,
             currentIndex              = currentIndex,
             currentItem               = currentItem,
@@ -819,6 +826,7 @@ private fun AppRoot(viewModel: MainViewModel) {
                     onLoadMore        = viewModel::loadMoreProfileTab,
                     onToggleFollow    = viewModel::toggleProfileFollow,
                     onTapItem         = viewModel::openPostFromProfileTab,
+                    onSeedSubImageIndex = { postId, idx -> subImageIndices[postId] = idx },
                     onOpenBlog        = viewModel::openProfileBlog,
                     onCloseBlog       = viewModel::closeProfileBlog,
                     onOpenReview      = viewModel::openProfileReview,

@@ -127,6 +127,12 @@ private data class TranslationState(
 
 @Composable
 fun MainFeedScreen(
+    // Feature request #8: hoisted up to MainActivity so a tap from
+    // ProfileOverlay's grid can pre-seed which sub-image a multi-image
+    // post's pager should open on (see MainActivity's call site). Nullable
+    // with an internal fallback so every other existing call site (previews,
+    // tests, etc.) keeps working unchanged.
+    subImageIndices: androidx.compose.runtime.snapshots.SnapshotStateMap<String, Int>? = null,
     mediaItems: List<MediaItem>,
     currentIndex: Int,
     currentItem: MediaItem?,
@@ -298,7 +304,13 @@ fun MainFeedScreen(
     // Lives here (above the per-post AnimatedContent) so it survives navigating
     // away to another post and back — a plain remember(item.id) inside PostContent
     // was getting torn down and reset to 0 every time.
-    val subImageIndices = remember { mutableStateMapOf<String, Int>() }
+    //
+    // Feature request #8: now optionally supplied by the caller (see the
+    // `subImageIndices` parameter) so ProfileOverlay's Pinterest/All grid can
+    // pre-seed a post's starting sub-image before handing off to this screen
+    // to show it — falls back to an internally-owned map when no caller
+    // needs to seed it, same as before.
+    val subImageIndices = subImageIndices ?: remember { mutableStateMapOf<String, Int>() }
     // Whether the text bubble is showing full text (true, the default/natural
     // size) or collapsed to one ellipsized line (false). This is a single global
     // flag, not per-post: swiping the bubble up/down on any post collapses or

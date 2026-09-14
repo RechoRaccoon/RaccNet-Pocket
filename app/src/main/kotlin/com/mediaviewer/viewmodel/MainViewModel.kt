@@ -1855,7 +1855,7 @@ _bskyDid.value          = session.did
         loadProfileTab(initialTab, reset = true)
 
         viewModelScope.launch(Dispatchers.IO) {
-            val blogs = runCatching { bskyRepo.getLeafletBlogs(author.did) }.getOrDefault(emptyList())
+            val blogs = runCatching { bskyRepo.getLeafletBlogs(author.did, probeConcurrently = true) }.getOrDefault(emptyList())
             if (blogs.isEmpty()) return@launch
             val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
             _profileOverlay.value = cur.copy(
@@ -1864,7 +1864,7 @@ _bskyDid.value          = session.did
             )
         }
         viewModelScope.launch(Dispatchers.IO) {
-            val reviews = runCatching { bskyRepo.getPopfeedReviews(author.did) }.getOrDefault(emptyList())
+            val reviews = runCatching { bskyRepo.getPopfeedReviews(author.did, probeConcurrently = true) }.getOrDefault(emptyList())
             if (reviews.isEmpty()) return@launch
             val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
             _profileOverlay.value = cur.copy(
@@ -2030,9 +2030,18 @@ _bskyDid.value          = session.did
         _profileOverlay.value = cur.copy(scrollIndex = index, scrollOffset = offset)
     }
 
-    fun openPostFromProfileTab(index: Int) {
+    // Bug fix (per feedback): this used to always take an index into the
+    // *entire* tab's unfiltered item list (cur.tabStates[...].items), no
+    // matter which sub-filter — Images, Horizontal Videos, Reposts'
+    // MediaKindFilter, etc. — was actually on screen. So tapping into, say,
+    // the Vertical Videos sub-tab and swiping through the resulting pager
+    // would eventually swipe onto images, text posts, and horizontal videos
+    // that sub-tab never showed. Now the caller passes the exact list
+    // currently rendered on screen (already filtered to that sub-tab) plus
+    // the index within *that* list, so the pager can never contain more
+    // than what the grid the user tapped from was actually showing.
+    fun openPostFromProfileTab(items: List<MediaItem>, index: Int) {
         val cur = _profileOverlay.value ?: return
-        val items = cur.tabStates[cur.selectedTab]?.items ?: return
         if (index !in items.indices) return
         if (_authorFeedState.value == null) {
             _authorFeedState.value = AuthorFeedSavedState(
