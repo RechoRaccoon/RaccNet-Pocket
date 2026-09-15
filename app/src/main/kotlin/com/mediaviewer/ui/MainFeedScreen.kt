@@ -146,6 +146,21 @@ fun MainFeedScreen(
     appMode: AppMode,
     navDirection: Int,
     reducedAnimations: Boolean,
+    classicProfileTabRow: Boolean = false,
+    onToggleClassicProfileTabRow: (Boolean) -> Unit = {},
+    // Feature: auto-subscribe — used by the Hub's Reviews/Blogs rows to
+    // exclude the signed-in user's own reviews/blogs from that preview row
+    // (their own account is auto-subscribed too, but only so their reviews
+    // show up on the matching title's page alongside everyone else's, not
+    // so they see their own name in their own "friends" row).
+    selfDid: String = "",
+    subscribedReviewDids: Set<String> = emptySet(),
+    subscribedBlogDids: Set<String> = emptySet(),
+    followerScanState: MainViewModel.FollowerScanState = MainViewModel.FollowerScanState.Idle,
+    followerScanCompletedOnce: Boolean = false,
+    onStartFollowerScan: () -> Unit = {},
+    onRescanFollowersFromScratch: () -> Unit = {},
+    onDismissFollowerScanResult: () -> Unit = {},
     liquidGlass: Boolean,
     onToggleLiquidGlass: (Boolean) -> Unit,
     liquidGlassIntensity: Float = 1f,
@@ -502,6 +517,16 @@ fun MainFeedScreen(
                         onShowFriends             = { onShowFriends(); onSetScreen(ScreenState.FEED) },
                         onShowE621Following       = { onShowE621Following(); onSetScreen(ScreenState.FEED) },
                         onToggleReducedAnimations = onToggleReducedAnimations,
+                        classicProfileTabRow      = classicProfileTabRow,
+                        onToggleClassicProfileTabRow = onToggleClassicProfileTabRow,
+                        selfDid                   = selfDid,
+                        subscribedReviewDids      = subscribedReviewDids,
+                        subscribedBlogDids        = subscribedBlogDids,
+                        followerScanState         = followerScanState,
+                        followerScanCompletedOnce = followerScanCompletedOnce,
+                        onStartFollowerScan       = onStartFollowerScan,
+                        onRescanFollowersFromScratch = onRescanFollowersFromScratch,
+                        onDismissFollowerScanResult = onDismissFollowerScanResult,
                         combineListsAndPacks      = combineListsAndPacks,
                         onToggleCombineListsPacks = onToggleCombineListsPacks,
                         autoAddToOnFollow         = autoAddToOnFollow,

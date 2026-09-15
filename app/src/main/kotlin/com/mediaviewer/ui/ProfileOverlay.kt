@@ -25,8 +25,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -34,6 +32,22 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.StarHalf
+// Icon-only profile tab row (new default layout)
+import androidx.compose.material.icons.filled.GridOn
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.Article
+import androidx.compose.material.icons.filled.OndemandVideo
+import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.Photo
+import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.CropLandscape
+import androidx.compose.material.icons.filled.CropPortrait
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Theaters
+import androidx.compose.material.icons.filled.Tv
+import androidx.compose.material.icons.filled.SportsEsports
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -203,34 +217,6 @@ private fun <T> ProfileSubFilterRow(
     }
 }
 
-/** Local-only "Subscribe" toggle — adds/removes this profile from the Hub's
- *  Reviews or Blogs source list (see MainViewModel.toggleReviewSubscription/
- *  toggleBlogSubscription). A filled bookmark once subscribed, outline
- *  otherwise — same compact pill treatment as the filter chips next to it. */
-@Composable
-private fun SubscribeBubble(subscribed: Boolean, liquidGlass: Boolean, tint: Color, onToggle: () -> Unit) {
-    val shape = RoundedCornerShape(12.dp)
-    Row(
-        Modifier
-            .then(
-                if (liquidGlass) Modifier.glassPanel(true, tint = if (subscribed) tint else tint.copy(alpha = 0.4f), shape = shape)
-                else Modifier.clip(shape).background(if (subscribed) Color.White.copy(0.15f) else Color.White.copy(0.06f))
-            )
-            .clickable(onClick = onToggle)
-            .padding(horizontal = 9.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        Icon(
-            if (subscribed) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
-            contentDescription = if (subscribed) "Subscribed" else "Subscribe",
-            tint = if (subscribed) Color.White else DimGray, modifier = Modifier.size(13.dp)
-        )
-        Text(if (subscribed) "Subscribed" else "Subscribe", color = if (subscribed) Color.White else DimGray,
-            fontSize = 11.sp, fontWeight = if (subscribed) FontWeight.SemiBold else FontWeight.Normal)
-    }
-}
-
 /**
  * Profile Overhaul — a full-screen overlay page for viewing an account's
  * profile. Rendered above everything else (see MainActivity) so closing it
@@ -248,6 +234,11 @@ fun ProfileOverlay(
     state: MainViewModel.ProfileOverlayState,
     liquidGlass: Boolean,
     reducedAnimations: Boolean,
+    // Item (this session): profile row layout toggle (Settings) — false
+    // (default) shows the new single-row icon layout (ProfileIconTabRow),
+    // true falls back to the classic two-row text-label layout
+    // (ProfileTabsRow + ProfileSubFilterRow).
+    classicProfileTabRow: Boolean = false,
     // The logged-in user's own did — used only to detect "this is my own
     // profile" so the banner shows a placeholder "Edit" button instead of
     // Follow/Following (following yourself doesn't make sense).
@@ -440,89 +431,99 @@ fun ProfileOverlay(
                     // reads as its own bounded section rather than floating
                     // directly under the header.
                     HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
-                    ProfileTabsRow(
-                        tabs = MainViewModel.ProfileTab.entries.filter { it in state.availableTabs },
-                        selected = state.selectedTab,
-                        liquidGlass = liquidGlass,
-                        tint = blended,
-                        onSelect = onSelectTab
-                    )
-                    HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
-                    // Sub-filter row (per feedback) — a second, half-height
-                    // row of pills directly under the tab strip, same
-                    // treatment Popfeed itself uses. Only rendered for tabs
-                    // where a type filter means something; other tabs (Text
-                    // Posts, Blogs, Vods) show nothing extra here.
-                    //
-                    // Feature request #7: a pill only shows up once there's
-                    // at least one loaded item it would actually match —
-                    // same "don't show an empty tab" rule the outer
-                    // Blogs/Reviews/Backlog tabs already follow. The
-                    // currently-selected option always stays visible even at
-                    // zero matches, so picking a filter can't make its own
-                    // pill disappear out from under the selection.
+                    val availableTabs = MainViewModel.ProfileTab.entries.filter { it in state.availableTabs }
                     val subFilterTabState = state.tabStates[state.selectedTab]
-                    when (state.selectedTab) {
-                        MainViewModel.ProfileTab.POSTS -> {
-                            val loadedPosts = subFilterTabState?.items ?: emptyList()
-                            val visiblePostFilters = PostKindFilter.entries.filter {
-                                it == postKindFilter || loadedPosts.any { item -> it.matches(item) }
+                    if (classicProfileTabRow) {
+                        // ── Classic layout: text-label tab row, then a
+                        // second half-height row of text-label sub-filter
+                        // pills underneath. Kept as an opt-in fallback
+                        // (Settings → Classic Profile Tabs) for anyone who
+                        // preferred it to the new icon row below.
+                        ProfileTabsRow(
+                            tabs = availableTabs, selected = state.selectedTab,
+                            liquidGlass = liquidGlass, tint = blended, onSelect = onSelectTab
+                        )
+                        HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
+                        // Feature request #7: a pill only shows up once
+                        // there's at least one loaded item it would actually
+                        // match. The currently-selected option always stays
+                        // visible even at zero matches, so picking a filter
+                        // can't make its own pill disappear out from under
+                        // the selection.
+                        when (state.selectedTab) {
+                            MainViewModel.ProfileTab.POSTS -> {
+                                val loadedPosts = subFilterTabState?.items ?: emptyList()
+                                val visiblePostFilters = PostKindFilter.entries.filter {
+                                    it == postKindFilter || loadedPosts.any { item -> it.matches(item) }
+                                }
+                                if (visiblePostFilters.size > 1) {
+                                    ProfileSubFilterRow(
+                                        options = visiblePostFilters, selected = postKindFilter,
+                                        liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
+                                        onSelect = { postKindFilter = it }
+                                    )
+                                }
                             }
-                            if (visiblePostFilters.size > 1) {
+                            MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES -> {
+                                val loadedItems = subFilterTabState?.items ?: emptyList()
+                                val visibleMediaFilters = MediaKindFilter.entries.filter {
+                                    it == mediaKindFilter || loadedItems.any { item -> it.matches(item) }
+                                }
+                                if (visibleMediaFilters.size > 1) {
+                                    ProfileSubFilterRow(
+                                        options = visibleMediaFilters, selected = mediaKindFilter,
+                                        liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
+                                        onSelect = { mediaKindFilter = it }
+                                    )
+                                }
+                            }
+                            MainViewModel.ProfileTab.REVIEWS -> {
+                                val loadedReviews = subFilterTabState?.reviews ?: emptyList()
+                                val visibleReviewFilters = ReviewKindFilter.entries.filter {
+                                    it == reviewKindFilter || loadedReviews.any { r -> it.matchesReview(r) }
+                                }
                                 ProfileSubFilterRow(
-                                    options = visiblePostFilters, selected = postKindFilter,
+                                    options = visibleReviewFilters, selected = reviewKindFilter,
                                     liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
-                                    onSelect = { postKindFilter = it }
+                                    onSelect = { reviewKindFilter = it }
                                 )
                             }
-                        }
-                        MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES -> {
-                            val loadedItems = subFilterTabState?.items ?: emptyList()
-                            val visibleMediaFilters = MediaKindFilter.entries.filter {
-                                it == mediaKindFilter || loadedItems.any { item -> it.matches(item) }
-                            }
-                            if (visibleMediaFilters.size > 1) {
+                            MainViewModel.ProfileTab.BACKLOG -> {
+                                val loadedBacklog = subFilterTabState?.backlog ?: emptyList()
+                                val visibleBacklogFilters = ReviewKindFilter.entries.filter {
+                                    it == reviewKindFilter || loadedBacklog.any { b -> it.matchesBacklog(b) }
+                                }
                                 ProfileSubFilterRow(
-                                    options = visibleMediaFilters, selected = mediaKindFilter,
+                                    options = visibleBacklogFilters, selected = reviewKindFilter,
                                     liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
-                                    onSelect = { mediaKindFilter = it }
+                                    onSelect = { reviewKindFilter = it }
                                 )
                             }
+                            else -> {}
                         }
-                        MainViewModel.ProfileTab.REVIEWS -> {
-                            val loadedReviews = subFilterTabState?.reviews ?: emptyList()
-                            val visibleReviewFilters = ReviewKindFilter.entries.filter {
-                                it == reviewKindFilter || loadedReviews.any { r -> it.matchesReview(r) }
+                    } else {
+                        // ── New default layout: one row, icons only, two
+                        // independently-scrolling halves — see
+                        // ProfileIconTabRow's own doc comment.
+                        ProfileIconTabRow(
+                            tabs = availableTabs, selectedTab = state.selectedTab, onSelectTab = onSelectTab,
+                            liquidGlass = liquidGlass, tint = blended,
+                            postKindFilter = postKindFilter, onSelectPostKindFilter = { postKindFilter = it },
+                            visiblePostFilters = PostKindFilter.entries.filter {
+                                it == postKindFilter || (subFilterTabState?.items ?: emptyList()).any { item -> it.matches(item) }
+                            },
+                            mediaKindFilter = mediaKindFilter, onSelectMediaKindFilter = { mediaKindFilter = it },
+                            visibleMediaFilters = MediaKindFilter.entries.filter {
+                                it == mediaKindFilter || (subFilterTabState?.items ?: emptyList()).any { item -> it.matches(item) }
+                            },
+                            reviewKindFilter = reviewKindFilter, onSelectReviewKindFilter = { reviewKindFilter = it },
+                            visibleReviewFilters = ReviewKindFilter.entries.filter {
+                                it == reviewKindFilter || (subFilterTabState?.reviews ?: emptyList()).any { r -> it.matchesReview(r) }
+                            },
+                            visibleBacklogFilters = ReviewKindFilter.entries.filter {
+                                it == reviewKindFilter || (subFilterTabState?.backlog ?: emptyList()).any { b -> it.matchesBacklog(b) }
                             }
-                            ProfileSubFilterRow(
-                                options = visibleReviewFilters, selected = reviewKindFilter,
-                                liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
-                                onSelect = { reviewKindFilter = it },
-                                trailing = { SubscribeBubble(isReviewSubscribed, liquidGlass, blended, onToggleReviewSubscribe) }
-                            )
-                        }
-                        MainViewModel.ProfileTab.BACKLOG -> {
-                            val loadedBacklog = subFilterTabState?.backlog ?: emptyList()
-                            val visibleBacklogFilters = ReviewKindFilter.entries.filter {
-                                it == reviewKindFilter || loadedBacklog.any { b -> it.matchesBacklog(b) }
-                            }
-                            ProfileSubFilterRow(
-                                options = visibleBacklogFilters, selected = reviewKindFilter,
-                                liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
-                                onSelect = { reviewKindFilter = it }
-                            )
-                        }
-                        // Item (this session): Blogs has no type filter chips
-                        // (unlike Reviews/Backlog), so this row exists purely
-                        // to host the Subscribe button in the same place.
-                        MainViewModel.ProfileTab.BLOGS -> {
-                            ProfileSubFilterRow(
-                                options = emptyList<Unit>(), selected = Unit,
-                                liquidGlass = liquidGlass, tint = blended, labelOf = { "" }, onSelect = {},
-                                trailing = { SubscribeBubble(isBlogSubscribed, liquidGlass, blended, onToggleBlogSubscribe) }
-                            )
-                        }
-                        else -> {}
+                        )
                     }
                 }
             }
@@ -1026,6 +1027,132 @@ private fun ProfileTabsRow(
     }
 }
 
+// ─── Icon-only profile tab row (new default layout) ────────────────────────
+// One 48dp row, two independently horizontally-scrolling halves:
+//   LEFT  — the content-type filter for whichever source is selected (what
+//           used to be the text-label sub-filter row underneath the tabs),
+//           now icon bubbles. Scrolls on its own since Reviews/Backlog can
+//           have more filters than fit on screen.
+//   RIGHT — the post *source*: Posts, Reposts, Likes, Blogs, Reviews
+//           (filled star), Backlog (outline star), Vods. Drawn on top of
+//           the left row in a floating capsule, right-aligned, and sized to
+//           its own content (not stretched or scrolled) so every source
+//           icon is always visible without needing a scroll gesture.
+// Blogs has no left-side filters at all (Blogs posts aren't bucketed by
+// type) — selecting it just leaves the left side empty.
+private fun MainViewModel.ProfileTab.icon() = when (this) {
+    MainViewModel.ProfileTab.POSTS   -> Icons.Filled.GridOn
+    MainViewModel.ProfileTab.REPOSTS -> Icons.Filled.Repeat
+    MainViewModel.ProfileTab.LIKES   -> Icons.Filled.Favorite
+    MainViewModel.ProfileTab.BLOGS   -> Icons.Filled.Article
+    MainViewModel.ProfileTab.REVIEWS -> Icons.Filled.Star       // filled star, per spec
+    MainViewModel.ProfileTab.BACKLOG -> Icons.Filled.StarBorder // unfilled star, per spec
+    MainViewModel.ProfileTab.VODS    -> Icons.Filled.OndemandVideo
+}
+private fun PostKindFilter.icon() = when (this) {
+    PostKindFilter.ALL               -> Icons.Filled.Apps
+    PostKindFilter.IMAGES            -> Icons.Filled.Photo
+    PostKindFilter.TEXT_POSTS        -> Icons.Filled.Chat
+    PostKindFilter.HORIZONTAL_VIDEOS -> Icons.Filled.CropLandscape
+    PostKindFilter.VERTICAL_VIDEOS   -> Icons.Filled.CropPortrait
+}
+private fun MediaKindFilter.icon() = when (this) {
+    MediaKindFilter.ALL    -> Icons.Filled.Apps
+    MediaKindFilter.IMAGES -> Icons.Filled.Photo
+    MediaKindFilter.VIDEOS -> Icons.Filled.Videocam
+}
+private fun ReviewKindFilter.icon() = when (this) {
+    ReviewKindFilter.ALL    -> Icons.Filled.Apps
+    ReviewKindFilter.MOVIES -> Icons.Filled.Theaters
+    ReviewKindFilter.TV     -> Icons.Filled.Tv
+    ReviewKindFilter.GAMES  -> Icons.Filled.SportsEsports
+    ReviewKindFilter.MUSIC  -> Icons.Filled.MusicNote
+    ReviewKindFilter.BOOKS  -> Icons.Filled.MenuBook
+}
+
+/** One circular icon-only bubble — the shared building block for both
+ *  halves of [ProfileIconTabRow]. */
+@Composable
+private fun IconTabBubble(
+    icon: androidx.compose.ui.graphics.vector.ImageVector, contentDescription: String,
+    isSelected: Boolean, liquidGlass: Boolean, tint: Color, size: Dp = 34.dp, onClick: () -> Unit
+) {
+    Box(
+        Modifier
+            .size(size)
+            .then(
+                if (liquidGlass) Modifier.glassPanel(true, tint = if (isSelected) tint else tint.copy(alpha = 0.4f), shape = CircleShape)
+                else Modifier.clip(CircleShape).background(if (isSelected) Color.White.copy(0.18f) else Color.White.copy(0.07f))
+            )
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(icon, contentDescription = contentDescription, tint = if (isSelected) Color.White else DimGray, modifier = Modifier.size(16.dp))
+    }
+}
+
+@Composable
+private fun ProfileIconTabRow(
+    tabs: List<MainViewModel.ProfileTab>, selectedTab: MainViewModel.ProfileTab, onSelectTab: (MainViewModel.ProfileTab) -> Unit,
+    liquidGlass: Boolean, tint: Color,
+    postKindFilter: PostKindFilter, onSelectPostKindFilter: (PostKindFilter) -> Unit, visiblePostFilters: List<PostKindFilter>,
+    mediaKindFilter: MediaKindFilter, onSelectMediaKindFilter: (MediaKindFilter) -> Unit, visibleMediaFilters: List<MediaKindFilter>,
+    reviewKindFilter: ReviewKindFilter, onSelectReviewKindFilter: (ReviewKindFilter) -> Unit,
+    visibleReviewFilters: List<ReviewKindFilter>, visibleBacklogFilters: List<ReviewKindFilter>
+) {
+    Box(Modifier.fillMaxWidth().height(52.dp)) {
+        // LEFT — content-type filter icons for the currently selected
+        // source. Right-padded generously so its last icon can still
+        // scroll out from underneath the floating source capsule on the
+        // right rather than being permanently hidden behind it.
+        Row(
+            Modifier.fillMaxSize().horizontalScroll(rememberScrollState()).padding(start = 10.dp, end = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            when (selectedTab) {
+                MainViewModel.ProfileTab.POSTS -> if (visiblePostFilters.size > 1) {
+                    visiblePostFilters.forEach { f ->
+                        IconTabBubble(f.icon(), f.label(), f == postKindFilter, liquidGlass, tint) { onSelectPostKindFilter(f) }
+                    }
+                }
+                MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES -> if (visibleMediaFilters.size > 1) {
+                    visibleMediaFilters.forEach { f ->
+                        IconTabBubble(f.icon(), f.label(), f == mediaKindFilter, liquidGlass, tint) { onSelectMediaKindFilter(f) }
+                    }
+                }
+                MainViewModel.ProfileTab.REVIEWS -> visibleReviewFilters.forEach { f ->
+                    IconTabBubble(f.icon(), f.label(), f == reviewKindFilter, liquidGlass, tint) { onSelectReviewKindFilter(f) }
+                }
+                MainViewModel.ProfileTab.BACKLOG -> visibleBacklogFilters.forEach { f ->
+                    IconTabBubble(f.icon(), f.label(), f == reviewKindFilter, liquidGlass, tint) { onSelectReviewKindFilter(f) }
+                }
+                // Blogs/Vods: no content-type filter, left side stays empty.
+                else -> {}
+            }
+            // Lets the leftmost/rightmost icons clear the floating source
+            // capsule on the right when scrolled all the way over.
+            Spacer(Modifier.width(148.dp))
+        }
+        // RIGHT — post source icons, floating over the left row in their
+        // own capsule. Not given horizontalScroll: per spec this side is
+        // meant to size itself to fit every source icon without scrolling.
+        Row(
+            Modifier
+                .align(Alignment.CenterEnd)
+                .padding(vertical = 8.dp, horizontal = 6.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(OledBlack.copy(alpha = 0.82f))
+                .padding(horizontal = 5.dp, vertical = 5.dp),
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            tabs.forEach { tab ->
+                IconTabBubble(tab.icon(), tab.label(), tab == selectedTab, liquidGlass, tint, size = 32.dp) { onSelectTab(tab) }
+            }
+        }
+    }
+}
+
 // ─── Results ─────────────────────────────────────────────────────────────────
 
 /**
@@ -1321,20 +1448,32 @@ private fun PinterestTile(item: MediaItem, tint: Color, shape: RoundedCornerShap
 }
 
 // ─── Posts tab: "All" and "Images" — Pinterest-style masonry ────────────────
-// True two-column masonry (not fixed-height cells with letterboxing): each
-// tile keeps its source image's own aspect ratio, and a greedy
-// shortest-column assignment keeps the two columns close in height, computed
-// once across the whole loaded list rather than in separate batches — a
-// batch boundary used to leave its own little seam/gap wherever one column
-// ran a bit longer than the other within that batch (feature request #2).
-// Each row now pairs exactly one left + one right tile as its own lazy item,
-// so there's nothing left to leave a gap in.
+// True two-column masonry: each tile keeps its source image's own aspect
+// ratio, and a single greedy shortest-column assignment runs across the
+// *entire* loaded list (not in separate batches, which used to leave a seam
+// wherever one column ran a bit longer than the other within a batch).
 //
-// Text posts (feature request #6) don't take part in the masonry at all —
-// they render as the exact same full-width glass bubble as their own Text
-// Posts sub-tab, inserted back in at roughly the point they'd have fallen
-// chronologically, instead of being squeezed into a masonry column's shape.
+// Bug fix (per feedback): the previous renderer still paired left[row] with
+// right[row] inside a shared Row for every row index, which forces both
+// columns to advance in lockstep — any time one side's tile was taller than
+// the other's *at that same row*, the shorter side was left with dead space
+// underneath it until the next row began. That's what produced the random
+// gaps. True masonry needs each column to just stack its own tiles directly
+// on top of one another with no forced per-row sync, so tiles are now
+// grouped into chunks and each chunk renders as one Row containing two
+// Columns — one per side — each holding that chunk's tiles back-to-back.
+// Because the greedy assignment already balances height across the whole
+// list, the two columns entering any chunk boundary are already close in
+// cumulative height, so a boundary introduces at most a tiny seam, never a
+// gap on every row.
+//
+// Text posts now take part in the same masonry pass instead of interrupting
+// it as full-width rows (feature request #2): each one competes for
+// whichever column is currently shorter, same as an image tile, and renders
+// as a shrunk-down bubble sized to one column's width (see
+// CompactTextPostBubble) rather than spanning both.
 private data class IndexedItem(val localIndex: Int, val item: MediaItem)
+private data class AssignedEntry(val entry: IndexedItem, val left: Boolean)
 
 private fun LazyListScope.postsPinterestGridRows(
     items: List<MediaItem>, loading: Boolean, profileTint: Color, liquidGlass: Boolean,
@@ -1346,49 +1485,41 @@ private fun LazyListScope.postsPinterestGridRows(
     if (matched.isEmpty()) return
 
     val indexed = matched.mapIndexed { i, item -> IndexedItem(i, item) }
-    val mediaEntries = indexed.filterNot { it.item.isTextOnly }
-    val textEntries = indexed.filter { it.item.isTextOnly }
+    val mediaShape = RoundedCornerShape(14.dp)
+    val textShape = RoundedCornerShape(12.dp)
 
-    val leftCol = mutableListOf<IndexedItem>()
-    val rightCol = mutableListOf<IndexedItem>()
+    val assigned = mutableListOf<AssignedEntry>()
     var leftHeight = 0f
     var rightHeight = 0f
-    mediaEntries.forEach { entry ->
+    indexed.forEach { entry ->
         val h = 1f / entry.item.tileAspectRatio()
-        if (leftHeight <= rightHeight) { leftCol += entry; leftHeight += h } else { rightCol += entry; rightHeight += h }
+        val left = leftHeight <= rightHeight
+        assigned += AssignedEntry(entry, left)
+        if (left) leftHeight += h else rightHeight += h
     }
-    val mediaRowCount = maxOf(leftCol.size, rightCol.size)
 
-    // Which media row a text post should appear just before, based on how
-    // many media items (in original order) came before it.
-    fun insertionRow(localIndex: Int): Int = (mediaEntries.count { it.localIndex < localIndex } / 2).coerceAtMost(mediaRowCount)
-    val textByRow = textEntries.groupBy { insertionRow(it.localIndex) }
-    val shape = RoundedCornerShape(14.dp)
+    // Chunked purely to keep a reasonable number of lazy items for
+    // recycling/pagination purposes — not for balancing, which already
+    // happened above across the whole list.
+    val chunkSize = 18
+    val chunks = assigned.chunked(chunkSize)
 
-    for (row in 0..mediaRowCount) {
-        textByRow[row]?.forEach { entry ->
-            item(key = "pinterest_text_${entry.item.id}_${entry.localIndex}") {
-                TextPostBubble(item = entry.item, liquidGlass = liquidGlass, tint = profileTint,
-                    onOpen = { onTapItem(matched, entry.localIndex) },
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
-            }
-        }
-        if (row >= mediaRowCount) continue
-        val left = leftCol.getOrNull(row)
-        val right = rightCol.getOrNull(row)
-        item(key = "pinterest_media_row_${row}_${left?.localIndex ?: -1}_${right?.localIndex ?: -1}") {
-            if (!loading && items.isNotEmpty() && row >= mediaRowCount - 4) {
-                LaunchedEffect(row, matched.size) { onLoadMore() }
+    chunks.forEachIndexed { chunkIndex, chunk ->
+        val left = chunk.filter { it.left }.map { it.entry }
+        val right = chunk.filter { !it.left }.map { it.entry }
+        item(key = "pinterest_chunk_${chunkIndex}_${chunk.firstOrNull()?.entry?.item?.id ?: chunkIndex}") {
+            if (!loading && items.isNotEmpty() && chunkIndex >= chunks.size - 2) {
+                LaunchedEffect(chunkIndex, matched.size) { onLoadMore() }
             }
             Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Box(Modifier.weight(1f)) {
-                    left?.let { entry ->
-                        PinterestTile(entry.item, profileTint, shape, liquidGlass, onSeedSubImageIndex) { onTapItem(matched, entry.localIndex) }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    left.forEach { e ->
+                        PinterestEntryTile(e.item, profileTint, mediaShape, textShape, liquidGlass, onSeedSubImageIndex) { onTapItem(matched, e.localIndex) }
                     }
                 }
-                Box(Modifier.weight(1f)) {
-                    right?.let { entry ->
-                        PinterestTile(entry.item, profileTint, shape, liquidGlass, onSeedSubImageIndex) { onTapItem(matched, entry.localIndex) }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    right.forEach { e ->
+                        PinterestEntryTile(e.item, profileTint, mediaShape, textShape, liquidGlass, onSeedSubImageIndex) { onTapItem(matched, e.localIndex) }
                     }
                 }
             }
@@ -1400,6 +1531,21 @@ private fun LazyListScope.postsPinterestGridRows(
                 CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 1.5.dp)
             }
         }
+    }
+}
+
+/** Picks the compact text bubble or the normal image/video tile depending
+ *  on the entry — used by the masonry columns above so both kinds of post
+ *  can live in the same stack. */
+@Composable
+private fun PinterestEntryTile(
+    item: MediaItem, tint: Color, mediaShape: RoundedCornerShape, textShape: RoundedCornerShape,
+    liquidGlass: Boolean, onSeedSubImageIndex: (String, Int) -> Unit, onClick: () -> Unit
+) {
+    if (item.isTextOnly) {
+        CompactTextPostBubble(item = item, liquidGlass = liquidGlass, tint = tint, shape = textShape, onOpen = onClick)
+    } else {
+        PinterestTile(item, tint, mediaShape, liquidGlass, onSeedSubImageIndex, onClick)
     }
 }
 
@@ -1643,6 +1789,37 @@ private fun TextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, o
             .padding(16.dp)
     ) {
         Text(item.text, color = Color.White.copy(0.92f), fontSize = 14.sp, lineHeight = 19.sp)
+    }
+}
+
+/** The "All"/masonry-grid version of [TextPostBubble] (feature request #2):
+ *  a text post taking part in the two-column masonry needs to actually fit
+ *  in one column, not spill across both. Rather than just narrowing the
+ *  same full-size bubble — which would wrap the same text into *more*
+ *  lines than it takes at full width, changing its shape — the whole
+ *  bubble is scaled down together (padding, corner radius, and font all
+ *  shrink at once), so it keeps roughly the same rows-and-characters-per-
+ *  line proportions, just smaller. Sized to the same tileAspectRatio() box
+ *  every other masonry tile uses so it can take part in the same greedy
+ *  column-balancing pass. */
+@Composable
+private fun CompactTextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, shape: RoundedCornerShape, onOpen: () -> Unit) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .aspectRatio(item.tileAspectRatio())
+            .then(
+                if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
+                else Modifier.clip(shape).background(Color.White.copy(0.06f))
+            )
+            .clip(shape)
+            .clickable(onClick = onOpen)
+            .padding(10.dp)
+    ) {
+        Text(
+            item.text, color = Color.White.copy(0.92f), fontSize = 9.sp, lineHeight = 12.sp,
+            maxLines = 9, overflow = TextOverflow.Ellipsis
+        )
     }
 }
 

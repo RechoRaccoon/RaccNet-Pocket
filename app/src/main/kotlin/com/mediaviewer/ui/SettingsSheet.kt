@@ -113,6 +113,16 @@ fun SettingsSheet(
     downloadOnLike: Boolean,
     downloadProgress: DownloadProgress?,
     reducedAnimations: Boolean,
+    classicProfileTabRow: Boolean = false,
+    onToggleClassicProfileTabRow: (Boolean) -> Unit = {},
+    selfDid: String = "",
+    subscribedReviewDids: Set<String> = emptySet(),
+    subscribedBlogDids: Set<String> = emptySet(),
+    followerScanState: MainViewModel.FollowerScanState = MainViewModel.FollowerScanState.Idle,
+    followerScanCompletedOnce: Boolean = false,
+    onStartFollowerScan: () -> Unit = {},
+    onRescanFollowersFromScratch: () -> Unit = {},
+    onDismissFollowerScanResult: () -> Unit = {},
     liquidGlass: Boolean,
     onToggleLiquidGlass: (Boolean) -> Unit,
     // Item 26: 0f..1f blur/magnify strength dial, only meaningful while
@@ -374,6 +384,8 @@ fun SettingsSheet(
                     when (page) {
                         HubPage.SETTINGS -> SettingsPageContent(
                             reducedAnimations = reducedAnimations, onToggleReducedAnimations = onToggleReducedAnimations,
+                            classicProfileTabRow = classicProfileTabRow, onToggleClassicProfileTabRow = onToggleClassicProfileTabRow,
+                            followerScanState = followerScanState, onRescanFollowersFromScratch = onRescanFollowersFromScratch,
                             hideTextOnlyPosts = hideTextOnlyPosts, onToggleHideTextOnlyPosts = onToggleHideTextOnlyPosts,
                             liquidGlass = liquidGlass, onToggleLiquidGlass = onToggleLiquidGlass,
                             liquidGlassIntensity = liquidGlassIntensity, onSetLiquidGlassIntensity = onSetLiquidGlassIntensity,
@@ -418,7 +430,10 @@ fun SettingsSheet(
                             blueskyLiveNow = blueskyLiveNow, blueskyLiveNowLoading = blueskyLiveNowLoading,
                             onLoadBlueskyLiveNow = onLoadBlueskyLiveNow, onOpenLivePlayer = onOpenLivePlayer,
                             onEnsureFriends = onEnsureFriends,
-                            friendsBlogs = friendsBlogs, onOpenBlog = onOpenBlog,
+                            friendsBlogs = friendsBlogs, onOpenBlog = onOpenBlog, selfDid = selfDid,
+                            subscribedReviewDids = subscribedReviewDids, subscribedBlogDids = subscribedBlogDids,
+                            followerScanState = followerScanState, followerScanCompletedOnce = followerScanCompletedOnce,
+                            onStartFollowerScan = onStartFollowerScan, onDismissFollowerScanResult = onDismissFollowerScanResult,
                             onRefreshHub = onRefreshHub,
                             onReturnToFeed = { onReturnToFeed() },
                             hasVisitedFeed = hasVisitedFeed,
@@ -495,6 +510,10 @@ fun SettingsSheet(
 private fun SettingsPageContent(
     reducedAnimations: Boolean,
     onToggleReducedAnimations: (Boolean) -> Unit,
+    classicProfileTabRow: Boolean,
+    onToggleClassicProfileTabRow: (Boolean) -> Unit,
+    followerScanState: MainViewModel.FollowerScanState = MainViewModel.FollowerScanState.Idle,
+    onRescanFollowersFromScratch: () -> Unit = {},
     hideTextOnlyPosts: Boolean,
     onToggleHideTextOnlyPosts: (Boolean) -> Unit,
     liquidGlass: Boolean,
@@ -655,6 +674,39 @@ private fun SettingsPageContent(
         CompactRow {
             Text("Reduced Animations", color = Color.White, fontSize = 14.sp)
             CompactSwitch(checked = reducedAnimations, onCheckedChange = onToggleReducedAnimations)
+        }
+
+        // Item (this session): swap back into the old text-label, two-row
+        // profile tab layout — the new single-row icon layout is the
+        // default, this is an opt-out for anyone who preferred the old one.
+        CompactRow {
+            Text("Classic Profile Tabs", color = Color.White, fontSize = 14.sp)
+            CompactSwitch(checked = classicProfileTabRow, onCheckedChange = onToggleClassicProfileTabRow)
+        }
+
+        // Feature: auto-subscribe — re-runs the one-time follower scan from
+        // scratch (ignores any saved resume point), for anyone who wants to
+        // pick up accounts that started posting reviews/blogs after the
+        // last scan, or who skipped/never ran it from the Hub's intro
+        // bubble. Most people won't need this — opening a profile already
+        // auto-subscribes it the moment it turns out to have any (see
+        // MainViewModel.maybeAutoSubscribeOnProfileOpen) — this is just for
+        // the accounts a user never happens to visit.
+        CompactRow {
+            val scanning = followerScanState is MainViewModel.FollowerScanState.Scanning
+            Text(
+                if (scanning) "Scanning Followers…" else "Rescan Followers for Reviews/Blogs",
+                color = if (scanning) DimGray else Color.White, fontSize = 14.sp
+            )
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (scanning) Color.White.copy(0.05f) else Color.White.copy(0.12f))
+                    .clickable(enabled = !scanning, onClick = onRescanFollowersFromScratch)
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+                Text(if (scanning) "…" else "Rescan", color = if (scanning) DimGray else Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            }
         }
 
         // Item 4: Glass Theme + the Background/Outline intensity sliders are
@@ -1210,6 +1262,19 @@ private fun AtProtocolPageContent(
     onLoadFriendsReviews: () -> Unit = {},
     onOpenProfile: (com.mediaviewer.model.AuthorInfo) -> Unit = {},
     onOpenReview: (com.mediaviewer.model.FriendPopfeedReview) -> Unit = {},
+    // Feature: auto-subscribe — the signed-in user is now auto-subscribed
+    // to their own Reviews/Blogs too (so their reviews show up on a
+    // title's page alongside everyone else's), but that means
+    // friendsReviews/friendsBlogs can contain the user's own entries. Used
+    // below to filter those back out of just the Hub preview rows, which
+    // are meant to be "what your friends posted", not "what you posted".
+    selfDid: String = "",
+    subscribedReviewDids: Set<String> = emptySet(),
+    subscribedBlogDids: Set<String> = emptySet(),
+    followerScanState: MainViewModel.FollowerScanState = MainViewModel.FollowerScanState.Idle,
+    followerScanCompletedOnce: Boolean = false,
+    onStartFollowerScan: () -> Unit = {},
+    onDismissFollowerScanResult: () -> Unit = {},
     // Item 8/19: Livestreams section.
     liveFriends: List<com.mediaviewer.model.StreamplaceLiveStream> = emptyList(),
     liveFriendsLoading: Boolean = false,
@@ -1308,6 +1373,12 @@ private fun AtProtocolPageContent(
     // the "Created by Recho Raccoon" credit does, so nothing ever scrolls
     // behind it. This Column now just needs a small fixed bottom margin for
     // breathing room, not a height reserved to avoid an overlay.
+    //
+    // Feature: auto-subscribe — wrapped in a Box now (it used to be the
+    // bare top-level content) purely so the follower-scan completion popup
+    // below can layer on top of this scrollable Column instead of needing
+    // its own separate screen/route.
+    Box(Modifier.fillMaxSize()) {
     Column(
         Modifier
             .fillMaxSize()
@@ -1518,8 +1589,8 @@ private fun AtProtocolPageContent(
             liveFriends.map { LiveCardSource.Streamplace(it) } + blueskyLiveNow.map { LiveCardSource.BlueskyLive(it) }
         }
         val hasCurrentLive = combinedLive.isNotEmpty()
-        val reviewsRecency = friendsReviews.firstOrNull()?.review?.createdAt ?: ""
-        val blogsRecency = friendsBlogs.firstOrNull()?.blog?.createdAt ?: ""
+        val reviewsRecency = friendsReviews.firstOrNull { it.author.did != selfDid }?.review?.createdAt ?: ""
+        val blogsRecency = friendsBlogs.firstOrNull { it.author.did != selfDid }?.blog?.createdAt ?: ""
 
         // ── Item 8/19: Livestreams — everyone the user follows, combining
         // two distinct sources: Streamplace (an AT-Protocol-native
@@ -1570,7 +1641,8 @@ private fun AtProtocolPageContent(
         // ProfileOverlay.kt), not everyone followed.
         @Composable
         fun ReviewsSectionContent() {
-            if (friendsReviews.isEmpty()) return
+            val friendOnlyReviews = friendsReviews.filter { it.author.did != selfDid }
+            if (friendOnlyReviews.isEmpty()) return
             // Bug fix (per feedback): see LiveSectionContent's matching
             // comment just above — same tightened spacing applied here so
             // it's consistent no matter which section ends up first.
@@ -1586,7 +1658,7 @@ private fun AtProtocolPageContent(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                friendsReviews.take(20).forEach { fr -> MutualReviewCard(fr, liquidGlass, onOpenReview) }
+                friendOnlyReviews.take(20).forEach { fr -> MutualReviewCard(fr, liquidGlass, onOpenReview) }
             }
         }
 
@@ -1594,7 +1666,8 @@ private fun AtProtocolPageContent(
         // separate list (see ProfileOverlay.kt's Blogs sub-row).
         @Composable
         fun BlogsSectionContent() {
-            if (friendsBlogs.isEmpty()) return
+            val friendOnlyBlogs = friendsBlogs.filter { it.author.did != selfDid }
+            if (friendOnlyBlogs.isEmpty()) return
             // Bug fix (per feedback): see LiveSectionContent's matching
             // comment above — same tightened spacing applied here so it's
             // consistent no matter which section ends up first.
@@ -1623,7 +1696,7 @@ private fun AtProtocolPageContent(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.Top
             ) {
-                friendsBlogs.take(20).forEach { fb ->
+                friendOnlyBlogs.take(20).forEach { fb ->
                     // Bug fix (per feedback): the author bubble now (a)
                     // centers horizontally over its own blog card instead
                     // of hugging the card's left edge — Column defaults to
@@ -1653,16 +1726,23 @@ private fun AtProtocolPageContent(
             }
         }
 
+        val notYetScanned = !followerScanCompletedOnce
+        val isScanningNow = followerScanState is MainViewModel.FollowerScanState.Scanning
+        val showScanIntro = notYetScanned && (isScanningNow || (subscribedReviewDids.isEmpty() && subscribedBlogDids.isEmpty()))
+
         val sectionOrder = remember(hasCurrentLive, reviewsRecency, blogsRecency) {
             val nonLive = listOf("reviews" to reviewsRecency, "blogs" to blogsRecency)
                 .sortedByDescending { it.second }.map { it.first }
             if (hasCurrentLive) listOf("live") + nonLive else nonLive + listOf("live")
         }
+        if (showScanIntro) {
+            ReviewsBlogsScanIntroBubble(followerScanState, liquidGlass, dominantColor, backdrop, onStartFollowerScan)
+        }
         sectionOrder.forEach { key ->
             when (key) {
                 "live" -> LiveSectionContent()
-                "reviews" -> ReviewsSectionContent()
-                "blogs" -> BlogsSectionContent()
+                "reviews" -> if (!showScanIntro) ReviewsSectionContent()
+                "blogs" -> if (!showScanIntro) BlogsSectionContent()
             }
         }
 
@@ -1730,6 +1810,125 @@ private fun AtProtocolPageContent(
         }
 
         Spacer(Modifier.height(8.dp))
+    }
+
+    // Feature: auto-subscribe — the one-time follower scan's completion
+    // popup, layered over everything else on this page while it's up.
+    // Dismissing it (the centered close bubble) just clears the popup;
+    // FOLLOWER_SCAN_COMPLETED stays set, so the intro bubble below doesn't
+    // come back — a "no accounts added" result explains that a rescan is
+    // always available from Settings instead of nagging again here.
+    val completedScan = followerScanState as? MainViewModel.FollowerScanState.Completed
+    if (completedScan != null) {
+        FollowerScanCompletionPopup(completedScan, liquidGlass, dominantColor, backdrop, onDismissFollowerScanResult)
+    }
+    }
+}
+
+/** Feature: auto-subscribe — shown once [MainViewModel.startFollowerScan]
+ *  finishes, summarizing what it found. A centered card over a dimmed
+ *  scrim, dismissed only via its own close bubble (no scrim-tap-to-dismiss)
+ *  since it's a one-shot informational result, not a sheet someone might
+ *  want to swipe past. */
+@Composable
+private fun FollowerScanCompletionPopup(
+    result: MainViewModel.FollowerScanState.Completed, liquidGlass: Boolean, dominantColor: Color,
+    backdrop: GlassBackdrop?, onDismiss: () -> Unit
+) {
+    val foundNothing = result.reviewsFound == 0 && result.blogsFound == 0
+    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.6f)), contentAlignment = Alignment.Center) {
+        val cardShape = RoundedCornerShape(20.dp)
+        @Composable
+        fun CardContent() {
+            Column(
+                Modifier.padding(horizontal = 24.dp, vertical = 22.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("Follower Scan Complete", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Scanned ${result.accountsScanned} account${if (result.accountsScanned == 1) "" else "s"}.",
+                    color = Color.White.copy(0.85f), fontSize = 13.sp, textAlign = TextAlign.Center
+                )
+                Text(
+                    "${result.reviewsFound} had Reviews, ${result.blogsFound} had Blogs.",
+                    color = Color.White.copy(0.85f), fontSize = 13.sp, textAlign = TextAlign.Center
+                )
+                if (foundNothing) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "None of your followed accounts had reviews or blogs. You can retry this scan anytime from Settings.",
+                        color = DimGray, fontSize = 12.sp, textAlign = TextAlign.Center, lineHeight = 16.sp
+                    )
+                }
+                Spacer(Modifier.height(16.dp))
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color.White.copy(0.15f))
+                        .clickable(onClick = onDismiss)
+                        .padding(horizontal = 22.dp, vertical = 9.dp)
+                ) {
+                    Text("Close", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+        if (liquidGlass) {
+            LiquidGlassSurface(Modifier.padding(horizontal = 32.dp), shape = cardShape, tint = dominantColor, backdrop = backdrop) { CardContent() }
+        } else {
+            Box(Modifier.padding(horizontal = 32.dp).clip(cardShape).background(OledBlack)) { CardContent() }
+        }
+    }
+}
+
+/** Feature: auto-subscribe — the Reviews/Blogs rows' empty-state
+ *  replacement, shown (per spec) only to accounts with nothing in either
+ *  subscribed list yet and who've never run the follower scan. Explains
+ *  what the scan does and why it's paced/one-time, and doubles as the
+ *  progress readout once [onStartFollowerScan] is tapped — same bubble,
+ *  its copy just swaps to a running count while [scanState] is Scanning. */
+@Composable
+private fun ReviewsBlogsScanIntroBubble(
+    scanState: MainViewModel.FollowerScanState, liquidGlass: Boolean, dominantColor: Color,
+    backdrop: GlassBackdrop?, onStartScan: () -> Unit
+) {
+    val scanning = scanState as? MainViewModel.FollowerScanState.Scanning
+    val shape = RoundedCornerShape(20.dp)
+    @Composable
+    fun BubbleContent() {
+        Column(Modifier.padding(horizontal = 20.dp, vertical = 18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            if (scanning != null) {
+                Text("Scanning your followers…", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "${scanning.accountsScanned} checked · ${scanning.reviewsFound} Reviews · ${scanning.blogsFound} Blogs found so far",
+                    color = DimGray, fontSize = 12.sp, textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(10.dp))
+                CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 1.5.dp)
+            } else {
+                Text(
+                    "This app combines multiple AT Proto apps into one, allowing you to write and view long-form blogs and title reviews. The blogs and reviews from the people you follow can show up here, but you'll need to initiate a one-time scan of your followers list to locally log which accounts post blogs and/or reviews so that the app can display their latest blogs/reviews here! Creating this on-device list helps avoid PDS rate limits.",
+                    color = Color.White.copy(0.85f), fontSize = 13.sp, lineHeight = 18.sp, textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(14.dp))
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color.White.copy(0.15f))
+                        .clickable(onClick = onStartScan)
+                        .padding(horizontal = 22.dp, vertical = 9.dp)
+                ) {
+                    Text("Initiate Scan", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
+    Spacer(Modifier.height(10.dp))
+    if (liquidGlass) {
+        LiquidGlassSurface(Modifier.fillMaxWidth().padding(horizontal = 16.dp), shape = shape, tint = dominantColor, backdrop = backdrop) { BubbleContent() }
+    } else {
+        Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp).clip(shape).background(Color.White.copy(0.06f))) { BubbleContent() }
     }
 }
 

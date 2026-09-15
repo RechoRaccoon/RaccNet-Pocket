@@ -22,6 +22,7 @@ import com.mediaviewer.worker.DownloadWorker
 import com.mediaviewer.worker.GifDownloadWorker
 import com.mediaviewer.worker.urlToDownloadInfo
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -63,6 +64,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ── Settings ──────────────────────────────────────────────────────────────
     private val _reducedAnimations = MutableStateFlow(false)
     val reducedAnimations: StateFlow<Boolean> = _reducedAnimations
+
+    // Item (this session): profile row layout toggle — false (default) uses
+    // the new single-row icon layout, true swaps back to the classic
+    // two-row text-label layout.
+    private val _classicProfileTabRow = MutableStateFlow(false)
+    val classicProfileTabRow: StateFlow<Boolean> = _classicProfileTabRow
+
+    fun setClassicProfileTabRow(enabled: Boolean) {
+        _classicProfileTabRow.value = enabled
+        viewModelScope.launch { prefs.setClassicProfileTabRow(enabled) }
+    }
 
     private val _combineListsAndPacks = MutableStateFlow(false)
     val combineListsAndPacks: StateFlow<Boolean> = _combineListsAndPacks
@@ -302,6 +314,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val loading: Boolean = false,
         val loaded: Boolean = false
     )
+
+    // ── Follower scan (feature: automatic Reviews/Blogs subscriptions) ────
+    // See startFollowerScan's doc comment for the full picture. Idle before
+    // ever run (and between runs); Scanning while in progress, with running
+    // counts the Hub's intro bubble → progress state can render as it goes;
+    // Completed once a run finishes, carrying the same three numbers the
+    // completion popup is meant to show.
+    sealed class FollowerScanState {
+        object Idle : FollowerScanState()
+        data class Scanning(val accountsScanned: Int, val reviewsFound: Int, val blogsFound: Int) : FollowerScanState()
+        data class Completed(val accountsScanned: Int, val reviewsFound: Int, val blogsFound: Int) : FollowerScanState()
+    }
 
     data class ProfileOverlayState(
         val author: AuthorInfo,
@@ -973,6 +997,144 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ── Automatic Reviews/Blogs subscriptions ──────────────────────────────
+    // Replaces the manual "Subscribe" button (removed from the profile
+    // Reviews/Blogs sub-rows this session) with two complementary passive
+    // paths that need zero extra PDS calls of their own:
+    //  1. [maybeAutoSubscribeOnProfileOpen] — opening any profile already
+    //     fetches that account's blogs/reviews (see openProfile below); if
+    //     it turns out they have some, and the signed-in user follows them
+    //     (or it's their own profile), fold them into the subscribed list
+    //     right there. Runs on every profile open, not just the first,
+    //     since it also keeps [rememberedTitlesJson-free] — no separate
+    //     "remembered titles" cache is kept here; friendsReviews/
+    //     friendsBlogs (backed by HUB_REVIEWS_CACHE_JSON/HUB_BLOGS_CACHE_JSON)
+    //     already is that cache, refreshed by loadFriendsReviewsIfNeeded.
+    //  2. [startFollowerScan] — a one-time (or user-re-triggered) sweep of
+    //     every account the user follows, for the accounts they never
+    //     happen to open a profile for.
+    private fun maybeAutoSubscribeOnProfileOpen(
+        author: AuthorInfo, isFollowingOrSelf: Boolean, hasReviews: Boolean, hasBlogs: Boolean
+    ) {
+        if (!isFollowingOrSelf) return
+        if (!hasReviews && !hasBlogs) return
+        viewModelScope.launch(Dispatchers.IO) {
+            if (hasReviews) prefs.addSubscribedReviewDidIfMissing(author.did)
+            if (hasBlogs) prefs.addSubscribedBlogDidIfMissing(author.did)
+            // Cheap to just re-run — loadFriendsReviewsIfNeeded's own cache
+            // means this doesn't cost anything if nothing actually changed,
+            // and force=true is what makes a newly-subscribed account's
+            // content show up in the Hub without waiting for the next
+            // natural Hub visit.
+            reviewsBlogsLoaded = false
+            loadFriendsReviewsIfNeeded(force = true)
+        }
+    }
+
+    private val _followerScanState = MutableStateFlow<FollowerScanState>(FollowerScanState.Idle)
+    val followerScanState: StateFlow<FollowerScanState> = _followerScanState
+    private val _followerScanCompletedOnce = MutableStateFlow(false)
+    val followerScanCompletedOnce: StateFlow<Boolean> = _followerScanCompletedOnce
+    private var followerScanJob: Job? = null
+
+    /** Feature: one-time (or user-re-triggered) follower scan — the active
+     *  counterpart to [maybeAutoSubscribeOnProfileOpen]'s passive path.
+     *  Walks every account the signed-in user follows (plus their own
+     *  account, checked first on every run) probing each for Popfeed
+     *  reviews / Leaflet blogs, so accounts the user never happens to open
+     *  a profile for still end up in the local subscription lists —
+     *  without ever touching Jetstream/firehose or any "everyone's
+     *  activity" pipeline, just a direct per-account read.
+     *
+     *  Pacing: this is the same family of request as getSubscribedReviews/
+     *  getSubscribedBlogs (see that doc comment for the actual documented
+     *  Bluesky HTTP limit this is sized against), but can run against
+     *  thousands of accounts in one go instead of the tens a subscribed
+     *  list normally holds — so it runs far more conservatively:
+     *  concurrency [SCAN_CONCURRENCY] with a fixed [SCAN_STAGGER_MS] delay
+     *  before each probe, well under the ~10 req/sec sustained budget with
+     *  wide margin left for whatever unknown limit a given third-party PDS
+     *  might have of its own. This is explicitly allowed to take a while.
+     *
+     *  Resumable: the follows-list pagination cursor is persisted after
+     *  every fully-processed page (FOLLOWER_SCAN_CURSOR), so an app kill
+     *  mid-scan doesn't cost re-spending PDS calls re-checking accounts
+     *  already resolved on the next [resume]d run. [resume] = false (the
+     *  Settings "rescan from scratch" action) ignores any saved cursor and
+     *  walks the whole follow list again — for picking up accounts that
+     *  only started posting reviews/blogs after the last scan.
+     */
+    fun startFollowerScan(resume: Boolean = true) {
+        if (followerScanJob?.isActive == true) return
+        val myDid = _bskyDid.value
+        if (myDid.isBlank()) return
+        followerScanJob = viewModelScope.launch(Dispatchers.IO) {
+            val scanned = java.util.concurrent.atomic.AtomicInteger(0)
+            val reviewsFound = java.util.concurrent.atomic.AtomicInteger(0)
+            val blogsFound = java.util.concurrent.atomic.AtomicInteger(0)
+            _followerScanState.value = FollowerScanState.Scanning(0, 0, 0)
+
+            suspend fun probe(did: String) {
+                val reviews = runCatching { bskyRepo.getPopfeedReviews(did, probeConcurrently = did == myDid) }.getOrDefault(emptyList())
+                val blogs = runCatching { bskyRepo.getLeafletBlogs(did, probeConcurrently = did == myDid) }.getOrDefault(emptyList())
+                if (reviews.isNotEmpty()) { prefs.addSubscribedReviewDidIfMissing(did); reviewsFound.incrementAndGet() }
+                if (blogs.isNotEmpty()) { prefs.addSubscribedBlogDidIfMissing(did); blogsFound.incrementAndGet() }
+                val s = scanned.incrementAndGet()
+                _followerScanState.value = FollowerScanState.Scanning(s, reviewsFound.get(), blogsFound.get())
+            }
+
+            // The user's own account, every run, never gated behind the
+            // resumable cursor below — this is what keeps a resumed or
+            // re-triggered scan picking up the signed-in user's own new
+            // reviews/blogs even though it's just one account.
+            runCatching { probe(myDid) }
+
+            var cursor: String? = if (resume) prefs.followerScanCursor.first() else null
+            val gate = kotlinx.coroutines.sync.Semaphore(SCAN_CONCURRENCY)
+            while (true) {
+                val page = bskyRepo.getFollowsPage(bskyToken, myDid, cursor).getOrNull() ?: break
+                val (dids, nextCursor) = page
+                if (dids.isNotEmpty()) {
+                    coroutineScope {
+                        dids.filter { it != myDid }.forEach { did ->
+                            launch {
+                                gate.withPermit {
+                                    delay(SCAN_STAGGER_MS)
+                                    runCatching { probe(did) }
+                                }
+                            }
+                        }
+                    }
+                }
+                prefs.setFollowerScanCursor(nextCursor)
+                cursor = nextCursor
+                if (cursor.isNullOrBlank()) break
+            }
+
+            prefs.setFollowerScanCompleted(true)
+            prefs.setFollowerScanCursor(null)
+            prefs.setFollowerScanLastRunMs(System.currentTimeMillis())
+            _followerScanCompletedOnce.value = true
+            _followerScanState.value = FollowerScanState.Completed(scanned.get(), reviewsFound.get(), blogsFound.get())
+
+            reviewsBlogsLoaded = false
+            loadFriendsReviewsIfNeeded(force = true)
+        }
+    }
+
+    /** Dismisses the completion popup back to a quiet Idle state — called
+     *  when the user taps the popup's close bubble. Leaves the persisted
+     *  followerScanCompleted flag (and therefore [followerScanCompletedOnce])
+     *  alone, so the Hub's intro bubble stays gone afterward. */
+    fun dismissFollowerScanResult() {
+        if (_followerScanState.value is FollowerScanState.Completed) _followerScanState.value = FollowerScanState.Idle
+    }
+
+    companion object {
+        private const val SCAN_CONCURRENCY = 2
+        private const val SCAN_STAGGER_MS = 350L
+    }
+
     /** Loads (or reloads) the Hub's Reviews/Blogs sections from the current
      *  subscribed-DID sets. Cache-first, same instant-on-restart shape the
      *  old firehose indexer had: the last persisted snapshot publishes
@@ -1378,6 +1540,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { screenState.collect { if (it == ScreenState.FEED) _hasVisitedFeed.value = true } }
         viewModelScope.launch { prefs.reducedAnimations.collect { _reducedAnimations.value = it } }
         viewModelScope.launch { prefs.liquidGlass.collect { _liquidGlass.value = it } }
+        viewModelScope.launch { prefs.classicProfileTabRow.collect { _classicProfileTabRow.value = it } }
+        viewModelScope.launch { prefs.followerScanCompleted.collect { _followerScanCompletedOnce.value = it } }
         viewModelScope.launch { prefs.liquidGlassIntensity.collect { _liquidGlassIntensity.value = it } }
         viewModelScope.launch { prefs.glassRimIntensity.collect { _glassRimIntensity.value = it } }
         viewModelScope.launch { prefs.downloadOnLike.collect { _downloadOnLike.value = it } }
@@ -1862,6 +2026,7 @@ _bskyDid.value          = session.did
                 availableTabs = cur.availableTabs + ProfileTab.BLOGS,
                 tabStates = cur.tabStates + (ProfileTab.BLOGS to ProfileTabState(blogs = blogs, loaded = true))
             )
+            maybeAutoSubscribeOnProfileOpen(cur.author, cur.author.isFollowing || cur.author.did == _bskyDid.value, hasReviews = false, hasBlogs = true)
         }
         viewModelScope.launch(Dispatchers.IO) {
             val reviews = runCatching { bskyRepo.getPopfeedReviews(author.did, probeConcurrently = true) }.getOrDefault(emptyList())
@@ -1871,6 +2036,7 @@ _bskyDid.value          = session.did
                 availableTabs = cur.availableTabs + ProfileTab.REVIEWS,
                 tabStates = cur.tabStates + (ProfileTab.REVIEWS to ProfileTabState(reviews = reviews, loaded = true))
             )
+            maybeAutoSubscribeOnProfileOpen(cur.author, cur.author.isFollowing || cur.author.did == _bskyDid.value, hasReviews = true, hasBlogs = false)
         }
         viewModelScope.launch(Dispatchers.IO) {
             val backlog = runCatching { bskyRepo.getPopfeedBacklog(author.did) }.getOrDefault(emptyList())

@@ -92,6 +92,26 @@ object PrefKeys {
     // from without needing its own network+auth round trip just to color
     // itself.
     val SELF_AVATAR_URL_CACHE = stringPreferencesKey("self_avatar_url_cache")
+
+    // Item (this session): profile row layout toggle. The new single-row,
+    // icon-only layout (left half = content-type filters, right half =
+    // Posts/Reposts/Likes/Blogs/Reviews/Backlog/Vods source) is the
+    // default; this key opts a user back into the older two-row, text-label
+    // layout instead. false = new layout, true = classic.
+    val CLASSIC_PROFILE_TAB_ROW = booleanPreferencesKey("classic_profile_tab_row")
+
+    // ── Blogs/Reviews auto-subscribe (feature: automatic subscriptions) ───
+    // The actual review/blog *content* cache already exists —
+    // HUB_REVIEWS_CACHE_JSON/HUB_BLOGS_CACHE_JSON above, written by
+    // MainViewModel.loadFriendsReviewsIfNeeded — so nothing new is needed
+    // there. What's new is just tracking the one-time follower scan.
+    val FOLLOWER_SCAN_COMPLETED    = booleanPreferencesKey("follower_scan_completed")
+    val FOLLOWER_SCAN_LAST_RUN_MS  = longPreferencesKey("follower_scan_last_run_ms")
+    // Resumability: if the app is closed mid-scan, this is the last
+    // follows-list pagination cursor successfully processed so a re-launch
+    // of the scan (manual retry from Settings) doesn't have to start over
+    // from scratch and re-spend PDS calls on accounts it already checked.
+    val FOLLOWER_SCAN_CURSOR       = stringPreferencesKey("follower_scan_cursor")
 }
 
 
@@ -131,6 +151,12 @@ class PreferencesManager(private val context: Context) {
     val hubCacheHydratedAt: Flow<Long>          = context.dataStore.data.map { it[PrefKeys.HUB_CACHE_HYDRATED_AT] ?: 0L }
     val subscribedReviewDids: Flow<Set<String>> = context.dataStore.data.map { it[PrefKeys.SUBSCRIBED_REVIEW_DIDS] ?: emptySet() }
     val subscribedBlogDids: Flow<Set<String>>   = context.dataStore.data.map { it[PrefKeys.SUBSCRIBED_BLOG_DIDS] ?: emptySet() }
+    // Defaults false: the new single-row icon layout is the default profile
+    // tab row; this opts back into the classic two-row text-label layout.
+    val classicProfileTabRow: Flow<Boolean>     = context.dataStore.data.map { it[PrefKeys.CLASSIC_PROFILE_TAB_ROW] ?: false }
+    val followerScanCompleted: Flow<Boolean>     = context.dataStore.data.map { it[PrefKeys.FOLLOWER_SCAN_COMPLETED] ?: false }
+    val followerScanLastRunMs: Flow<Long>        = context.dataStore.data.map { it[PrefKeys.FOLLOWER_SCAN_LAST_RUN_MS] ?: 0L }
+    val followerScanCursor: Flow<String?>        = context.dataStore.data.map { it[PrefKeys.FOLLOWER_SCAN_CURSOR] }
     // Phase 4: on-device translation toggle + preferred target language (BCP-47 tag).
     // Defaults to the device's own language so a fresh install "just works" without
     // the user having to hunt for the setting first.
@@ -251,6 +277,45 @@ class PreferencesManager(private val context: Context) {
         }
     }
 
+    // ── Automatic subscriptions (feature: auto-subscribe on profile open /
+    // follower scan) ─────────────────────────────────────────────────────
+    // Additive-only, unlike the manual toggle above: opening a profile (or
+    // scanning followers) that turns out to have reviews/blogs should only
+    // ever *add* that account, never remove one the user (or a past scan)
+    // already added — removal stays a manual action if it's ever exposed.
+    suspend fun addSubscribedReviewDidIfMissing(did: String) {
+        context.dataStore.edit { prefs ->
+            val current = prefs[PrefKeys.SUBSCRIBED_REVIEW_DIDS] ?: emptySet()
+            if (did !in current) prefs[PrefKeys.SUBSCRIBED_REVIEW_DIDS] = current + did
+        }
+    }
+
+    suspend fun addSubscribedBlogDidIfMissing(did: String) {
+        context.dataStore.edit { prefs ->
+            val current = prefs[PrefKeys.SUBSCRIBED_BLOG_DIDS] ?: emptySet()
+            if (did !in current) prefs[PrefKeys.SUBSCRIBED_BLOG_DIDS] = current + did
+        }
+    }
+
+    /** Bulk variant used by the follower scan — one DataStore write for a
+     *  whole batch of newly-discovered accounts instead of one write per
+     *  account, since the scan can turn up thousands of candidates. */
+    suspend fun addSubscribedReviewDids(dids: Collection<String>) {
+        if (dids.isEmpty()) return
+        context.dataStore.edit { prefs ->
+            val current = prefs[PrefKeys.SUBSCRIBED_REVIEW_DIDS] ?: emptySet()
+            prefs[PrefKeys.SUBSCRIBED_REVIEW_DIDS] = current + dids
+        }
+    }
+
+    suspend fun addSubscribedBlogDids(dids: Collection<String>) {
+        if (dids.isEmpty()) return
+        context.dataStore.edit { prefs ->
+            val current = prefs[PrefKeys.SUBSCRIBED_BLOG_DIDS] ?: emptySet()
+            prefs[PrefKeys.SUBSCRIBED_BLOG_DIDS] = current + dids
+        }
+    }
+
     suspend fun setHideTextOnlyPosts(enabled: Boolean) {        context.dataStore.edit { prefs -> prefs[PrefKeys.HIDE_TEXT_ONLY_POSTS] = enabled }
     }
 
@@ -365,5 +430,23 @@ class PreferencesManager(private val context: Context) {
 
     suspend fun setReducedAnimations(enabled: Boolean) {
         context.dataStore.edit { prefs -> prefs[PrefKeys.REDUCED_ANIMATIONS] = enabled }
+    }
+
+    suspend fun setClassicProfileTabRow(enabled: Boolean) {
+        context.dataStore.edit { prefs -> prefs[PrefKeys.CLASSIC_PROFILE_TAB_ROW] = enabled }
+    }
+
+    suspend fun setFollowerScanCompleted(completed: Boolean) {
+        context.dataStore.edit { prefs -> prefs[PrefKeys.FOLLOWER_SCAN_COMPLETED] = completed }
+    }
+
+    suspend fun setFollowerScanLastRunMs(ms: Long) {
+        context.dataStore.edit { prefs -> prefs[PrefKeys.FOLLOWER_SCAN_LAST_RUN_MS] = ms }
+    }
+
+    suspend fun setFollowerScanCursor(cursor: String?) {
+        context.dataStore.edit { prefs ->
+            if (cursor == null) prefs.remove(PrefKeys.FOLLOWER_SCAN_CURSOR) else prefs[PrefKeys.FOLLOWER_SCAN_CURSOR] = cursor
+        }
     }
 }

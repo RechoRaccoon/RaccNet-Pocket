@@ -1595,6 +1595,17 @@ class BlueskyRepository {
 
     // ── DMs / chat (item 6, item 7) ──────────────────────────────────────────
 
+    /** One page of accounts the given user follows — used by the Hub's
+     *  one-time follower scan (see MainViewModel.startFollowerScan) to walk
+     *  a potentially thousands-strong follow list a page at a time instead
+     *  of loading it all into memory up front. */
+    suspend fun getFollowsPage(token: String, did: String, cursor: String?): Result<Pair<List<String>, String?>> = runCatching {
+        val resp = retryOnce { api.getFollows("Bearer $token", did, 100, cursor) }
+        if (!resp.isSuccessful) throw java.io.IOException("getFollows failed: ${resp.code()}")
+        val body = resp.body() ?: throw java.io.IOException("getFollows: empty body")
+        body.follows.map { it.did } to body.cursor
+    }
+
     /** Bug fix: retries a single paginated page once before giving up on it —
      *  used by fetchAllFollows/fetchAllFollowers below so one transient
      *  network hiccup on, say, page 6 of 12 doesn't have to take down the

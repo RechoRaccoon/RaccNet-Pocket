@@ -212,6 +212,7 @@ private fun AppRoot(viewModel: MainViewModel) {
     val appMode            by viewModel.appMode.collectAsState()
     val navDirection       by viewModel.navDirection.collectAsState()
     val reducedAnimations  by viewModel.reducedAnimations.collectAsState()
+    val classicProfileTabRow by viewModel.classicProfileTabRow.collectAsState()
     val liquidGlass        by viewModel.liquidGlass.collectAsState()
     val liquidGlassIntensity by viewModel.liquidGlassIntensity.collectAsState()
     val glassRimIntensity  by viewModel.glassRimIntensity.collectAsState()
@@ -277,6 +278,8 @@ private fun AppRoot(viewModel: MainViewModel) {
     val playingLive           by viewModel.playingLive.collectAsState()
     val subscribedReviewDids  by viewModel.subscribedReviewDids.collectAsState()
     val subscribedBlogDids    by viewModel.subscribedBlogDids.collectAsState()
+    val followerScanState     by viewModel.followerScanState.collectAsState()
+    val followerScanCompletedOnce by viewModel.followerScanCompletedOnce.collectAsState()
     val searchOpen             by viewModel.searchOpen.collectAsState()
     val searchState            by viewModel.searchState.collectAsState()
     // AI Tagging feature
@@ -646,6 +649,16 @@ private fun AppRoot(viewModel: MainViewModel) {
             onShowFriends             = viewModel::showFriendsFeed,
             onShowE621Following       = viewModel::searchFollowingE621,
             onToggleReducedAnimations = viewModel::setReducedAnimations,
+            classicProfileTabRow      = classicProfileTabRow,
+            onToggleClassicProfileTabRow = viewModel::setClassicProfileTabRow,
+            selfDid                   = bskyDid,
+            subscribedReviewDids      = subscribedReviewDids,
+            subscribedBlogDids        = subscribedBlogDids,
+            followerScanState         = followerScanState,
+            followerScanCompletedOnce = followerScanCompletedOnce,
+            onStartFollowerScan       = { viewModel.startFollowerScan() },
+            onRescanFollowersFromScratch = { viewModel.startFollowerScan(resume = false) },
+            onDismissFollowerScanResult = viewModel::dismissFollowerScanResult,
             combineListsAndPacks      = combineListsPacks,
             onToggleCombineListsPacks = viewModel::setCombineListsAndPacks,
             autoAddToOnFollow         = autoAddToOnFollow,
@@ -820,6 +833,7 @@ private fun AppRoot(viewModel: MainViewModel) {
                     state             = currentProfileOverlay,
                     liquidGlass       = liquidGlass,
                     reducedAnimations = reducedAnimations,
+                    classicProfileTabRow = classicProfileTabRow,
                     selfDid           = bskyDid,
                     onClose           = viewModel::closeProfile,
                     onSelectTab       = viewModel::selectProfileTab,
