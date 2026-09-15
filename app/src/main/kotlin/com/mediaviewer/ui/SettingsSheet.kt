@@ -695,7 +695,7 @@ private fun SettingsPageContent(
         CompactRow {
             val scanning = followerScanState is MainViewModel.FollowerScanState.Scanning
             Text(
-                if (scanning) "Scanning Followers…" else "Rescan Followers for Reviews/Blogs",
+                if (scanning) "Scanning Who You Follow…" else "Rescan Following for Reviews/Blogs",
                 color = if (scanning) DimGray else Color.White, fontSize = 14.sp
             )
             Box(
@@ -1844,7 +1844,7 @@ private fun FollowerScanCompletionPopup(
                 Modifier.padding(horizontal = 24.dp, vertical = 22.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text("Follower Scan Complete", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text("Scan Complete", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(10.dp))
                 Text(
                     "Scanned ${result.accountsScanned} account${if (result.accountsScanned == 1) "" else "s"}.",
@@ -1857,7 +1857,7 @@ private fun FollowerScanCompletionPopup(
                 if (foundNothing) {
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "None of your followed accounts had reviews or blogs. You can retry this scan anytime from Settings.",
+                        "None of the accounts you follow had reviews or blogs. You can retry this scan anytime from Settings.",
                         color = DimGray, fontSize = 12.sp, textAlign = TextAlign.Center, lineHeight = 16.sp
                     )
                 }
@@ -1898,7 +1898,7 @@ private fun ReviewsBlogsScanIntroBubble(
     fun BubbleContent() {
         Column(Modifier.padding(horizontal = 20.dp, vertical = 18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             if (scanning != null) {
-                Text("Scanning your followers…", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+                Text("Scanning who you follow…", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(8.dp))
                 Text(
                     "${scanning.accountsScanned} checked · ${scanning.reviewsFound} Reviews · ${scanning.blogsFound} Blogs found so far",
@@ -1908,7 +1908,7 @@ private fun ReviewsBlogsScanIntroBubble(
                 CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 1.5.dp)
             } else {
                 Text(
-                    "This app combines multiple AT Proto apps into one, allowing you to write and view long-form blogs and title reviews. The blogs and reviews from the people you follow can show up here, but you'll need to initiate a one-time scan of your followers list to locally log which accounts post blogs and/or reviews so that the app can display their latest blogs/reviews here! Creating this on-device list helps avoid PDS rate limits.",
+                    "This app combines multiple AT Proto apps into one, allowing you to write and view long-form blogs and title reviews. The blogs and reviews from the people you follow can show up here, but you'll need to initiate a one-time scan of who you follow to locally log which accounts post blogs and/or reviews so that the app can display their latest blogs/reviews here! Creating this on-device list helps avoid PDS rate limits.",
                     color = Color.White.copy(0.85f), fontSize = 13.sp, lineHeight = 18.sp, textAlign = TextAlign.Center
                 )
                 Spacer(Modifier.height(14.dp))

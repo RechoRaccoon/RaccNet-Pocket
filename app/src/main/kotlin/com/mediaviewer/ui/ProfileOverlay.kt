@@ -1342,6 +1342,22 @@ private fun MediaItem.tileAspectRatio(): Float = when {
     else -> aspectRatio?.takeIf { it in 0.2f..5f } ?: 1f
 }
 
+/** Height estimate used only for the masonry's greedy column-balancing
+ *  pass (see postsPinterestGridRows) — never for actual render size.
+ *  Image/video tiles use their real aspect ratio, same as before. Text
+ *  posts don't have a fixed-size box anymore (CompactTextPostBubble sizes
+ *  itself to its own text, per feedback), so this is a rough per-line
+ *  estimate at the compact bubble's narrow width/small font instead —
+ *  just needs to be roughly proportional to how tall that bubble will
+ *  actually end up, not exact. */
+private fun MediaItem.estimatedMasonryHeightUnits(): Float = if (isTextOnly) {
+    val charsPerLine = 32
+    val lines = kotlin.math.ceil(text.length.coerceAtLeast(1) / charsPerLine.toFloat())
+    0.22f + lines * 0.16f
+} else {
+    1f / tileAspectRatio()
+}
+
 /** Matches the exact rim recipe every glass button/pill in the app already
  *  uses (see Modifier.glassPanel in GlassTheme.kt) — same 1.dp width, same
  *  three-stop tint/white/tint gradient, same rim-intensity setting — so a
@@ -1492,7 +1508,7 @@ private fun LazyListScope.postsPinterestGridRows(
     var leftHeight = 0f
     var rightHeight = 0f
     indexed.forEach { entry ->
-        val h = 1f / entry.item.tileAspectRatio()
+        val h = entry.item.estimatedMasonryHeightUnits()
         val left = leftHeight <= rightHeight
         assigned += AssignedEntry(entry, left)
         if (left) leftHeight += h else rightHeight += h
@@ -1794,32 +1810,25 @@ private fun TextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, o
 
 /** The "All"/masonry-grid version of [TextPostBubble] (feature request #2):
  *  a text post taking part in the two-column masonry needs to actually fit
- *  in one column, not spill across both. Rather than just narrowing the
- *  same full-size bubble — which would wrap the same text into *more*
- *  lines than it takes at full width, changing its shape — the whole
- *  bubble is scaled down together (padding, corner radius, and font all
- *  shrink at once), so it keeps roughly the same rows-and-characters-per-
- *  line proportions, just smaller. Sized to the same tileAspectRatio() box
- *  every other masonry tile uses so it can take part in the same greedy
- *  column-balancing pass. */
+ *  in one column, not spill across both — but per feedback it needs to
+ *  stay the *same bubble* otherwise: sized to its own text (not a fixed
+ *  aspect-ratio box, which was leaving huge empty space under short posts),
+ *  no line cap/ellipsis, just narrower and with smaller font+padding so
+ *  the same content that used to span the full width now settles into one
+ *  column's worth instead. */
 @Composable
 private fun CompactTextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, shape: RoundedCornerShape, onOpen: () -> Unit) {
     Box(
         Modifier
             .fillMaxWidth()
-            .aspectRatio(item.tileAspectRatio())
             .then(
                 if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
                 else Modifier.clip(shape).background(Color.White.copy(0.06f))
             )
-            .clip(shape)
             .clickable(onClick = onOpen)
             .padding(10.dp)
     ) {
-        Text(
-            item.text, color = Color.White.copy(0.92f), fontSize = 9.sp, lineHeight = 12.sp,
-            maxLines = 9, overflow = TextOverflow.Ellipsis
-        )
+        Text(item.text, color = Color.White.copy(0.92f), fontSize = 9.sp, lineHeight = 12.sp)
     }
 }
 
