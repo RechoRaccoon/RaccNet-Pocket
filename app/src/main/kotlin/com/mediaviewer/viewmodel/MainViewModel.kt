@@ -29,7 +29,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -1090,7 +1092,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching { probe(myDid) }
 
             var cursor: String? = if (resume) prefs.followerScanCursor.first() else null
-            val gate = kotlinx.coroutines.sync.Semaphore(SCAN_CONCURRENCY)
+            val gate = Semaphore(SCAN_CONCURRENCY)
             while (true) {
                 val page = bskyRepo.getFollowsPage(bskyToken, myDid, cursor).getOrNull() ?: break
                 val (dids, nextCursor) = page
