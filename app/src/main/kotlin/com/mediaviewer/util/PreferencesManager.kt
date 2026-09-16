@@ -93,12 +93,38 @@ object PrefKeys {
     // itself.
     val SELF_AVATAR_URL_CACHE = stringPreferencesKey("self_avatar_url_cache")
 
-    // Item (this session): profile row layout toggle. The new single-row,
-    // icon-only layout (left half = content-type filters, right half =
-    // Posts/Reposts/Likes/Blogs/Reviews/Backlog/Vods source) is the
-    // default; this key opts a user back into the older two-row, text-label
-    // layout instead. false = new layout, true = classic.
+    // Item (this session): profile row layout toggle. The icon-only layout
+    // (left half = content-type filters, right half =
+    // Posts/Reposts/Likes/Blogs/Reviews/Backlog/Vods source) was tried as a
+    // default but reverted per feedback — the classic two-row, text-label
+    // layout (ProfileTabsRow/ProfileSubFilterRow) is the default again and
+    // the settings toggle for this was removed, so this key is no longer
+    // read anywhere; it's kept only so any previously-persisted value
+    // doesn't dangle as an orphaned DataStore entry. The icon layout
+    // composables (ProfileIconTabRow etc.) are still present in
+    // ProfileOverlay.kt, just unreachable, in case this is revisited later.
     val CLASSIC_PROFILE_TAB_ROW = booleanPreferencesKey("classic_profile_tab_row")
+
+    // Feature request #4: an on-disk cache of each visited profile's tab
+    // strip (which tabs it has, plus a trimmed snapshot of each tab's
+    // content) so reopening a profile can show its tabs and a first batch
+    // of results *instantly*, the same way the Hub's Reviews/Blogs sections
+    // do off HUB_REVIEWS_CACHE_JSON/HUB_BLOGS_CACHE_JSON above — see
+    // MainViewModel's profileTabCache doc comment for the read/refresh/
+      // reconcile flow. A single JSON object keyed by author did, capped to
+    // a bounded number of most-recently-used profiles (see
+    // MainViewModel.PROFILE_TAB_CACHE_MAX_ENTRIES) so this can't grow
+    // unbounded from someone who visits hundreds of different profiles.
+    val PROFILE_TAB_CACHE_JSON = stringPreferencesKey("profile_tab_cache_json")
+
+    // Feature request #7: experimental 3-wide variant of the Pinterest-style
+    // masonry used by the Posts tab's All/Images filters (default is 2
+    // columns).
+    val PINTEREST_THREE_COLUMNS = booleanPreferencesKey("pinterest_three_columns")
+
+    // Feature request #8: "I hate fun" — blurs Bluesky-labeled sexual/adult
+    // content behind a tap-to-reveal cover instead of filtering it out.
+    val HATE_FUN_BLUR_NSFW = booleanPreferencesKey("hate_fun_blur_nsfw")
 
     // ── Blogs/Reviews auto-subscribe (feature: automatic subscriptions) ───
     // The actual review/blog *content* cache already exists —
@@ -154,6 +180,9 @@ class PreferencesManager(private val context: Context) {
     // Defaults false: the new single-row icon layout is the default profile
     // tab row; this opts back into the classic two-row text-label layout.
     val classicProfileTabRow: Flow<Boolean>     = context.dataStore.data.map { it[PrefKeys.CLASSIC_PROFILE_TAB_ROW] ?: false }
+    val profileTabCacheJson: Flow<String>       = context.dataStore.data.map { it[PrefKeys.PROFILE_TAB_CACHE_JSON] ?: "{}" }
+    val pinterestThreeColumns: Flow<Boolean>    = context.dataStore.data.map { it[PrefKeys.PINTEREST_THREE_COLUMNS] ?: false }
+    val hateFunBlurNsfw: Flow<Boolean>          = context.dataStore.data.map { it[PrefKeys.HATE_FUN_BLUR_NSFW] ?: false }
     val followerScanCompleted: Flow<Boolean>     = context.dataStore.data.map { it[PrefKeys.FOLLOWER_SCAN_COMPLETED] ?: false }
     val followerScanLastRunMs: Flow<Long>        = context.dataStore.data.map { it[PrefKeys.FOLLOWER_SCAN_LAST_RUN_MS] ?: 0L }
     val followerScanCursor: Flow<String?>        = context.dataStore.data.map { it[PrefKeys.FOLLOWER_SCAN_CURSOR] }
@@ -434,6 +463,18 @@ class PreferencesManager(private val context: Context) {
 
     suspend fun setClassicProfileTabRow(enabled: Boolean) {
         context.dataStore.edit { prefs -> prefs[PrefKeys.CLASSIC_PROFILE_TAB_ROW] = enabled }
+    }
+
+    suspend fun setProfileTabCacheJson(json: String) {
+        context.dataStore.edit { prefs -> prefs[PrefKeys.PROFILE_TAB_CACHE_JSON] = json }
+    }
+
+    suspend fun setPinterestThreeColumns(enabled: Boolean) {
+        context.dataStore.edit { prefs -> prefs[PrefKeys.PINTEREST_THREE_COLUMNS] = enabled }
+    }
+
+    suspend fun setHateFunBlurNsfw(enabled: Boolean) {
+        context.dataStore.edit { prefs -> prefs[PrefKeys.HATE_FUN_BLUR_NSFW] = enabled }
     }
 
     suspend fun setFollowerScanCompleted(completed: Boolean) {

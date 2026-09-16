@@ -115,6 +115,10 @@ fun SettingsSheet(
     reducedAnimations: Boolean,
     classicProfileTabRow: Boolean = false,
     onToggleClassicProfileTabRow: (Boolean) -> Unit = {},
+    pinterestThreeColumns: Boolean = false,
+    onTogglePinterestThreeColumns: (Boolean) -> Unit = {},
+    hateFunBlurNsfw: Boolean = false,
+    onToggleHateFunBlurNsfw: (Boolean) -> Unit = {},
     selfDid: String = "",
     subscribedReviewDids: Set<String> = emptySet(),
     subscribedBlogDids: Set<String> = emptySet(),
@@ -385,6 +389,8 @@ fun SettingsSheet(
                         HubPage.SETTINGS -> SettingsPageContent(
                             reducedAnimations = reducedAnimations, onToggleReducedAnimations = onToggleReducedAnimations,
                             classicProfileTabRow = classicProfileTabRow, onToggleClassicProfileTabRow = onToggleClassicProfileTabRow,
+                            pinterestThreeColumns = pinterestThreeColumns, onTogglePinterestThreeColumns = onTogglePinterestThreeColumns,
+                            hateFunBlurNsfw = hateFunBlurNsfw, onToggleHateFunBlurNsfw = onToggleHateFunBlurNsfw,
                             followerScanState = followerScanState, onRescanFollowersFromScratch = onRescanFollowersFromScratch,
                             hideTextOnlyPosts = hideTextOnlyPosts, onToggleHideTextOnlyPosts = onToggleHideTextOnlyPosts,
                             liquidGlass = liquidGlass, onToggleLiquidGlass = onToggleLiquidGlass,
@@ -512,6 +518,10 @@ private fun SettingsPageContent(
     onToggleReducedAnimations: (Boolean) -> Unit,
     classicProfileTabRow: Boolean,
     onToggleClassicProfileTabRow: (Boolean) -> Unit,
+    pinterestThreeColumns: Boolean = false,
+    onTogglePinterestThreeColumns: (Boolean) -> Unit = {},
+    hateFunBlurNsfw: Boolean = false,
+    onToggleHateFunBlurNsfw: (Boolean) -> Unit = {},
     followerScanState: MainViewModel.FollowerScanState = MainViewModel.FollowerScanState.Idle,
     onRescanFollowersFromScratch: () -> Unit = {},
     hideTextOnlyPosts: Boolean,
@@ -676,12 +686,22 @@ private fun SettingsPageContent(
             CompactSwitch(checked = reducedAnimations, onCheckedChange = onToggleReducedAnimations)
         }
 
-        // Item (this session): swap back into the old text-label, two-row
-        // profile tab layout — the new single-row icon layout is the
-        // default, this is an opt-out for anyone who preferred the old one.
+        // Item (this session): the "Classic Profile Tabs" toggle was
+        // removed — the classic two-row text-label tab layout is always
+        // used now (see ProfileOverlay's classicProfileTabRow doc comment).
+
+        // Feature request #7: experimental 3-wide Pinterest-style grid for
+        // the Posts/Reposts/Likes tabs' All/Images filters (default is 2).
         CompactRow {
-            Text("Classic Profile Tabs", color = Color.White, fontSize = 14.sp)
-            CompactSwitch(checked = classicProfileTabRow, onCheckedChange = onToggleClassicProfileTabRow)
+            Text("3-Column Pinterest Layout (Experimental)", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(end = 12.dp))
+            CompactSwitch(checked = pinterestThreeColumns, onCheckedChange = onTogglePinterestThreeColumns)
+        }
+
+        // Feature request #8: "I hate fun" — blurs Bluesky-labeled sexual/
+        // adult posts behind a tap-to-reveal cover instead of hiding them.
+        CompactRow {
+            Text("I Hate Fun (Blur NSFW Content)", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(end = 12.dp))
+            CompactSwitch(checked = hateFunBlurNsfw, onCheckedChange = onToggleHateFunBlurNsfw)
         }
 
         // Feature: auto-subscribe — re-runs the one-time follower scan from

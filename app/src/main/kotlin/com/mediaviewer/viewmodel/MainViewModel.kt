@@ -78,6 +78,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { prefs.setClassicProfileTabRow(enabled) }
     }
 
+    // Feature request #7: experimental 3-wide variant of the Pinterest-style
+    // masonry (Posts tab's All/Images filters). Default (false) stays 2.
+    private val _pinterestThreeColumns = MutableStateFlow(false)
+    val pinterestThreeColumns: StateFlow<Boolean> = _pinterestThreeColumns
+    fun setPinterestThreeColumns(enabled: Boolean) {
+        _pinterestThreeColumns.value = enabled
+        viewModelScope.launch { prefs.setPinterestThreeColumns(enabled) }
+    }
+
+    // Feature request #8: "I hate fun" — blur Bluesky-labeled sexual/adult
+    // posts behind a tap-to-reveal cover instead of hiding them outright.
+    private val _hateFunBlurNsfw = MutableStateFlow(false)
+    val hateFunBlurNsfw: StateFlow<Boolean> = _hateFunBlurNsfw
+    fun setHateFunBlurNsfw(enabled: Boolean) {
+        _hateFunBlurNsfw.value = enabled
+        viewModelScope.launch { prefs.setHateFunBlurNsfw(enabled) }
+    }
+
     private val _combineListsAndPacks = MutableStateFlow(false)
     val combineListsAndPacks: StateFlow<Boolean> = _combineListsAndPacks
 
@@ -316,6 +334,109 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val loading: Boolean = false,
         val loaded: Boolean = false
     )
+
+    // Feature request #4: on-disk snapshot of one profile's tab strip —
+    // which tabs it has, plus a trimmed first batch of each tab's content —
+    // written every time a profile's tabs finish (re)loading, and read back
+    // the *next* time that same profile is opened so its tabs and first
+    // results can render instantly instead of the tab strip staying blank
+    // until the network round-trip finishes. This mirrors how the Hub's
+    // Reviews/Blogs sections work off HUB_REVIEWS_CACHE_JSON/
+    // HUB_BLOGS_CACHE_JSON: show the cached snapshot immediately, kick off
+    // the exact same real load in the background regardless (openProfile()
+    // always does this unconditionally), and let the real result — whatever
+    // it turns out to be — replace the cached one once it comes back. If a
+    // tab that used to have content no longer does (e.g. its one post got
+    // deleted), or a tab that had nothing before now does, the normal
+    // "add/remove from availableTabs" logic in openProfile() already
+    // reconciles that once the fresh probe finishes — see the isEmpty()
+    // checks added to each probe below.
+    private data class CachedProfileTabs(
+        val availableTabs: Set<String> = emptySet(),
+        val posts: List<MediaItem> = emptyList(),
+        val reposts: List<MediaItem> = emptyList(),
+        val likes: List<MediaItem> = emptyList(),
+        val blogs: List<LeafletBlog> = emptyList(),
+        val reviews: List<PopfeedReview> = emptyList(),
+        val backlog: List<PopfeedBacklogItem> = emptyList(),
+        val vods: List<StreamplaceVideoView> = emptyList(),
+        val savedAt: Long = 0L
+    )
+    // How many items of each per-tab list get persisted to disk — just
+    // enough for an instant "first screenful" on reopen, not the entire
+    // history (which would make the cache file grow without bound as
+    // someone scrolls a big profile).
+    private val PROFILE_TAB_CACHE_ITEM_LIMIT = 30
+    // Bounds the number of distinct profiles kept in the cache at all —
+    // oldest (by savedAt) evicted first once this is exceeded, so visiting
+    // many different profiles over time can't grow the file unboundedly.
+    private val PROFILE_TAB_CACHE_MAX_ENTRIES = 25
+    // In-memory mirror of the on-disk cache, hydrated once at startup (see
+    // init{}) and updated in lockstep with every disk write, so reads don't
+    // need to suspend on DataStore.
+    private var profileTabCache: MutableMap<String, CachedProfileTabs> = mutableMapOf()
+    private var profileTabCacheHydrated = false
+    private val profileTabCacheMutex = Mutex()
+    private val profileTabCacheGson by lazy { com.google.gson.Gson() }
+    private val profileTabCacheType by lazy {
+        object : com.google.gson.reflect.TypeToken<Map<String, CachedProfileTabs>>() {}.type
+    }
+
+    private suspend fun ensureProfileTabCacheHydrated() {
+        if (profileTabCacheHydrated) return
+        profileTabCacheMutex.withLock {
+            if (profileTabCacheHydrated) return
+            runCatching {
+                val json = prefs.profileTabCacheJson.first()
+                val parsed: Map<String, CachedProfileTabs>? = profileTabCacheGson.fromJson(json, profileTabCacheType)
+                if (parsed != null) profileTabCache = parsed.toMutableMap()
+            }
+            profileTabCacheHydrated = true
+        }
+    }
+
+    /** Seeds a freshly-created [ProfileOverlayState] with whatever's on
+     *  disk for this author, if anything — called synchronously from
+     *  [openProfile] before the real network probes kick off. Since disk
+     *  hydration is async, the very first profile opened right after
+     *  process start may miss the cache once (falls back to the normal
+     *  blank-until-loaded behavior); every subsequent open in the same
+     *  process is instant. */
+    private fun cachedProfileTabsFor(did: String): CachedProfileTabs? {
+        if (!profileTabCacheHydrated) return null
+        return profileTabCache[did]
+    }
+
+    /** Builds a snapshot of the given profile's *currently loaded* tab
+     *  state and persists it, called after any tab finishes (re)loading —
+     *  see loadProfileTab()'s success path and each of the Blogs/Reviews/
+     *  Backlog/Vods probes in openProfile(). */
+    private fun persistProfileTabCache(state: ProfileOverlayState) {
+        viewModelScope.launch(Dispatchers.IO) {
+            ensureProfileTabCacheHydrated()
+            profileTabCacheMutex.withLock {
+                val entry = CachedProfileTabs(
+                    availableTabs = state.availableTabs.map { it.name }.toSet(),
+                    posts = state.tabStates[ProfileTab.POSTS]?.items?.take(PROFILE_TAB_CACHE_ITEM_LIMIT) ?: emptyList(),
+                    reposts = state.tabStates[ProfileTab.REPOSTS]?.items?.take(PROFILE_TAB_CACHE_ITEM_LIMIT) ?: emptyList(),
+                    likes = state.tabStates[ProfileTab.LIKES]?.items?.take(PROFILE_TAB_CACHE_ITEM_LIMIT) ?: emptyList(),
+                    blogs = state.tabStates[ProfileTab.BLOGS]?.blogs ?: emptyList(),
+                    reviews = state.tabStates[ProfileTab.REVIEWS]?.reviews ?: emptyList(),
+                    backlog = state.tabStates[ProfileTab.BACKLOG]?.backlog ?: emptyList(),
+                    vods = state.tabStates[ProfileTab.VODS]?.vods?.take(PROFILE_TAB_CACHE_ITEM_LIMIT) ?: emptyList(),
+                    savedAt = System.currentTimeMillis()
+                )
+                profileTabCache[state.author.did] = entry
+                // Evict oldest entries once over the cap.
+                if (profileTabCache.size > PROFILE_TAB_CACHE_MAX_ENTRIES) {
+                    val toDrop = profileTabCache.entries.sortedBy { it.value.savedAt }
+                        .take(profileTabCache.size - PROFILE_TAB_CACHE_MAX_ENTRIES).map { it.key }
+                    toDrop.forEach { profileTabCache.remove(it) }
+                }
+                runCatching { prefs.setProfileTabCacheJson(profileTabCacheGson.toJson(profileTabCache, profileTabCacheType)) }
+            }
+        }
+    }
 
     // ── Follower scan (feature: automatic Reviews/Blogs subscriptions) ────
     // See startFollowerScan's doc comment for the full picture. Idle before
@@ -870,6 +991,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .onFailure {
                     _dmThread.value = _dmThread.value?.copy(loading = false)
                     _errorMessage.value = it.message
+                }
+        }
+    }
+
+    /** Feature request #6: the profile page's "DM" interaction-bar button —
+     *  looks for an existing conversation with this author first (so a
+     *  thread with history opens showing that history), and falls back to
+     *  getOrCreateConvo (same call [sendToSelectedRecipients] uses) for a
+     *  brand new conversation with no messages yet. Either way, ends by
+     *  opening the normal DM thread overlay on it. */
+    fun openDmWithProfile(author: AuthorInfo) {
+        if (!_bskyLoggedIn.value) return
+        val existing = _dmConversations.value.firstOrNull { it.member.did == author.did }
+        if (existing != null) { openDmThread(existing); return }
+        _dmThread.value = DmThreadState(convo = DmConversation(convoId = "", member = author, lastSentByUsAt = "", lastActivityAt = ""), loading = true)
+        viewModelScope.launch(Dispatchers.IO) {
+            bskyRepo.getOrCreateConvo(bskyToken, _bskyDid.value, listOf(author.did))
+                .onSuccess { convoId ->
+                    val convo = DmConversation(convoId = convoId, member = author, lastSentByUsAt = "", lastActivityAt = "")
+                    _dmThread.value = DmThreadState(convo = convo, loading = true)
+                    bskyRepo.getConvoMessages(bskyToken, _bskyDid.value, convoId)
+                        .onSuccess { (messages, cursor) ->
+                            _dmThread.value = _dmThread.value?.copy(
+                                messages = messages, embeddedPosts = buildEmbeddedPosts(messages),
+                                loading = false, cursor = cursor
+                            )
+                        }
+                        .onFailure { _dmThread.value = _dmThread.value?.copy(loading = false) }
+                }
+                .onFailure {
+                    _dmThread.value = null
+                    _errorMessage.value = "Couldn't open DM: ${it.message}"
                 }
         }
     }
@@ -1543,6 +1696,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { prefs.reducedAnimations.collect { _reducedAnimations.value = it } }
         viewModelScope.launch { prefs.liquidGlass.collect { _liquidGlass.value = it } }
         viewModelScope.launch { prefs.classicProfileTabRow.collect { _classicProfileTabRow.value = it } }
+        viewModelScope.launch(Dispatchers.IO) { ensureProfileTabCacheHydrated() }
+        viewModelScope.launch { prefs.pinterestThreeColumns.collect { _pinterestThreeColumns.value = it } }
+        viewModelScope.launch { prefs.hateFunBlurNsfw.collect { _hateFunBlurNsfw.value = it } }
         viewModelScope.launch { prefs.followerScanCompleted.collect { _followerScanCompletedOnce.value = it } }
         viewModelScope.launch { prefs.liquidGlassIntensity.collect { _liquidGlassIntensity.value = it } }
         viewModelScope.launch { prefs.glassRimIntensity.collect { _glassRimIntensity.value = it } }
@@ -2001,9 +2157,29 @@ _bskyDid.value          = session.did
         // hidden behind a post pager) — chain onto it via `parent` so
         // closeProfile() can unwind back through it instead of losing it.
         val parent = _profileOverlay.value
+        // Feature request #4: seed instantly from whatever's cached on disk
+        // for this exact profile (see cachedProfileTabsFor's doc comment) —
+        // the network probes below still run unconditionally right after,
+        // exactly as if nothing were cached, and will replace/correct
+        // anything shown here once they resolve.
+        val cached = cachedProfileTabsFor(author.did)
+        val seededAvailableTabs = setOf(ProfileTab.POSTS, ProfileTab.REPOSTS, ProfileTab.LIKES) +
+            (cached?.availableTabs?.mapNotNull { name -> runCatching { ProfileTab.valueOf(name) }.getOrNull() } ?: emptyList())
+        val seededTabStates = buildMap {
+            if (cached != null) {
+                if (cached.posts.isNotEmpty()) put(ProfileTab.POSTS, ProfileTabState(items = cached.posts, loaded = true))
+                if (cached.reposts.isNotEmpty()) put(ProfileTab.REPOSTS, ProfileTabState(items = cached.reposts, loaded = true))
+                if (cached.likes.isNotEmpty()) put(ProfileTab.LIKES, ProfileTabState(items = cached.likes, loaded = true))
+                if (cached.blogs.isNotEmpty()) put(ProfileTab.BLOGS, ProfileTabState(blogs = cached.blogs, loaded = true))
+                if (cached.reviews.isNotEmpty()) put(ProfileTab.REVIEWS, ProfileTabState(reviews = cached.reviews, loaded = true))
+                if (cached.backlog.isNotEmpty()) put(ProfileTab.BACKLOG, ProfileTabState(backlog = cached.backlog, loaded = true))
+                if (cached.vods.isNotEmpty()) put(ProfileTab.VODS, ProfileTabState(vods = cached.vods, loaded = true))
+            }
+        }
         _profileOverlay.value = ProfileOverlayState(
             author = author, selectedTab = initialTab, parent = parent, openReview = review, openBlog = blog,
-            openTitle = title, openTitlePreselectedReview = preselectedReview
+            openTitle = title, openTitlePreselectedReview = preselectedReview,
+            availableTabs = seededAvailableTabs, tabStates = seededTabStates
         )
 
         viewModelScope.launch(Dispatchers.IO) {
@@ -2022,44 +2198,84 @@ _bskyDid.value          = session.did
 
         viewModelScope.launch(Dispatchers.IO) {
             val blogs = runCatching { bskyRepo.getLeafletBlogs(author.did, probeConcurrently = true) }.getOrDefault(emptyList())
-            if (blogs.isEmpty()) return@launch
             val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
-            _profileOverlay.value = cur.copy(
+            if (blogs.isEmpty()) {
+                // Feature request #4 (reconcile): drop a cached-but-now-empty
+                // tab instead of leaving it stuck on stale cached content —
+                // e.g. the account's one blog got deleted since it was last
+                // cached.
+                if (ProfileTab.BLOGS in cur.availableTabs) {
+                    val updated = cur.copy(availableTabs = cur.availableTabs - ProfileTab.BLOGS, tabStates = cur.tabStates - ProfileTab.BLOGS)
+                    _profileOverlay.value = updated
+                    persistProfileTabCache(updated)
+                }
+                return@launch
+            }
+            val updated = cur.copy(
                 availableTabs = cur.availableTabs + ProfileTab.BLOGS,
                 tabStates = cur.tabStates + (ProfileTab.BLOGS to ProfileTabState(blogs = blogs, loaded = true))
             )
+            _profileOverlay.value = updated
+            persistProfileTabCache(updated)
             maybeAutoSubscribeOnProfileOpen(cur.author, cur.author.isFollowing || cur.author.did == _bskyDid.value, hasReviews = false, hasBlogs = true)
         }
         viewModelScope.launch(Dispatchers.IO) {
             val reviews = runCatching { bskyRepo.getPopfeedReviews(author.did, probeConcurrently = true) }.getOrDefault(emptyList())
-            if (reviews.isEmpty()) return@launch
             val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
-            _profileOverlay.value = cur.copy(
+            if (reviews.isEmpty()) {
+                if (ProfileTab.REVIEWS in cur.availableTabs) {
+                    val updated = cur.copy(availableTabs = cur.availableTabs - ProfileTab.REVIEWS, tabStates = cur.tabStates - ProfileTab.REVIEWS)
+                    _profileOverlay.value = updated
+                    persistProfileTabCache(updated)
+                }
+                return@launch
+            }
+            val updated = cur.copy(
                 availableTabs = cur.availableTabs + ProfileTab.REVIEWS,
                 tabStates = cur.tabStates + (ProfileTab.REVIEWS to ProfileTabState(reviews = reviews, loaded = true))
             )
+            _profileOverlay.value = updated
+            persistProfileTabCache(updated)
             maybeAutoSubscribeOnProfileOpen(cur.author, cur.author.isFollowing || cur.author.did == _bskyDid.value, hasReviews = true, hasBlogs = false)
         }
         viewModelScope.launch(Dispatchers.IO) {
             val backlog = runCatching { bskyRepo.getPopfeedBacklog(author.did) }.getOrDefault(emptyList())
-            if (backlog.isEmpty()) return@launch
             val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
-            _profileOverlay.value = cur.copy(
+            if (backlog.isEmpty()) {
+                if (ProfileTab.BACKLOG in cur.availableTabs) {
+                    val updated = cur.copy(availableTabs = cur.availableTabs - ProfileTab.BACKLOG, tabStates = cur.tabStates - ProfileTab.BACKLOG)
+                    _profileOverlay.value = updated
+                    persistProfileTabCache(updated)
+                }
+                return@launch
+            }
+            val updated = cur.copy(
                 availableTabs = cur.availableTabs + ProfileTab.BACKLOG,
                 tabStates = cur.tabStates + (ProfileTab.BACKLOG to ProfileTabState(backlog = backlog, loaded = true))
             )
+            _profileOverlay.value = updated
+            persistProfileTabCache(updated)
         }
         // Item 19: VODs tab, only shown once we actually find any — most
         // accounts won't have Streamplace VODs, and that's a normal empty
         // result, not an error, so we stay silent on failure/empty here.
         viewModelScope.launch(Dispatchers.IO) {
             val vods = streamplaceRepo.getVods(author.handle).getOrNull()?.first ?: emptyList()
-            if (vods.isEmpty()) return@launch
             val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
-            _profileOverlay.value = cur.copy(
+            if (vods.isEmpty()) {
+                if (ProfileTab.VODS in cur.availableTabs) {
+                    val updated = cur.copy(availableTabs = cur.availableTabs - ProfileTab.VODS, tabStates = cur.tabStates - ProfileTab.VODS)
+                    _profileOverlay.value = updated
+                    persistProfileTabCache(updated)
+                }
+                return@launch
+            }
+            val updated = cur.copy(
                 availableTabs = cur.availableTabs + ProfileTab.VODS,
                 tabStates = cur.tabStates + (ProfileTab.VODS to ProfileTabState(vods = vods, loaded = true))
             )
+            _profileOverlay.value = updated
+            persistProfileTabCache(updated)
         }
     }
 
@@ -2175,9 +2391,17 @@ _bskyDid.value          = session.did
             val cur2 = _profileOverlay.value?.takeIf { it.author.did == did } ?: return@launch
             if (succeeded) {
                 val prevItems = if (reset) emptyList() else (cur2.tabStates[tab]?.items ?: emptyList())
-                _profileOverlay.value = cur2.copy(
+                val updated = cur2.copy(
                     tabStates = cur2.tabStates + (tab to ProfileTabState(items = prevItems + accumulated, cursor = cursorNow, loading = false, loaded = true))
                 )
+                _profileOverlay.value = updated
+                // Feature request #4: keep the on-disk cache in step with
+                // Posts/Reposts/Likes too, not just Blogs/Reviews/Backlog/
+                // Vods — only worth writing on a `reset` load (a fresh
+                // first page, or a tab switch) rather than on every
+                // load-more page, since the cache only ever keeps a
+                // trimmed first batch anyway (see PROFILE_TAB_CACHE_ITEM_LIMIT).
+                if (reset) persistProfileTabCache(updated)
             } else {
                 _profileOverlay.value = cur2.copy(tabStates = cur2.tabStates + (tab to existing.copy(loading = false, loaded = true)))
             }
@@ -2861,6 +3085,15 @@ _bskyDid.value          = session.did
         val item = currentItem.value ?: return
         if (_appMode.value != AppMode.BLUESKY) return
         openListPicker(item.author.did)
+    }
+
+    /** Feature request #6: the profile page's "Add To" interaction-bar
+     *  button — same list-picker sheet as [openListPickerForCurrentAuthor],
+     *  just for whichever profile is currently open rather than the
+     *  currently-open post's author. */
+    fun openListPickerForProfile(did: String) {
+        if (_appMode.value != AppMode.BLUESKY) return
+        openListPicker(did)
     }
 
     // ── Quote repost (item 5) ──────────────────────────────────────────────────

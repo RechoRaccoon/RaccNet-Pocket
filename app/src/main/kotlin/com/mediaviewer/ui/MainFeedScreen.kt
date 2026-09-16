@@ -310,7 +310,9 @@ fun MainFeedScreen(
     // Phase 4 — custom font pack
     customFontName: String? = null,
     onPickFontFile: (android.net.Uri) -> Unit = {},
-    onResetFont: () -> Unit = {}
+    onResetFont: () -> Unit = {},
+    // Feature request #8: "I hate fun".
+    hateFunBlurNsfw: Boolean = false
 ) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
@@ -446,7 +448,8 @@ fun MainFeedScreen(
                             lastDominantColor = color
                             lastBackdrop = backdrop
                             onCurrentBackdropChanged(backdrop, color)
-                        }
+                        },
+                        hateFunBlurNsfw        = hateFunBlurNsfw
                     )
                     ScreenState.COMMENTS -> CommentsSheet(
                         currentItem     = currentItem,
@@ -804,7 +807,8 @@ private fun FeedView(
     translationTargetLang: String = "en",
     translationStates: androidx.compose.runtime.snapshots.SnapshotStateMap<String, TranslationState> = remember { mutableStateMapOf() },
     onBackdropChanged: (GlassBackdrop?, Color) -> Unit = { _, _ -> },
-    externallyPaused: Boolean = false
+    externallyPaused: Boolean = false,
+    hateFunBlurNsfw: Boolean = false
 ) {
     val context     = LocalContext.current
     val imageLoader = remember { ImageLoader(context) }
@@ -877,7 +881,8 @@ private fun FeedView(
                     translationState       = translationStates[item.id],
                     onSetTranslationState  = { translationStates[item.id] = it },
                     onBackdropChanged      = onBackdropChanged,
-                    externallyPaused       = externallyPaused
+                    externallyPaused       = externallyPaused,
+                    hateFunBlurNsfw        = hateFunBlurNsfw
                 )
             }
         }
@@ -920,13 +925,26 @@ private fun PostContent(
     translationState: TranslationState? = null,
     onSetTranslationState: (TranslationState) -> Unit = {},
     onBackdropChanged: (GlassBackdrop?, Color) -> Unit = { _, _ -> },
-    externallyPaused: Boolean = false
+    externallyPaused: Boolean = false,
+    // Feature request #8: "I hate fun" — Settings toggle (Bluesky mode
+    // only; item.isNsfwLabeled is always false for other modes anyway
+    // since only Bluesky posts ever populate MediaItem.labels).
+    hateFunBlurNsfw: Boolean = false
 ) {
     val context = LocalContext.current
     var scale  by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     var containerSize by remember { mutableStateOf(IntSize.Zero) }
     LaunchedEffect(item.id) { scale = 1f; offset = Offset.Zero }
+
+    // Feature request #8: `remember(item.id)` — not hoisted any higher, so
+    // this naturally resets to unrevealed once the pager scrolls this post
+    // far enough away that Compose disposes its page and back again later
+    // (a fresh composition), matching the spec ("unblurs...until the user
+    // scrolls off and on it again") without needing to hand-roll any
+    // "did we scroll away" detection of our own.
+    var nsfwRevealed by remember(item.id) { mutableStateOf(false) }
+    val nsfwBlurred = hateFunBlurNsfw && item.isNsfwLabeled && !item.isBlocked && !nsfwRevealed
 
     var menuCenter    by remember { mutableStateOf<Offset?>(null) }
     var hoveredAction by remember { mutableStateOf<QuickAction?>(null) }
@@ -1294,7 +1312,7 @@ private fun PostContent(
         ) {
             val mediaModifier = Modifier.fillMaxSize().graphicsLayer {
                 scaleX = scale; scaleY = scale; translationX = offset.x; translationY = offset.y
-            }.let { if (item.isBlocked) it.blur(28.dp) else it }
+            }.let { if (item.isBlocked || nsfwBlurred) it.blur(28.dp) else it }
             if (item.isTextOnly) {
                 // Big Update #3: text-only posts get a liquid-glass card shaped
                 // like a piece of media, centered where an image would sit.
@@ -1360,6 +1378,20 @@ private fun PostContent(
             if (item.isBlocked) {
                 Text("Blocked", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold,
                     modifier = Modifier.align(Alignment.Center))
+            } else if (nsfwBlurred) {
+                // Feature request #8: tap-to-reveal — only shows in the
+                // feed/pager (this composable), not in profile tab grids,
+                // per spec ("The unblur button should only appear when a
+                // post is selected/while in the feed/timeline page").
+                Box(
+                    Modifier.align(Alignment.Center)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .clickable { nsfwRevealed = true }
+                        .padding(horizontal = 20.dp, vertical = 12.dp)
+                ) {
+                    Text("Show NSFW Content", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                }
             }
         }
 

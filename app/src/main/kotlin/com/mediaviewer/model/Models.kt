@@ -96,7 +96,15 @@ data class MediaItem(
     // a forced square crop, and (b) classify a video as "horizontal" or
     // "vertical" for the Horizontal Videos / Vertical Videos sub-tabs. Null
     // when the source API didn't report dimensions.
-    val aspectRatio: Float? = null
+    val aspectRatio: Float? = null,
+    // Feature request #8: "I hate fun" — the raw label values Bluesky (or
+    // any subscribed labeler) attached to this post, e.g. "porn", "sexual",
+    // "nudity" (also self-labels the author applied themselves — both
+    // sources land in the same post.labels array). Only these three
+    // specific values are treated as NSFW for this feature (see
+    // isNsfwLabeled below) — "graphic-media" is violence/gore, not sexual
+    // content, and isn't what this toggle is for.
+    val labels: List<String> = emptyList()
 ) {
     /** True when this post has no image/video to show — feed renders it as a
      *  standalone liquid-glass text card instead of a media tile. */
@@ -111,6 +119,15 @@ data class MediaItem(
      *  style row sized for a wide thumbnail would. */
     val isHorizontalVideo: Boolean get() = isVideo && (aspectRatio ?: 0f) > 1f
     val isVerticalVideo: Boolean get() = isVideo && !isHorizontalVideo
+
+    /** Feature request #8: true when Bluesky (or any labeler) tagged this
+     *  post as sexual/suggestive/adult content. Checked purely by label
+     *  *value*, not by which labeler (`src`) applied it — "porn", "sexual",
+     *  and "nudity" are global label values in Bluesky's taxonomy (usable
+     *  by any labeler service, not just the default moderation.bsky.app
+     *  one, and by self-labels), so matching on value alone already covers
+     *  every labeler using Bluesky's standard sexual-content vocabulary. */
+    val isNsfwLabeled: Boolean get() = labels.any { it == "porn" || it == "sexual" || it == "nudity" }
 }
 
 data class AuthorInfo(
@@ -183,7 +200,20 @@ data class BskyPost(
     val likeCount: Int? = 0,
     val repostCount: Int? = 0,
     val replyCount: Int? = 0,
-    val viewer: BskyPostViewer? = null
+    val viewer: BskyPostViewer? = null,
+    // Feature request #8: com.atproto.label.defs#label entries attached to
+    // this post — both labeler-applied and self-applied labels arrive here
+    // together. See MediaItem.isNsfwLabeled for how these get used.
+    val labels: List<BskyLabelView>? = null
+)
+
+/** One com.atproto.label.defs#label entry. `value` is Kotlin-safe naming for
+ *  the lexicon's `val` field (a reserved word) — e.g. "porn", "sexual",
+ *  "nudity", "graphic-media", or a third-party labeler's own custom value. */
+data class BskyLabelView(
+    val src: String = "",
+    val uri: String = "",
+    @SerializedName("val") val value: String = ""
 )
 
 data class BskyPostViewer(
@@ -278,7 +308,12 @@ data class BskyEmbedRecord(
     // embed.record the way a plain app.bsky.embed.record#view is — callers
     // can just do `embed.record?.record ?: embed.record` to reach the real
     // viewRecord either way.
-    val record: BskyEmbedRecord? = null
+    val record: BskyEmbedRecord? = null,
+    // Feature request #8: the quoted post's own labels — the outer
+    // quote-repost post can be unlabeled while the post it's quoting is the
+    // one that's actually NSFW, so this needs to be checked separately from
+    // BskyPost.labels (see parseFeedItem's quote-repost branch).
+    val labels: List<BskyLabelView>? = null
 )
 
 data class BskyActorLikesResponse(val feed: List<BskyFeedItem>, val cursor: String? = null)
@@ -581,7 +616,12 @@ data class ProfileData(
     val description: String = "",
     val followersCount: Int = 0,
     val followsCount: Int = 0,
-    val postsCount: Int = 0
+    val postsCount: Int = 0,
+    // Feature request #6: the profile page's "DM" interaction-bar button
+    // only shows when the signed-in account and this profile are mutuals
+    // (each follows the other) — author.isFollowing covers "I follow them",
+    // this covers "they follow me back".
+    val followedByMe: Boolean = false
 )
 
 // Generic com.atproto.repo.listRecords envelope — used for any collection

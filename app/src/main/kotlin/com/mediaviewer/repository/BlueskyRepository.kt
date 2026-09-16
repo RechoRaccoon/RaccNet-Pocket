@@ -282,7 +282,8 @@ class BlueskyRepository {
             description = body.description ?: "",
             followersCount = body.followersCount ?: 0,
             followsCount = body.followsCount ?: 0,
-            postsCount = body.postsCount ?: 0
+            postsCount = body.postsCount ?: 0,
+            followedByMe = body.viewer?.followedBy != null
         )
     }
 
@@ -2251,6 +2252,10 @@ class BlueskyRepository {
             isFollowing  = post.author.viewer?.following != null
         )
         val text = post.record.text ?: ""
+        // Feature request #8: shared across every MediaItem this post
+        // produces below (multi-image posts flatten to several MediaItems
+        // per post) — labels are a property of the post as a whole.
+        val nsfwLabels = post.labels?.mapNotNull { it.value.takeIf(String::isNotBlank) } ?: emptyList()
 
         // A text-only post (no embed at all, or an embed type we don't render
         // as media, e.g. a link card or a bare quote-post) still deserves a
@@ -2263,7 +2268,7 @@ class BlueskyRepository {
                     author = author, likeUri = post.viewer?.like, repostUri = post.viewer?.repost,
                     isLiked = post.viewer?.like != null, isReposted = post.viewer?.repost != null,
                     likeCount = post.likeCount ?: 0, replyCount = post.replyCount ?: 0,
-                    repostCount = post.repostCount ?: 0, text = text
+                    repostCount = post.repostCount ?: 0, text = text, labels = nsfwLabels
                 )
             )
 
@@ -2349,7 +2354,8 @@ class BlueskyRepository {
                                     MediaGroupItem(mediaUrl = it.fullsize, thumbUrl = resolvedThumb(it), altText = it.alt ?: "", aspectRatio = resolvedRatio(it))
                                 } else emptyList(),
                                 text = text,
-                                aspectRatio = resolvedRatio(first)
+                                aspectRatio = resolvedRatio(first),
+                                labels = nsfwLabels
                             )
                         )
                     }
@@ -2366,7 +2372,8 @@ class BlueskyRepository {
                         // Profile "Posts" tab redesign: lets the Horizontal
                         // Videos / Vertical Videos sub-tabs classify this
                         // video without decoding it.
-                        aspectRatio = embed.aspectRatio?.takeIf { it.height > 0 }?.let { it.width.toFloat() / it.height.toFloat() }
+                        aspectRatio = embed.aspectRatio?.takeIf { it.height > 0 }?.let { it.width.toFloat() / it.height.toFloat() },
+                        labels = nsfwLabels
                     )
                 )
                 embed.type.contains("recordWithMedia") ->
@@ -2435,7 +2442,14 @@ class BlueskyRepository {
                                 text = quoted.value?.text ?: "",
                                 sentByAuthor = author, sentByMessage = text, sentByIsRepost = true,
                                 aspectRatio = (quotedVideo?.aspectRatio ?: quotedImage?.aspectRatio)
-                                    ?.takeIf { it.height > 0 }?.let { it.width.toFloat() / it.height.toFloat() }
+                                    ?.takeIf { it.height > 0 }?.let { it.width.toFloat() / it.height.toFloat() },
+                                // Feature request #8: union of the outer
+                                // quote-repost post's own labels and the
+                                // quoted post's labels — either one being
+                                // NSFW-labeled should count, since the
+                                // quoted post's actual content is what's
+                                // rendered here.
+                                labels = (nsfwLabels + (quoted.labels?.mapNotNull { it.value.takeIf(String::isNotBlank) } ?: emptyList())).distinct()
                             )
                         )
                     }

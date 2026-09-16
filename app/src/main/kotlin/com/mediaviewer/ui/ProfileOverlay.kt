@@ -66,6 +66,9 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.buildAnnotatedString
@@ -77,6 +80,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.roundToInt
 import coil.compose.AsyncImage
 import coil.compose.SubcomposeAsyncImage
 import com.mediaviewer.model.AuthorInfo
@@ -176,6 +180,37 @@ private fun ReviewKindFilter.matchesBacklog(item: PopfeedBacklogItem) = this == 
 fun ReviewKindFilter.matchesTitle(result: com.mediaviewer.model.TitleSearchResult) =
     this == ReviewKindFilter.ALL || categoryBucket(result.mediaCategory) == this
 
+// Feature request #8: "I hate fun" — a CompositionLocal rather than a
+// parameter threaded through every tile-rendering function in this very
+// large file (ThumbBox, PinterestEntryTile, CompactTextPostBubble, and the
+// handful of LazyListScope row-builder functions between ProfileOverlay and
+// them) — the setting is a single global toggle that every tile everywhere
+// in the profile needs to see, which is exactly the "implicit, ambient
+// value most of the subtree wants" case CompositionLocal exists for, rather
+// than a cross-cutting concern threaded through unrelated intermediate
+// signatures. Provided once, high up, in ProfileOverlay itself.
+private val LocalHateFunBlurNsfw = androidx.compose.runtime.compositionLocalOf { false }
+
+/** Feature request #8: static, no-reveal-button blur for profile tab grid
+ *  tiles — only the feed/pager (MainFeedScreen's PostContent) gets a
+ *  "Show NSFW Content" tap-to-reveal button, per spec. Wraps a tile's own
+ *  content with a blur + dim scrim when it's NSFW-labeled and the setting
+ *  is on; otherwise renders the content unchanged. */
+@Composable
+private fun NsfwTileScrim(item: MediaItem, modifier: Modifier = Modifier, content: @Composable BoxScope.() -> Unit) {
+    val blurred = LocalHateFunBlurNsfw.current && item.isNsfwLabeled
+    Box(modifier) {
+        content()
+        if (blurred) {
+            Box(
+                Modifier.matchParentSize()
+                    .blur(20.dp)
+                    .background(Color.Black.copy(alpha = 0.45f))
+            )
+        }
+    }
+}
+
 @Composable
 private fun <T> ProfileSubFilterRow(
     options: List<T>, selected: T, liquidGlass: Boolean, tint: Color, labelOf: (T) -> String, onSelect: (T) -> Unit,
@@ -234,11 +269,16 @@ fun ProfileOverlay(
     state: MainViewModel.ProfileOverlayState,
     liquidGlass: Boolean,
     reducedAnimations: Boolean,
-    // Item (this session): profile row layout toggle (Settings) — false
-    // (default) shows the new single-row icon layout (ProfileIconTabRow),
-    // true falls back to the classic two-row text-label layout
-    // (ProfileTabsRow + ProfileSubFilterRow).
-    classicProfileTabRow: Boolean = false,
+    // Item (this session): profile row layout — the icon-only single-row
+    // layout (ProfileIconTabRow) was tried as the default and then reverted
+    // per feedback. The classic two-row text-label layout (ProfileTabsRow +
+    // ProfileSubFilterRow) is the default again, and the settings toggle
+    // that used to switch between them was removed, so this parameter is no
+    // longer read (see the ignoreUnusedClassicToggleParam note below) — the
+    // classic layout is always shown. It's kept as a parameter rather than
+    // deleted so callers don't all need edits, and ProfileIconTabRow itself
+    // is kept in this file, unused, in case the icon layout is revisited.
+    @Suppress("UNUSED_PARAMETER") classicProfileTabRow: Boolean = false,
     // The logged-in user's own did — used only to detect "this is my own
     // profile" so the banner shows a placeholder "Edit" button instead of
     // Follow/Following (following yourself doesn't make sense).
@@ -293,7 +333,15 @@ fun ProfileOverlay(
     isReviewSubscribed: Boolean = false,
     isBlogSubscribed: Boolean = false,
     onToggleReviewSubscribe: () -> Unit = {},
-    onToggleBlogSubscribe: () -> Unit = {}
+    onToggleBlogSubscribe: () -> Unit = {},
+    // Feature request #6: profile page interaction bar.
+    onOpenAddTo: (String) -> Unit = {},
+    onOpenDm: (AuthorInfo) -> Unit = {},
+    // Feature request #7: experimental 3-wide Pinterest grid (Settings).
+    pinterestThreeColumns: Boolean = false,
+    // Feature request #8: "I hate fun" — blur Bluesky-labeled sexual/adult
+    // content behind a tap-to-reveal cover.
+    hateFunBlurNsfw: Boolean = false
 ) {
     val author  = state.author
     val profile = state.profile
@@ -322,6 +370,7 @@ fun ProfileOverlay(
         initialFirstVisibleItemScrollOffset = state.scrollOffset
     )
     val coroutineScope = rememberCoroutineScope()
+    val uriHandler = LocalUriHandler.current
 
     // Bug fix: force-restore the saved scroll position the moment this
     // profile is revealed again (hidden flips false->true->false), instead
@@ -359,6 +408,83 @@ fun ProfileOverlay(
     var postKindFilter by remember(author.did, state.selectedTab) { mutableStateOf(PostKindFilter.ALL) }
     var reviewKindFilter by remember(author.did, state.selectedTab) { mutableStateOf(ReviewKindFilter.ALL) }
 
+    // Feature request #6: "Grid" interaction-bar toggle — square 3-wide grid
+    // (profileMediaGridRows) vs. this tab's own normal layout. Local/
+    // display-only like the filters above, and reset on the same triggers
+    // for the same reason (a stale grid-mode carried over from a totally
+    // different tab/profile would be surprising).
+    var gridMode by remember(author.did, state.selectedTab) { mutableStateOf(false) }
+    val pinterestColumns = if (pinterestThreeColumns) 3 else 2
+    val density = LocalDensity.current
+    val configuration = LocalConfiguration.current
+
+    // Feature request #6: "seamless" Grid-mode toggle — approximates which
+    // post is vertically centered in the current layout before switching,
+    // then scrolls the new layout to roughly the same post. This can't be
+    // pixel-perfect for the masonry side (it's one big non-lazy Row/Column
+    // pair — see postsPinterestGridRows' doc comment — rather than one lazy
+    // item per tile), so it estimates using the same column-balancing pass
+    // the masonry itself uses (assignMasonryColumns) plus each tile's
+    // estimated height, scaled to an actual on-screen column width. The
+    // spec explicitly doesn't require exact centering, just "the right
+    // place" — this gets close without needing per-tile position tracking.
+    fun toggleGridMode() {
+        val tabItems = state.tabStates[state.selectedTab]?.items ?: emptyList()
+        val matched = tabItems.filter { postKindFilter.matches(it) }
+        if (matched.isEmpty() || state.selectedTab !in setOf(MainViewModel.ProfileTab.POSTS, MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES)) {
+            gridMode = !gridMode
+            return
+        }
+        val outerHorizontalPaddingDp = 6f
+        val gapDp = 6f
+        val rowTopPaddingDp = 3f
+        val screenWidthDp = configuration.screenWidthDp.toFloat()
+
+        if (!gridMode) {
+            // Masonry (pinterestColumns-wide) → Grid (always 3-wide).
+            val cols = assignMasonryColumns(matched, pinterestColumns)
+            var targetLocalIndex = 0
+            if (listState.firstVisibleItemIndex == 2) {
+                val columnWidthDp = (screenWidthDp - 2 * outerHorizontalPaddingDp - (pinterestColumns - 1) * gapDp) / pinterestColumns
+                val offsetDp = (listState.firstVisibleItemScrollOffset / density.density) - rowTopPaddingDp
+                // Any column is representative enough — they're kept close
+                // in cumulative height by construction.
+                val col = cols.firstOrNull { it.isNotEmpty() } ?: emptyList()
+                var cumulative = 0f
+                var found = col.firstOrNull()?.localIndex ?: 0
+                for (entry in col) {
+                    val h = entry.item.estimatedMasonryHeightUnits() * columnWidthDp
+                    if (cumulative + h > offsetDp.coerceAtLeast(0f)) { found = entry.localIndex; break }
+                    cumulative += h + gapDp
+                    found = entry.localIndex
+                }
+                targetLocalIndex = found
+            }
+            gridMode = true
+            val targetRow = targetLocalIndex / 3
+            coroutineScope.launch { listState.scrollToItem((2 + targetRow).coerceAtLeast(2), 0) }
+        } else {
+            // Grid (always 3-wide) → Masonry (pinterestColumns-wide).
+            val targetLocalIndex = if (listState.firstVisibleItemIndex >= 2) (listState.firstVisibleItemIndex - 2) * 3 else 0
+            gridMode = false
+            val cols = assignMasonryColumns(matched, pinterestColumns)
+            val columnWidthDp = (screenWidthDp - 2 * outerHorizontalPaddingDp - (pinterestColumns - 1) * gapDp) / pinterestColumns
+            var offsetDp = rowTopPaddingDp
+            var matchedCol = false
+            for (col in cols) {
+                val idxInCol = col.indexOfFirst { it.localIndex == targetLocalIndex }
+                if (idxInCol >= 0) {
+                    matchedCol = true
+                    for (i in 0 until idxInCol) offsetDp += col[i].item.estimatedMasonryHeightUnits() * columnWidthDp + gapDp
+                    break
+                }
+            }
+            val offsetPx = if (matchedCol) (offsetDp * density.density).roundToInt() else 0
+            coroutineScope.launch { listState.scrollToItem(2, offsetPx.coerceAtLeast(0)) }
+        }
+    }
+
+    CompositionLocalProvider(LocalHateFunBlurNsfw provides hateFunBlurNsfw) {
     Box(
         Modifier
             .fillMaxSize()
@@ -405,7 +531,7 @@ fun ProfileOverlay(
             // inset, plus a small fixed buffer so it's not flush even
             // against that — keeps the last item fully visible and clear
             // of it once scrolled all the way down.
-            contentPadding = PaddingValues(bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 16.dp),
+            contentPadding = PaddingValues(bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 16.dp + 76.dp),
             modifier = Modifier.fillMaxSize().padding(top = rememberTopCutoutClearance())
         ) {
             item(key = "profile_header") {
@@ -433,7 +559,12 @@ fun ProfileOverlay(
                     HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
                     val availableTabs = MainViewModel.ProfileTab.entries.filter { it in state.availableTabs }
                     val subFilterTabState = state.tabStates[state.selectedTab]
-                    if (classicProfileTabRow) {
+                    // Item (this session): the icon-only tab row is disabled
+                    // (see classicProfileTabRow's doc comment above) — the
+                    // classic branch always runs now. The `else` branch
+                    // below (ProfileIconTabRow) is unreachable but left in
+                    // place in case this is revisited.
+                    if (true) {
                         // ── Classic layout: text-label tab row, then a
                         // second half-height row of text-label sub-filter
                         // pills underneath. Kept as an opt-in fallback
@@ -464,16 +595,22 @@ fun ProfileOverlay(
                                     )
                                 }
                             }
+                            // Feature request #5: Reposts/Likes now use the
+                            // exact same PostKindFilter sub-tabs as Posts
+                            // (All/Images/Text Posts/Horizontal Videos/
+                            // Vertical Videos), routed to the same
+                            // per-filter layouts below — see
+                            // profileResultsContent's REPOSTS/LIKES branch.
                             MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES -> {
                                 val loadedItems = subFilterTabState?.items ?: emptyList()
-                                val visibleMediaFilters = MediaKindFilter.entries.filter {
-                                    it == mediaKindFilter || loadedItems.any { item -> it.matches(item) }
+                                val visiblePostFilters = PostKindFilter.entries.filter {
+                                    it == postKindFilter || loadedItems.any { item -> it.matches(item) }
                                 }
-                                if (visibleMediaFilters.size > 1) {
+                                if (visiblePostFilters.size > 1) {
                                     ProfileSubFilterRow(
-                                        options = visibleMediaFilters, selected = mediaKindFilter,
+                                        options = visiblePostFilters, selected = postKindFilter,
                                         liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
-                                        onSelect = { mediaKindFilter = it }
+                                        onSelect = { postKindFilter = it }
                                     )
                                 }
                             }
@@ -546,13 +683,32 @@ fun ProfileOverlay(
                 onSeedSubImageIndex = onSeedSubImageIndex,
                 onOpenBlog = onOpenBlog,
                 onOpenReview = onOpenReview,
-                onOpenTitle = onOpenTitle
+                onOpenTitle = onOpenTitle,
+                gridMode = gridMode,
+                pinterestColumns = pinterestColumns
             )
         }
 
         if (!state.loadingProfile && profile == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("Couldn't load this profile", color = DimGray, fontSize = 13.sp)
+            }
+        }
+
+        // Feature request #6: profile page interaction bar — Grid/Add To/
+        // View on Bluesky/DM, fixed to the bottom (same "reserve extra
+        // bottom content padding above" pattern as TitleDetailOverlay's own
+        // bottom bar). Hidden while loading (no profile yet to act on).
+        if (profile != null) {
+            Box(Modifier.align(Alignment.BottomCenter)) {
+                ProfileInteractionBar(
+                    liquidGlass = liquidGlass, tint = blended, gridMode = gridMode,
+                    showDm = selfDid.isNotBlank() && author.did != selfDid && author.isFollowing && profile.followedByMe,
+                    onGrid = { toggleGridMode() },
+                    onAddTo = { onOpenAddTo(author.did) },
+                    onViewOnBluesky = { uriHandler.openUri("https://bsky.app/profile/${author.handle}") },
+                    onDm = { onOpenDm(author) }
+                )
             }
         }
 
@@ -610,6 +766,61 @@ fun ProfileOverlay(
                 onToggleReviewLike = onToggleReviewLike, onPostReviewComment = onPostReviewComment,
                 selfDid = selfDid, onDeleteReview = onDeleteReview
             )
+        }
+    }
+    }
+}
+
+/** Feature request #6: profile page's bottom interaction bar. Visually
+ *  matches [LikeReviewCommentBar]/[TitleReviewBar] — same 60dp height, same
+ *  26dp corner-radius pill treatment, same glass styling — but unlike that
+ *  bar's equal-width segments, these buttons size to their own content
+ *  (Grid/Add To/View on Bluesky/DM are all very different widths) and the
+ *  row spaces them evenly from edge to edge instead (SpaceBetween) rather
+ *  than splitting into equal weights.
+ *
+ *  DM only renders when [showDm] is true — feature request #6 restricts it
+ *  to mutuals (each account follows the other); see ProfileData.followedByMe
+ *  and AuthorInfo.isFollowing for the two halves of that check. */
+@Composable
+private fun ProfileInteractionBar(
+    liquidGlass: Boolean, tint: Color, gridMode: Boolean, showDm: Boolean,
+    onGrid: () -> Unit, onAddTo: () -> Unit, onViewOnBluesky: () -> Unit, onDm: () -> Unit
+) {
+    val shape = RoundedCornerShape(26.dp)
+    @Composable
+    fun Pill(highlighted: Boolean, onClick: () -> Unit, content: @Composable RowScope.() -> Unit) {
+        Row(
+            Modifier
+                .fillMaxHeight()
+                .glassPanel(liquidGlass, tint = if (highlighted) tint else tint.copy(alpha = 0.55f), shape = shape)
+                .clickable(onClick = onClick)
+                .padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            content = content
+        )
+    }
+    Box(
+        Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).height(60.dp)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Pill(highlighted = gridMode, onClick = onGrid) {
+                Text("Grid", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            }
+            Pill(highlighted = false, onClick = onAddTo) {
+                Text("Add To", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            }
+            Pill(highlighted = false, onClick = onViewOnBluesky) {
+                Text("View on Bluesky", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            }
+            if (showDm) {
+                Pill(highlighted = false, onClick = onDm) {
+                    Text("DM", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Icon(Icons.Default.Chat, contentDescription = "DM", tint = Color.White, modifier = Modifier.size(16.dp))
+                }
+            }
         }
     }
 }
@@ -740,14 +951,21 @@ private fun ProfileHeaderSection(
         // ── Counts ──
         if (profile != null) {
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                // Feature request #2: matched to the bio's own top gap
+                // (bio's `vertical = 12.dp` padding) so the space below the
+                // counts row down to the tab strip reads the same as the
+                // space above the bio down from the banner, instead of the
+                // much larger gap this used to leave (4dp here + a 10dp
+                // spacer + the tab row's own top padding stacked on top of
+                // each other).
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, top = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.Start)
             ) {
                 CountStat(profile.postsCount, "Posts")
                 CountStat(profile.followersCount, "Followers")
                 CountStat(profile.followsCount, "Following")
             }
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(4.dp))
         }
     }
 }
@@ -1173,7 +1391,16 @@ private fun LazyListScope.profileResultsContent(
     onSeedSubImageIndex: (String, Int) -> Unit,
     onOpenBlog: (LeafletBlog) -> Unit,
     onOpenReview: (PopfeedReview) -> Unit,
-    onOpenTitle: (PopfeedBacklogItem) -> Unit = {}
+    onOpenTitle: (PopfeedBacklogItem) -> Unit = {},
+    // Feature request #6: the interaction bar's "Grid" toggle — when on,
+    // Posts/Reposts/Likes all render through the same square 3-wide grid
+    // (profileMediaGridRows) regardless of which PostKindFilter sub-tab is
+    // selected, instead of each sub-tab's own specialized layout.
+    gridMode: Boolean = false,
+    // Feature request #7: experimental 3-column masonry (Settings toggle),
+    // read by the ALL/IMAGES branches below — see pinterestThreeColumns'
+    // doc comment in PreferencesManager.
+    pinterestColumns: Int = 2
 ) {
     val tabState = state.tabStates[state.selectedTab]
 
@@ -1186,11 +1413,16 @@ private fun LazyListScope.profileResultsContent(
         MainViewModel.ProfileTab.POSTS -> {
             val allItems = tabState?.items ?: emptyList()
             val loading = tabState?.loading == true
-            when (postKindFilter) {
+            if (gridMode) {
+                profileMediaGridRows(
+                    items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
+                    onTapItem = onTapItem, onLoadMore = onLoadMore, filter = { postKindFilter.matches(it) }
+                )
+            } else when (postKindFilter) {
                 PostKindFilter.ALL, PostKindFilter.IMAGES -> postsPinterestGridRows(
                     items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
                     onTapItem = onTapItem, onSeedSubImageIndex = onSeedSubImageIndex, onLoadMore = onLoadMore,
-                    filter = { postKindFilter.matches(it) }
+                    filter = { postKindFilter.matches(it) }, columns = pinterestColumns
                 )
                 PostKindFilter.TEXT_POSTS -> postsTextRows(
                     items = allItems, loading = loading, liquidGlass = liquidGlass, profileTint = profileTint,
@@ -1209,19 +1441,42 @@ private fun LazyListScope.profileResultsContent(
                 )
             }
         }
+        // Feature request #5: Reposts and Likes now share the exact same
+        // sub-tabs (PostKindFilter) and the exact same per-filter layouts
+        // as Posts, instead of their own separate MediaKindFilter + one
+        // generic 3-wide square grid — same branch as POSTS above, just
+        // reading this tab's own tabState. Feature request #6's Grid
+        // toggle applies here too, same as Posts.
         MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES -> {
             val allItems = tabState?.items ?: emptyList()
-            // See profileMediaGridRows' own doc comment on `filter` for why
-            // this passes the full, unfiltered list through plus a
-            // predicate, rather than pre-filtering the list itself —
-            // onTapItem's index has to stay valid against the original list.
-            profileMediaGridRows(
-                items = allItems,
-                loading = tabState?.loading == true,
-                profileTint = profileTint, liquidGlass = liquidGlass,
-                onTapItem = onTapItem, onLoadMore = onLoadMore,
-                filter = { mediaKindFilter.matches(it) }
-            )
+            val loading = tabState?.loading == true
+            if (gridMode) {
+                profileMediaGridRows(
+                    items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
+                    onTapItem = onTapItem, onLoadMore = onLoadMore, filter = { postKindFilter.matches(it) }
+                )
+            } else when (postKindFilter) {
+                PostKindFilter.ALL, PostKindFilter.IMAGES -> postsPinterestGridRows(
+                    items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
+                    onTapItem = onTapItem, onSeedSubImageIndex = onSeedSubImageIndex, onLoadMore = onLoadMore,
+                    filter = { postKindFilter.matches(it) }, columns = pinterestColumns
+                )
+                PostKindFilter.TEXT_POSTS -> postsTextRows(
+                    items = allItems, loading = loading, liquidGlass = liquidGlass, profileTint = profileTint,
+                    onTapItem = onTapItem, onLoadMore = onLoadMore,
+                    filter = { postKindFilter.matches(it) }
+                )
+                PostKindFilter.HORIZONTAL_VIDEOS -> postsHorizontalVideoRows(
+                    items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
+                    onTapItem = onTapItem, onLoadMore = onLoadMore,
+                    filter = { postKindFilter.matches(it) }
+                )
+                PostKindFilter.VERTICAL_VIDEOS -> postsVerticalVideoGridRows(
+                    items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
+                    onTapItem = onTapItem, onLoadMore = onLoadMore,
+                    filter = { postKindFilter.matches(it) }
+                )
+            }
         }
         MainViewModel.ProfileTab.BLOGS -> {
             items(tabState?.blogs ?: emptyList(), key = { "blog_${it.uri}" }) { blog ->
@@ -1415,6 +1670,11 @@ private fun ThumbBox(item: MediaItem, tint: Color, shape: RoundedCornerShape, mo
         if (item.mediaGroup.size > 1) {
             MultiImageCountBadge(count = item.mediaGroup.size, modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp))
         }
+        // Feature request #8: rendered last so it sits on top of the play
+        // icon / multi-image badge too, not just the thumbnail.
+        if (LocalHateFunBlurNsfw.current && item.isNsfwLabeled) {
+            Box(Modifier.matchParentSize().blur(20.dp).background(Color.Black.copy(alpha = 0.45f)))
+        }
     }
 }
 
@@ -1448,6 +1708,9 @@ private fun SwipeableThumbBox(
                 modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(18.dp))
         }
         MultiImageCountBadge(count = item.mediaGroup.size, currentPage = pagerState.currentPage, modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp))
+        if (LocalHateFunBlurNsfw.current && item.isNsfwLabeled) {
+            Box(Modifier.matchParentSize().blur(20.dp).background(Color.Black.copy(alpha = 0.45f)))
+        }
     }
 }
 
@@ -1489,53 +1752,85 @@ private fun PinterestTile(item: MediaItem, tint: Color, shape: RoundedCornerShap
 // as a shrunk-down bubble sized to one column's width (see
 // CompactTextPostBubble) rather than spanning both.
 private data class IndexedItem(val localIndex: Int, val item: MediaItem)
-private data class AssignedEntry(val entry: IndexedItem, val left: Boolean)
+
+/** Greedy shortest-column-first balancing across [columns] columns — the
+ *  masonry layout's placement logic (postsPinterestGridRows), generalized
+ *  from a hardcoded 2 columns to support feature request #7's experimental
+ *  3-column mode. Also reused by ProfileOverlay's Grid-mode toggle (feature
+ *  request #6) to work out roughly which post is centered on screen before
+ *  switching layouts, and where that same post ends up afterward. */
+private fun assignMasonryColumns(matched: List<MediaItem>, columns: Int): List<List<IndexedItem>> {
+    val cols = List(columns) { mutableListOf<IndexedItem>() }
+    val heights = FloatArray(columns)
+    matched.forEachIndexed { i, item ->
+        val h = item.estimatedMasonryHeightUnits()
+        var shortest = 0
+        for (c in 1 until columns) if (heights[c] < heights[shortest]) shortest = c
+        cols[shortest] += IndexedItem(i, item)
+        heights[shortest] += h
+    }
+    return cols
+}
 
 private fun LazyListScope.postsPinterestGridRows(
     items: List<MediaItem>, loading: Boolean, profileTint: Color, liquidGlass: Boolean,
     onTapItem: (List<MediaItem>, Int) -> Unit, onSeedSubImageIndex: (String, Int) -> Unit,
-    onLoadMore: () -> Unit, filter: (MediaItem) -> Boolean
+    onLoadMore: () -> Unit, filter: (MediaItem) -> Boolean,
+    // Feature request #7: experimental toggle (Settings) renders 3 columns
+    // side by side instead of the default 2, for the All/Images filters
+    // only — see the pinterestThreeColumns doc comment where this is read.
+    columns: Int = 2
 ) {
     val matched = items.filter(filter)
     emptyAfterFilterLoadMore(this, matched, items, loading, onLoadMore, "pinterest_filtered_empty_loadmore")
     if (matched.isEmpty()) return
 
-    val indexed = matched.mapIndexed { i, item -> IndexedItem(i, item) }
     val mediaShape = RoundedCornerShape(14.dp)
     val textShape = RoundedCornerShape(12.dp)
+    val cols = assignMasonryColumns(matched, columns)
 
-    val assigned = mutableListOf<AssignedEntry>()
-    var leftHeight = 0f
-    var rightHeight = 0f
-    indexed.forEach { entry ->
-        val h = entry.item.estimatedMasonryHeightUnits()
-        val left = leftHeight <= rightHeight
-        assigned += AssignedEntry(entry, left)
-        if (left) leftHeight += h else rightHeight += h
-    }
-
-    // Chunked purely to keep a reasonable number of lazy items for
-    // recycling/pagination purposes — not for balancing, which already
-    // happened above across the whole list.
-    val chunkSize = 18
-    val chunks = assigned.chunked(chunkSize)
-
-    chunks.forEachIndexed { chunkIndex, chunk ->
-        val left = chunk.filter { it.left }.map { it.entry }
-        val right = chunk.filter { !it.left }.map { it.entry }
-        item(key = "pinterest_chunk_${chunkIndex}_${chunk.firstOrNull()?.entry?.item?.id ?: chunkIndex}") {
-            if (!loading && items.isNotEmpty() && chunkIndex >= chunks.size - 2) {
-                LaunchedEffect(chunkIndex, matched.size) { onLoadMore() }
-            }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    // Bug fix (feature request #3): this used to split `assigned` into
+    // fixed-size chunks (18 items) and render each chunk as its own Row of
+    // two Columns. That reintroduced the exact row-sync problem the
+    // masonry was supposed to fix, just at a coarser interval: a Row's
+    // height is always the *taller* of its two Columns, so if one 18-item
+    // chunk happened to hand many more of its items — or its tallest
+    // items — to one side (which the *height estimate* used for balancing
+    // can easily do, since the estimate is only ever approximate,
+    // especially for text posts, which don't render at their estimated
+    // size), the shorter column in that chunk was left with genuinely
+    // empty space under it up to the taller column's height, then both
+    // columns reset to zero at the very next chunk's Row. That's the
+    // "random giant gaps that don't line up with where posts actually are"
+    // bug. A real two-column masonry can't have any such per-chunk reset:
+    // each column has to be free to keep stacking its own tiles straight
+    // down with nothing forcing it to wait on the other column's height at
+    // any point, not just every 18 items.
+    //
+    // So instead of rendering many small Row-of-two-Columns chunks, this
+    // renders the *entire* currently-loaded, currently-filtered list as
+    // ONE Row containing two plain (non-lazy) Columns — one down each
+    // side — as a single LazyListScope item. That's structurally
+    // incapable of producing a mid-list gap, since there's no boundary at
+    // which either column's height gets reset or clipped to the other's.
+    // The trade-off is that this one item isn't itself virtualized the way
+    // separate lazy items would be, but the outer LazyColumn still only
+    // composes it at all once it scrolls into view, and Coil already only
+    // loads images once *they're* on-screen — so this is a reasonable
+    // trade for a masonry that's actually gap-free. Pagination still kicks
+    // in the same way, just via a single trailing LaunchedEffect instead
+    // of one per chunk.
+    item(key = "pinterest_grid_${columns}_${matched.size}_${matched.firstOrNull()?.item?.id ?: "empty"}") {
+        if (!loading && items.isNotEmpty()) {
+            LaunchedEffect(matched.size) { onLoadMore() }
+        }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            cols.forEach { colEntries ->
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    left.forEach { e ->
-                        PinterestEntryTile(e.item, profileTint, mediaShape, textShape, liquidGlass, onSeedSubImageIndex) { onTapItem(matched, e.localIndex) }
-                    }
-                }
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    right.forEach { e ->
-                        PinterestEntryTile(e.item, profileTint, mediaShape, textShape, liquidGlass, onSeedSubImageIndex) { onTapItem(matched, e.localIndex) }
+                    colEntries.forEach { e ->
+                        key(e.item.id) {
+                            PinterestEntryTile(e.item, profileTint, mediaShape, textShape, liquidGlass, onSeedSubImageIndex) { onTapItem(matched, e.localIndex) }
+                        }
                     }
                 }
             }
@@ -1829,6 +2124,9 @@ private fun CompactTextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: C
             .padding(10.dp)
     ) {
         Text(item.text, color = Color.White.copy(0.92f), fontSize = 9.sp, lineHeight = 12.sp)
+        if (LocalHateFunBlurNsfw.current && item.isNsfwLabeled) {
+            Box(Modifier.matchParentSize().blur(20.dp).background(Color.Black.copy(alpha = 0.45f)))
+        }
     }
 }
 

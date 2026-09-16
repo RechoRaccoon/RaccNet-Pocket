@@ -213,6 +213,8 @@ private fun AppRoot(viewModel: MainViewModel) {
     val navDirection       by viewModel.navDirection.collectAsState()
     val reducedAnimations  by viewModel.reducedAnimations.collectAsState()
     val classicProfileTabRow by viewModel.classicProfileTabRow.collectAsState()
+    val pinterestThreeColumns by viewModel.pinterestThreeColumns.collectAsState()
+    val hateFunBlurNsfw by viewModel.hateFunBlurNsfw.collectAsState()
     val liquidGlass        by viewModel.liquidGlass.collectAsState()
     val liquidGlassIntensity by viewModel.liquidGlassIntensity.collectAsState()
     val glassRimIntensity  by viewModel.glassRimIntensity.collectAsState()
@@ -651,6 +653,10 @@ private fun AppRoot(viewModel: MainViewModel) {
             onToggleReducedAnimations = viewModel::setReducedAnimations,
             classicProfileTabRow      = classicProfileTabRow,
             onToggleClassicProfileTabRow = viewModel::setClassicProfileTabRow,
+            pinterestThreeColumns     = pinterestThreeColumns,
+            onTogglePinterestThreeColumns = viewModel::setPinterestThreeColumns,
+            hateFunBlurNsfw           = hateFunBlurNsfw,
+            onToggleHateFunBlurNsfw   = viewModel::setHateFunBlurNsfw,
             selfDid                   = bskyDid,
             subscribedReviewDids      = subscribedReviewDids,
             subscribedBlogDids        = subscribedBlogDids,
@@ -726,7 +732,8 @@ private fun AppRoot(viewModel: MainViewModel) {
             onSelectTranslationLanguage = viewModel::setTranslationTargetLang,
             customFontName            = customFontName,
             onPickFontFile            = viewModel::setCustomFontFromUri,
-            onResetFont               = viewModel::resetCustomFont
+            onResetFont               = viewModel::resetCustomFont,
+            hateFunBlurNsfw           = hateFunBlurNsfw
         )
 
         if (dmInboxOpen) {
@@ -859,7 +866,11 @@ private fun AppRoot(viewModel: MainViewModel) {
                     isReviewSubscribed = currentProfileOverlay.author.did in subscribedReviewDids,
                     isBlogSubscribed   = currentProfileOverlay.author.did in subscribedBlogDids,
                     onToggleReviewSubscribe = { viewModel.toggleReviewSubscription(currentProfileOverlay.author) },
-                    onToggleBlogSubscribe   = { viewModel.toggleBlogSubscription(currentProfileOverlay.author) }
+                    onToggleBlogSubscribe   = { viewModel.toggleBlogSubscription(currentProfileOverlay.author) },
+                    onOpenAddTo       = viewModel::openListPickerForProfile,
+                    onOpenDm          = viewModel::openDmWithProfile,
+                    pinterestThreeColumns = pinterestThreeColumns,
+                    hateFunBlurNsfw   = hateFunBlurNsfw
                 )
             }
         }
