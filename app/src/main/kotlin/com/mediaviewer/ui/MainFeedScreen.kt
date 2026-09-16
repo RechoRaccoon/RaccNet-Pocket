@@ -311,8 +311,19 @@ fun MainFeedScreen(
     customFontName: String? = null,
     onPickFontFile: (android.net.Uri) -> Unit = {},
     onResetFont: () -> Unit = {},
-    // Feature request #8: "I hate fun".
-    hateFunBlurNsfw: Boolean = false
+    // Feature request #8: "I hate fun" — the boolean is used directly by
+    // FeedView/PostContent below (the actual blur); onToggleHateFunBlurNsfw
+    // is only needed to forward into this screen's own internal Settings
+    // sheet (ScreenState.SETTINGS branch below), same as
+    // onToggleClassicProfileTabRow already is.
+    hateFunBlurNsfw: Boolean = false,
+    onToggleHateFunBlurNsfw: (Boolean) -> Unit = {},
+    // Feature request #7: only used by the Settings sheet below (the
+    // Pinterest-grid column count is read directly by ProfileOverlay, which
+    // MainActivity provides separately — this screen has no Pinterest grid
+    // of its own to apply it to).
+    pinterestThreeColumns: Boolean = false,
+    onTogglePinterestThreeColumns: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
@@ -522,6 +533,10 @@ fun MainFeedScreen(
                         onToggleReducedAnimations = onToggleReducedAnimations,
                         classicProfileTabRow      = classicProfileTabRow,
                         onToggleClassicProfileTabRow = onToggleClassicProfileTabRow,
+                        pinterestThreeColumns     = pinterestThreeColumns,
+                        onTogglePinterestThreeColumns = onTogglePinterestThreeColumns,
+                        hateFunBlurNsfw           = hateFunBlurNsfw,
+                        onToggleHateFunBlurNsfw   = onToggleHateFunBlurNsfw,
                         selfDid                   = selfDid,
                         subscribedReviewDids      = subscribedReviewDids,
                         subscribedBlogDids        = subscribedBlogDids,

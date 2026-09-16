@@ -653,10 +653,6 @@ private fun AppRoot(viewModel: MainViewModel) {
             onToggleReducedAnimations = viewModel::setReducedAnimations,
             classicProfileTabRow      = classicProfileTabRow,
             onToggleClassicProfileTabRow = viewModel::setClassicProfileTabRow,
-            pinterestThreeColumns     = pinterestThreeColumns,
-            onTogglePinterestThreeColumns = viewModel::setPinterestThreeColumns,
-            hateFunBlurNsfw           = hateFunBlurNsfw,
-            onToggleHateFunBlurNsfw   = viewModel::setHateFunBlurNsfw,
             selfDid                   = bskyDid,
             subscribedReviewDids      = subscribedReviewDids,
             subscribedBlogDids        = subscribedBlogDids,
@@ -733,7 +729,10 @@ private fun AppRoot(viewModel: MainViewModel) {
             customFontName            = customFontName,
             onPickFontFile            = viewModel::setCustomFontFromUri,
             onResetFont               = viewModel::resetCustomFont,
-            hateFunBlurNsfw           = hateFunBlurNsfw
+            hateFunBlurNsfw           = hateFunBlurNsfw,
+            onToggleHateFunBlurNsfw   = viewModel::setHateFunBlurNsfw,
+            pinterestThreeColumns     = pinterestThreeColumns,
+            onTogglePinterestThreeColumns = viewModel::setPinterestThreeColumns
         )
 
         if (dmInboxOpen) {

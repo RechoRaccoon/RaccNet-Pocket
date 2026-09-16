@@ -958,7 +958,7 @@ private fun ProfileHeaderSection(
                 // much larger gap this used to leave (4dp here + a 10dp
                 // spacer + the tab row's own top padding stacked on top of
                 // each other).
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp, top = 4.dp),
+                Modifier.fillMaxWidth().padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 0.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.Start)
             ) {
                 CountStat(profile.postsCount, "Posts")
@@ -1820,7 +1820,7 @@ private fun LazyListScope.postsPinterestGridRows(
     // trade for a masonry that's actually gap-free. Pagination still kicks
     // in the same way, just via a single trailing LaunchedEffect instead
     // of one per chunk.
-    item(key = "pinterest_grid_${columns}_${matched.size}_${matched.firstOrNull()?.item?.id ?: "empty"}") {
+    item(key = "pinterest_grid_${columns}_${matched.size}_${matched.firstOrNull()?.id ?: "empty"}") {
         if (!loading && items.isNotEmpty()) {
             LaunchedEffect(matched.size) { onLoadMore() }
         }
