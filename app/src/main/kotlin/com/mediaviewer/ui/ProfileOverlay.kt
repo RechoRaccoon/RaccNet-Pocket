@@ -9,6 +9,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
@@ -48,6 +49,7 @@ import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -55,9 +57,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -180,6 +185,106 @@ private fun ReviewKindFilter.matchesBacklog(item: PopfeedBacklogItem) = this == 
 fun ReviewKindFilter.matchesTitle(result: com.mediaviewer.model.TitleSearchResult) =
     this == ReviewKindFilter.ALL || categoryBucket(result.mediaCategory) == this
 
+// ─── Profile grid-mode cycling (adjustment #2/#5) ───────────────────────────
+// The interaction bar's Grid button now cycles through three layouts instead
+// of toggling two, and — per feedback — each tab/sub-tab remembers its own
+// choice independently instead of sharing one flag across the whole profile.
+// Which trio applies depends on the sub-tab's own natural shape:
+//  - Image-like sub-tabs (All/Images) cycle 2-col masonry -> 3-col
+//    "experimental" masonry (previously Settings-only) -> the uniform
+//    square 3-wide grid.
+//  - Text Posts/Horizontal Videos default to their own dedicated list
+//    layout, then cycle into the same 2-col/3-col masonry the image tabs
+//    use (PinterestEntryTile already renders text posts and horizontal
+//    videos fine inside that masonry — it just wasn't reachable from these
+//    two sub-tabs before).
+// Encoded as a plain 0/1/2 index (rather than two separate enums) so one map
+// can hold every sub-tab's choice; PostKindFilter.isMasonryKind()/
+// isListKind() below decide which of the two meanings applies when reading
+// it back.
+private fun PostKindFilter.isMasonryKind() = this == PostKindFilter.ALL || this == PostKindFilter.IMAGES
+private fun PostKindFilter.isListKind() = this == PostKindFilter.TEXT_POSTS || this == PostKindFilter.HORIZONTAL_VIDEOS
+
+/** Small custom vector icons for the Grid button — none of these shapes
+ *  (uneven 2-col / uneven 3-col / dots+lines list) exist in the Material
+ *  icon set the rest of the app draws from, so they're hand-drawn here with
+ *  a plain Canvas instead. Deliberately simple/geometric to read clearly at
+ *  a small icon size. */
+@Composable
+private fun UnevenColumnsIcon(columns: Int, modifier: Modifier = Modifier, tint: Color = Color.White) {
+    Canvas(modifier) {
+        val gap = size.width * 0.12f
+        val colWidth = (size.width - gap * (columns - 1)) / columns
+        // A fixed, hand-picked pattern of short/tall bars per column count —
+        // just needs to visually read as "uneven", not track any real data.
+        val heightFractions = if (columns == 2) listOf(0.62f, 1f) else listOf(1f, 0.55f, 0.8f)
+        for (c in 0 until columns) {
+            val h = size.height * heightFractions[c % heightFractions.size]
+            drawRoundRect(
+                color = tint,
+                topLeft = Offset(c * (colWidth + gap), size.height - h),
+                size = Size(colWidth, h),
+                cornerRadius = CornerRadius(colWidth * 0.18f, colWidth * 0.18f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ListModeIcon(modifier: Modifier = Modifier, tint: Color = Color.White) {
+    Canvas(modifier) {
+        val rowGap = size.height * 0.18f
+        val rowHeight = (size.height - rowGap * 2) / 3f
+        val dotSize = rowHeight * 0.62f
+        val lineStartX = size.width * 0.32f
+        for (row in 0 until 3) {
+            val cy = row * (rowHeight + rowGap) + rowHeight / 2f
+            drawCircle(color = tint, radius = dotSize / 2f, center = Offset(rowHeight / 2f, cy))
+            drawRoundRect(
+                color = tint,
+                topLeft = Offset(lineStartX, cy - rowHeight * 0.14f),
+                size = Size(size.width - lineStartX, rowHeight * 0.28f),
+                cornerRadius = CornerRadius(rowHeight * 0.14f, rowHeight * 0.14f)
+            )
+        }
+    }
+}
+
+/** Bluesky's own logo — a simplified butterfly silhouette good enough to
+ *  read clearly at a small button size — drawn by hand since it isn't part
+ *  of the Material icon set the rest of the app's icon buttons pull from. */
+@Composable
+private fun BlueskyLogoIcon(modifier: Modifier = Modifier, tint: Color = Color.White) {
+    Canvas(modifier) {
+        val w = size.width; val h = size.height
+        fun wing(mirror: Boolean) {
+            val path = Path()
+            val sign = if (mirror) -1f else 1f
+            val cx = w / 2f
+            path.moveTo(cx, h * 0.42f)
+            path.cubicTo(
+                cx + sign * w * 0.05f, h * 0.05f,
+                cx + sign * w * 0.55f, h * 0.02f,
+                cx + sign * w * 0.48f, h * 0.32f
+            )
+            path.cubicTo(
+                cx + sign * w * 0.44f, h * 0.5f,
+                cx + sign * w * 0.5f, h * 0.62f,
+                cx + sign * w * 0.34f, h * 0.68f
+            )
+            path.cubicTo(
+                cx + sign * w * 0.22f, h * 0.72f,
+                cx + sign * w * 0.1f, h * 0.6f,
+                cx, h * 0.5f
+            )
+            path.close()
+            drawPath(path, color = tint)
+        }
+        wing(false)
+        wing(true)
+    }
+}
+
 // Feature request #8: "I hate fun" — a CompositionLocal rather than a
 // parameter threaded through every tile-rendering function in this very
 // large file (ThumbBox, PinterestEntryTile, CompactTextPostBubble, and the
@@ -190,26 +295,6 @@ fun ReviewKindFilter.matchesTitle(result: com.mediaviewer.model.TitleSearchResul
 // than a cross-cutting concern threaded through unrelated intermediate
 // signatures. Provided once, high up, in ProfileOverlay itself.
 private val LocalHateFunBlurNsfw = androidx.compose.runtime.compositionLocalOf { false }
-
-/** Feature request #8: static, no-reveal-button blur for profile tab grid
- *  tiles — only the feed/pager (MainFeedScreen's PostContent) gets a
- *  "Show NSFW Content" tap-to-reveal button, per spec. Wraps a tile's own
- *  content with a blur + dim scrim when it's NSFW-labeled and the setting
- *  is on; otherwise renders the content unchanged. */
-@Composable
-private fun NsfwTileScrim(item: MediaItem, modifier: Modifier = Modifier, content: @Composable BoxScope.() -> Unit) {
-    val blurred = LocalHateFunBlurNsfw.current && item.isNsfwLabeled
-    Box(modifier) {
-        content()
-        if (blurred) {
-            Box(
-                Modifier.matchParentSize()
-                    .blur(20.dp)
-                    .background(Color.Black.copy(alpha = 0.45f))
-            )
-        }
-    }
-}
 
 @Composable
 private fun <T> ProfileSubFilterRow(
@@ -337,6 +422,12 @@ fun ProfileOverlay(
     // Feature request #6: profile page interaction bar.
     onOpenAddTo: (String) -> Unit = {},
     onOpenDm: (AuthorInfo) -> Unit = {},
+    // Adjustment #7: promotes the sub-filter row's selection out of local
+    // Compose state and into the ViewModel (see
+    // ProfileOverlayState.postKindFilter's own doc comment) so it survives
+    // the parent-chain "tab remembering thing" restore.
+    onSelectPostKindFilter: (PostKindFilter) -> Unit,
+    onSelectReviewKindFilter: (ReviewKindFilter) -> Unit,
     // Feature request #7: experimental 3-wide Pinterest grid (Settings).
     pinterestThreeColumns: Boolean = false,
     // Feature request #8: "I hate fun" — blur Bluesky-labeled sexual/adult
@@ -399,95 +490,149 @@ fun ProfileOverlay(
     // state.loadingProfile clears) — so this one was just a redundant
     // second loading screen stacked underneath it.
 
-    // Profile tabs sub-filter row state — purely local/display-only (not
-    // round-tripped through the ViewModel, since it never needs to survive
-    // beyond this composition), reset whenever the profile or the selected
-    // tab changes so switching tabs/profiles doesn't carry over a stale
-    // filter selection from a completely different tab's category set.
+    // Profile tabs sub-filter row state. mediaKindFilter is dead/unreachable
+    // code (see ProfileIconTabRow's own doc comment) and stays purely
+    // local. postKindFilter/reviewKindFilter, though, are now read straight
+    // off `state` (round-tripped through the ViewModel via
+    // onSelectPostKindFilter/onSelectReviewKindFilter below) instead of
+    // local Compose state — see ProfileOverlayState.postKindFilter's own
+    // doc comment for why (adjustment #7).
     var mediaKindFilter by remember(author.did, state.selectedTab) { mutableStateOf(MediaKindFilter.ALL) }
-    var postKindFilter by remember(author.did, state.selectedTab) { mutableStateOf(PostKindFilter.ALL) }
-    var reviewKindFilter by remember(author.did, state.selectedTab) { mutableStateOf(ReviewKindFilter.ALL) }
+    val postKindFilter = state.postKindFilter
+    val reviewKindFilter = state.reviewKindFilter
 
-    // Feature request #6: "Grid" interaction-bar toggle — square 3-wide grid
-    // (profileMediaGridRows) vs. this tab's own normal layout. Local/
-    // display-only like the filters above, and reset on the same triggers
-    // for the same reason (a stale grid-mode carried over from a totally
-    // different tab/profile would be surprising).
-    var gridMode by remember(author.did, state.selectedTab) { mutableStateOf(false) }
-    val pinterestColumns = if (pinterestThreeColumns) 3 else 2
+    // Adjustment #5: "Grid" interaction-bar button — now a 3-way cycle
+    // instead of a plain on/off toggle, remembered *per tab + sub-tab*
+    // (keyed on the PostKindFilter too, not just the ProfileTab) so
+    // switching from, say, Images back to Text Posts and back doesn't lose
+    // whichever layout was picked for each. Reset whenever the profile
+    // changes, same reasoning as the filters above. 0/1/2 — see
+    // PostKindFilter.isMasonryKind()/isListKind() above for what each
+    // index actually renders in a given sub-tab.
+    val gridModeByTab = remember(author.did) {
+        androidx.compose.runtime.mutableStateMapOf<Pair<MainViewModel.ProfileTab, PostKindFilter>, Int>()
+    }
+    fun gridModeFor(tab: MainViewModel.ProfileTab, filter: PostKindFilter): Int = gridModeByTab[tab to filter] ?: 0
     val density = LocalDensity.current
     val configuration = LocalConfiguration.current
 
-    // Feature request #6: "seamless" Grid-mode toggle — approximates which
-    // post is vertically centered in the current layout before switching,
-    // then scrolls the new layout to roughly the same post. This can't be
-    // pixel-perfect for the masonry side (it's one big non-lazy Row/Column
-    // pair — see postsPinterestGridRows' doc comment — rather than one lazy
-    // item per tile), so it estimates using the same column-balancing pass
-    // the masonry itself uses (assignMasonryColumns) plus each tile's
-    // estimated height, scaled to an actual on-screen column width. The
-    // spec explicitly doesn't require exact centering, just "the right
-    // place" — this gets close without needing per-tile position tracking.
-    fun toggleGridMode() {
-        val tabItems = state.tabStates[state.selectedTab]?.items ?: emptyList()
-        val matched = tabItems.filter { postKindFilter.matches(it) }
-        if (matched.isEmpty() || state.selectedTab !in setOf(MainViewModel.ProfileTab.POSTS, MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES)) {
-            gridMode = !gridMode
-            return
-        }
-        val outerHorizontalPaddingDp = 6f
-        val gapDp = 6f
-        val rowTopPaddingDp = 3f
-        val screenWidthDp = configuration.screenWidthDp.toFloat()
+    // Adjustment #6: the previous version of this "keep the same post in
+    // view across a layout switch" logic only ever tracked/restored the
+    // post at the very *top* of the viewport (offset 0), which is why it
+    // "didn't quite work" — a post that was actually centered on screen
+    // would end up pinned to the top edge after switching instead. Both
+    // halves below now target the viewport's own vertical middle: reading
+    // back which post currently sits there (adding half the viewport
+    // height to the raw scroll offset before walking the column), and,
+    // when landing in the new layout, pulling the scroll target back up by
+    // that same half-viewport amount so the post lands near the middle
+    // again instead of flush against the top. Still an estimate (not
+    // pixel-perfect — see assignMasonryColumns' own doc comment), just a
+    // meaningfully closer one.
+    val viewportMidDp = configuration.screenHeightDp.toFloat() * 0.4f
+    val outerHorizontalPaddingDp = 6f
+    val gapDp = 6f
+    val rowTopPaddingDp = 3f
+    val screenWidthDp = configuration.screenWidthDp.toFloat()
 
-        if (!gridMode) {
-            // Masonry (pinterestColumns-wide) → Grid (always 3-wide).
-            val cols = assignMasonryColumns(matched, pinterestColumns)
-            var targetLocalIndex = 0
-            if (listState.firstVisibleItemIndex == 2) {
-                val columnWidthDp = (screenWidthDp - 2 * outerHorizontalPaddingDp - (pinterestColumns - 1) * gapDp) / pinterestColumns
-                val offsetDp = (listState.firstVisibleItemScrollOffset / density.density) - rowTopPaddingDp
-                // Any column is representative enough — they're kept close
-                // in cumulative height by construction.
-                val col = cols.firstOrNull { it.isNotEmpty() } ?: emptyList()
-                var cumulative = 0f
-                var found = col.firstOrNull()?.localIndex ?: 0
-                for (entry in col) {
-                    val h = entry.item.estimatedMasonryHeightUnits() * columnWidthDp
-                    if (cumulative + h > offsetDp.coerceAtLeast(0f)) { found = entry.localIndex; break }
-                    cumulative += h + gapDp
-                    found = entry.localIndex
-                }
-                targetLocalIndex = found
-            }
-            gridMode = true
-            val targetRow = targetLocalIndex / 3
-            coroutineScope.launch { listState.scrollToItem((2 + targetRow).coerceAtLeast(2), 0) }
+    // mode 2 is always the uniform square 3-wide grid (profileMediaGridRows);
+    // modes 0/1 are masonry at 2 or 3 columns respectively (postsPinterestGridRows).
+    fun masonryColumnsFor(mode: Int) = if (mode == 1) 3 else 2
+
+    fun localIndexAtViewportMiddle(mode: Int, matched: List<MediaItem>): Int {
+        if (matched.isEmpty() || listState.firstVisibleItemIndex < 2) return 0
+        return if (mode == 2) {
+            val colWidthDp = (screenWidthDp - 2 * outerHorizontalPaddingDp) / 3f
+            val topRow = listState.firstVisibleItemIndex - 2
+            val offsetDp = listState.firstVisibleItemScrollOffset / density.density
+            val rowAtMiddle = topRow + ((offsetDp + viewportMidDp) / colWidthDp).toInt()
+            (rowAtMiddle * 3).coerceIn(0, matched.lastIndex)
         } else {
-            // Grid (always 3-wide) → Masonry (pinterestColumns-wide).
-            val targetLocalIndex = if (listState.firstVisibleItemIndex >= 2) (listState.firstVisibleItemIndex - 2) * 3 else 0
-            gridMode = false
-            val cols = assignMasonryColumns(matched, pinterestColumns)
-            val columnWidthDp = (screenWidthDp - 2 * outerHorizontalPaddingDp - (pinterestColumns - 1) * gapDp) / pinterestColumns
+            if (listState.firstVisibleItemIndex != 2) return 0
+            val columns = masonryColumnsFor(mode)
+            val columnWidthDp = (screenWidthDp - 2 * outerHorizontalPaddingDp - (columns - 1) * gapDp) / columns
+            val targetDp = (listState.firstVisibleItemScrollOffset / density.density) - rowTopPaddingDp + viewportMidDp
+            val cols = assignMasonryColumns(matched, columns)
+            val col = cols.firstOrNull { it.isNotEmpty() } ?: emptyList()
+            var cumulative = 0f
+            var found = col.firstOrNull()?.localIndex ?: 0
+            for (entry in col) {
+                val h = entry.item.estimatedMasonryHeightUnits() * columnWidthDp
+                if (cumulative + h > targetDp.coerceAtLeast(0f)) { found = entry.localIndex; break }
+                cumulative += h + gapDp
+                found = entry.localIndex
+            }
+            found
+        }
+    }
+
+    fun scrollToViewportMiddle(mode: Int, matched: List<MediaItem>, localIndex: Int) {
+        if (mode == 2) {
+            val colWidthDp = (screenWidthDp - 2 * outerHorizontalPaddingDp) / 3f
+            val targetRow = localIndex / 3
+            val extraRows = (viewportMidDp / colWidthDp).toInt()
+            val fractionalDp = viewportMidDp - extraRows * colWidthDp
+            val startRow = targetRow - extraRows
+            val targetIndex = (2 + startRow).coerceAtLeast(2)
+            val offsetPx = if (startRow >= 0) (fractionalDp * density.density).roundToInt() else 0
+            coroutineScope.launch { listState.scrollToItem(targetIndex, offsetPx.coerceAtLeast(0)) }
+        } else {
+            val columns = masonryColumnsFor(mode)
+            val cols = assignMasonryColumns(matched, columns)
+            val columnWidthDp = (screenWidthDp - 2 * outerHorizontalPaddingDp - (columns - 1) * gapDp) / columns
             var offsetDp = rowTopPaddingDp
             var matchedCol = false
             for (col in cols) {
-                val idxInCol = col.indexOfFirst { it.localIndex == targetLocalIndex }
+                val idxInCol = col.indexOfFirst { it.localIndex == localIndex }
                 if (idxInCol >= 0) {
                     matchedCol = true
                     for (i in 0 until idxInCol) offsetDp += col[i].item.estimatedMasonryHeightUnits() * columnWidthDp + gapDp
                     break
                 }
             }
-            val offsetPx = if (matchedCol) (offsetDp * density.density).roundToInt() else 0
+            val centeredOffsetDp = (offsetDp - viewportMidDp).coerceAtLeast(0f)
+            val offsetPx = if (matchedCol) (centeredOffsetDp * density.density).roundToInt() else 0
             coroutineScope.launch { listState.scrollToItem(2, offsetPx.coerceAtLeast(0)) }
         }
     }
+
+    fun onGridButtonTap() {
+        val key = state.selectedTab to postKindFilter
+        val curMode = gridModeByTab[key] ?: 0
+        val newMode = (curMode + 1) % 3
+        val tabItems = state.tabStates[state.selectedTab]?.items ?: emptyList()
+        val matched = tabItems.filter { postKindFilter.matches(it) }
+        if (matched.isEmpty() || state.selectedTab !in setOf(MainViewModel.ProfileTab.POSTS, MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES)) {
+            gridModeByTab[key] = newMode
+            return
+        }
+        val localIndex = localIndexAtViewportMiddle(curMode, matched)
+        gridModeByTab[key] = newMode
+        scrollToViewportMiddle(newMode, matched, localIndex)
+    }
+
+    // Adjustment #2: the bottom interaction bar now needs to blur whatever's
+    // actually behind it, not just show a flat tint — the same live
+    // "record what's drawn, read it back through a blurred glass panel"
+    // system TitleDetailOverlay's own bottom bar and the feed/timeline's
+    // post bubbles already use (see GlassBackdrop's doc comment). Recording
+    // this whole Box (rather than just a fixed banner, like
+    // TitleDetailOverlay does) means the bar reads real live pixels of
+    // whatever's scrolled underneath it — header, tabs, grid tiles, all of
+    // it — not an approximation.
+    val backdropLayer = rememberGraphicsLayer()
+    var backdropOrigin by remember { mutableStateOf(Offset.Zero) }
+    val backdrop = if (liquidGlass) remember(backdropLayer) { GlassBackdrop(backdropLayer) { backdropOrigin } } else null
 
     CompositionLocalProvider(LocalHateFunBlurNsfw provides hateFunBlurNsfw) {
     Box(
         Modifier
             .fillMaxSize()
+            .onGloballyPositioned { backdropOrigin = it.positionInRoot() }
+            .drawWithContent {
+                if (liquidGlass) backdropLayer.record { this@drawWithContent.drawContent() }
+                drawContent()
+            }
             .background(postBackgroundBrush(blended))
             // Pinch-out detection: watched passively (PointerEventPass.Initial,
             // never consumed) purely to peek at 2-finger spread without
@@ -591,7 +736,7 @@ fun ProfileOverlay(
                                     ProfileSubFilterRow(
                                         options = visiblePostFilters, selected = postKindFilter,
                                         liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
-                                        onSelect = { postKindFilter = it }
+                                        onSelect = onSelectPostKindFilter
                                     )
                                 }
                             }
@@ -610,7 +755,7 @@ fun ProfileOverlay(
                                     ProfileSubFilterRow(
                                         options = visiblePostFilters, selected = postKindFilter,
                                         liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
-                                        onSelect = { postKindFilter = it }
+                                        onSelect = onSelectPostKindFilter
                                     )
                                 }
                             }
@@ -622,7 +767,7 @@ fun ProfileOverlay(
                                 ProfileSubFilterRow(
                                     options = visibleReviewFilters, selected = reviewKindFilter,
                                     liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
-                                    onSelect = { reviewKindFilter = it }
+                                    onSelect = onSelectReviewKindFilter
                                 )
                             }
                             MainViewModel.ProfileTab.BACKLOG -> {
@@ -633,7 +778,7 @@ fun ProfileOverlay(
                                 ProfileSubFilterRow(
                                     options = visibleBacklogFilters, selected = reviewKindFilter,
                                     liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
-                                    onSelect = { reviewKindFilter = it }
+                                    onSelect = onSelectReviewKindFilter
                                 )
                             }
                             else -> {}
@@ -645,7 +790,7 @@ fun ProfileOverlay(
                         ProfileIconTabRow(
                             tabs = availableTabs, selectedTab = state.selectedTab, onSelectTab = onSelectTab,
                             liquidGlass = liquidGlass, tint = blended,
-                            postKindFilter = postKindFilter, onSelectPostKindFilter = { postKindFilter = it },
+                            postKindFilter = postKindFilter, onSelectPostKindFilter = onSelectPostKindFilter,
                             visiblePostFilters = PostKindFilter.entries.filter {
                                 it == postKindFilter || (subFilterTabState?.items ?: emptyList()).any { item -> it.matches(item) }
                             },
@@ -653,7 +798,7 @@ fun ProfileOverlay(
                             visibleMediaFilters = MediaKindFilter.entries.filter {
                                 it == mediaKindFilter || (subFilterTabState?.items ?: emptyList()).any { item -> it.matches(item) }
                             },
-                            reviewKindFilter = reviewKindFilter, onSelectReviewKindFilter = { reviewKindFilter = it },
+                            reviewKindFilter = reviewKindFilter, onSelectReviewKindFilter = onSelectReviewKindFilter,
                             visibleReviewFilters = ReviewKindFilter.entries.filter {
                                 it == reviewKindFilter || (subFilterTabState?.reviews ?: emptyList()).any { r -> it.matchesReview(r) }
                             },
@@ -684,8 +829,7 @@ fun ProfileOverlay(
                 onOpenBlog = onOpenBlog,
                 onOpenReview = onOpenReview,
                 onOpenTitle = onOpenTitle,
-                gridMode = gridMode,
-                pinterestColumns = pinterestColumns
+                gridModeFor = { filter -> gridModeFor(state.selectedTab, filter) }
             )
         }
 
@@ -695,16 +839,20 @@ fun ProfileOverlay(
             }
         }
 
-        // Feature request #6: profile page interaction bar — Grid/Add To/
-        // View on Bluesky/DM, fixed to the bottom (same "reserve extra
-        // bottom content padding above" pattern as TitleDetailOverlay's own
-        // bottom bar). Hidden while loading (no profile yet to act on).
+        // Adjustment #2: profile page interaction bar — Grid/Add To/
+        // Bluesky/DM, fixed to the bottom (same "reserve extra bottom
+        // content padding above" pattern as TitleDetailOverlay's own bottom
+        // bar). Hidden while loading (no profile yet to act on).
         if (profile != null) {
-            Box(Modifier.align(Alignment.BottomCenter)) {
+            Box(Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 8.dp)) {
                 ProfileInteractionBar(
-                    liquidGlass = liquidGlass, tint = blended, gridMode = gridMode,
+                    liquidGlass = liquidGlass, tint = blended, backdrop = backdrop,
+                    gridMode = gridModeFor(state.selectedTab, postKindFilter),
+                    gridCyclesListLayout = postKindFilter.isListKind(),
+                    showGrid = state.selectedTab in setOf(MainViewModel.ProfileTab.POSTS, MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES) &&
+                        (postKindFilter.isMasonryKind() || postKindFilter.isListKind()),
                     showDm = selfDid.isNotBlank() && author.did != selfDid && author.isFollowing && profile.followedByMe,
-                    onGrid = { toggleGridMode() },
+                    onGrid = { onGridButtonTap() },
                     onAddTo = { onOpenAddTo(author.did) },
                     onViewOnBluesky = { uriHandler.openUri("https://bsky.app/profile/${author.handle}") },
                     onDm = { onOpenDm(author) }
@@ -771,57 +919,86 @@ fun ProfileOverlay(
     }
 }
 
-/** Feature request #6: profile page's bottom interaction bar. Visually
- *  matches [LikeReviewCommentBar]/[TitleReviewBar] — same 60dp height, same
- *  26dp corner-radius pill treatment, same glass styling — but unlike that
- *  bar's equal-width segments, these buttons size to their own content
- *  (Grid/Add To/View on Bluesky/DM are all very different widths) and the
- *  row spaces them evenly from edge to edge instead (SpaceBetween) rather
- *  than splitting into equal weights.
+/** Adjustment #2: profile page's bottom interaction bar — redesigned from a
+ *  row of separate, edge-to-edge text pills into a single vertically-
+ *  centered bubble (matching the feed/timeline's own [ActionRow] bubble)
+ *  holding icon-only buttons, sized to exactly fit its own buttons rather
+ *  than stretching edge to edge. Blurs whatever's actually behind it via
+ *  [backdrop] — same live system [ActionRow]/[LiquidGlassSurface] use.
  *
- *  DM only renders when [showDm] is true — feature request #6 restricts it
- *  to mutuals (each account follows the other); see ProfileData.followedByMe
- *  and AuthorInfo.isFollowing for the two halves of that check. */
+ *  Grid/Add To/DM all reuse icons already used elsewhere for the same
+ *  action (Grid: see [gridMode]'s own icon mapping below; Add To: the same
+ *  "add to a list" icon Settings' DMs/list features use; DM: the same
+ *  [Icons.Default.Chat] the Settings "DMs" button and the old text pill
+ *  both already used). Bluesky has no Material icon, so it's a small
+ *  hand-drawn butterfly mark ([BlueskyLogoIcon]) instead of a text label.
+ *
+ *  DM only renders when [showDm] is true — restricted to mutuals (each
+ *  account follows the other); see ProfileData.followedByMe and
+ *  AuthorInfo.isFollowing for the two halves of that check.
+ *
+ *  [gridMode] is 0/1/2, and [gridCyclesListLayout] picks which of the two
+ *  three-icon sequences it's read against (see PostKindFilter.isListKind()
+ *  above) — image-like sub-tabs cycle uneven-2-col -> uneven-3-col ->
+ *  square-3x3; Text Posts/Horizontal Videos cycle list -> uneven-2-col ->
+ *  uneven-3-col instead, per feedback. [showGrid] hides the button
+ *  entirely on tabs/sub-tabs the Grid cycle has nothing to do to (Blogs,
+ *  Reviews, Backlog, Vods, Vertical Videos — the last already renders as
+ *  its own fixed 3-wide grid with no alternate layout to offer). */
 @Composable
 private fun ProfileInteractionBar(
-    liquidGlass: Boolean, tint: Color, gridMode: Boolean, showDm: Boolean,
+    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
+    gridMode: Int, gridCyclesListLayout: Boolean, showGrid: Boolean, showDm: Boolean,
     onGrid: () -> Unit, onAddTo: () -> Unit, onViewOnBluesky: () -> Unit, onDm: () -> Unit
 ) {
     val shape = RoundedCornerShape(26.dp)
+    val iconSize = 20.dp
     @Composable
-    fun Pill(highlighted: Boolean, onClick: () -> Unit, content: @Composable RowScope.() -> Unit) {
-        Row(
-            Modifier
-                .fillMaxHeight()
-                .glassPanel(liquidGlass, tint = if (highlighted) tint else tint.copy(alpha = 0.55f), shape = shape)
-                .clickable(onClick = onClick)
-                .padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            content = content
+    fun IconButton(onClick: () -> Unit, content: @Composable () -> Unit) {
+        Box(
+            Modifier.size(44.dp).clip(CircleShape).clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+            content = { content() }
         )
     }
-    Box(
-        Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).height(60.dp)
-            .padding(horizontal = 12.dp, vertical = 8.dp)
-    ) {
-        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Pill(highlighted = gridMode, onClick = onGrid) {
-                Text("Grid", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    @Composable
+    fun BarContent() {
+        Row(
+            Modifier.fillMaxHeight().padding(horizontal = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            if (showGrid) {
+                IconButton(onClick = onGrid) {
+                    when {
+                        gridCyclesListLayout && gridMode == 0 -> ListModeIcon(Modifier.size(iconSize))
+                        gridCyclesListLayout && gridMode == 1 -> UnevenColumnsIcon(2, Modifier.size(iconSize))
+                        gridCyclesListLayout -> UnevenColumnsIcon(3, Modifier.size(iconSize))
+                        gridMode == 0 -> UnevenColumnsIcon(2, Modifier.size(iconSize))
+                        gridMode == 1 -> UnevenColumnsIcon(3, Modifier.size(iconSize))
+                        else -> Icon(Icons.Filled.GridOn, contentDescription = "Grid layout", tint = Color.White, modifier = Modifier.size(iconSize))
+                    }
+                }
             }
-            Pill(highlighted = false, onClick = onAddTo) {
-                Text("Add To", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            IconButton(onClick = onAddTo) {
+                Icon(Icons.Filled.PlaylistAdd, contentDescription = "Add To", tint = Color.White, modifier = Modifier.size(iconSize))
             }
-            Pill(highlighted = false, onClick = onViewOnBluesky) {
-                Text("View on Bluesky", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            IconButton(onClick = onViewOnBluesky) {
+                BlueskyLogoIcon(Modifier.size(iconSize), tint = Color.White)
             }
             if (showDm) {
-                Pill(highlighted = false, onClick = onDm) {
-                    Text("DM", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    Icon(Icons.Default.Chat, contentDescription = "DM", tint = Color.White, modifier = Modifier.size(16.dp))
+                IconButton(onClick = onDm) {
+                    Icon(Icons.Default.Chat, contentDescription = "DM", tint = Color.White, modifier = Modifier.size(iconSize))
                 }
             }
         }
+    }
+
+    val barModifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars).height(60.dp).wrapContentWidth()
+    if (liquidGlass) {
+        LiquidGlassSurface(modifier = barModifier, shape = shape, tint = tint, backdrop = backdrop) { BarContent() }
+    } else {
+        Box(barModifier.clip(shape).background(Color.Black.copy(alpha = 0.7f))) { BarContent() }
     }
 }
 
@@ -1392,91 +1569,98 @@ private fun LazyListScope.profileResultsContent(
     onOpenBlog: (LeafletBlog) -> Unit,
     onOpenReview: (PopfeedReview) -> Unit,
     onOpenTitle: (PopfeedBacklogItem) -> Unit = {},
-    // Feature request #6: the interaction bar's "Grid" toggle — when on,
-    // Posts/Reposts/Likes all render through the same square 3-wide grid
-    // (profileMediaGridRows) regardless of which PostKindFilter sub-tab is
-    // selected, instead of each sub-tab's own specialized layout.
-    gridMode: Boolean = false,
-    // Feature request #7: experimental 3-column masonry (Settings toggle),
-    // read by the ALL/IMAGES branches below — see pinterestThreeColumns'
-    // doc comment in PreferencesManager.
-    pinterestColumns: Int = 2
+    // Adjustment #5: the interaction bar's Grid button is now a 3-way cycle
+    // remembered per (tab, sub-tab) — the caller (ProfileOverlay) owns that
+    // map and hands back just this tab's current mode for whichever
+    // PostKindFilter is asked about. See PostKindFilter.isMasonryKind()/
+    // isListKind() and postsLayoutRows below for what each index means.
+    gridModeFor: (PostKindFilter) -> Int = { 0 }
 ) {
     val tabState = state.tabStates[state.selectedTab]
 
-    when (state.selectedTab) {
-        // Profile "Posts" tab redesign: one tab, one fetch, one unfiltered
-        // items list — which of five completely different layouts renders
-        // is decided purely by the sub-filter row (PostKindFilter), same
-        // "pass the predicate in, keep indices pointing at the real list"
-        // contract as the old Media/Reposts/Likes grid used.
-        MainViewModel.ProfileTab.POSTS -> {
-            val allItems = tabState?.items ?: emptyList()
-            val loading = tabState?.loading == true
-            if (gridMode) {
-                profileMediaGridRows(
+    // Shared by both the Posts and Reposts/Likes branches below (feature
+    // request #5 made Reposts/Likes use the exact same sub-tabs and
+    // per-filter layouts Posts does) — picks one of five layouts per
+    // PostKindFilter, and within the ALL/IMAGES/TEXT_POSTS/HORIZONTAL_VIDEOS
+    // sub-tabs, one of three further layouts per that sub-tab's own
+    // remembered grid-mode index (adjustment #5).
+    fun postsLayoutRows(allItems: List<MediaItem>, loading: Boolean) {
+        when (postKindFilter) {
+            PostKindFilter.ALL, PostKindFilter.IMAGES -> when (gridModeFor(postKindFilter)) {
+                2 -> profileMediaGridRows(
                     items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
                     onTapItem = onTapItem, onLoadMore = onLoadMore, filter = { postKindFilter.matches(it) }
                 )
-            } else when (postKindFilter) {
-                PostKindFilter.ALL, PostKindFilter.IMAGES -> postsPinterestGridRows(
+                1 -> postsPinterestGridRows(
                     items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
                     onTapItem = onTapItem, onSeedSubImageIndex = onSeedSubImageIndex, onLoadMore = onLoadMore,
-                    filter = { postKindFilter.matches(it) }, columns = pinterestColumns
+                    filter = { postKindFilter.matches(it) }, columns = 3
                 )
-                PostKindFilter.TEXT_POSTS -> postsTextRows(
+                else -> postsPinterestGridRows(
+                    items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
+                    onTapItem = onTapItem, onSeedSubImageIndex = onSeedSubImageIndex, onLoadMore = onLoadMore,
+                    filter = { postKindFilter.matches(it) }, columns = 2
+                )
+            }
+            PostKindFilter.TEXT_POSTS -> when (gridModeFor(postKindFilter)) {
+                2 -> postsPinterestGridRows(
+                    items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
+                    onTapItem = onTapItem, onSeedSubImageIndex = onSeedSubImageIndex, onLoadMore = onLoadMore,
+                    filter = { postKindFilter.matches(it) }, columns = 3
+                )
+                1 -> postsPinterestGridRows(
+                    items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
+                    onTapItem = onTapItem, onSeedSubImageIndex = onSeedSubImageIndex, onLoadMore = onLoadMore,
+                    filter = { postKindFilter.matches(it) }, columns = 2
+                )
+                else -> postsTextRows(
                     items = allItems, loading = loading, liquidGlass = liquidGlass, profileTint = profileTint,
                     onTapItem = onTapItem, onLoadMore = onLoadMore,
                     filter = { postKindFilter.matches(it) }
                 )
-                PostKindFilter.HORIZONTAL_VIDEOS -> postsHorizontalVideoRows(
+            }
+            PostKindFilter.HORIZONTAL_VIDEOS -> when (gridModeFor(postKindFilter)) {
+                2 -> postsPinterestGridRows(
                     items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
-                    onTapItem = onTapItem, onLoadMore = onLoadMore,
-                    filter = { postKindFilter.matches(it) }
+                    onTapItem = onTapItem, onSeedSubImageIndex = onSeedSubImageIndex, onLoadMore = onLoadMore,
+                    filter = { postKindFilter.matches(it) }, columns = 3
                 )
-                PostKindFilter.VERTICAL_VIDEOS -> postsVerticalVideoGridRows(
+                1 -> postsPinterestGridRows(
+                    items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
+                    onTapItem = onTapItem, onSeedSubImageIndex = onSeedSubImageIndex, onLoadMore = onLoadMore,
+                    filter = { postKindFilter.matches(it) }, columns = 2
+                )
+                else -> postsHorizontalVideoRows(
                     items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
                     onTapItem = onTapItem, onLoadMore = onLoadMore,
                     filter = { postKindFilter.matches(it) }
                 )
             }
+            PostKindFilter.VERTICAL_VIDEOS -> postsVerticalVideoGridRows(
+                items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
+                onTapItem = onTapItem, onLoadMore = onLoadMore,
+                filter = { postKindFilter.matches(it) }
+            )
         }
-        // Feature request #5: Reposts and Likes now share the exact same
+    }
+
+    when (state.selectedTab) {
+        // Profile "Posts" tab redesign: one tab, one fetch, one unfiltered
+        // items list — which layout renders is decided purely by the
+        // sub-filter row (PostKindFilter) plus that sub-tab's own
+        // remembered grid-mode (postsLayoutRows above), same "pass the
+        // predicate in, keep indices pointing at the real list" contract
+        // as the old Media/Reposts/Likes grid used.
+        MainViewModel.ProfileTab.POSTS -> {
+            postsLayoutRows(tabState?.items ?: emptyList(), tabState?.loading == true)
+        }
+        // Feature request #5: Reposts and Likes share the exact same
         // sub-tabs (PostKindFilter) and the exact same per-filter layouts
         // as Posts, instead of their own separate MediaKindFilter + one
         // generic 3-wide square grid — same branch as POSTS above, just
-        // reading this tab's own tabState. Feature request #6's Grid
-        // toggle applies here too, same as Posts.
+        // reading this tab's own tabState.
         MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES -> {
-            val allItems = tabState?.items ?: emptyList()
-            val loading = tabState?.loading == true
-            if (gridMode) {
-                profileMediaGridRows(
-                    items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
-                    onTapItem = onTapItem, onLoadMore = onLoadMore, filter = { postKindFilter.matches(it) }
-                )
-            } else when (postKindFilter) {
-                PostKindFilter.ALL, PostKindFilter.IMAGES -> postsPinterestGridRows(
-                    items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
-                    onTapItem = onTapItem, onSeedSubImageIndex = onSeedSubImageIndex, onLoadMore = onLoadMore,
-                    filter = { postKindFilter.matches(it) }, columns = pinterestColumns
-                )
-                PostKindFilter.TEXT_POSTS -> postsTextRows(
-                    items = allItems, loading = loading, liquidGlass = liquidGlass, profileTint = profileTint,
-                    onTapItem = onTapItem, onLoadMore = onLoadMore,
-                    filter = { postKindFilter.matches(it) }
-                )
-                PostKindFilter.HORIZONTAL_VIDEOS -> postsHorizontalVideoRows(
-                    items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
-                    onTapItem = onTapItem, onLoadMore = onLoadMore,
-                    filter = { postKindFilter.matches(it) }
-                )
-                PostKindFilter.VERTICAL_VIDEOS -> postsVerticalVideoGridRows(
-                    items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
-                    onTapItem = onTapItem, onLoadMore = onLoadMore,
-                    filter = { postKindFilter.matches(it) }
-                )
-            }
+            postsLayoutRows(tabState?.items ?: emptyList(), tabState?.loading == true)
         }
         MainViewModel.ProfileTab.BLOGS -> {
             items(tabState?.blogs ?: emptyList(), key = { "blog_${it.uri}" }) { blog ->
@@ -1652,28 +1836,44 @@ private fun ThumbBox(item: MediaItem, tint: Color, shape: RoundedCornerShape, mo
             .tileRim(tint, shape, liquidGlass)
             .clickable(onClick = onClick)
     ) {
+        // Bug fix: the NSFW cover used to be a solid, already-opaque black
+        // box that was itself given a `.blur()` — blurring a flat single
+        // color box against its own square edge does essentially nothing
+        // visible (no edges inside it to soften), so it rendered as a plain
+        // grey/dim tint instead of an actual blur of the thumbnail
+        // underneath. The blur now applies to the thumbnail content itself
+        // (same technique MainFeedScreen's pager uses for its own NSFW/
+        // blocked blur), with a light scrim on top just to guarantee it
+        // reads as fully obscured even for a low-detail thumbnail a blur
+        // alone might not fully hide.
+        val blurNsfw = LocalHateFunBlurNsfw.current && item.isNsfwLabeled
+        val contentModifier = Modifier.fillMaxSize().let { if (blurNsfw) it.blur(20.dp) else it }
         if (item.isTextOnly) {
-            Box(Modifier.fillMaxSize().background(OledBlack).padding(10.dp), contentAlignment = Alignment.Center) {
+            Box(contentModifier.background(OledBlack).padding(10.dp), contentAlignment = Alignment.Center) {
                 Text(item.text, color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp, maxLines = 8, overflow = TextOverflow.Ellipsis)
             }
         } else {
             val thumb = item.mediaGroup.firstOrNull()?.thumbUrl?.ifBlank { item.mediaGroup.firstOrNull()?.mediaUrl }
                 ?: item.thumbUrl.ifBlank { item.mediaUrl }
             if (thumb.isNotBlank()) {
-                AsyncImage(model = thumb, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                AsyncImage(model = thumb, contentDescription = null, contentScale = ContentScale.Crop, modifier = contentModifier)
             }
         }
-        if (item.isVideo) {
-            Icon(Icons.Filled.PlayArrow, contentDescription = "Video", tint = Color.White.copy(0.9f),
-                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(playIconSize))
+        if (!blurNsfw) {
+            if (item.isVideo) {
+                Icon(Icons.Filled.PlayArrow, contentDescription = "Video", tint = Color.White.copy(0.9f),
+                    modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(playIconSize))
+            }
+            if (item.mediaGroup.size > 1) {
+                MultiImageCountBadge(count = item.mediaGroup.size, modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp))
+            }
         }
-        if (item.mediaGroup.size > 1) {
-            MultiImageCountBadge(count = item.mediaGroup.size, modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp))
-        }
-        // Feature request #8: rendered last so it sits on top of the play
-        // icon / multi-image badge too, not just the thumbnail.
-        if (LocalHateFunBlurNsfw.current && item.isNsfwLabeled) {
-            Box(Modifier.matchParentSize().blur(20.dp).background(Color.Black.copy(alpha = 0.45f)))
+        // Feature request #8: rendered last so it sits on top of everything
+        // else — a light scrim (not the whole effect on its own anymore,
+        // the blur above now does the actual obscuring) just to even out
+        // any thumbnail that's still readable through the blur alone.
+        if (blurNsfw) {
+            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.25f)))
         }
     }
 }
@@ -1696,20 +1896,26 @@ private fun SwipeableThumbBox(
             .tileRim(tint, shape, liquidGlass)
             .clickable { onSeedSubImageIndex(item.id, pagerState.currentPage); onClick() }
     ) {
-        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
+        // Bug fix: see ThumbBox's own comment above — blur the actual page
+        // content, not a solid box laid on top of it, or the effect reads
+        // as a flat grey dim instead of a real blur.
+        val blurNsfw = LocalHateFunBlurNsfw.current && item.isNsfwLabeled
+        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize().let { if (blurNsfw) it.blur(20.dp) else it }) { page ->
             val img = item.mediaGroup.getOrNull(page)
             val thumb = img?.thumbUrl?.ifBlank { img.mediaUrl }?.takeIf { it.isNotBlank() } ?: item.thumbUrl.ifBlank { item.mediaUrl }
             if (thumb.isNotBlank()) {
                 AsyncImage(model = thumb, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
             }
         }
-        if (item.isVideo) {
-            Icon(Icons.Filled.PlayArrow, contentDescription = "Video", tint = Color.White.copy(0.9f),
-                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(18.dp))
+        if (!blurNsfw) {
+            if (item.isVideo) {
+                Icon(Icons.Filled.PlayArrow, contentDescription = "Video", tint = Color.White.copy(0.9f),
+                    modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(18.dp))
+            }
+            MultiImageCountBadge(count = item.mediaGroup.size, currentPage = pagerState.currentPage, modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp))
         }
-        MultiImageCountBadge(count = item.mediaGroup.size, currentPage = pagerState.currentPage, modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp))
-        if (LocalHateFunBlurNsfw.current && item.isNsfwLabeled) {
-            Box(Modifier.matchParentSize().blur(20.dp).background(Color.Black.copy(alpha = 0.45f)))
+        if (blurNsfw) {
+            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.25f)))
         }
     }
 }
@@ -1787,7 +1993,6 @@ private fun LazyListScope.postsPinterestGridRows(
 
     val mediaShape = RoundedCornerShape(14.dp)
     val textShape = RoundedCornerShape(12.dp)
-    val cols = assignMasonryColumns(matched, columns)
 
     // Bug fix (feature request #3): this used to split `assigned` into
     // fixed-size chunks (18 items) and render each chunk as its own Row of
@@ -1820,10 +2025,43 @@ private fun LazyListScope.postsPinterestGridRows(
     // trade for a masonry that's actually gap-free. Pagination still kicks
     // in the same way, just via a single trailing LaunchedEffect instead
     // of one per chunk.
-    item(key = "pinterest_grid_${columns}_${matched.size}_${matched.firstOrNull()?.id ?: "empty"}") {
+    // Adjustment #3: performance — this item's key used to include
+    // `matched.size`. Since this whole masonry renders as a single
+    // LazyListScope item (see the big comment above), changing that item's
+    // key on every page load-more (matched.size grows each time) told
+    // Compose this was now a *completely different* item — which tears
+    // down and rebuilds this entire non-virtualized Row/Column tree from
+    // scratch, including every tile composed and measured again, rather
+    // than just adding the newly-appended tiles onto the existing columns.
+    // That's O(total tiles loaded so far) of redundant work repeated on
+    // *every single* load-more page, i.e. quadratic overall as someone
+    // scrolls further and further down a masonry tab. Dropping `size` from
+    // the key (keeping just `columns` and the first item's id, which is
+    // stable across a load-more and still changes when the underlying
+    // profile/tab/filter genuinely changes to something with a different
+    // leading post) means Compose treats this as the *same* item across a
+    // load-more, and the per-entry `key(e.item.id)` wrapping below still
+    // does its normal job of only composing the newly-appended tiles
+    // instead of every tile again — same visual result, without the
+    // rebuild.
+    item(key = "pinterest_grid_${columns}_${matched.firstOrNull()?.id ?: "empty"}") {
         if (!loading && items.isNotEmpty()) {
             LaunchedEffect(matched.size) { onLoadMore() }
         }
+        // Adjustment #3 (performance, continued): the column-balancing pass
+        // itself is an O(matched.size) walk, re-run from scratch here on
+        // every recomposition of this item — which, before this fix, meant
+        // every unrelated recomposition of the profile page (theme change,
+        // an unrelated state update bubbling through, scrolling, etc.), not
+        // just an actual change to the loaded/filtered post list. Wrapping
+        // it in `remember(matched)` means it's now only ever recomputed
+        // when the matched list itself actually changed (a new page
+        // loaded, or the sub-filter changed), which — combined with this
+        // item no longer being torn down and rebuilt wholesale on every
+        // load-more page (see the key change above) — is what actually
+        // fixes the reported slowdown as a Pinterest-layout tab accumulates
+        // more and more loaded posts.
+        val cols = remember(matched) { assignMasonryColumns(matched, columns) }
         Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             cols.forEach { colEntries ->
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -2099,7 +2337,14 @@ private fun TextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, o
             .clickable(onClick = onOpen)
             .padding(16.dp)
     ) {
-        Text(item.text, color = Color.White.copy(0.92f), fontSize = 14.sp, lineHeight = 19.sp)
+        val blurNsfw = LocalHateFunBlurNsfw.current && item.isNsfwLabeled
+        Text(
+            item.text, color = Color.White.copy(0.92f), fontSize = 14.sp, lineHeight = 19.sp,
+            modifier = if (blurNsfw) Modifier.blur(8.dp) else Modifier
+        )
+        if (blurNsfw) {
+            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.25f)))
+        }
     }
 }
 
@@ -2123,9 +2368,13 @@ private fun CompactTextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: C
             .clickable(onClick = onOpen)
             .padding(10.dp)
     ) {
-        Text(item.text, color = Color.White.copy(0.92f), fontSize = 9.sp, lineHeight = 12.sp)
-        if (LocalHateFunBlurNsfw.current && item.isNsfwLabeled) {
-            Box(Modifier.matchParentSize().blur(20.dp).background(Color.Black.copy(alpha = 0.45f)))
+        val blurNsfw = LocalHateFunBlurNsfw.current && item.isNsfwLabeled
+        Text(
+            item.text, color = Color.White.copy(0.92f), fontSize = 9.sp, lineHeight = 12.sp,
+            modifier = if (blurNsfw) Modifier.blur(6.dp) else Modifier
+        )
+        if (blurNsfw) {
+            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.25f)))
         }
     }
 }

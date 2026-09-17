@@ -13,6 +13,8 @@ import com.mediaviewer.repository.BlueskyRepository
 import com.mediaviewer.repository.E621Repository
 import com.mediaviewer.repository.StreamplaceRepository
 import com.mediaviewer.repository.WikipediaRepository
+import com.mediaviewer.ui.PostKindFilter
+import com.mediaviewer.ui.ReviewKindFilter
 import com.mediaviewer.tagging.TagDatabase
 import com.mediaviewer.tagging.TaggerModelManager
 import com.mediaviewer.tagging.TaggingRepository
@@ -493,6 +495,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // back to false, instead of trusting Compose to have kept it.
         val scrollIndex: Int = 0,
         val scrollOffset: Int = 0,
+        // Adjustment #7: the "tab remembering thing" below (see `parent`'s
+        // own doc comment) only ever restored which main ProfileTab was
+        // selected, not which PostKindFilter/ReviewKindFilter sub-tab was
+        // active within it — so popping back to a parent profile would
+        // land back on, say, Posts, but reset to the "All" sub-filter even
+        // if Text Posts had been selected. Moving these two out of
+        // ProfileOverlay's local Compose `remember` state and into the
+        // state object that `parent` snapshots/restores fixes that; see
+        // selectPostKindFilter()/selectReviewKindFilter() below for the
+        // setters, and selectProfileTab() for why switching *to* a new
+        // main tab still resets these back to ALL (unlike a parent-chain
+        // restore, which leaves them alone).
+        val postKindFilter: PostKindFilter = PostKindFilter.ALL,
+        val reviewKindFilter: ReviewKindFilter = ReviewKindFilter.ALL,
         // Item 17: if a profile is opened while another profile overlay is
         // already up (visible or hidden behind a post pager) — e.g. tapping
         // a different author's avatar from inside a post reached via a
@@ -1003,6 +1019,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      *  opening the normal DM thread overlay on it. */
     fun openDmWithProfile(author: AuthorInfo) {
         if (!_bskyLoggedIn.value) return
+        // Bug fix: this used to populate _dmThread without ever opening
+        // DmInboxOverlay (gated separately by _dmInboxOpen — see
+        // openDmInbox()) — MainActivity only renders that overlay when
+        // dmInboxOpen is true, so the profile page's DM button silently
+        // built a thread nobody could see. DmInboxOverlay itself already
+        // knows how to show a single open thread with no conversation list
+        // underneath it (that's what onSelectConvo &co. drive it into
+        // normally), so opening straight into that same state works here
+        // too.
+        _dmInboxOpen.value = true
         val existing = _dmConversations.value.firstOrNull { it.member.did == author.did }
         if (existing != null) { openDmThread(existing); return }
         _dmThread.value = DmThreadState(convo = DmConversation(convoId = "", member = author, lastSentByUsAt = "", lastActivityAt = ""), loading = true)
@@ -2329,9 +2355,31 @@ _bskyDid.value          = session.did
     fun selectProfileTab(tab: ProfileTab) {
         val cur = _profileOverlay.value ?: return
         if (tab !in cur.availableTabs) return
-        _profileOverlay.value = cur.copy(selectedTab = tab)
+        // Adjustment #7: switching to a *new* main tab still starts that
+        // tab's sub-filter fresh at ALL (matching the old always-reset
+        // behavior) — it's only the parent-chain restore path (going back
+        // to a profile that's already mid-browse) that's supposed to leave
+        // postKindFilter/reviewKindFilter alone; see ProfileOverlayState's
+        // own doc comment on these two fields.
+        _profileOverlay.value = cur.copy(selectedTab = tab, postKindFilter = PostKindFilter.ALL, reviewKindFilter = ReviewKindFilter.ALL)
         val state = cur.tabStates[tab]
         if (state == null || (!state.loaded && !state.loading)) loadProfileTab(tab, reset = true)
+    }
+
+    // Adjustment #7: see ProfileOverlayState.postKindFilter/reviewKindFilter's
+    // own doc comment — these used to live purely in ProfileOverlay's local
+    // Compose state (reset every time selectedTab changed), which meant a
+    // parent-chain restore (see ProfileOverlayState.parent) lost whichever
+    // sub-tab had been active. Promoting them into the state object that
+    // `parent` snapshots fixes that.
+    fun selectPostKindFilter(filter: PostKindFilter) {
+        val cur = _profileOverlay.value ?: return
+        _profileOverlay.value = cur.copy(postKindFilter = filter)
+    }
+
+    fun selectReviewKindFilter(filter: ReviewKindFilter) {
+        val cur = _profileOverlay.value ?: return
+        _profileOverlay.value = cur.copy(reviewKindFilter = filter)
     }
 
     fun loadMoreProfileTab() {
@@ -2371,7 +2419,26 @@ _bskyDid.value          = session.did
             val accumulated = mutableListOf<MediaItem>()
             var authRetried = false
             var succeeded = false
-            val maxAutoPages = 1
+            // Bug fix: Reposts and Likes both filter a raw underlying feed
+            // page down to just the items that actually qualify — reposts
+            // out of a mixed posts+reposts author feed, or hidden/blocked
+            // authors stripped back out — client-side, *after* fetching it
+            // (see getProfileReposts/getProfileLikes above). It's entirely
+            // normal for one raw page of 50 to contain zero reposts if the
+            // account mostly just posts, which used to mean this loop (with
+            // maxAutoPages pinned at 1) returned an "empty but succeeded"
+            // page: accumulated stayed empty, the cursor still advanced,
+            // and nothing was appended for the grid to show — so scrolling
+            // to the bottom of a Reposts/Likes tab that had gone quiet for
+            // a stretch just silently stopped loading more instead of
+            // paging through to the next repost. Letting this loop keep
+            // pulling further raw pages (bounded, so an account with
+            // literally zero reposts/likes ever doesn't spin forever)
+            // until it actually finds something — or runs out of pages —
+            // fixes that; POSTS essentially never needs more than the one
+            // page this bumped-up cap still allows for it, since it's rare
+            // for a raw page to contain zero own-posts.
+            val maxAutoPages = 6
             var pagesFetched = 0
             while (pagesFetched < maxAutoPages) {
                 pagesFetched++
