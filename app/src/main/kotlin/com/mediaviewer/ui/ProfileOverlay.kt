@@ -625,46 +625,60 @@ fun ProfileOverlay(
     val backdrop = if (liquidGlass) remember(backdropLayer) { GlassBackdrop(backdropLayer) { backdropOrigin } } else null
 
     CompositionLocalProvider(LocalHateFunBlurNsfw provides hateFunBlurNsfw) {
-    Box(
-        Modifier
-            .fillMaxSize()
-            .onGloballyPositioned { backdropOrigin = it.positionInRoot() }
-            .drawWithContent {
-                if (liquidGlass) backdropLayer.record { this@drawWithContent.drawContent() }
-                drawContent()
-            }
-            .background(postBackgroundBrush(blended))
-            // Pinch-out detection: watched passively (PointerEventPass.Initial,
-            // never consumed) purely to peek at 2-finger spread without
-            // interfering with the LazyColumn's own single-finger scroll
-            // handling below. One-shot per gesture, same "compare against the
-            // spread when the 2nd finger first touched down" approach as the
-            // pager's existing pinch gestures in MainFeedScreen.
-            .pointerInput(Unit) {
-                awaitEachGesture {
-                    var startDist = -1f
-                    var fired = false
-                    while (true) {
-                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                        val pressed = event.changes.filter { it.pressed }
-                        if (pressed.size < 2) {
-                            if (pressed.isEmpty()) break
-                            startDist = -1f; fired = false
-                            continue
-                        }
-                        val dist = (pressed[0].position - pressed[1].position).getDistance()
-                        if (startDist < 0f) {
-                            startDist = dist
-                        } else if (!fired && dist / startDist > 1.4f) {
-                            fired = true
-                            // Bug fix: capture scroll position before hiding.
-                            onSaveScroll(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
-                            onPinchOut()
+    Box(Modifier.fillMaxSize()) {
+        // Bug fix: this recording box must wrap *only* the scrollable
+        // content (the LazyColumn) — not the interaction bar or anything
+        // else on this page that itself reads [backdrop] to render. The
+        // very first version of this wrapped the entire page, which made
+        // recording it also draw (and thus re-enter/read) the interaction
+        // bar's own LiquidGlassSurface mid-recording — a circular draw
+        // that crashed on every profile open. TitleDetailOverlay's own
+        // bottom-bar backdrop (its "fixed background" Box, further down in
+        // this file) avoids exactly this by keeping its recorded box
+        // scoped to just the banner, not the whole page; this keeps the
+        // same separation while still recording the *real* scrolled
+        // content instead of a fixed banner, since nothing that reads
+        // [backdrop] lives inside this particular Box.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .onGloballyPositioned { backdropOrigin = it.positionInRoot() }
+                .drawWithContent {
+                    if (liquidGlass) backdropLayer.record { this@drawWithContent.drawContent() }
+                    drawContent()
+                }
+                .background(postBackgroundBrush(blended))
+                // Pinch-out detection: watched passively (PointerEventPass.Initial,
+                // never consumed) purely to peek at 2-finger spread without
+                // interfering with the LazyColumn's own single-finger scroll
+                // handling below. One-shot per gesture, same "compare against the
+                // spread when the 2nd finger first touched down" approach as the
+                // pager's existing pinch gestures in MainFeedScreen.
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        var startDist = -1f
+                        var fired = false
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val pressed = event.changes.filter { it.pressed }
+                            if (pressed.size < 2) {
+                                if (pressed.isEmpty()) break
+                                startDist = -1f; fired = false
+                                continue
+                            }
+                            val dist = (pressed[0].position - pressed[1].position).getDistance()
+                            if (startDist < 0f) {
+                                startDist = dist
+                            } else if (!fired && dist / startDist > 1.4f) {
+                                fired = true
+                                // Bug fix: capture scroll position before hiding.
+                                onSaveScroll(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+                                onPinchOut()
+                            }
                         }
                     }
                 }
-            }
-    ) {
+        ) {
         LazyColumn(
             state = listState,
             // Bug fix (per feedback): the last item in a tab (e.g. the
@@ -832,6 +846,7 @@ fun ProfileOverlay(
                 gridModeFor = { filter -> gridModeFor(state.selectedTab, filter) }
             )
         }
+        } // close the backdrop-recording Box (LazyColumn only) — see its own doc comment above
 
         if (!state.loadingProfile && profile == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
