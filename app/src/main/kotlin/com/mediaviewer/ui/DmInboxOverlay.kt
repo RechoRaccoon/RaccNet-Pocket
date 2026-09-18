@@ -38,6 +38,7 @@ import com.mediaviewer.model.DmConversation
 import com.mediaviewer.model.DmEmbeddedPost
 import com.mediaviewer.ui.theme.DimGray
 import com.mediaviewer.ui.theme.OledBlack
+import com.mediaviewer.util.rememberHapticTap
 import com.mediaviewer.viewmodel.MainViewModel
 
 /**
@@ -70,6 +71,7 @@ fun DmInboxOverlay(
     // every post shared in this conversation.
     onOpenSharedPostsFeed: () -> Unit = {}
 ) {
+    val tap = rememberHapticTap()
     // Item 8: background/chrome now reflect the logged-in user's own
     // profile color, the same pattern the Hub uses (see SettingsSheet's
     // `dominantColor` shadow) — instead of the flat NeutralGlassTint this
@@ -133,7 +135,7 @@ fun DmInboxOverlay(
                 Box(
                     Modifier.size(32.dp)
                         .then(if (liquidGlass) Modifier.glassPanel(true, shape = shape, tint = headerTint) else Modifier.clip(shape).background(Color.White.copy(0.14f)))
-                        .clickable(onClick = if (thread != null) onCloseThread else onClose),
+                        .clickable(onClick = { tap(); if (thread != null) onCloseThread() else onClose() }),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
@@ -145,9 +147,9 @@ fun DmInboxOverlay(
                 if (thread != null) {
                     if (thread.convo.member.avatarUrl != null) {
                         AsyncImage(model = thread.convo.member.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                            modifier = Modifier.size(28.dp).clip(CircleShape).clickable { onTapAuthor(thread.convo.member) })
+                            modifier = Modifier.size(28.dp).clip(CircleShape).clickable { tap(); onTapAuthor(thread.convo.member) })
                     }
-                    Column(Modifier.clickable { onTapAuthor(thread.convo.member) }) {
+                    Column(Modifier.clickable { tap(); onTapAuthor(thread.convo.member) }) {
                         Text(thread.convo.member.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text("@${thread.convo.member.handle}", color = DimGray, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -182,6 +184,7 @@ private fun DmConversationPicker(
     tint: Color = NeutralGlassTint,
     onSelectConvo: (DmConversation) -> Unit
 ) {
+    val tap = rememberHapticTap()
     // Only accounts we actually have history with — a mutual with no convo yet
     // has nothing to show in a linear-history view.
     val withHistory = remember(conversations) { conversations.filter { it.convoId.isNotBlank() } }
@@ -205,7 +208,7 @@ private fun DmConversationPicker(
                         Row(
                             Modifier.fillMaxWidth()
                                 .then(if (liquidGlass) Modifier.glassPanel(true, shape = shape, tint = tint) else Modifier.clip(shape).background(Color.White.copy(0.06f)))
-                                .clickable { onSelectConvo(convo) }
+                                .clickable { tap(); onSelectConvo(convo) }
                                 .padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -242,6 +245,7 @@ private fun DmThreadView(
     onLoadMoreMessages: () -> Unit,
     onOpenSharedPostsFeed: () -> Unit
 ) {
+    val tap = rememberHapticTap()
     var text by remember { mutableStateOf("") }
     val myDid = thread.messages.firstOrNull { it.sender?.did != thread.convo.member.did }?.sender?.did
 
@@ -383,7 +387,7 @@ private fun DmThreadView(
                 }
             }
             val sendModifier = Modifier.size(46.dp).clickable(enabled = text.isNotBlank() && !thread.sending) {
-                onSendReply(text.trim()); text = ""
+                tap(); onSendReply(text.trim()); text = ""
             }
             if (liquidGlass) {
                 LiquidGlassSurface(sendModifier, shape = sendShape, tint = profileTint, backdrop = backdrop) { SendButtonContent() }
@@ -399,6 +403,7 @@ private fun DmBubble(
     msg: BskyMessageView, isMine: Boolean, tint: Color, liquidGlass: Boolean, embedded: DmEmbeddedPost?,
     backdrop: GlassBackdrop?, onOpenSharedPostsFeed: () -> Unit
 ) {
+    val tap = rememberHapticTap()
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isMine) Arrangement.End else Arrangement.Start) {
         val shape = RoundedCornerShape(
             topStart = 16.dp, topEnd = 16.dp,
@@ -428,7 +433,7 @@ private fun DmBubble(
                 Column(
                     Modifier.fillMaxWidth().clip(innerShape)
                         .background(Color.Black.copy(0.22f))
-                        .clickable(onClick = onOpenSharedPostsFeed)
+                        .clickable(onClick = { tap(); onOpenSharedPostsFeed() })
                         .padding(10.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {

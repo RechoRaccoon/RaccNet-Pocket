@@ -72,8 +72,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalUriHandler
-import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -104,6 +102,8 @@ import com.mediaviewer.model.RockskyTrack
 import com.mediaviewer.model.TitleSearchResult
 import com.mediaviewer.ui.theme.DimGray
 import com.mediaviewer.ui.theme.OledBlack
+import com.mediaviewer.util.formatRelativeTime
+import com.mediaviewer.util.rememberHapticTap
 import com.mediaviewer.viewmodel.MainViewModel
 import kotlinx.coroutines.launch
 
@@ -295,6 +295,8 @@ private fun <T> ProfileSubFilterRow(
     options: List<T>, selected: T, liquidGlass: Boolean, tint: Color, labelOf: (T) -> String, onSelect: (T) -> Unit,
     trailing: (@Composable () -> Unit)? = null
 ) {
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -312,7 +314,7 @@ private fun <T> ProfileSubFilterRow(
                             if (liquidGlass) Modifier.glassPanel(true, tint = if (isSelected) tint else tint.copy(alpha = 0.4f), shape = shape)
                             else Modifier.clip(shape).background(if (isSelected) Color.White.copy(0.15f) else Color.White.copy(0.06f))
                         )
-                        .clickable { onSelect(option) }
+                        .clickable { tap(); onSelect(option) }
                         .padding(horizontal = 9.dp, vertical = 4.dp)
                 ) {
                     Text(labelOf(option), color = if (isSelected) Color.White else DimGray, fontSize = 11.sp,
@@ -854,7 +856,7 @@ fun ProfileOverlay(
         // content padding above" pattern as TitleDetailOverlay's own bottom
         // bar). Hidden while loading (no profile yet to act on).
         if (profile != null) {
-            Box(Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 8.dp)) {
+            Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 8.dp)) {
                 ProfileInteractionBar(
                     liquidGlass = liquidGlass, tint = blended, backdrop = backdrop,
                     gridMode = gridModeFor(state.selectedTab, postKindFilter),
@@ -968,8 +970,9 @@ private fun ProfileInteractionBar(
     val shape = RoundedCornerShape(26.dp)
     val iconSize = 20.dp
     // Item 8: haptic tap on the grid-layout swap button specifically.
-    val haptic = LocalHapticFeedback.current
-    val onGridHaptic = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onGrid() }
+    // Fix 9: the shared light-tap helper replaces the old LongPress here.
+    val tap = rememberHapticTap()
+    val onGridHaptic = { tap(); onGrid() }
     // Item 4: PlaylistAdd is a thin, mostly-negative-space glyph, so at the
     // same 20dp/44dp box every other icon here uses it reads visually tiny
     // next to Grid/Bluesky/DM. Its own box (and the glyph inside it) is
@@ -997,9 +1000,9 @@ private fun ProfileInteractionBar(
     @Composable
     fun BarContent() {
         Row(
-            Modifier.fillMaxHeight().padding(horizontal = 6.dp),
+            Modifier.fillMaxSize().padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp)
+            horizontalArrangement = Arrangement.SpaceEvenly
         ) {
             if (showGrid) {
                 IconButton(onClick = onGridHaptic) {
@@ -1013,14 +1016,14 @@ private fun ProfileInteractionBar(
                     }
                 }
             }
-            BigIconButton(onClick = onAddTo) {
+            BigIconButton(onClick = { tap(); onAddTo() }) {
                 Icon(Icons.Filled.PlaylistAdd, contentDescription = "Add To", tint = Color.White, modifier = Modifier.size(addToIconSize))
             }
-            IconButton(onClick = onViewOnBluesky) {
+            IconButton(onClick = { tap(); onViewOnBluesky() }) {
                 BlueskyLogoIcon(Modifier.size(iconSize), tint = Color.White)
             }
             if (showDm) {
-                IconButton(onClick = onDm) {
+                IconButton(onClick = { tap(); onDm() }) {
                     Icon(Icons.Default.Chat, contentDescription = "DM", tint = Color.White, modifier = Modifier.size(iconSize))
                 }
             }
@@ -1031,18 +1034,26 @@ private fun ProfileInteractionBar(
     // ActionRow does (60dp glass / 52dp flat) — this bar used to stay 60dp
     // in both modes, so it only matched the feed bar's size when glass was
     // actually on, and read visibly taller than the feed bar otherwise.
+    // Fix 6: the bar now mirrors ActionRow's own outer modifier —
+    // fillMaxWidth().windowInsetsPadding(navigationBars).height(...) — and
+    // the glass/flat pill inside carries the same 12dp/8dp internal
+    // padding the feed's bar does, so the visible pill is 44dp/36dp tall
+    // in both places.
     val barModifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)
-        .height(if (liquidGlass) 60.dp else 52.dp).wrapContentWidth()
+        .height(if (liquidGlass) 60.dp else 52.dp).fillMaxWidth()
+    val pillModifier = barModifier.padding(horizontal = 12.dp, vertical = 8.dp)
     if (liquidGlass) {
-        LiquidGlassSurface(modifier = barModifier, shape = shape, tint = tint, backdrop = backdrop) { BarContent() }
+        LiquidGlassSurface(modifier = pillModifier, shape = shape, tint = tint, backdrop = backdrop) { BarContent() }
     } else {
-        Box(barModifier.clip(shape).background(Color.Black.copy(alpha = 0.7f))) { BarContent() }
+        Box(pillModifier.clip(shape).background(Color.Black.copy(alpha = 0.7f))) { BarContent() }
     }
 }
 
 @Composable
 private fun ScrollToTopBubble(liquidGlass: Boolean, tint: Color, onClick: () -> Unit) {
     val shape = CircleShape
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     Box(
         Modifier
             .size(38.dp)
@@ -1050,7 +1061,7 @@ private fun ScrollToTopBubble(liquidGlass: Boolean, tint: Color, onClick: () -> 
                 if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
                 else Modifier.clip(shape).background(Color.Black.copy(0.6f))
             )
-            .clickable(onClick = onClick),
+            .clickable(onClick = { tap(); onClick() }),
         contentAlignment = Alignment.Center
     ) {
         Icon(Icons.Filled.ArrowUpward, contentDescription = "Scroll to top", tint = Color.White, modifier = Modifier.size(18.dp))
@@ -1356,9 +1367,11 @@ private fun formatCount(n: Int): String = when {
 @Composable
 private fun CloseGlassBubble(liquidGlass: Boolean, tint: Color, onClick: () -> Unit, backdrop: GlassBackdrop? = null) {
     val shape = CircleShape
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     if (liquidGlass) {
         LiquidGlassSurface(
-            modifier = Modifier.size(30.dp).clickable(onClick = onClick),
+            modifier = Modifier.size(30.dp).clickable(onClick = { tap(); onClick() }),
             shape = shape, tint = tint, backdrop = backdrop
         ) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -1367,7 +1380,7 @@ private fun CloseGlassBubble(liquidGlass: Boolean, tint: Color, onClick: () -> U
         }
     } else {
         Box(
-            Modifier.size(30.dp).clip(shape).background(Color.White.copy(0.14f)).clickable(onClick = onClick),
+            Modifier.size(30.dp).clip(shape).background(Color.White.copy(0.14f)).clickable(onClick = { tap(); onClick() }),
             contentAlignment = Alignment.Center
         ) {
             Icon(Icons.Default.Close, contentDescription = "Close profile", tint = Color.White, modifier = Modifier.size(16.dp))
@@ -1422,11 +1435,20 @@ private fun ProfileGlassPill(
     // This is opt-in (only when a caller passes a non-null value) so every
     // other existing caller keeps its old shrink-to-fit-content sizing
     // unchanged.
-    textAlign: TextAlign? = null
+    textAlign: TextAlign? = null,
+    // Item 9 (scoped centering): LiquidGlassSurface's content now defaults
+    // to TopStart again — callers that stretch this pill taller than its
+    // own text (the review-page pills sized to fillMaxHeight to match a
+    // sibling row's height) pass centerContent = true so their text sits
+    // in the pill's middle instead of pinned to its top. The same
+    // conditional applies to the non-glass fallback Box so both modes
+    // read identically.
+    centerContent: Boolean = false
 ) {
     val shape = RoundedCornerShape(14.dp)
     val padH = if (compact) 8.dp else 12.dp
     val padV = if (compact) 3.dp else 6.dp
+    val contentAlignment = if (centerContent) Alignment.Center else Alignment.TopStart
     @Composable
     fun Label() {
         Text(text, color = Color.White, fontSize = fontSize, fontWeight = if (bold) FontWeight.Bold else FontWeight.Medium,
@@ -1435,13 +1457,13 @@ private fun ProfileGlassPill(
             modifier = if (textAlign != null) Modifier.fillMaxWidth() else Modifier)
     }
     if (liquidGlass) {
-        LiquidGlassSurface(modifier = modifier, shape = shape, tint = tint, backdrop = backdrop) {
+        LiquidGlassSurface(modifier = modifier, shape = shape, tint = tint, backdrop = backdrop, contentAlignment = contentAlignment) {
             Box(Modifier.padding(horizontal = padH, vertical = padV), contentAlignment = Alignment.Center) { Label() }
         }
     } else {
         Box(
             modifier.clip(shape).background(Color.Black.copy(0.55f)).padding(horizontal = padH, vertical = padV),
-            contentAlignment = Alignment.Center
+            contentAlignment = contentAlignment
         ) { Label() }
     }
 }
@@ -1451,6 +1473,8 @@ private fun ProfileTabsRow(
     tabs: List<MainViewModel.ProfileTab>, selected: MainViewModel.ProfileTab, liquidGlass: Boolean, tint: Color,
     onSelect: (MainViewModel.ProfileTab) -> Unit
 ) {
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     Row(
         Modifier
             .fillMaxWidth()
@@ -1467,7 +1491,7 @@ private fun ProfileTabsRow(
                         if (liquidGlass) Modifier.glassPanel(true, tint = if (isSelected) tint else tint.copy(alpha = 0.4f), shape = shape)
                         else Modifier.clip(shape).background(if (isSelected) Color.White.copy(0.15f) else Color.White.copy(0.06f))
                     )
-                    .clickable { onSelect(tab) }
+                    .clickable { tap(); onSelect(tab) }
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
                 Text(tab.label(), color = if (isSelected) Color.White else DimGray, fontSize = 13.sp,
@@ -1528,6 +1552,8 @@ private fun IconTabBubble(
     icon: androidx.compose.ui.graphics.vector.ImageVector, contentDescription: String,
     isSelected: Boolean, liquidGlass: Boolean, tint: Color, size: Dp = 34.dp, onClick: () -> Unit
 ) {
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     Box(
         Modifier
             .size(size)
@@ -1535,7 +1561,7 @@ private fun IconTabBubble(
                 if (liquidGlass) Modifier.glassPanel(true, tint = if (isSelected) tint else tint.copy(alpha = 0.4f), shape = CircleShape)
                 else Modifier.clip(CircleShape).background(if (isSelected) Color.White.copy(0.18f) else Color.White.copy(0.07f))
             )
-            .clickable(onClick = onClick),
+            .clickable(onClick = { tap(); onClick() }),
         contentAlignment = Alignment.Center
     ) {
         Icon(icon, contentDescription = contentDescription, tint = if (isSelected) Color.White else DimGray, modifier = Modifier.size(16.dp))
@@ -1891,6 +1917,8 @@ private fun <T> emptyAfterFilterLoadMore(
 
 @Composable
 private fun ThumbBox(item: MediaItem, tint: Color, shape: RoundedCornerShape, modifier: Modifier, liquidGlass: Boolean, playIconSize: Dp = 18.dp, onClick: () -> Unit) {
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     Box(
         modifier
             .clip(shape)
@@ -1900,7 +1928,7 @@ private fun ThumbBox(item: MediaItem, tint: Color, shape: RoundedCornerShape, mo
             // empty void with just an outline around it.
             .background(Color.White.copy(alpha = 0.05f))
             .tileRim(tint, shape, liquidGlass)
-            .clickable(onClick = onClick)
+            .clickable(onClick = { tap(); onClick() })
     ) {
         // Bug fix: the NSFW cover used to be a solid, already-opaque black
         // box that was itself given a `.blur()` — blurring a flat single
@@ -1955,12 +1983,14 @@ private fun SwipeableThumbBox(
     onSeedSubImageIndex: (String, Int) -> Unit, onClick: () -> Unit
 ) {
     val pagerState = rememberPagerState(pageCount = { item.mediaGroup.size })
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     Box(
         modifier
             .clip(shape)
             .background(Color.White.copy(alpha = 0.05f))
             .tileRim(tint, shape, liquidGlass)
-            .clickable { onSeedSubImageIndex(item.id, pagerState.currentPage); onClick() }
+            .clickable { tap(); onSeedSubImageIndex(item.id, pagerState.currentPage); onClick() }
     ) {
         // Bug fix: see ThumbBox's own comment above — blur the actual page
         // content, not a solid box laid on top of it, or the effect reads
@@ -2200,6 +2230,8 @@ private fun LazyListScope.postsHorizontalVideoRows(
     val shape = RoundedCornerShape(10.dp)
 
     itemsIndexed(matched, key = { i, item -> "hvideo_${item.id}_$i" }) { localIndex, item ->
+        // Fix 9: the shared light tap, via the shared helper.
+        val tap = rememberHapticTap()
         if (!loading && items.isNotEmpty() && localIndex >= matched.size - 4) {
             LaunchedEffect(localIndex, matched.size) { onLoadMore() }
         }
@@ -2207,7 +2239,7 @@ private fun LazyListScope.postsHorizontalVideoRows(
         // of every row stacked up to a 16.dp gap between videos — much more
         // than the thin one-line dividers a real YouTube-style list uses.
         Row(
-            Modifier.fillMaxWidth().clickable { onTapItem(matched, localIndex) }.padding(horizontal = 10.dp, vertical = 4.dp),
+            Modifier.fillMaxWidth().clickable { tap(); onTapItem(matched, localIndex) }.padding(horizontal = 10.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             ThumbBox(
@@ -2340,6 +2372,13 @@ private fun MusicHistoryRow(track: RockskyTrack, liquidGlass: Boolean, tint: Col
             Text(track.title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(track.artist, color = DimGray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
         }
+        // Fix 4: relative "played X ago" stamp, right-aligned at the row's
+        // end (renders as nothing for live now-playing entries, which
+        // leave playedAt blank).
+        Text(
+            formatRelativeTime(track.playedAt), color = DimGray, fontSize = 12.sp, maxLines = 1,
+            modifier = Modifier.align(Alignment.CenterVertically)
+        )
     }
 }
 
@@ -2386,6 +2425,8 @@ private fun BacklogCard(item: PopfeedBacklogItem, liquidGlass: Boolean, onOpenTi
 @Composable
 fun TitlePosterCard(title: String, imageUrl: String?, liquidGlass: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val tint = rememberDominantColor(imageUrl ?: "")
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     val shape = RoundedCornerShape(14.dp)
     val imageShape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp)
     Column(
@@ -2394,7 +2435,7 @@ fun TitlePosterCard(title: String, imageUrl: String?, liquidGlass: Boolean, onCl
                 if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
                 else Modifier.clip(shape).background(Color.White.copy(0.06f))
             )
-            .clickable(onClick = onClick)
+            .clickable(onClick = { tap(); onClick() })
     ) {
         Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f)) {
             if (imageUrl != null) {
@@ -2448,6 +2489,8 @@ private fun ShrinkToFitText(text: String, baseFontSize: androidx.compose.ui.unit
 @Composable
 private fun TextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, onOpen: () -> Unit, modifier: Modifier = Modifier) {
     val shape = RoundedCornerShape(16.dp)
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     Box(
         modifier
             .fillMaxWidth()
@@ -2455,7 +2498,7 @@ private fun TextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, o
                 if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
                 else Modifier.clip(shape).background(Color.White.copy(0.06f))
             )
-            .clickable(onClick = onOpen)
+            .clickable(onClick = { tap(); onOpen() })
             .padding(16.dp)
     ) {
         val blurNsfw = LocalHateFunBlurNsfw.current && item.isNsfwLabeled
@@ -2479,6 +2522,8 @@ private fun TextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, o
  *  column's worth instead. */
 @Composable
 private fun CompactTextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, shape: RoundedCornerShape, onOpen: () -> Unit) {
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     Box(
         Modifier
             .fillMaxWidth()
@@ -2486,7 +2531,7 @@ private fun CompactTextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: C
                 if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
                 else Modifier.clip(shape).background(Color.White.copy(0.06f))
             )
-            .clickable(onClick = onOpen)
+            .clickable(onClick = { tap(); onOpen() })
             .padding(10.dp)
     ) {
         val blurNsfw = LocalHateFunBlurNsfw.current && item.isNsfwLabeled
@@ -2539,6 +2584,8 @@ fun BlogBubble(
 ) {
     val shape = RoundedCornerShape(16.dp)
     val dateText = formatCreatedAt(blog.createdAt)
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     val tint = rememberDominantColor(blog.thumbnailUrl ?: fallbackAvatarUrl ?: "")
     // Item 5: the Hub passes fixedHeight, which also means smaller/tighter
     // pills than the profile's full-size ones — same visual language, just
@@ -2568,7 +2615,7 @@ fun BlogBubble(
             .then(if (fixedHeight != null) Modifier.height(fixedHeight) else Modifier)
             .clip(shape)
             .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.background(Color.White.copy(0.06f)))
-            .clickable { onOpenBlog(blog) }
+            .clickable { tap(); onOpenBlog(blog) }
     ) {
         // Item 2: title pill can grow to use the card's actual measured
         // width (minus the row's own edge padding) instead of a small
@@ -2771,6 +2818,8 @@ fun BlogBubble(
 private fun VodBubble(vod: com.mediaviewer.model.StreamplaceVideoView, liquidGlass: Boolean, tint: Color, modifier: Modifier = Modifier) {
     val shape = RoundedCornerShape(16.dp)
     val context = androidx.compose.ui.platform.LocalContext.current
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     Row(
         modifier
             .fillMaxWidth()
@@ -2779,6 +2828,7 @@ private fun VodBubble(vod: com.mediaviewer.model.StreamplaceVideoView, liquidGla
                 else Modifier.clip(shape).background(Color.White.copy(0.06f))
             )
             .clickable {
+                tap()
                 val webUrl = "https://stream.place/${vod.authorHandle}/vod/${vod.uri.substringAfterLast('/')}"
                 runCatching {
                     context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(webUrl)))
@@ -3073,6 +3123,8 @@ private fun LeafletBlocksContent(blocks: List<LeafletBlock>, liquidGlass: Boolea
 @Composable
 private fun ReviewRow(review: PopfeedReview, liquidGlass: Boolean, onOpenReview: (PopfeedReview) -> Unit, modifier: Modifier = Modifier) {
     val shape = RoundedCornerShape(16.dp)
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     // Rims/backgrounds reflect the thumbnail's own colors, not a fixed neutral
     // tint — same idea as everywhere else these bubbles pull from a source
     // image, just per-review instead of per-profile.
@@ -3085,7 +3137,7 @@ private fun ReviewRow(review: PopfeedReview, liquidGlass: Boolean, onOpenReview:
                 if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
                 else Modifier.clip(shape).background(Color.White.copy(0.06f))
             )
-            .clickable { onOpenReview(review) }
+            .clickable { tap(); onOpenReview(review) }
     ) {
         val imgShape = RoundedCornerShape(topStart = 16.dp, bottomStart = 16.dp)
         Box(
@@ -3100,9 +3152,9 @@ private fun ReviewRow(review: PopfeedReview, liquidGlass: Boolean, onOpenReview:
         Column(Modifier.fillMaxHeight().weight(1f).padding(10.dp)) {
             Row(Modifier.height(IntrinsicSize.Min), verticalAlignment = Alignment.CenterVertically) {
                 ProfileGlassPill(text = review.mediaTitle, liquidGlass = liquidGlass, tint = tint, fontSize = 13.sp, bold = true,
-                    modifier = Modifier.weight(1f).fillMaxHeight())
+                    centerContent = true, modifier = Modifier.weight(1f).fillMaxHeight())
                 Spacer(Modifier.width(6.dp))
-                StarRatingPill(rating = review.ratingOutOf5, liquidGlass = liquidGlass, tint = tint, modifier = Modifier.fillMaxHeight())
+                StarRatingPill(rating = review.ratingOutOf5, liquidGlass = liquidGlass, tint = tint, centerContent = true, modifier = Modifier.fillMaxHeight())
             }
             Spacer(Modifier.height(6.dp))
             Text(
@@ -3126,7 +3178,15 @@ fun StarRatingPill(
     // value) rather than a global default, so every other page that uses
     // this pill (profile Reviews tab rows, the standalone review popup,
     // the Hub's mutual review cards) keeps its original, unchanged size.
-    starSize: Dp = 11.dp
+    starSize: Dp = 11.dp,
+    // Item 9 (scoped centering): LiquidGlassSurface's content now defaults
+    // to TopStart again — callers that stretch this pill taller than its
+    // own stars (the review-page pills sized to fillMaxHeight to match a
+    // sibling row's height) pass centerContent = true so the stars sit in
+    // the pill's middle instead of pinned to its top. The same conditional
+    // applies to the non-glass fallback Box so both modes read
+    // identically.
+    centerContent: Boolean = false
 ) {
     // Bug fix: this used to have its own bespoke shape (10.dp corner radius)
     // and padding (6.dp/3.dp) — visibly smaller/differently-rounded than
@@ -3167,9 +3227,15 @@ fun StarRatingPill(
     }
     }
     if (liquidGlass) {
-        LiquidGlassSurface(modifier = modifier, shape = shape, tint = tint, backdrop = backdrop) { Stars() }
+        LiquidGlassSurface(
+            modifier = modifier, shape = shape, tint = tint, backdrop = backdrop,
+            contentAlignment = if (centerContent) Alignment.Center else Alignment.TopStart
+        ) { Stars() }
     } else {
-        Box(modifier.clip(shape).background(Color.Black.copy(0.55f))) { Stars() }
+        Box(
+            modifier.clip(shape).background(Color.Black.copy(0.55f)),
+            contentAlignment = if (centerContent) Alignment.Center else Alignment.TopStart
+        ) { Stars() }
     }
 }
 
@@ -3199,9 +3265,9 @@ private fun ReviewDetailOverlay(review: PopfeedReview, author: AuthorInfo, liqui
                 // Title bubble and star-rating bubble — same row, same height.
                 Row(Modifier.fillMaxHeight(), verticalAlignment = Alignment.CenterVertically) {
                     ProfileGlassPill(text = review.mediaTitle, liquidGlass = liquidGlass, tint = tint, fontSize = 15.sp, bold = true,
-                        modifier = Modifier.fillMaxHeight())
+                        centerContent = true, modifier = Modifier.fillMaxHeight())
                     Spacer(Modifier.width(8.dp))
-                    StarRatingPill(rating = review.ratingOutOf5, liquidGlass = liquidGlass, tint = tint, modifier = Modifier.fillMaxHeight())
+                    StarRatingPill(rating = review.ratingOutOf5, liquidGlass = liquidGlass, tint = tint, centerContent = true, modifier = Modifier.fillMaxHeight())
                 }
             }
             ByAndDateRow(
@@ -3511,7 +3577,7 @@ fun TitleDetailOverlay(
                             ProfileGlassPill(
                                 text = releaseDateLabel(title.releaseDate) ?: "Placeholder",
                                 liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true,
-                                backdrop = backdrop, modifier = Modifier.fillMaxHeight()
+                                backdrop = backdrop, centerContent = true, modifier = Modifier.fillMaxHeight()
                             )
                             Spacer(Modifier.weight(1f))
                             // Item 4: now the same shape/padding/backdrop as
@@ -3531,7 +3597,7 @@ fun TitleDetailOverlay(
                             // on this page.
                             StarRatingPill(
                                 rating = averageRating(reviews), liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
-                                starSize = 18.dp, modifier = Modifier.fillMaxHeight()
+                                starSize = 18.dp, centerContent = true, modifier = Modifier.fillMaxHeight()
                             )
                         }
                         // Item 5: defaults to "Directed by" for movie/TV
@@ -3540,7 +3606,7 @@ fun TitleDetailOverlay(
                         ProfileGlassPill(
                             text = title.creator?.let { "${creatorRoleLabel(title.creatorRole, title.mediaCategory)} $it" } ?: "Placeholder",
                             liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true,
-                            backdrop = backdrop, textAlign = TextAlign.Center,
+                            backdrop = backdrop, textAlign = TextAlign.Center, centerContent = true,
                             modifier = Modifier.weight(1f).fillMaxWidth()
                         )
                         // Item 6: each genre gets its own bubble now,
@@ -3553,7 +3619,7 @@ fun TitleDetailOverlay(
                             genreList.forEach { g ->
                                 ProfileGlassPill(
                                     text = g, liquidGlass = liquidGlass, tint = tint, fontSize = 12.sp, bold = false, compact = true,
-                                    backdrop = backdrop, modifier = Modifier.fillMaxHeight()
+                                    backdrop = backdrop, centerContent = true, modifier = Modifier.fillMaxHeight()
                                 )
                             }
                         }
@@ -3702,10 +3768,12 @@ private fun TabBubble(
     // that's a deliberate simplification of the fuller effect described in
     // spec.
     val bubbleTint = if (selected) tint.copy(alpha = (tint.alpha + 0.25f).coerceAtMost(1f)) else tint
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     val outerModifier = Modifier
         .onGloballyPositioned { onPositioned(it.positionInRoot().x + it.size.width / 2f) }
         .then(if (selected) Modifier.border(1.5.dp, Color.White.copy(0.5f), shape) else Modifier)
-        .clickable(onClick = onClick)
+        .clickable(onClick = { tap(); onClick() })
     @Composable
     fun Inner() {
         Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, content = content)
@@ -3751,6 +3819,8 @@ private fun TabConnectorNotch(centerX: Float?, tint: Color, liquidGlass: Boolean
 @Composable
 private fun SummaryPanel(title: TitleSearchResult, liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, onOpenLink: (String) -> Unit) {
     val shape = RoundedCornerShape(16.dp)
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     @Composable
     fun Content() {
         val wikiUrl = title.wikipediaArticleUrl
@@ -3762,7 +3832,7 @@ private fun SummaryPanel(title: TitleSearchResult, liquidGlass: Boolean, tint: C
                 // Item 7: tapping the synopsis itself also opens the full
                 // Wikipedia article, same destination as the attribution
                 // row's own "Wikipedia" link below.
-                modifier = if (title.overview != null && wikiUrl != null) Modifier.clickable { onOpenLink(wikiUrl) } else Modifier
+                modifier = if (title.overview != null && wikiUrl != null) Modifier.clickable { tap(); onOpenLink(wikiUrl) } else Modifier
             )
             if (title.overview != null && wikiUrl != null) {
                 // Item 7: tight divider spacing (was 12dp/12dp) and the
@@ -3883,10 +3953,12 @@ private fun ReviewPanel(fr: FriendPopfeedReview, social: MainViewModel.ReviewSoc
 @Composable
 private fun TitleReviewBar(liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, onClick: () -> Unit) {
     val shape = RoundedCornerShape(26.dp)
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     Box(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).height(60.dp)) {
         if (liquidGlass) {
             LiquidGlassSurface(
-                Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp).clickable(onClick = onClick),
+                Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp).clickable(onClick = { tap(); onClick() }),
                 shape = shape, tint = tint, backdrop = backdrop
             ) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -3896,7 +3968,7 @@ private fun TitleReviewBar(liquidGlass: Boolean, tint: Color, backdrop: GlassBac
         } else {
             Box(
                 Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp).clip(shape)
-                    .background(Color.White.copy(0.10f)).clickable(onClick = onClick),
+                    .background(Color.White.copy(0.10f)).clickable(onClick = { tap(); onClick() }),
                 contentAlignment = Alignment.Center
             ) {
                 Text("Review", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
@@ -3918,9 +3990,11 @@ private fun LikeReviewCommentBar(
     onLike: () -> Unit, onReview: () -> Unit, onComment: () -> Unit, onDelete: () -> Unit
 ) {
     val shape = RoundedCornerShape(26.dp)
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     @Composable
     fun RowScope.Segment(label: String, textColor: Color, onClick: () -> Unit) {
-        val modifier = Modifier.weight(1f).fillMaxHeight().clickable(onClick = onClick)
+        val modifier = Modifier.weight(1f).fillMaxHeight().clickable(onClick = { tap(); onClick() })
         @Composable
         fun Label() { Text(label, color = textColor, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
         if (liquidGlass) {
@@ -3946,6 +4020,8 @@ private fun LikeReviewCommentBar(
 @Composable
 private fun CommentComposerRow(liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, onSubmit: (String) -> Unit) {
     var text by remember { mutableStateOf("") }
+    // Fix 9: the shared light tap, via the shared helper.
+    val tap = rememberHapticTap()
     val shape = RoundedCornerShape(20.dp)
     @Composable
     fun Content() {
@@ -3964,7 +4040,7 @@ private fun CommentComposerRow(liquidGlass: Boolean, tint: Color, backdrop: Glas
             Text(
                 "Post", color = if (text.isNotBlank()) Color.White else Color.White.copy(0.3f),
                 fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.clickable(enabled = text.isNotBlank()) { onSubmit(text); text = "" }
+                modifier = Modifier.clickable(enabled = text.isNotBlank()) { tap(); onSubmit(text); text = "" }
             )
         }
     }

@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.mediaviewer.tagging.TaggerModelManager
 import com.mediaviewer.ui.theme.*
+import com.mediaviewer.util.rememberHapticTap
 import com.mediaviewer.viewmodel.MainViewModel
 import kotlin.math.roundToInt
 
@@ -276,11 +277,12 @@ private fun TaggingCloseBubble(liquidGlass: Boolean, tint: Color, backdrop: Glas
 
 @Composable
 private fun DismissButton(liquidGlass: Boolean, tint: Color, label: String, onClick: () -> Unit) {
+    val tap = rememberHapticTap()
     val shape = RoundedCornerShape(16.dp)
     Box(
         Modifier
             .then(if (liquidGlass) Modifier.glassPanel(true, shape = shape, tint = tint) else Modifier.clip(shape).background(tint.copy(alpha = 0.35f)))
-            .clickable(onClick = onClick)
+            .clickable(onClick = { tap(); onClick() })
             .padding(horizontal = 22.dp, vertical = 10.dp)
     ) {
         Text(label, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)

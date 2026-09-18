@@ -1,7 +1,6 @@
 package com.mediaviewer.ui
 
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
+import com.mediaviewer.util.rememberHapticTap
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -577,6 +576,10 @@ private fun SettingsPageContent(
     onSaveLiveYoutubeUrl: (String) -> Unit = {},
     onCreateLiveLinkWidget: () -> Unit = {}
 ) {
+    // Fix 9: shared haptic tap for the Settings page's primary actions —
+    // declared once here so the toggle rows (via CompactSwitch below) and
+    // the follower-scan rescan button share one consistent light feel.
+    val tap = rememberHapticTap()
     @Composable
     fun CompactRow(content: @Composable RowScope.() -> Unit) {
         // Item 5: half the previous vertical padding — the switch rows were
@@ -602,7 +605,7 @@ private fun SettingsPageContent(
     fun CompactSwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
         Box(modifier = Modifier.size(width = 36.dp, height = 22.dp), contentAlignment = Alignment.Center) {
             Switch(
-                checked = checked, onCheckedChange = onCheckedChange,
+                checked = checked, onCheckedChange = { tap(); onCheckedChange(it) },
                 modifier = Modifier.scale(0.7f),
                 colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = VoteGreen,
                     uncheckedThumbColor = DimGray, uncheckedTrackColor = Color.White.copy(0.1f))
@@ -716,7 +719,7 @@ private fun SettingsPageContent(
                 Modifier
                     .clip(RoundedCornerShape(10.dp))
                     .background(if (scanning) Color.White.copy(0.05f) else Color.White.copy(0.12f))
-                    .clickable(enabled = !scanning, onClick = onRescanFollowersFromScratch)
+                    .clickable(enabled = !scanning) { tap(); onRescanFollowersFromScratch() }
                     .padding(horizontal = 10.dp, vertical = 6.dp)
             ) {
                 Text(if (scanning) "…" else "Rescan", color = if (scanning) DimGray else Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
@@ -1455,17 +1458,7 @@ private fun AtProtocolPageContent(
         // Item 7: round search bar + a separate circular glass search
         // button, both open the full-screen SearchOverlay — this app has no
         // inline search of its own, it's purely an entry point.
-        // Item 1: a "Search" section divider above it, matching the "Feeds"
-        // divider's own style below, instead of dropping straight into the
-        // search row with no label.
-        Spacer(Modifier.height(10.dp))
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
-            Text("Search", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(horizontal = 10.dp))
-            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
-        }
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(4.dp))
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1474,14 +1467,13 @@ private fun AtProtocolPageContent(
             val barShape = RoundedCornerShape(22.dp)
             @Composable
             fun SearchBarContent() {
+                val tap = rememberHapticTap()
                 Row(
-                    Modifier.fillMaxSize().clickable(onClick = onOpenSearch).padding(horizontal = 16.dp),
+                    Modifier.fillMaxSize().clickable { tap(); onOpenSearch() }.padding(horizontal = 16.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Icon(Icons.Default.Search, contentDescription = null, tint = DimGray, modifier = Modifier.size(16.dp))
-                    // Item 1: just "Search" — the "Bluesky" text is redundant
-                    // now that the section divider above already labels it.
                     Text("Search", color = DimGray, fontSize = 13.sp)
                 }
             }
@@ -1826,12 +1818,13 @@ private fun AtProtocolPageContent(
             val rowShape = RoundedCornerShape(20.dp)
             @Composable
             fun LiveLinkRowContent() {
+                val tap = rememberHapticTap()
                 if (liveActivePlatform != null) {
                     val label = if (liveActivePlatform == com.mediaviewer.model.LiveNowPlatform.TWITCH) "End Twitch Link" else "End YouTube Link"
                     val bg = if (liveActivePlatform == com.mediaviewer.model.LiveNowPlatform.TWITCH) TwitchPurple else YouTubeRed
                     Box(
                         Modifier.fillMaxSize().padding(4.dp).clip(RoundedCornerShape(16.dp))
-                            .background(bg.copy(alpha = 0.85f)).clickable(onClick = onEndLiveLink),
+                            .background(bg.copy(alpha = 0.85f)).clickable { tap(); onEndLiveLink() },
                         contentAlignment = Alignment.Center
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1846,7 +1839,7 @@ private fun AtProtocolPageContent(
                             Box(
                                 Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(16.dp))
                                     .background(TwitchPurple.copy(alpha = 0.85f))
-                                    .clickable { onToggleLiveLink(com.mediaviewer.model.LiveNowPlatform.TWITCH) },
+                                    .clickable { tap(); onToggleLiveLink(com.mediaviewer.model.LiveNowPlatform.TWITCH) },
                                 contentAlignment = Alignment.Center
                             ) { Text("Activate Twitch Link", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center) }
                         }
@@ -1854,7 +1847,7 @@ private fun AtProtocolPageContent(
                             Box(
                                 Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(16.dp))
                                     .background(YouTubeRed.copy(alpha = 0.85f))
-                                    .clickable { onToggleLiveLink(com.mediaviewer.model.LiveNowPlatform.YOUTUBE) },
+                                    .clickable { tap(); onToggleLiveLink(com.mediaviewer.model.LiveNowPlatform.YOUTUBE) },
                                 contentAlignment = Alignment.Center
                             ) { Text("Activate YouTube Link", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center) }
                         }
@@ -1868,91 +1861,6 @@ private fun AtProtocolPageContent(
             }
         }
         }
-
-        // ── e621 (item 14: folded in from the removed standalone e621 page)
-        if (e621LoggedIn) {
-            var localE621Tags by remember(e621SearchTags) { mutableStateOf(e621SearchTags) }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
-                Text("e621", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(horizontal = 10.dp))
-                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
-            }
-            Spacer(Modifier.height(6.dp))
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedTextField(value = localE621Tags, onValueChange = { localE621Tags = it },
-                    placeholder = { Text("Search tags…", color = DimGray, fontSize = 13.sp) },
-                    singleLine = true, colors = fieldColors(),
-                    modifier = Modifier.weight(1f).height(52.dp))
-                Button(onClick = { onOpenE621Search(localE621Tags) },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.1f), contentColor = Color.White),
-                    modifier = Modifier.height(52.dp)) { Text("Search") }
-            }
-            Spacer(Modifier.height(8.dp))
-            Column(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                @Composable
-                fun HotContent() {
-                    Row(
-                        modifier = Modifier.fillMaxSize().clickable(onClick = onOpenE621Hot),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        Text("\uD83D\uDD25", fontSize = 16.sp)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Hot", color = Color.White, fontSize = 13.sp)
-                    }
-                }
-                if (liquidGlass) {
-                    LiquidGlassSurface(Modifier.fillMaxWidth().height(46.dp), tint = dominantColor, backdrop = backdrop) { HotContent() }
-                } else {
-                    Box(Modifier.fillMaxWidth().height(46.dp).clip(RoundedCornerShape(20.dp)).background(Color.White.copy(0.08f))) { HotContent() }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    @Composable
-                    fun FavoritesContent() {
-                        Row(
-                            modifier = Modifier.fillMaxSize().clickable(onClick = onOpenE621Favorites),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            Icon(Icons.Default.Star, contentDescription = null, tint = BookmarkYellow, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Favorites", color = Color.White, fontSize = 13.sp)
-                        }
-                    }
-                    if (liquidGlass) {
-                        LiquidGlassSurface(Modifier.weight(1f).height(46.dp), tint = dominantColor, backdrop = backdrop) { FavoritesContent() }
-                    } else {
-                        Box(Modifier.weight(1f).height(46.dp).clip(RoundedCornerShape(20.dp)).background(Color.White.copy(0.08f))) { FavoritesContent() }
-                    }
-                    @Composable
-                    fun FollowingContent() {
-                        Row(
-                            modifier = Modifier.fillMaxSize().clickable(onClick = onOpenE621Following),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            Icon(Icons.Default.PersonAdd, contentDescription = null, tint = VoteGreen, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Following", color = Color.White, fontSize = 13.sp)
-                        }
-                    }
-                    if (liquidGlass) {
-                        LiquidGlassSurface(Modifier.weight(1f).height(46.dp), tint = dominantColor, backdrop = backdrop) { FollowingContent() }
-                    } else {
-                        Box(Modifier.weight(1f).height(46.dp).clip(RoundedCornerShape(20.dp)).background(Color.White.copy(0.08f))) { FollowingContent() }
-                    }
-                }
-            }
-        }
-
         Spacer(Modifier.height(8.dp))
     }
 
@@ -1980,6 +1888,7 @@ private fun FollowerScanCompletionPopup(
     backdrop: GlassBackdrop?, onDismiss: () -> Unit
 ) {
     val foundNothing = result.reviewsFound == 0 && result.blogsFound == 0
+    val tap = rememberHapticTap()
     Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.6f)), contentAlignment = Alignment.Center) {
         val cardShape = RoundedCornerShape(20.dp)
         @Composable
@@ -2010,7 +1919,7 @@ private fun FollowerScanCompletionPopup(
                     Modifier
                         .clip(RoundedCornerShape(20.dp))
                         .background(Color.White.copy(0.15f))
-                        .clickable(onClick = onDismiss)
+                        .clickable { tap(); onDismiss() }
                         .padding(horizontal = 22.dp, vertical = 9.dp)
                 ) {
                     Text("Close", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
@@ -2038,6 +1947,7 @@ private fun ReviewsBlogsScanIntroBubble(
 ) {
     val scanning = scanState as? MainViewModel.FollowerScanState.Scanning
     val shape = RoundedCornerShape(20.dp)
+    val tap = rememberHapticTap()
     @Composable
     fun BubbleContent() {
         Column(Modifier.padding(horizontal = 20.dp, vertical = 18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -2060,7 +1970,7 @@ private fun ReviewsBlogsScanIntroBubble(
                     Modifier
                         .clip(RoundedCornerShape(20.dp))
                         .background(Color.White.copy(0.15f))
-                        .clickable(onClick = onStartScan)
+                        .clickable { tap(); onStartScan() }
                         .padding(horizontal = 22.dp, vertical = 9.dp)
                 ) {
                     Text("Initiate Scan", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
@@ -2294,11 +2204,11 @@ private fun HubMoreButton(
     val scope = rememberCoroutineScope()
     val shape = CircleShape
     // Item 8: haptic tap on opening/closing the stack.
-    val haptic = LocalHapticFeedback.current
+    val tap = rememberHapticTap()
 
     @Composable
     fun Bubble(icon: ImageVector, label: String, iconSize: Dp = 14.dp, iconRotation: Float = 0f, onClick: () -> Unit) {
-        val clickModifier = Modifier.size(size).clickable(onClick = onClick)
+        val clickModifier = Modifier.size(size).clickable { tap(); onClick() }
         @Composable fun IconContent() {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Icon(icon, contentDescription = label, tint = Color.White, modifier = Modifier.size(iconSize).graphicsLayer { rotationZ = iconRotation })
@@ -2308,7 +2218,11 @@ private fun HubMoreButton(
         else Box(clickModifier.clip(shape).background(Color.White.copy(0.10f))) { IconContent() }
     }
 
-    Box(modifier) {
+    // Item 7: fixed-size root so the expanded popup (drawn above via a
+    // negative offset, unclipped) can never change this Box's measured
+    // height — without this, opening the popup stretched the whole bottom
+    // bar upward and the popup could overlap the close/refresh bubbles.
+    Box(modifier.size(size)) {
         AnimatedVisibility(
             visible = expanded,
             enter = fadeIn(tween(150)) + scaleIn(tween(150), initialScale = 0.8f, transformOrigin = TransformOrigin(0f, 1f)),
@@ -2328,7 +2242,7 @@ private fun HubMoreButton(
         }
 
         val clickModifier = Modifier.size(size).clickable {
-            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+            tap()
             expanded = !expanded
         }
         @Composable
@@ -2374,7 +2288,8 @@ private fun HubUploadBubble(
     onOpenComposePost: () -> Unit = {}
 ) {
     val circleShape = CircleShape
-    val clickModifier = Modifier.size(size).clickable { onOpenComposePost() }
+    val tap = rememberHapticTap()
+    val clickModifier = Modifier.size(size).clickable { tap(); onOpenComposePost() }
 
     @Composable
     fun IconContent() {
@@ -2438,8 +2353,8 @@ private fun ReturnToFeedBar(
     val shape = RoundedCornerShape(20.dp)
     val label = if (hasVisitedFeed) "Return to Feed" else "Open Feed"
     // Item 8: haptic tap when leaving the Hub back to the feed.
-    val haptic = LocalHapticFeedback.current
-    val onReturnToFeedHaptic = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onReturnToFeed() }
+    val tap = rememberHapticTap()
+    val onReturnToFeedHaptic = { tap(); onReturnToFeed() }
     // Bug fix (per feedback): the pill used to shrink-wrap its own text
     // and sit centered as a small standalone group with the refresh bubble
     // — not the wide, left-anchored bar it used to be. The pill itself now

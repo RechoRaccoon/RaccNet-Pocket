@@ -38,6 +38,7 @@ import com.mediaviewer.model.AppMode
 import com.mediaviewer.model.CommentItem
 import com.mediaviewer.model.MediaItem
 import com.mediaviewer.ui.theme.*
+import com.mediaviewer.util.rememberHapticTap
 
 @Composable
 fun CommentsSheet(
@@ -59,6 +60,7 @@ fun CommentsSheet(
     backdrop: GlassBackdrop? = null,
     reducedAnimations: Boolean = false
 ) {
+    val tap = rememberHapticTap()
     var threadStack by remember(currentItem?.id) { mutableStateOf(listOf<CommentItem>()) }
     var commentText by remember { mutableStateOf("") }
     var attachedUri by remember { mutableStateOf<Uri?>(null) }
@@ -217,6 +219,7 @@ fun CommentsSheet(
                                     Icon(
                                         Icons.Default.Close, contentDescription = "Cancel reply", tint = DimGray,
                                         modifier = Modifier.size(14.dp).clickable {
+                                            tap()
                                             replyTarget = null
                                             if (commentText == "@${target.authorHandle} ") commentText = ""
                                         }
@@ -227,7 +230,7 @@ fun CommentsSheet(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            IconButton(onClick = { mediaPicker.launch("image/* video/*") }, modifier = Modifier.size(34.dp)) {
+                            IconButton(onClick = { tap(); mediaPicker.launch("image/* video/*") }, modifier = Modifier.size(34.dp)) {
                                 // Item 10: a photo/media icon (not a paperclip) — this
                                 // attaches an image or video to the comment.
                                 Icon(Icons.Default.Image, contentDescription = "Attach media", tint = DimGray, modifier = Modifier.size(18.dp))
@@ -245,6 +248,7 @@ fun CommentsSheet(
                             )
                             IconButton(
                                 onClick = {
+                                    tap()
                                     if (commentText.isNotBlank()) {
                                         onPostComment(commentText.trim(), replyTarget)
                                         commentText = ""; attachedUri = null; replyTarget = null
@@ -352,6 +356,7 @@ fun CommentsSheet(
 
 @Composable
 private fun TagRow(tag: String, onTagClick: (String) -> Unit, onTagAdd: (String) -> Unit, onTagExclude: (String) -> Unit) {
+    val tap = rememberHapticTap()
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -363,14 +368,14 @@ private fun TagRow(tag: String, onTagClick: (String) -> Unit, onTagAdd: (String)
             tag.replace('_', ' '),
             color    = Color.White,
             fontSize = 13.sp,
-            modifier = Modifier.weight(1f).clickable { onTagClick(tag) }
+            modifier = Modifier.weight(1f).clickable { tap(); onTagClick(tag) }
         )
         Box(
             modifier = Modifier
                 .size(28.dp)
                 .clip(CircleShape)
                 .background(VoteGreen.copy(alpha = 0.15f))
-                .clickable { onTagAdd(tag) },
+                .clickable { tap(); onTagAdd(tag) },
             contentAlignment = Alignment.Center
         ) {
             Icon(Icons.Default.Add, contentDescription = "Add to search", tint = VoteGreen, modifier = Modifier.size(16.dp))
@@ -380,7 +385,7 @@ private fun TagRow(tag: String, onTagClick: (String) -> Unit, onTagAdd: (String)
                 .size(28.dp)
                 .clip(CircleShape)
                 .background(VoteRed.copy(alpha = 0.15f))
-                .clickable { onTagExclude(tag) },
+                .clickable { tap(); onTagExclude(tag) },
             contentAlignment = Alignment.Center
         ) {
             Icon(Icons.Default.Remove, contentDescription = "Exclude from search", tint = VoteRed, modifier = Modifier.size(16.dp))
@@ -403,10 +408,11 @@ private fun CommentRow(
 ) {
     @Composable
     fun RowContent() {
+        val tap = rememberHapticTap()
         Row(
             modifier = Modifier.fillMaxWidth()
                 .padding(start = if (indented) 20.dp else 0.dp)
-                .clickable(enabled = comment.replies.isNotEmpty()) { onOpenThread(comment) }
+                .clickable(enabled = comment.replies.isNotEmpty()) { tap(); onOpenThread(comment) }
                 .padding(horizontal = 12.dp, vertical = 7.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
@@ -449,7 +455,7 @@ private fun CommentRow(
                     Icon(
                         imageVector = if (comment.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
                         contentDescription = "Like", tint = if (comment.isLiked) LikeRed else DimGray,
-                        modifier = Modifier.size(14.dp).clickable { onLike(comment) }
+                        modifier = Modifier.size(14.dp).clickable { tap(); onLike(comment) }
                     )
                     if (comment.replyCount > 0) {
                         Text("replies: ${comment.replyCount}", color = DimGray, fontSize = 11.sp)
@@ -457,16 +463,16 @@ private fun CommentRow(
                     Spacer(Modifier.weight(1f))
                     Text(
                         "Reply", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.clickable { onReplyToComment(comment) }
+                        modifier = Modifier.clickable { tap(); onReplyToComment(comment) }
                     )
                 } else {
                     Icon(Icons.Default.ArrowUpward, contentDescription = "Upvote",
                         tint = if (comment.e621UserVote == 1) VoteGreen else DimGray,
-                        modifier = Modifier.size(14.dp).clickable { onVote(comment, 1) })
+                        modifier = Modifier.size(14.dp).clickable { tap(); onVote(comment, 1) })
                     Text(comment.likeCount.toString(), color = DimGray, fontSize = 11.sp)
                     Icon(Icons.Default.ArrowDownward, contentDescription = "Downvote",
                         tint = if (comment.e621UserVote == -1) VoteRed else DimGray,
-                        modifier = Modifier.size(14.dp).clickable { onVote(comment, -1) })
+                        modifier = Modifier.size(14.dp).clickable { tap(); onVote(comment, -1) })
                     if (comment.replyCount > 0) {
                         Spacer(Modifier.width(4.dp))
                         Text("replies: ${comment.replyCount}", color = DimGray, fontSize = 11.sp)
@@ -498,6 +504,7 @@ private fun ThreadParentHeader(
     backdrop: GlassBackdrop?,
     onBack: () -> Unit
 ) {
+    val tap = rememberHapticTap()
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -505,7 +512,7 @@ private fun ThreadParentHeader(
     ) {
         @Composable
         fun BackIconContent() {
-            Box(Modifier.fillMaxSize().clickable(onClick = onBack), contentAlignment = Alignment.Center) {
+            Box(Modifier.fillMaxSize().clickable(onClick = { tap(); onBack() }), contentAlignment = Alignment.Center) {
                 Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(18.dp))
             }
         }

@@ -9,21 +9,29 @@ import retrofit2.http.Query
  *  https://api.rocksky.app, per their docs (https://docs.rocksky.app) and
  *  lexicon namespace (app.rocksky.*, github.com/tsirysndr/rocksky). Two
  *  endpoints are used:
- *   - app.rocksky.scrobble.getScrobbles — a DID's scrobble history, used for
- *     the profile's "Music History" tab.
+ *   - app.rocksky.actor.getActorScrobbles — a DID's *own* scrobble history
+ *     (queried with a `did` param — `actor` is rejected with InvalidRequest),
+ *     used for the profile's "Music History" tab. Important: the sibling
+ *     app.rocksky.scrobble.getScrobbles returns the GLOBAL recent-scrobble
+ *     feed whenever the DID has no Rocksky data — it never goes empty —
+ *     so it must never back a per-profile tab. The actor endpoint returns
+ *     {"scrobbles":[]} for unknown DIDs instead, which is what lets the tab
+ *     hide itself on non-Rocksky accounts.
  *   - app.rocksky.player.getCurrentlyPlaying — a DID's live now-playing
  *     state, used for the "Listening to ..." bio line. Rocksky also exposes
  *     a Spotify-specific app.rocksky.spotify.getCurrentlyPlaying; this app
  *     tries the general player endpoint first and falls back to the Spotify
  *     one (see RockskyRepository.getNowPlaying) since not every scrobbler
  *     integration necessarily answers the general one.
- *  These field names are reconstructed from the public docs/lexicon and not
- *  verified against a live response — RockskyRepository parses defensively
- *  (every field optional/defaulted) so a mismatched or renamed field
- *  degrades to "no data" instead of crashing. */
+ *  The actor-endpoint scrobble field names (title, artist, album, albumArt,
+ *  uri, ...) were verified against a live API response (2026-09-18); the
+ *  now-playing fields are reconstructed from public docs/lexicon, so
+ *  RockskyRepository parses them defensively (every field
+ *  optional/defaulted) and a mismatch degrades to "no data" instead of
+ *  crashing. */
 interface RockskyApi {
 
-    @GET("xrpc/app.rocksky.scrobble.getScrobbles")
+    @GET("xrpc/app.rocksky.actor.getActorScrobbles")
     suspend fun getScrobbles(
         @Query("did") did: String,
         @Query("limit") limit: Int = 30,
@@ -47,7 +55,12 @@ data class RockskyScrobbleDto(
     val title: String? = null,
     val artist: String? = null,
     val album: String? = null,
+    // The actor endpoint's real cover-art field (verified live); the
+    // global-feed variant used `cover` instead — kept as a fallback.
     val albumArt: String? = null,
+    val cover: String? = null,
+    val did: String? = null,
+    val handle: String? = null,
     // Some responses may nest cover art under a `track` object instead of
     // flat fields — checked as a fallback when parsing (see
     // RockskyRepository.toModel()).

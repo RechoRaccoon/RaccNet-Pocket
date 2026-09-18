@@ -19,6 +19,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.mediaviewer.model.DmConversation
 import com.mediaviewer.ui.theme.*
+import com.mediaviewer.util.rememberHapticTap
 
 @Composable
 fun ReplyDialog(
@@ -28,6 +29,7 @@ fun ReplyDialog(
 ) {
     if (convo == null) return
     var text by remember(convo.convoId) { mutableStateOf("") }
+    val tap = rememberHapticTap()
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -61,7 +63,7 @@ fun ReplyDialog(
                     )
                     Spacer(Modifier.height(14.dp))
                     Button(
-                        onClick = { if (text.isNotBlank()) onSend(text.trim()) },
+                        onClick = { tap(); if (text.isNotBlank()) onSend(text.trim()) },
                         enabled = text.isNotBlank(),
                         colors = ButtonDefaults.buttonColors(containerColor = VoteGreen, disabledContainerColor = Color.White.copy(0.1f)),
                         modifier = Modifier.fillMaxWidth().height(46.dp)

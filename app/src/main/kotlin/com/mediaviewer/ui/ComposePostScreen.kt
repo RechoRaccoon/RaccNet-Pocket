@@ -58,6 +58,7 @@ import com.mediaviewer.model.AuthorInfo
 import com.mediaviewer.model.TitleSearchResult
 import com.mediaviewer.ui.theme.DimGray
 import com.mediaviewer.ui.theme.RepostGreen
+import com.mediaviewer.util.rememberHapticTap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -817,6 +818,7 @@ private fun ReviewTargetRow(
  *  scale. Shows the numeric rating to the right, per spec. */
 @Composable
 private fun ReviewStarPicker(rating: Int, onRatingChange: (Int) -> Unit) {
+    val tap = rememberHapticTap()
     Row(verticalAlignment = Alignment.CenterVertically) {
         Row {
             repeat(5) { i ->
@@ -837,10 +839,10 @@ private fun ReviewStarPicker(rating: Int, onRatingChange: (Int) -> Unit) {
                     Row(Modifier.matchParentSize()) {
                         Box(Modifier.weight(1f).fillMaxHeight().clickable(
                             interactionSource = remember { MutableInteractionSource() }, indication = null
-                        ) { onRatingChange(starFloor + 1) })
+                        ) { tap(); onRatingChange(starFloor + 1) })
                         Box(Modifier.weight(1f).fillMaxHeight().clickable(
                             interactionSource = remember { MutableInteractionSource() }, indication = null
-                        ) { onRatingChange(starFloor + 2) })
+                        ) { tap(); onRatingChange(starFloor + 2) })
                     }
                 }
             }
@@ -867,8 +869,9 @@ private fun GlassCircleButton(
     selected: Boolean = true,
     onClick: () -> Unit
 ) {
+    val tap = rememberHapticTap()
     val shape = CircleShape
-    val clickMod = modifier.size(size).clip(shape).clickable(enabled = enabled, onClick = onClick)
+    val clickMod = modifier.size(size).clip(shape).clickable(enabled = enabled, onClick = { tap(); onClick() })
     val alpha = if (enabled && selected) 1f else 0.35f
     if (liquidGlass) {
         LiquidGlassSurface(clickMod, shape = shape, tint = tint) {
@@ -894,8 +897,9 @@ private fun TextToggleButton(
     selected: Boolean = true,
     onClick: () -> Unit
 ) {
+    val tap = rememberHapticTap()
     val shape = RoundedCornerShape(14.dp)
-    val clickMod = Modifier.clip(shape).clickable(enabled = enabled, onClick = onClick)
+    val clickMod = Modifier.clip(shape).clickable(enabled = enabled, onClick = { tap(); onClick() })
     val alpha = if (enabled && selected) 1f else 0.35f
 
     @Composable
@@ -942,8 +946,9 @@ private fun PostButton(
     liquidGlass: Boolean, tint: Color,
     modifier: Modifier = Modifier, onClick: () -> Unit
 ) {
+    val tap = rememberHapticTap()
     val shape = RoundedCornerShape(16.dp)
-    val clickMod = modifier.clip(shape).clickable(enabled = enabled, onClick = onClick)
+    val clickMod = modifier.clip(shape).clickable(enabled = enabled, onClick = { tap(); onClick() })
 
     @Composable
     fun Content() {
@@ -1018,11 +1023,12 @@ private fun GrowingTextField(
  *  "perfect" only when the count happened to be an exact multiple of 5. */
 @Composable
 private fun ImageGrid(images: List<Uri>, onRemove: (Uri) -> Unit) {
+    val tap = rememberHapticTap()
     Column(Modifier.fillMaxWidth()) {
         images.chunked(5).forEach { row ->
             Row(Modifier.fillMaxWidth()) {
                 row.forEach { uri ->
-                    Box(Modifier.weight(1f).aspectRatio(1f).clickable { onRemove(uri) }) {
+                    Box(Modifier.weight(1f).aspectRatio(1f).clickable { tap(); onRemove(uri) }) {
                         AsyncImage(model = uri, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                     }
                 }
@@ -1042,6 +1048,7 @@ private fun VideoAndThumbnailRow(
     onTapThumbnail: () -> Unit
 ) {
     if (videoUri == null) return
+    val tap = rememberHapticTap()
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Box(
             Modifier.weight(1f).aspectRatio(aspect).clip(RoundedCornerShape(10.dp)).background(Color.Black)
@@ -1051,7 +1058,7 @@ private fun VideoAndThumbnailRow(
         }
         Box(
             Modifier.weight(1f).aspectRatio(aspect).clip(RoundedCornerShape(10.dp))
-                .background(Color.White.copy(0.06f)).clickable(onClick = onTapThumbnail),
+                .background(Color.White.copy(0.06f)).clickable(onClick = { tap(); onTapThumbnail() }),
             contentAlignment = Alignment.Center
         ) {
             if (thumbnailUri != null) {

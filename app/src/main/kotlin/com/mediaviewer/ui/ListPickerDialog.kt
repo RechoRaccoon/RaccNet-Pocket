@@ -32,6 +32,7 @@ import coil.compose.AsyncImage
 import com.mediaviewer.model.BskyList
 import com.mediaviewer.model.BskyStarterPackView
 import com.mediaviewer.ui.theme.*
+import com.mediaviewer.util.rememberHapticTap
 
 private enum class PickerTab { LISTS, STARTER_PACKS }
 
@@ -259,6 +260,7 @@ private fun TabButton(
     modifier: Modifier,
     onClick: () -> Unit
 ) {
+    val tap = rememberHapticTap()
     val shape = RoundedCornerShape(10.dp)
     if (liquidGlass && selected) {
         LiquidGlassSurface(
@@ -267,7 +269,7 @@ private fun TabButton(
             Text(
                 text = label, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier
-                    .clickable(onClick = onClick)
+                    .clickable(onClick = { tap(); onClick() })
                     .padding(horizontal = 9.dp, vertical = 5.dp)
             )
         }
@@ -280,7 +282,7 @@ private fun TabButton(
             modifier   = modifier
                 .clip(shape)
                 .background(if (selected) Color.White.copy(0.1f) else Color.Transparent)
-                .clickable(onClick = onClick)
+                .clickable(onClick = { tap(); onClick() })
                 .padding(horizontal = 9.dp, vertical = 5.dp)
         )
     }
@@ -306,8 +308,9 @@ private fun EmptyLabel(text: String) {
 
 @Composable
 private fun EntryRow(name: String, subtitle: String?, avatarUrl: String?, isPack: Boolean, liquidGlass: Boolean = false, onClick: () -> Unit) {
+    val tap = rememberHapticTap()
     Row(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 11.dp),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = { tap(); onClick() }).padding(horizontal = 14.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {

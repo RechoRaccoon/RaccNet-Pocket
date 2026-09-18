@@ -2377,6 +2377,12 @@ _bskyDid.value          = session.did
                 if (ProfileTab.MUSIC_HISTORY in cur.availableTabs) {
                     val updated = cur.copy(availableTabs = cur.availableTabs - ProfileTab.MUSIC_HISTORY, tabStates = cur.tabStates - ProfileTab.MUSIC_HISTORY)
                     _profileOverlay.value = updated
+                    // Feature request #4 (reconcile): same pattern as the
+                    // Blogs probe above — write the removal back to the
+                    // on-disk cache, so a stale seeded MUSIC_HISTORY tab
+                    // doesn't flicker back in on the next open before the
+                    // fresh probe runs again.
+                    persistProfileTabCache(updated)
                 }
                 return@launch
             }

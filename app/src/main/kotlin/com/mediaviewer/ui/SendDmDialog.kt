@@ -19,9 +19,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -31,6 +29,7 @@ import coil.compose.AsyncImage
 import com.mediaviewer.model.DmConversation
 import com.mediaviewer.model.MediaItem
 import com.mediaviewer.ui.theme.*
+import com.mediaviewer.util.rememberHapticTap
 
 // Item 10 / Big Update #10: the whole Share page uses the same liquid-glass
 // language as the rest of the app (when the Glass Theme setting is on) — the
@@ -60,7 +59,7 @@ fun SendDmDialog(
 ) {
     if (target == null) return
     var message by remember(target.id) { mutableStateOf("") }
-    val haptic = LocalHapticFeedback.current
+    val tap = rememberHapticTap()
     val backdropUrl = target.thumbUrl.ifBlank { target.mediaUrl }
 
     BackHandler(onBack = onDismiss)
@@ -111,7 +110,7 @@ fun SendDmDialog(
                                         convo = convo,
                                         isSelected = selected.contains(convo.member.did),
                                         onTap = {
-                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            tap()
                                             onToggleSelect(convo.member.did)
                                         }
                                     )
@@ -155,7 +154,7 @@ fun SendDmDialog(
                                     .clip(CircleShape)
                                     .clickable(
                                         enabled = selected.isNotEmpty() && !sending,
-                                        onClick = { if (selected.isNotEmpty() && !sending) onSend(message.trim()) }
+                                        onClick = { tap(); if (selected.isNotEmpty() && !sending) onSend(message.trim()) }
                                     ),
                                 contentAlignment = Alignment.Center
                             ) {

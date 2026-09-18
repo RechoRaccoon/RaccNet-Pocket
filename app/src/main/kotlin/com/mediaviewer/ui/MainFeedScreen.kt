@@ -69,6 +69,7 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.mediaviewer.model.*
 import com.mediaviewer.ui.theme.*
+import com.mediaviewer.util.rememberHapticTap
 import com.mediaviewer.viewmodel.MainViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
@@ -2397,6 +2398,7 @@ private fun MoreBubbleMenu(
     onAddAccountToList: () -> Unit, onBlock: () -> Unit,
     supportsFeedInteractions: Boolean
 ) {
+    val tap = rememberHapticTap()
     val items = buildList {
         if (supportsFeedInteractions) {
             add(GlassMenuItem("Show more like this") { onShowMoreLikeThis() })
@@ -2463,7 +2465,7 @@ private fun MoreBubbleMenu(
                 .fillMaxWidth()
                 .height(bubbleHeightDp)
                 .clip(shape)
-                .clickable { onDismissRequest(); item.onClick() }
+                .clickable { tap(); onDismissRequest(); item.onClick() }
             val labelColor = if (item.destructive) Color(0xFFE0245E) else Color.White
             if (liquidGlass) {
                 LiquidGlassSurface(modifier = bubbleModifier, shape = shape, tint = tint, backdrop = backdrop) {
@@ -2488,8 +2490,9 @@ private fun MoreBubbleMenu(
 
 @Composable
 private fun GifActionButton(onClick: () -> Unit, tint: Color = Color.White) {
+    val tap = rememberHapticTap()
     Box(
-        modifier = Modifier.clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 10.dp)
+        modifier = Modifier.clickable(onClick = { tap(); onClick() }).padding(horizontal = 8.dp, vertical = 10.dp)
             .size(width = 30.dp, height = 26.dp),
         contentAlignment = Alignment.Center
     ) { Text("GIF", color = tint, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
@@ -2497,8 +2500,9 @@ private fun GifActionButton(onClick: () -> Unit, tint: Color = Color.White) {
 
 @Composable
 private fun ActionButton(icon: ImageVector, tint: Color, label: String? = null, onClick: () -> Unit) {
+    val tap = rememberHapticTap()
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp),
-        modifier = Modifier.clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 10.dp)) {
+        modifier = Modifier.clickable(onClick = { tap(); onClick() }).padding(horizontal = 8.dp, vertical = 10.dp)) {
         Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(26.dp))
         if (label != null) Text(label, color = tint, fontSize = 12.sp, fontWeight = FontWeight.Medium)
     }
@@ -2849,10 +2853,11 @@ private fun TransportBubble(
     backdrop: GlassBackdrop?,
     onClick: () -> Unit
 ) {
+    val tap = rememberHapticTap()
     val shape = CircleShape
     if (liquidGlass) {
         LiquidGlassSurface(
-            modifier = Modifier.size(size).clip(shape).clickable(onClick = onClick),
+            modifier = Modifier.size(size).clip(shape).clickable(onClick = { tap(); onClick() }),
             shape = shape, tint = dominantColor, backdrop = backdrop
         ) {
             Box(Modifier.matchParentSize(), contentAlignment = Alignment.Center) {
@@ -2861,7 +2866,7 @@ private fun TransportBubble(
         }
     } else {
         Box(
-            Modifier.size(size).clip(shape).background(Color.Black.copy(alpha = 0.55f)).clickable(onClick = onClick),
+            Modifier.size(size).clip(shape).background(Color.Black.copy(alpha = 0.55f)).clickable(onClick = { tap(); onClick() }),
             contentAlignment = Alignment.Center
         ) {
             Icon(icon, contentDescription = contentDescription, tint = Color.White, modifier = Modifier.size(iconSize))

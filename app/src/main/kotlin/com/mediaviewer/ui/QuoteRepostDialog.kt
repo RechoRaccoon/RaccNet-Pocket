@@ -22,6 +22,7 @@ import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import com.mediaviewer.model.MediaItem
 import com.mediaviewer.ui.theme.*
+import com.mediaviewer.util.rememberHapticTap
 
 private const val BSKY_POST_LIMIT = 300
 
@@ -41,6 +42,7 @@ fun QuoteRepostDialog(
 ) {
     if (target == null) return
     var text by remember(target.id) { mutableStateOf("") }
+    val tap = rememberHapticTap()
     val overLimit = text.length > BSKY_POST_LIMIT
 
     BackHandler(onBack = onDismiss)
@@ -128,7 +130,7 @@ fun QuoteRepostDialog(
                     ) {
                         Box(
                             Modifier.matchParentSize()
-                                .clickable(enabled = enabled) { onSubmit(text.trim()) },
+                                .clickable(enabled = enabled) { tap(); onSubmit(text.trim()) },
                             contentAlignment = Alignment.Center
                         ) {
                             if (submitting) CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
@@ -137,7 +139,7 @@ fun QuoteRepostDialog(
                     }
                 } else {
                     Button(
-                        onClick = { if (!overLimit && !submitting) onSubmit(text.trim()) },
+                        onClick = { tap(); if (!overLimit && !submitting) onSubmit(text.trim()) },
                         enabled = !overLimit && !submitting,
                         colors = ButtonDefaults.buttonColors(containerColor = RepostGreen, disabledContainerColor = Color.White.copy(0.1f)),
                         modifier = Modifier.fillMaxWidth().height(46.dp)

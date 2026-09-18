@@ -344,19 +344,17 @@ fun PixelMatrixOverlay(controller: PixelTransitionController, modifier: Modifier
                 }
                 if (!visible) continue
 
-                // Discrete conveyor-belt hop (item 13): each cell still steps
-                // through the exact same brightness cycle, once per tick, so
-                // the whole grid keeps moving constantly — but which band a
-                // given cell is *currently on* is offset by a fixed,
-                // per-cell random phase (cellPhase) rather than being a pure
-                // function of (gx + gy). A pure (gx + gy) band read as clean
-                // parallel diagonal lines marching in lockstep; folding in a
-                // stable per-cell hash scrambles which cells share a band at
-                // any given instant into a scattered/noisy speckle instead,
-                // while every cell's own cycle still advances one step per
-                // tick exactly as before.
-                val cellPhase = (hash01(gx * 53 + 7, gy * 97 + 13) * BAND_PERIOD).toInt()
-                val rawBand = ((gx + gy) + cellPhase - step) % BAND_PERIOD
+                // Bug fix (per feedback): the conveyor band used to fold a
+                // stable per-cell random phase into which band each cell was
+                // on, which scattered the motion into a noisy speckle that
+                // read as random drift. The band is now a pure function of
+                // (gx + gy - step), so every pixel steps through the exact
+                // same brightness cycle in lockstep and the whole grid
+                // drifts uniformly toward the top-right, one discrete hop
+                // per tick. (The diagonal axis is bottom-left -> top-right,
+                // so subtracting the ever-increasing step marches each band
+                // toward larger gx+gy, i.e. up-right.)
+                val rawBand = ((gx + gy) - step) % BAND_PERIOD
                 val bandPos = if (rawBand < 0) rawBand + BAND_PERIOD else rawBand
                 val conveyorFactor = when (bandPos) {
                     0 -> 1.45f

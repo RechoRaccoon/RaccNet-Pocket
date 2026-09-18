@@ -48,6 +48,7 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import coil.request.ImageRequest
 import com.mediaviewer.ui.theme.DimGray
+import com.mediaviewer.util.rememberHapticTap
 
 /** Bug fix: top-of-screen interactive rows (the feed's AuthorRow, the Hub
  *  header, Search/DM overlays' headers, …) used to pad themselves down by
@@ -397,6 +398,19 @@ fun LiquidGlassSurface(
     // to be correct again. Passing the analytic, scale-independent position
     // directly sidesteps that timing dependency entirely.
     staticOrigin: Offset? = null,
+    // Item 9: centering the panel's inner content is opt-in per caller.
+    // This Box used to default to TopStart, then was changed globally to
+    // Center so a stretched review-page pill (sized to
+    // Modifier.fillMaxHeight() to match a sibling row's height) would sit
+    // its text in its middle instead of pinning it to the top — but that
+    // bled into every other caller (e.g. the feed's image-post AuthorRow
+    // pill started centering usernames/post text instead of start-aligning
+    // them). So the default is back to TopStart, and review-page pills
+    // pass Alignment.Center through ProfileGlassPill/StarRatingPill's own
+    // centerContent flag instead. Every decorative layer above
+    // (backdrop/tint/scrim/rim) already uses matchParentSize(), so this
+    // only affects content that doesn't already fill the panel itself.
+    contentAlignment: Alignment = Alignment.TopStart,
     content: @Composable BoxScope.() -> Unit
 ) {
     // Item 26: same fade-to-flat behavior as glassPanel above, plus scaling
@@ -418,15 +432,12 @@ fun LiquidGlassSurface(
                     Modifier.onGloballyPositioned { coords -> trackedOrigin = coords.positionInRoot() }
                 else Modifier
             ),
-        // Item 9 fix: this Box used to default to TopStart, so any caller
-        // that stretches the panel taller than its own inner content (e.g. a
-        // review-page pill sized to Modifier.fillMaxHeight() to match a
-        // sibling row's height) ended up with its text/icon pinned to the
-        // top of the now-taller panel instead of sitting in its middle.
         // Every decorative layer above (backdrop/tint/scrim/rim) already
         // uses matchParentSize(), so centering the actual content here only
-        // affects content that doesn't already fill the panel itself.
-        contentAlignment = Alignment.Center
+        // affects content that doesn't already fill the panel itself — see
+        // the [contentAlignment] parameter's own doc comment for why the
+        // default is TopStart rather than Center.
+        contentAlignment = contentAlignment
     ) {
         // Big Update #4: the live backdrop — a magnified, blurred crop of
         // whatever is actually rendered directly under this panel right now,
@@ -488,7 +499,9 @@ fun FollowButton(
     backdrop: GlassBackdrop? = null
 ) {
     val shape = RoundedCornerShape(14.dp)
-    val clickableModifier = modifier.clip(shape).clickable(onClick = onClick)
+    // Fix 9: one shared light tap on every press, via the shared helper.
+    val tap = rememberHapticTap()
+    val clickableModifier = modifier.clip(shape).clickable(onClick = { tap(); onClick() })
 
     @Composable
     fun FollowLabel() {
@@ -626,6 +639,8 @@ fun GlassDropdownMenu(
     modifier: Modifier = Modifier
 ) {
     if (!expanded) return
+    // Fix 9: one shared light tap on every menu-item press.
+    val tap = rememberHapticTap()
     val density = LocalDensity.current
     val itemHeightDp = 40.dp
     val gapDp = 8.dp
@@ -648,7 +663,7 @@ fun GlassDropdownMenu(
             items.forEachIndexed { index, item ->
                 Box(
                     Modifier.fillMaxWidth().height(itemHeightDp)
-                        .clickable { onDismissRequest(); item.onClick() },
+                        .clickable { tap(); onDismissRequest(); item.onClick() },
                     contentAlignment = Alignment.CenterEnd
                 ) {
                     Text(

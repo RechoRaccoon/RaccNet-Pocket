@@ -29,6 +29,7 @@ import com.mediaviewer.model.AppMode
 import com.mediaviewer.model.BskyFeedInfo
 import com.mediaviewer.model.MediaItem
 import com.mediaviewer.ui.theme.*
+import com.mediaviewer.util.rememberHapticTap
 import com.mediaviewer.viewmodel.MainViewModel
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -55,6 +56,7 @@ fun GridScreen(
     onSearchE621: (String) -> Unit,
     onRefresh: () -> Unit
 ) {
+    val tap = rememberHapticTap()
     val gridState  = rememberLazyGridState()
     var localTags  by remember(e621SearchTags) { mutableStateOf(e621SearchTags) }
 
@@ -125,7 +127,7 @@ fun GridScreen(
                     modifier = Modifier.weight(1f).height(54.dp)
                 )
                 Button(
-                    onClick = { onSearchE621(localTags) },
+                    onClick = { tap(); onSearchE621(localTags) },
                     colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(0.1f), contentColor = Color.White),
                     contentPadding = PaddingValues(horizontal = 14.dp),
                     modifier = Modifier.height(54.dp)

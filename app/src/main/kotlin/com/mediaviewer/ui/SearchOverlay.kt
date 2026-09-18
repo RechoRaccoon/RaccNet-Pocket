@@ -48,6 +48,7 @@ import com.mediaviewer.model.SearchAccountResult
 import com.mediaviewer.model.SearchFeedResult
 import com.mediaviewer.model.SearchStarterPackResult
 import com.mediaviewer.ui.theme.*
+import com.mediaviewer.util.rememberHapticTap
 import com.mediaviewer.viewmodel.MainViewModel
 
 /** Item 7: full-screen search — round search bar, Posts/Accounts/Lists/
@@ -398,6 +399,7 @@ fun SearchOverlay(
  *  centered in the results area, same as the other tabs' empty states. */
 @Composable
 private fun LikedTagsSetupPrompt(liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, onStartTagging: () -> Unit) {
+    val tap = rememberHapticTap()
     Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
         val cardShape = RoundedCornerShape(20.dp)
         @Composable
@@ -415,7 +417,7 @@ private fun LikedTagsSetupPrompt(liquidGlass: Boolean, tint: Color, backdrop: Gl
                 Box(
                     Modifier
                         .then(if (liquidGlass) Modifier.glassPanel(true, shape = buttonShape, tint = tint) else Modifier.clip(buttonShape).background(tint.copy(alpha = 0.35f)))
-                        .clickable(onClick = onStartTagging)
+                        .clickable(onClick = { tap(); onStartTagging() })
                         .padding(horizontal = 20.dp, vertical = 10.dp)
                 ) {
                     Text("Start Tagging", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
@@ -448,7 +450,8 @@ private fun MainViewModel.SearchFilter.label(): String = when (this) {
 
 @Composable
 private fun SearchPostCell(item: MediaItem, onClick: () -> Unit) {
-    Box(Modifier.aspectRatio(1f).clickable(onClick = onClick)) {
+    val tap = rememberHapticTap()
+    Box(Modifier.aspectRatio(1f).clickable(onClick = { tap(); onClick() })) {
         if (item.isTextOnly) {
             Box(Modifier.fillMaxSize().background(OffBlack).padding(6.dp), contentAlignment = Alignment.Center) {
                 Text(item.text, color = Color.White.copy(alpha = 0.85f), fontSize = 10.sp, maxLines = 5, overflow = TextOverflow.Ellipsis)
@@ -464,8 +467,9 @@ private fun SearchPostCell(item: MediaItem, onClick: () -> Unit) {
 
 @Composable
 private fun AccountResultRow(result: SearchAccountResult, liquidGlass: Boolean, onClick: () -> Unit) {
+    val tap = rememberHapticTap()
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 10.dp),
+        Modifier.fillMaxWidth().clickable(onClick = { tap(); onClick() }).padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
@@ -515,6 +519,7 @@ private fun StarterPackResultRow(pack: SearchStarterPackResult, liquidGlass: Boo
  *  aren't things you "view", you subscribe to them. */
 @Composable
 private fun FeedResultRow(feed: SearchFeedResult, liquidGlass: Boolean, onAdd: () -> Unit) {
+    val tap = rememberHapticTap()
     var added by remember(feed.uri) { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
@@ -541,7 +546,7 @@ private fun FeedResultRow(feed: SearchFeedResult, liquidGlass: Boolean, onAdd: (
         Box(
             Modifier
                 .then(if (liquidGlass) Modifier.glassPanel(true, shape = pillShape) else Modifier.clip(pillShape).background(Color.White.copy(0.1f)))
-                .clickable(enabled = !added) { added = true; onAdd() }
+                .clickable(enabled = !added) { tap(); added = true; onAdd() }
                 .padding(horizontal = 12.dp, vertical = 6.dp)
         ) {
             Text(if (added) "Added" else "Add", color = if (added) VoteGreen else Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
@@ -562,6 +567,7 @@ private fun FeedResultRow(feed: SearchFeedResult, liquidGlass: Boolean, onAdd: (
 // one-off treatment.
 @Composable
 private fun FilterChip(label: String, active: Boolean, liquidGlass: Boolean, tint: Color = NeutralGlassTint, backdrop: GlassBackdrop? = null, onClick: () -> Unit) {
+    val tap = rememberHapticTap()
     val shape = RoundedCornerShape(12.dp)
     @Composable
     fun ChipLabel() {
@@ -572,7 +578,7 @@ private fun FilterChip(label: String, active: Boolean, liquidGlass: Boolean, tin
     }
     if (liquidGlass) {
         LiquidGlassSurface(
-            modifier = Modifier.clickable(onClick = onClick),
+            modifier = Modifier.clickable(onClick = { tap(); onClick() }),
             shape = shape, tint = if (active) tint else tint.copy(alpha = 0.4f), backdrop = backdrop
         ) {
             Box(Modifier.padding(horizontal = 9.dp, vertical = 4.dp)) { ChipLabel() }
@@ -580,7 +586,7 @@ private fun FilterChip(label: String, active: Boolean, liquidGlass: Boolean, tin
     } else {
         Box(
             Modifier.clip(shape).background(if (active) Color.White.copy(0.15f) else Color.White.copy(0.06f))
-                .clickable(onClick = onClick).padding(horizontal = 9.dp, vertical = 4.dp)
+                .clickable(onClick = { tap(); onClick() }).padding(horizontal = 9.dp, vertical = 4.dp)
         ) { ChipLabel() }
     }
 }
@@ -591,15 +597,16 @@ private fun FilterChip(label: String, active: Boolean, liquidGlass: Boolean, tin
  *  reused. */
 @Composable
 private fun SearchCloseBubble(liquidGlass: Boolean, tint: Color = NeutralGlassTint, backdrop: GlassBackdrop? = null, onClick: () -> Unit) {
+    val tap = rememberHapticTap()
     val shape = CircleShape
     if (liquidGlass) {
-        LiquidGlassSurface(modifier = Modifier.size(30.dp).clickable(onClick = onClick), shape = shape, tint = tint, backdrop = backdrop) {
+        LiquidGlassSurface(modifier = Modifier.size(30.dp).clickable(onClick = { tap(); onClick() }), shape = shape, tint = tint, backdrop = backdrop) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Icon(Icons.Default.Close, contentDescription = "Close search", tint = Color.White, modifier = Modifier.size(16.dp))
             }
         }
     } else {
-        Box(Modifier.size(30.dp).clip(shape).background(Color.White.copy(0.14f)).clickable(onClick = onClick), contentAlignment = Alignment.Center) {
+        Box(Modifier.size(30.dp).clip(shape).background(Color.White.copy(0.14f)).clickable(onClick = { tap(); onClick() }), contentAlignment = Alignment.Center) {
             Icon(Icons.Default.Close, contentDescription = "Close search", tint = Color.White, modifier = Modifier.size(16.dp))
         }
     }
