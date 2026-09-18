@@ -33,6 +33,9 @@ object PrefKeys {
     // background blur/tint dial above so the rim can be turned down (or up)
     // independently of the background effect.
     val GLASS_RIM_INTENSITY    = floatPreferencesKey("glass_rim_intensity")
+    // Item 7: whether the rim gradient's brighter second stop is on at all —
+    // see glassRimVibrantSecondary's own doc comment.
+    val GLASS_RIM_VIBRANT_SECONDARY = booleanPreferencesKey("glass_rim_vibrant_secondary")
     val HIDE_TEXT_ONLY_POSTS  = booleanPreferencesKey("hide_text_only_posts")
     val HISTORY_JSON          = stringPreferencesKey("history_json")
     // Hub Reviews/Blogs cache — persisted so a cold restart can show the
@@ -167,6 +170,11 @@ class PreferencesManager(private val context: Context) {
     // Bug fix: independent rim/outline strength dial, split out from the
     // background dial above.
     val glassRimIntensity: Flow<Float>         = context.dataStore.data.map { it[PrefKeys.GLASS_RIM_INTENSITY] ?: 1f }
+    // Item 7: defaulted ON — every glass rim gradient blends its tint into a
+    // brighter/more-saturated version of that same tint (rather than the
+    // old neutral grey/white) as its middle stop. Turning this off collapses
+    // the rim to a single flat reflected color with no gradient at all.
+    val glassRimVibrantSecondary: Flow<Boolean> = context.dataStore.data.map { it[PrefKeys.GLASS_RIM_VIBRANT_SECONDARY] ?: true }
     // Settings Update: universally hides text-only posts (no image/video) from every feed.
     val hideTextOnlyPosts: Flow<Boolean>       = context.dataStore.data.map { it[PrefKeys.HIDE_TEXT_ONLY_POSTS] ?: false }
     // Settings Update: raw JSON array of HistoryEntry, newest first, capped at write time.
@@ -381,6 +389,9 @@ class PreferencesManager(private val context: Context) {
 
     suspend fun setGlassRimIntensity(intensity: Float) {
         context.dataStore.edit { prefs -> prefs[PrefKeys.GLASS_RIM_INTENSITY] = intensity.coerceIn(0f, 1f) }
+    }
+    suspend fun setGlassRimVibrantSecondary(enabled: Boolean) {
+        context.dataStore.edit { prefs -> prefs[PrefKeys.GLASS_RIM_VIBRANT_SECONDARY] = enabled }
     }
 
     suspend fun setCombineListsAndPacks(enabled: Boolean) {

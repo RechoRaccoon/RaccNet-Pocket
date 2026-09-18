@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.OndemandVideo
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.Chat
@@ -71,6 +72,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -97,6 +100,7 @@ import com.mediaviewer.model.LeafletTextSpan
 import com.mediaviewer.model.MediaItem
 import com.mediaviewer.model.PopfeedBacklogItem
 import com.mediaviewer.model.PopfeedReview
+import com.mediaviewer.model.RockskyTrack
 import com.mediaviewer.model.TitleSearchResult
 import com.mediaviewer.ui.theme.DimGray
 import com.mediaviewer.ui.theme.OledBlack
@@ -111,6 +115,11 @@ private fun MainViewModel.ProfileTab.label(): String = when (this) {
     MainViewModel.ProfileTab.REVIEWS    -> "Reviews"
     MainViewModel.ProfileTab.BACKLOG    -> "Backlog"
     MainViewModel.ProfileTab.VODS       -> "Vods"
+    // Item 16: always last — see the enum's own declaration order
+    // (MainViewModel.ProfileTab), which availableTabs.filter{} above
+    // preserves, plus the explicit sort in ProfileTabsRow's own doc
+    // comment/call site.
+    MainViewModel.ProfileTab.MUSIC_HISTORY -> "Music History"
 }
 
 // ─── Profile tabs sub-filter row ────────────────────────────────────────────
@@ -254,35 +263,21 @@ private fun ListModeIcon(modifier: Modifier = Modifier, tint: Color = Color.Whit
  *  read clearly at a small button size — drawn by hand since it isn't part
  *  of the Material icon set the rest of the app's icon buttons pull from. */
 @Composable
+// Item 1: this used to be a hand-drawn Canvas approximation of a butterfly
+// that didn't actually read as one (see the profile interaction bar
+// screenshot in the feedback — it looked closer to a mask than a
+// butterfly). Swapped for the real attached butterfly artwork
+// (ic_bluesky_butterfly, drawable-nodpi) rendered through a color filter, so
+// the shape is pixel-exact to spec and just recolored — white by default
+// (was blue in the source art) — rather than approximated by hand again.
+@Composable
 private fun BlueskyLogoIcon(modifier: Modifier = Modifier, tint: Color = Color.White) {
-    Canvas(modifier) {
-        val w = size.width; val h = size.height
-        fun wing(mirror: Boolean) {
-            val path = Path()
-            val sign = if (mirror) -1f else 1f
-            val cx = w / 2f
-            path.moveTo(cx, h * 0.42f)
-            path.cubicTo(
-                cx + sign * w * 0.05f, h * 0.05f,
-                cx + sign * w * 0.55f, h * 0.02f,
-                cx + sign * w * 0.48f, h * 0.32f
-            )
-            path.cubicTo(
-                cx + sign * w * 0.44f, h * 0.5f,
-                cx + sign * w * 0.5f, h * 0.62f,
-                cx + sign * w * 0.34f, h * 0.68f
-            )
-            path.cubicTo(
-                cx + sign * w * 0.22f, h * 0.72f,
-                cx + sign * w * 0.1f, h * 0.6f,
-                cx, h * 0.5f
-            )
-            path.close()
-            drawPath(path, color = tint)
-        }
-        wing(false)
-        wing(true)
-    }
+    androidx.compose.foundation.Image(
+        painter = androidx.compose.ui.res.painterResource(id = com.mediaviewer.R.drawable.ic_bluesky_butterfly),
+        contentDescription = "Bluesky",
+        colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(tint),
+        modifier = modifier
+    )
 }
 
 // Feature request #8: "I hate fun" — a CompositionLocal rather than a
@@ -704,7 +699,8 @@ fun ProfileOverlay(
                     isOwnProfile = selfDid.isNotBlank() && author.did == selfDid,
                     linkColor = blended,
                     onToggleFollow = onToggleFollow,
-                    onClose = onClose
+                    onClose = onClose,
+                    nowPlaying = state.nowPlaying
                 )
             }
 
@@ -865,7 +861,11 @@ fun ProfileOverlay(
                     gridMode = gridModeFor(state.selectedTab, postKindFilter),
                     gridCyclesListLayout = postKindFilter.isListKind(),
                     showGrid = state.selectedTab in setOf(MainViewModel.ProfileTab.POSTS, MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES) &&
-                        (postKindFilter.isMasonryKind() || postKindFilter.isListKind()),
+                        (postKindFilter.isMasonryKind() || postKindFilter.isListKind()) ||
+                        // Item 16: Music History's Grid button is a plain
+                        // 1/2/3 column cycle (see profileMusicHistoryRows),
+                        // not gated by PostKindFilter at all.
+                        state.selectedTab == MainViewModel.ProfileTab.MUSIC_HISTORY,
                     showDm = selfDid.isNotBlank() && author.did != selfDid && author.isFollowing && profile.followedByMe,
                     onGrid = { onGridButtonTap() },
                     onAddTo = { onOpenAddTo(author.did) },
@@ -968,10 +968,29 @@ private fun ProfileInteractionBar(
 ) {
     val shape = RoundedCornerShape(26.dp)
     val iconSize = 20.dp
+    // Item 8: haptic tap on the grid-layout swap button specifically.
+    val haptic = LocalHapticFeedback.current
+    val onGridHaptic = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onGrid() }
+    // Item 4: PlaylistAdd is a thin, mostly-negative-space glyph, so at the
+    // same 20dp/44dp box every other icon here uses it reads visually tiny
+    // next to Grid/Bluesky/DM. Its own box (and the glyph inside it) is
+    // deliberately bigger than the rest so it takes up more physical space
+    // in the row — pushing its neighbors outward — rather than just scaling
+    // the glyph inside an unchanged hit target.
+    val addToIconSize = 28.dp
+    val addToBoxSize = 56.dp
     @Composable
     fun IconButton(onClick: () -> Unit, content: @Composable () -> Unit) {
         Box(
             Modifier.size(44.dp).clip(CircleShape).clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+            content = { content() }
+        )
+    }
+    @Composable
+    fun BigIconButton(onClick: () -> Unit, content: @Composable () -> Unit) {
+        Box(
+            Modifier.size(addToBoxSize).clip(CircleShape).clickable(onClick = onClick),
             contentAlignment = Alignment.Center,
             content = { content() }
         )
@@ -984,7 +1003,7 @@ private fun ProfileInteractionBar(
             horizontalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             if (showGrid) {
-                IconButton(onClick = onGrid) {
+                IconButton(onClick = onGridHaptic) {
                     when {
                         gridCyclesListLayout && gridMode == 0 -> ListModeIcon(Modifier.size(iconSize))
                         gridCyclesListLayout && gridMode == 1 -> UnevenColumnsIcon(2, Modifier.size(iconSize))
@@ -995,8 +1014,8 @@ private fun ProfileInteractionBar(
                     }
                 }
             }
-            IconButton(onClick = onAddTo) {
-                Icon(Icons.Filled.PlaylistAdd, contentDescription = "Add To", tint = Color.White, modifier = Modifier.size(iconSize))
+            BigIconButton(onClick = onAddTo) {
+                Icon(Icons.Filled.PlaylistAdd, contentDescription = "Add To", tint = Color.White, modifier = Modifier.size(addToIconSize))
             }
             IconButton(onClick = onViewOnBluesky) {
                 BlueskyLogoIcon(Modifier.size(iconSize), tint = Color.White)
@@ -1009,7 +1028,12 @@ private fun ProfileInteractionBar(
         }
     }
 
-    val barModifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars).height(60.dp).wrapContentWidth()
+    // Item 2 (round 2): height now tracks liquidGlass exactly like the feed's
+    // ActionRow does (60dp glass / 52dp flat) — this bar used to stay 60dp
+    // in both modes, so it only matched the feed bar's size when glass was
+    // actually on, and read visibly taller than the feed bar otherwise.
+    val barModifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)
+        .height(if (liquidGlass) 60.dp else 52.dp).wrapContentWidth()
     if (liquidGlass) {
         LiquidGlassSurface(modifier = barModifier, shape = shape, tint = tint, backdrop = backdrop) { BarContent() }
     } else {
@@ -1055,7 +1079,10 @@ private fun ProfileHeaderSection(
     // (tabs, bubbles) — links in the bio use it too, per spec.
     linkColor: Color,
     onToggleFollow: () -> Unit,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    // Item 16: Rocksky "Listening to ..." bio line — see openProfile()'s
+    // own doc comment on where this is fetched from.
+    nowPlaying: RockskyTrack? = null
 ) {
     Column(Modifier.fillMaxWidth()) {
         // ── Banner ──
@@ -1122,6 +1149,20 @@ private fun ProfileHeaderSection(
                 backdrop = bannerBackdrop,
                 onToggleFollow = onToggleFollow,
                 onClose = onClose
+            )
+        }
+
+        // ── "Listening to ..." (Rocksky, item 16) ──
+        // Pushes the bio text down (its own Column-sibling padding does
+        // that automatically) only when actually present — most profiles
+        // have no Rocksky connection or nothing currently playing, and
+        // shouldn't reserve any space for this at all in that case.
+        if (nowPlaying != null) {
+            Text(
+                "Listening to ${nowPlaying.title} by ${nowPlaying.artist}",
+                color = linkColor, fontSize = 12.sp, fontWeight = FontWeight.Medium,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(top = 10.dp)
             )
         }
 
@@ -1458,6 +1499,7 @@ private fun MainViewModel.ProfileTab.icon() = when (this) {
     MainViewModel.ProfileTab.REVIEWS -> Icons.Filled.Star       // filled star, per spec
     MainViewModel.ProfileTab.BACKLOG -> Icons.Filled.StarBorder // unfilled star, per spec
     MainViewModel.ProfileTab.VODS    -> Icons.Filled.OndemandVideo
+    MainViewModel.ProfileTab.MUSIC_HISTORY -> Icons.Filled.MusicNote
 }
 private fun PostKindFilter.icon() = when (this) {
     PostKindFilter.ALL               -> Icons.Filled.Apps
@@ -1705,11 +1747,21 @@ private fun LazyListScope.profileResultsContent(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
             }
         }
+        MainViewModel.ProfileTab.MUSIC_HISTORY -> {
+            // Item 16: same Grid button/gridMode the Posts/Reposts/Likes
+            // tabs already use, just read as a literal 1/2/3 column count
+            // here instead of the masonry/square modes those tabs use it
+            // for — 0 -> 1 column (VodBubble-style horizontal row, cover
+            // left/info right), 1 -> 2 columns, 2 -> 3 columns (both grids
+            // of TitlePosterCard, the exact same poster-tile format the
+            // Backlog tab uses).
+            profileMusicHistoryRows(tracks = tabState?.musicHistory ?: emptyList(), columns = gridModeFor(postKindFilter) + 1, liquidGlass = liquidGlass, tint = profileTint)
+        }
     }
 
     val isEmpty = tabState != null &&
         tabState.items.isEmpty() && tabState.blogs.isEmpty() && tabState.reviews.isEmpty() &&
-        tabState.backlog.isEmpty() && tabState.vods.isEmpty()
+        tabState.backlog.isEmpty() && tabState.vods.isEmpty() && tabState.musicHistory.isEmpty()
     if (tabState == null || (tabState.loading && isEmpty)) {
         item(key = "results_loading") {
             Box(Modifier.fillMaxWidth().padding(vertical = 60.dp), contentAlignment = Alignment.Center) {
@@ -2236,6 +2288,61 @@ private fun MultiImageCountBadge(count: Int, currentPage: Int = 0, modifier: Mod
 }
 
 // ─── Backlog (Popfeed) ───────────────────────────────────────────────────────
+
+/** Item 16: Rocksky "Music History" tab. columns=1 is a vertical list of
+ *  horizontal rows (cover left, info right — same shape as [VodBubble]
+ *  above); columns=2/3 are grids of [TitlePosterCard] (the exact same
+ *  poster-tile format the Backlog tab uses), cover on top with the
+ *  song/artist shrink-to-fit underneath. */
+private fun LazyListScope.profileMusicHistoryRows(tracks: List<RockskyTrack>, columns: Int, liquidGlass: Boolean, tint: Color) {
+    if (columns <= 1) {
+        items(tracks, key = { "track_${it.playedAt}_${it.title}_${it.artist}" }) { track ->
+            MusicHistoryRow(track = track, liquidGlass = liquidGlass, tint = tint,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp))
+        }
+    } else {
+        val rows = tracks.chunked(columns)
+        itemsIndexed(rows, key = { i, row -> "music_row_${i}_${row.firstOrNull()?.title ?: i}" }) { _, row ->
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 5.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                row.forEach { track ->
+                    TitlePosterCard(
+                        title = "${track.title}\n${track.artist}", imageUrl = track.albumArtUrl,
+                        liquidGlass = liquidGlass, onClick = {}, modifier = Modifier.weight(1f)
+                    )
+                }
+                repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MusicHistoryRow(track: RockskyTrack, liquidGlass: Boolean, tint: Color, modifier: Modifier = Modifier) {
+    val shape = RoundedCornerShape(16.dp)
+    Row(
+        modifier
+            .fillMaxWidth()
+            .then(
+                if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
+                else Modifier.clip(shape).background(Color.White.copy(0.06f))
+            )
+            .padding(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Box(Modifier.size(56.dp).clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(0.3f))) {
+            if (track.albumArtUrl != null) {
+                AsyncImage(model = track.albumArtUrl, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            }
+        }
+        Column(Modifier.weight(1f)) {
+            Text(track.title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(track.artist, color = DimGray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+        }
+    }
+}
 
 private fun LazyListScope.profileBacklogGridRows(items: List<PopfeedBacklogItem>, liquidGlass: Boolean, onOpenTitle: (PopfeedBacklogItem) -> Unit = {}) {
     val rows = items.chunked(3)

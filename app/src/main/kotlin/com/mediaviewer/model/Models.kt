@@ -1102,3 +1102,14 @@ data class SharedPostMessage(
     val messageText: String,
     val sentAt: String
 )
+
+/** Item 16: Rocksky integration — one scrobbled track (or a live
+ *  now-playing entry, [playedAt] left blank for that case) — see
+ *  RockskyApi's own doc comment for the endpoints this is built from. */
+data class RockskyTrack(
+    val title: String,
+    val artist: String,
+    val album: String = "",
+    val albumArtUrl: String? = null,
+    val playedAt: String = ""
+)

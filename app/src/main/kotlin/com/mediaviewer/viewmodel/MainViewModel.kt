@@ -11,6 +11,7 @@ import coil.request.ImageRequest
 import com.mediaviewer.model.*
 import com.mediaviewer.repository.BlueskyRepository
 import com.mediaviewer.repository.E621Repository
+import com.mediaviewer.repository.RockskyRepository
 import com.mediaviewer.repository.StreamplaceRepository
 import com.mediaviewer.repository.WikipediaRepository
 import com.mediaviewer.ui.PostKindFilter
@@ -43,6 +44,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val e621Repo  = E621Repository()
     private val streamplaceRepo = StreamplaceRepository()
     private val taggingRepo = TaggingRepository.get(application, bskyRepo, e621Repo)
+    // Item 16: Rocksky music-scrobbling integration.
+    private val rockskyRepo = RockskyRepository()
+
+    // Item 8: shared haptic tap, callable from anywhere in the ViewModel
+    // (opening a profile, sending a message/comment/post, running a search)
+    // without needing a Compose/View context at each call site. Uses the
+    // Vibrator system service directly via the Application context this
+    // AndroidViewModel already holds.
+    private fun tapHaptic() {
+        try {
+            val context = getApplication<Application>()
+            val vibrator: android.os.Vibrator? =
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                    val vm = context.getSystemService(android.os.VibratorManager::class.java)
+                    vm?.defaultVibrator
+                } else {
+                    @Suppress("DEPRECATION")
+                    context.getSystemService(android.content.Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+                }
+            if (vibrator != null && vibrator.hasVibrator()) {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    vibrator.vibrate(android.os.VibrationEffect.createPredefined(android.os.VibrationEffect.EFFECT_TICK))
+                } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    vibrator.vibrate(android.os.VibrationEffect.createOneShot(15, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(15)
+                }
+            }
+        } catch (_: Exception) {
+            // Haptics are a nicety, never worth crashing over.
+        }
+    }
 
     // ── Session ───────────────────────────────────────────────────────────────
     private val _bskyLoggedIn = MutableStateFlow(false)
@@ -129,6 +163,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setGlassRimIntensity(intensity: Float) {
         _glassRimIntensity.value = intensity.coerceIn(0f, 1f)
         viewModelScope.launch { prefs.setGlassRimIntensity(intensity) }
+    }
+
+    // Item 7: see glassRimVibrantSecondary's doc comment on the
+    // PreferencesManager flow this mirrors.
+    private val _glassRimVibrantSecondary = MutableStateFlow(true)
+    val glassRimVibrantSecondary: StateFlow<Boolean> = _glassRimVibrantSecondary
+
+    fun setGlassRimVibrantSecondary(enabled: Boolean) {
+        _glassRimVibrantSecondary.value = enabled
+        viewModelScope.launch { prefs.setGlassRimVibrantSecondary(enabled) }
     }
 
     // Item 2: whether the "Add To" popup should open automatically right after
@@ -323,7 +367,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // different ways. Per the feature request they're now a single POSTS
     // tab with a sub-filter row (All/Images/Text Posts/Horizontal Videos/
     // Vertical Videos) — see ProfileOverlay's PostKindFilter.
-    enum class ProfileTab { POSTS, VODS, REPOSTS, LIKES, BLOGS, REVIEWS, BACKLOG }
+    enum class ProfileTab { POSTS, VODS, REPOSTS, LIKES, BLOGS, REVIEWS, BACKLOG, MUSIC_HISTORY }
 
     data class ProfileTabState(
         val items: List<MediaItem> = emptyList(),
@@ -332,6 +376,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val backlog: List<PopfeedBacklogItem> = emptyList(),
         // Item 19: VODs listed vertically, newest first — see StreamplaceRepository.
         val vods: List<StreamplaceVideoView> = emptyList(),
+        // Item 16: Rocksky scrobble history, most recent first.
+        val musicHistory: List<RockskyTrack> = emptyList(),
         val cursor: String? = null,
         val loading: Boolean = false,
         val loaded: Boolean = false
@@ -456,6 +502,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val author: AuthorInfo,
         val profile: ProfileData? = null,
         val loadingProfile: Boolean = true,
+        // Item 16: this profile's live Rocksky now-playing track, if any —
+        // see openProfile()'s own probe for how this is fetched.
+        val nowPlaying: RockskyTrack? = null,
         val selectedTab: ProfileTab = ProfileTab.POSTS,
         // Blogs/Reviews/Backlog are added to this set only once probing
         // confirms the account actually has Leaflet/Popfeed content — see
@@ -779,6 +828,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      *  ViewModel does (see isAuthError/refreshBskyTokenIfPossible). */
     fun submitComposePost(draft: com.mediaviewer.ui.ComposePostDraft) {
         if (_composePostSubmitting.value) return
+        // Item 8: haptic tap on posting (thread/single/review/blog/textshot
+        // all funnel through this one submit function).
+        tapHaptic()
         _composePostSubmitting.value = true
         viewModelScope.launch(Dispatchers.IO) {
             var result = runCatchingComposePost(draft)
@@ -809,7 +861,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             com.mediaviewer.ui.ComposeMode.TEXTSHOT -> runCatching {
                 val bitmap = com.mediaviewer.util.TextshotRenderer.render(draft.textshotText)
-                bskyRepo.createTextshotPost(bskyToken, did, bitmap).getOrElse { throw it }
+                bskyRepo.createTextshotPost(bskyToken, did, bitmap, draft.textshotText).getOrElse { throw it }
             }
             com.mediaviewer.ui.ComposeMode.VIDEO -> {
                 val uri = draft.videoUri
@@ -833,7 +885,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val target = draft.reviewTarget
                 if (target == null) Result.failure(IllegalStateException("No title to review"))
                 else runCatching {
-                    val uri = bskyRepo.postPopfeedReview(bskyToken, did, target, draft.reviewRating, draft.posts.firstOrNull()?.text.orEmpty())
+                    val uri = bskyRepo.postPopfeedReview(bskyToken, did, target, draft.reviewRating, draft.posts.firstOrNull()?.text.orEmpty(), draft.reviewContainsSpoilers)
                         .getOrElse { throw it }
                     // Only a title opened from an actual Backlog/Watchlist
                     // card (see MainViewModel.openProfileTitle) has an
@@ -859,7 +911,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // backed by a real search. Enum name kept as ACCOUNTS/FEEDS rather than
     // renaming the Kotlin identifiers too, to keep this diff scoped to
     // what's user-visible; .label() below is what actually says "People".
-    enum class SearchFilter { ACCOUNTS, POSTS, LIKED_TAGS, FEEDS, STARTER_PACKS }
+    enum class SearchFilter { ACCOUNTS, POSTS, LIKED_TAGS, FEEDS, STARTER_PACKS, E621 }
 
     data class SearchState(
         val query: String = "",
@@ -887,7 +939,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var searchJob: kotlinx.coroutines.Job? = null
 
-    fun openSearch() { _searchOpen.value = true }
+    fun openSearch() { tapHaptic(); _searchOpen.value = true }
     fun closeSearch() {
         _searchOpen.value = false
         _searchHiddenBehindPost.value = false
@@ -932,6 +984,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // else ever calls runSearch while that filter is active,
                 // this keeps it working rather than silently doing nothing.
                 SearchFilter.LIKED_TAGS -> performLikedTagSearch(query)
+                // Item 14: same reasoning as LIKED_TAGS above — typing on
+                // the e621 filter routes through updateLikedQueryText/
+                // submitE621SearchFromOverlay instead, never through here.
+                SearchFilter.E621 -> {}
                 SearchFilter.ACCOUNTS -> {
                     bskyRepo.searchActors(bskyToken, query).onSuccess { (accounts, _) ->
                         _searchState.value = _searchState.value.copy(accounts = accounts, loading = false, hasSearched = true)
@@ -1590,6 +1646,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun sendDmThreadReply(text: String) {
         val thread = _dmThread.value ?: return
         if (text.isBlank() || thread.convo.convoId.isBlank()) return
+        // Item 8: haptic tap on sending a DM.
+        tapHaptic()
         _dmThread.value = thread.copy(sending = true)
         viewModelScope.launch(Dispatchers.IO) {
             bskyRepo.sendMessage(bskyToken, _bskyDid.value, thread.convo.convoId, text)
@@ -1728,6 +1786,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { prefs.followerScanCompleted.collect { _followerScanCompletedOnce.value = it } }
         viewModelScope.launch { prefs.liquidGlassIntensity.collect { _liquidGlassIntensity.value = it } }
         viewModelScope.launch { prefs.glassRimIntensity.collect { _glassRimIntensity.value = it } }
+        viewModelScope.launch { prefs.glassRimVibrantSecondary.collect { _glassRimVibrantSecondary.value = it } }
         viewModelScope.launch { prefs.downloadOnLike.collect { _downloadOnLike.value = it } }
         viewModelScope.launch { prefs.e621FollowedArtists.collect { _e621FollowedArtists.value = it } }
         viewModelScope.launch { prefs.hideTextOnlyPosts.collect { _hideTextOnlyPosts.value = it } }
@@ -2179,6 +2238,11 @@ _bskyDid.value          = session.did
         title: TitleSearchResult? = null, preselectedReview: FriendPopfeedReview? = null
     ) {
         if (!_bskyLoggedIn.value) return
+        // Item 8: haptic tap every time a profile actually opens, regardless
+        // of which of the many screens (feed, search, DMs, notifications,
+        // comments...) triggered it — centralized here instead of at every
+        // individual call site.
+        tapHaptic()
         // Item 17: don't clobber a profile that's already open (visible or
         // hidden behind a post pager) — chain onto it via `parent` so
         // closeProfile() can unwind back through it instead of losing it.
@@ -2303,6 +2367,33 @@ _bskyDid.value          = session.did
             _profileOverlay.value = updated
             persistProfileTabCache(updated)
         }
+        // Item 16: Rocksky "Music History" tab, only shown once we actually
+        // find any scrobbles — most accounts won't have Rocksky connected,
+        // and that's a normal empty result, not an error.
+        viewModelScope.launch(Dispatchers.IO) {
+            val tracks = rockskyRepo.getScrobbles(author.did).getOrNull() ?: emptyList()
+            val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
+            if (tracks.isEmpty()) {
+                if (ProfileTab.MUSIC_HISTORY in cur.availableTabs) {
+                    val updated = cur.copy(availableTabs = cur.availableTabs - ProfileTab.MUSIC_HISTORY, tabStates = cur.tabStates - ProfileTab.MUSIC_HISTORY)
+                    _profileOverlay.value = updated
+                }
+                return@launch
+            }
+            val updated = cur.copy(
+                availableTabs = cur.availableTabs + ProfileTab.MUSIC_HISTORY,
+                tabStates = cur.tabStates + (ProfileTab.MUSIC_HISTORY to ProfileTabState(musicHistory = tracks, loaded = true))
+            )
+            _profileOverlay.value = updated
+        }
+        // Item 16: "Listening to ..." bio line — this profile's live
+        // now-playing state, if any (most accounts have nothing playing, or
+        // no Rocksky connection at all — both are a normal null result).
+        viewModelScope.launch(Dispatchers.IO) {
+            val track = rockskyRepo.getNowPlaying(author.did)
+            val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
+            _profileOverlay.value = cur.copy(nowPlaying = track)
+        }
     }
 
     // Item 24: the blog-detail popup and the profile it sits on top of are
@@ -2332,7 +2423,22 @@ _bskyDid.value          = session.did
             ancestor = ancestor.parent
         }
         _profileOverlay.value = ancestor
-        if (passedHidden) restoreSavedMainFeed()
+        // Bug fix (item 5): passedHidden only catches a hidden *ancestor* in
+        // the parent chain, so it missed the far more common case — open a
+        // profile, tap into a post (openPostFromProfileTab hides this same
+        // overlay and stashes the pre-profile main feed in
+        // _authorFeedState), pinch back in (pinchInFromPost un-hides that
+        // very overlay, so it's no longer "hidden" by the time closeProfile
+        // runs), then close directly from there. `ancestor` in that case is
+        // just this profile's own parent (often null/the real main feed
+        // already), so passedHidden never trips — but the pager's
+        // author-feed detour is still sitting underneath, unrestored, so
+        // the person landed back on the single post they'd pinched back
+        // from instead of the feed they were on before opening the profile
+        // at all. Checking whether *this* profile (the one actually being
+        // closed) is still the pager's target covers that case too.
+        val stillHasPagerContext = activeFeedMode == ActiveFeedMode.AUTHOR && activeFeedActorDid == cur.author.did
+        if (passedHidden || stillHasPagerContext) restoreSavedMainFeed()
     }
 
     /** Discards any post-pager context reached via a profile's grid (see
@@ -2392,7 +2498,7 @@ _bskyDid.value          = session.did
     private fun loadProfileTab(tab: ProfileTab, reset: Boolean) {
         // Blogs/Reviews/Backlog/Vods are fully loaded up-front by the probes
         // in openProfile() — there's no separate paged fetch for them.
-        if (tab == ProfileTab.BLOGS || tab == ProfileTab.REVIEWS || tab == ProfileTab.BACKLOG || tab == ProfileTab.VODS) return
+        if (tab == ProfileTab.BLOGS || tab == ProfileTab.REVIEWS || tab == ProfileTab.BACKLOG || tab == ProfileTab.VODS || tab == ProfileTab.MUSIC_HISTORY) return
         val cur = _profileOverlay.value ?: return
         val did = cur.author.did
         val existing = cur.tabStates[tab] ?: ProfileTabState()
@@ -3914,6 +4020,8 @@ _bskyDid.value          = session.did
     // as Bluesky's own reply-thread semantics.
     fun postComment(text: String, replyTo: CommentItem? = null) {
         val item = currentItem.value ?: return
+        // Item 8: haptic tap on sending a comment.
+        tapHaptic()
         viewModelScope.launch(Dispatchers.IO) {
             if (_appMode.value == AppMode.BLUESKY) {
                 val parentUri = replyTo?.uri?.takeIf { it.isNotBlank() } ?: item.postUri
@@ -4360,6 +4468,24 @@ _bskyDid.value          = session.did
     fun submitLikedSearch() {
         _tagSuggestions.value = emptyList()
         viewModelScope.launch(Dispatchers.IO) { performLikedTagSearch(_searchState.value.query) }
+    }
+
+    /** Item 14: the search page's "e621" filter option (only shown once
+     *  logged into e621 — see SearchOverlay's own gating) reuses the Tagged
+     *  tab's text field/autocomplete verbatim (updateLikedQueryText above
+     *  drives both), but submitting doesn't render inline results here at
+     *  all — it closes Search and jumps straight to the e621 feed with
+     *  those tags, the same self-contained pattern the Hub's own e621 Hot/
+     *  Favorites/Following buttons use (see AtProtocolPageContent's
+     *  onOpenE621* handlers). */
+    fun submitE621SearchFromOverlay() {
+        _tagSuggestions.value = emptyList()
+        val tags = _searchState.value.query
+        closeSearch()
+        setE621SearchTags(tags)
+        setMode(AppMode.E621)
+        searchE621()
+        setScreen(ScreenState.FEED)
     }
 
     /** Item 2: blank query browses everything tagged so far, most recent

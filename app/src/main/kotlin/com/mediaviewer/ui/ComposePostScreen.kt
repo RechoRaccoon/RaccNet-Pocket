@@ -134,7 +134,11 @@ data class ComposePostDraft(
     // a review draft (see ComposePostScreen's reviewTarget param), so the
     // review itself is always exactly one plain-text post.
     val reviewTarget: TitleSearchResult? = null,
-    val reviewRating: Int = 0
+    val reviewRating: Int = 0,
+    // Item 12: mirrors social.popfeed.feed.review's own "containsSpoilers"
+    // boolean (see review.json) — set from the composer's "Mark as Spoiler"
+    // toggle, only meaningful for ComposeMode.REVIEW.
+    val reviewContainsSpoilers: Boolean = false
 )
 
 @Composable
@@ -174,6 +178,9 @@ fun ComposePostScreen(
     // 10 = full 5 stars) — see PopfeedReview's ratingOutOf5 doc comment for
     // why /2 is always the right conversion both ways.
     var reviewRating by remember { mutableStateOf(0) }
+    // Item 12: composer-local "Mark as Spoiler" toggle for Review mode —
+    // see ComposePostDraft.reviewContainsSpoilers.
+    var reviewContainsSpoilers by remember { mutableStateOf(false) }
     var singleText by remember { mutableStateOf(TextFieldValue("")) }
     var images by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var videoUri by remember { mutableStateOf<Uri?>(null) }
@@ -371,7 +378,8 @@ fun ComposePostScreen(
             ComposeMode.REVIEW -> ComposePostDraft(
                 mode = ComposeMode.REVIEW,
                 posts = listOf(ThreadPostDraft(text = singleText.text)),
-                reviewTarget = reviewTarget, reviewRating = reviewRating
+                reviewTarget = reviewTarget, reviewRating = reviewRating,
+                reviewContainsSpoilers = reviewContainsSpoilers
             )
             ComposeMode.SINGLE -> ComposePostDraft(
                 mode = ComposeMode.SINGLE,
@@ -641,6 +649,32 @@ fun ComposePostScreen(
                 Modifier.fillMaxWidth().imePadding().navigationBarsPadding()
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
+                // Item 12: Review mode has no attach-image/Blog/Textshot/
+                // new-thread row at all (none of those apply to a review),
+                // so the char counter drops down to share the one remaining
+                // row with the new "Mark as Spoiler" toggle instead of
+                // sitting alone above an otherwise-empty row.
+                if (mode == ComposeMode.REVIEW) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        // Item 12: same lexicon field postPopfeedReview
+                        // already sends — social.popfeed.feed.review's own
+                        // "containsSpoilers" boolean (see review.json).
+                        TextToggleButton(
+                            label = "Mark as Spoiler",
+                            liquidGlass = liquidGlass, tint = dominantColor,
+                            selected = reviewContainsSpoilers,
+                            onClick = { reviewContainsSpoilers = !reviewContainsSpoilers }
+                        )
+                        Spacer(Modifier.weight(1f))
+                        val (used, limit) = activeBudget
+                        val overLimit = used > limit
+                        Text(
+                            if (limit == Int.MAX_VALUE) "$used" else "$used/$limit",
+                            color = if (overLimit) Color(0xFFE0245E) else DimGray,
+                            fontSize = 12.sp, fontWeight = FontWeight.Medium
+                        )
+                    }
+                } else {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                         val (used, limit) = activeBudget
                         val overLimit = used > limit

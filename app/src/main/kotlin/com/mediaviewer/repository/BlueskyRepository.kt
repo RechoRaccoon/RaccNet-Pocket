@@ -237,6 +237,13 @@ class BlueskyRepository {
     }
 
     companion object {
+        // Item 10: the exact prefix createTextshotPost tags every Textshot
+        // image's alt text with — kept as one shared constant so the
+        // writer (createTextshotPost above) and every reader (profile-tab
+        // classification, see parseAuthorFeed) can never drift out of sync
+        // with each other.
+        const val TEXTSHOT_ALT_PREFIX = "A textshot post reading: "
+
         /** Sentinel URI standing in for the pinned "Following" home timeline, which
          *  (unlike every other saved feed) is served by getTimeline, not getFeed. */
         const val FOLLOWING_FEED_URI = "timeline://following"
@@ -1176,7 +1183,7 @@ class BlueskyRepository {
      *    than erroring loudly on, which fits "shows up in this app's own
      *    unvalidated direct read, never shows up in Popfeed itself"
      *    exactly as well as the missing "$type" did. */
-    suspend fun postPopfeedReview(token: String, did: String, target: TitleSearchResult, ratingOutOf10: Int, text: String): Result<String> {
+    suspend fun postPopfeedReview(token: String, did: String, target: TitleSearchResult, ratingOutOf10: Int, text: String, containsSpoilers: Boolean = false): Result<String> {
         val identifiers = mutableMapOf<String, Any>()
         if (target.id.startsWith("imdb:")) identifiers["imdbId"] = target.id.removePrefix("imdb:")
         val record = mutableMapOf<String, Any>(
@@ -1188,7 +1195,9 @@ class BlueskyRepository {
             "title" to target.title,
             "tags" to emptyList<String>(),
             "facets" to emptyList<Any>(),
-            "containsSpoilers" to false,
+            // Item 12: wired to the composer's own "Mark as spoiler" toggle
+            // instead of always being hardcoded false.
+            "containsSpoilers" to containsSpoilers,
             "isRevisit" to false
         )
         if (text.isNotBlank()) record["text"] = text
@@ -2011,14 +2020,14 @@ class BlueskyRepository {
      *  app.bsky.embed.gallery embed (5-10 images) depending on count — the
      *  two are different lexicons; images tops out at 4 by schema, gallery
      *  covers 5-10 (soft-capped in authoring UIs; schema ceiling is 20). */
-    private fun buildImagesEmbed(blobs: List<BskyBlob>): Map<String, Any> {
-        val imageObjs = blobs.map { blob -> mapOf("image" to blob, "alt" to "") }
+    private fun buildImagesEmbed(blobs: List<BskyBlob>, alts: List<String> = emptyList()): Map<String, Any> {
+        val imageObjs = blobs.mapIndexed { i, blob -> mapOf("image" to blob, "alt" to (alts.getOrNull(i) ?: "")) }
         return if (blobs.size <= 4) {
             mapOf("\$type" to "app.bsky.embed.images", "images" to imageObjs)
         } else {
             mapOf(
                 "\$type" to "app.bsky.embed.gallery",
-                "items" to blobs.map { blob -> mapOf("\$type" to "app.bsky.embed.gallery#image", "image" to blob, "alt" to "") }
+                "items" to blobs.mapIndexed { i, blob -> mapOf("\$type" to "app.bsky.embed.gallery#image", "image" to blob, "alt" to (alts.getOrNull(i) ?: "")) }
             )
         }
     }
@@ -2029,7 +2038,13 @@ class BlueskyRepository {
     suspend fun createPost(
         token: String, did: String, text: String,
         imageBlobs: List<BskyBlob> = emptyList(),
-        reply: BskyReplyRef? = null
+        reply: BskyReplyRef? = null,
+        // Item 10: per-image alt text, by index — used by createTextshotPost
+        // below to tag Textshot images with "A textshot post reading: ..."
+        // so RaccNet Pocket can detect and route them back into the Text
+        // Post tab instead of Images when loading a profile (see
+        // parseAuthorFeed's isTextshotAltText check).
+        imageAlts: List<String> = emptyList()
     ): Result<BskyRef> = withContext(Dispatchers.IO) {
         runCatching {
         val record = mutableMapOf<String, Any>(
@@ -2037,7 +2052,7 @@ class BlueskyRepository {
             "text" to text,
             "createdAt" to Instant.now().toString()
         )
-        if (imageBlobs.isNotEmpty()) record["embed"] = buildImagesEmbed(imageBlobs)
+        if (imageBlobs.isNotEmpty()) record["embed"] = buildImagesEmbed(imageBlobs, imageAlts)
         if (reply != null) record["reply"] = mapOf(
             "root" to mapOf("uri" to reply.root.uri, "cid" to reply.root.cid),
             "parent" to mapOf("uri" to reply.parent.uri, "cid" to reply.parent.cid)
@@ -2082,10 +2097,14 @@ class BlueskyRepository {
     data class ThreadPostToSend(val text: String, val images: List<android.net.Uri> = emptyList())
 
     /** Renders [text] to a transparent-background/white-text square PNG
-     *  (same shrink-to-fit layout ComposePostScreen's live preview uses),
+     *  (same fit-to-frame layout ComposePostScreen's live preview uses),
      *  uploads it, and posts it as a single-image post — the network side of
-     *  Textshot mode. */
-    suspend fun createTextshotPost(token: String, did: String, textshotBitmap: android.graphics.Bitmap): Result<BskyRef> =
+     *  Textshot mode. Item 10: tagged with a recognizable alt-text prefix
+     *  ("A textshot post reading: ...") so RaccNet Pocket can tell a
+     *  Textshot image apart from a regular attached image when loading a
+     *  profile, and show it in the Text Post tab instead of Images — see
+     *  isTextshotAltText/textshotTextFromAlt below. */
+    suspend fun createTextshotPost(token: String, did: String, textshotBitmap: android.graphics.Bitmap, textshotText: String): Result<BskyRef> =
         withContext(Dispatchers.IO) {
             runCatching {
                 val out = java.io.ByteArrayOutputStream()
@@ -2094,7 +2113,8 @@ class BlueskyRepository {
                 val body = bytes.toRequestBody("image/png".toMediaType())
                 val resp = api.uploadBlob("Bearer $token", "image/png", body)
                 val blob = resp.body()?.blob ?: error("uploadBlob ${resp.code()}: ${resp.errorBody()?.string()}")
-                createPost(token, did, "", listOf(blob)).getOrElse { throw it }
+                val alt = TEXTSHOT_ALT_PREFIX + textshotText
+                createPost(token, did, "", listOf(blob), imageAlts = listOf(alt)).getOrElse { throw it }
             }
         }
 
@@ -2334,7 +2354,31 @@ class BlueskyRepository {
                         .filter { !it.fullsize.isNullOrBlank() && (!it.thumb.isNullOrBlank() || !it.thumbnail.isNullOrBlank()) }
                     if (images.isEmpty()) textOnlyItem() else {
                         val first = images.first()
-                        listOf(
+                        val firstAlt = first.alt
+                        if (images.size == 1 && firstAlt != null && firstAlt.startsWith(TEXTSHOT_ALT_PREFIX)) {
+                            // Item 10: on the wire, a Textshot post is just a
+                            // single image whose alt text is tagged with
+                            // TEXTSHOT_ALT_PREFIX (see createTextshotPost).
+                            // Reconstructed here as a text-only MediaItem —
+                            // blank mediaUrl/thumbUrl makes isTextOnly true,
+                            // which is exactly what routes it into the Text
+                            // Post tab (PostKindFilter.TEXT_POSTS) instead of
+                            // Images — using the original message recovered
+                            // from the alt text, since the post's own
+                            // top-level `text` is empty for Textshot posts.
+                            listOf(
+                                MediaItem(
+                                    id = post.cid, mediaUrl = "", thumbUrl = "", isVideo = false,
+                                    postUri = post.uri, postCid = post.cid, feedContext = item.feedContext,
+                                    author = author, likeUri = post.viewer?.like, repostUri = post.viewer?.repost,
+                                    isLiked = post.viewer?.like != null, isReposted = post.viewer?.repost != null,
+                                    likeCount = post.likeCount ?: 0, replyCount = post.replyCount ?: 0,
+                                    repostCount = post.repostCount ?: 0,
+                                    text = firstAlt.removePrefix(TEXTSHOT_ALT_PREFIX),
+                                    labels = nsfwLabels
+                                )
+                            )
+                        } else listOf(
                             MediaItem(
                                 id = post.cid, mediaUrl = first.fullsize,
                                 thumbUrl = resolvedThumb(first),

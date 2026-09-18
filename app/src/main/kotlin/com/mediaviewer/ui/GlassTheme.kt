@@ -27,6 +27,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.layer.GraphicsLayer
@@ -123,6 +125,18 @@ fun postBackgroundBrush(dominantColor: Color): Brush {
     return Brush.verticalGradient(listOf(deep, Color.Black, deep))
 }
 
+/** Item 11: a DM thread's own two-tone version of [postBackgroundBrush] —
+ *  [bottomColor] (the logged-in user's own dominant color) deep-tints the
+ *  bottom of the screen, fading through black in the middle, up into
+ *  [topColor] (the other person's dominant color) at the top — instead of
+ *  one flat color reflected symmetrically top and bottom like every other
+ *  page in the app. Mirrors how each side's chat bubbles are already tinted
+ *  to that same person's own color (see DmThreadView's myTint/theirTint). */
+fun dmThreadBackgroundBrush(bottomColor: Color, topColor: Color): Brush {
+    fun deepen(c: Color) = Color(red = c.red * 0.22f, green = c.green * 0.22f, blue = c.blue * 0.22f, alpha = 1f)
+    return Brush.verticalGradient(listOf(deepen(topColor), Color.Black, deepen(bottomColor)))
+}
+
 /** Bug fix: blocks taps/drags from passing through a full-screen overlay to
  *  whatever is still composed underneath it (the feed pager, a Hub page's
  *  own swipe gestures, etc.). Full-screen overlays built from a plain
@@ -187,6 +201,39 @@ val LocalGlassIntensity = compositionLocalOf { 1f }
  *  full strongly-tinted rim. */
 val LocalGlassRimIntensity = compositionLocalOf { 1f }
 
+/** Item 7: whether every glass rim's gradient uses a brighter/more-saturated
+ *  version of its own tint as the middle stop (true, the default) or
+ *  collapses to a single flat reflected color with no gradient at all
+ *  (false) — the Settings toggle next to the rim intensity slider. */
+val LocalGlassRimVibrantSecondary = compositionLocalOf { true }
+
+/** Item 7: a brighter, more saturated version of [c] at the same hue —
+ *  every rim gradient's middle stop uses this instead of a neutral
+ *  grey/white, so the outline reads as "this panel's own color, lit up"
+ *  rather than a generic highlight unrelated to whatever it's tinted with. */
+private fun vibrantRimHighlight(c: Color): Color {
+    val hsv = FloatArray(3)
+    android.graphics.Color.colorToHSV(c.toArgb(), hsv)
+    hsv[1] = (hsv[1] * 0.85f + 0.15f).coerceIn(0f, 1f)
+    hsv[2] = hsv[2].coerceAtLeast(0.92f)
+    return Color(android.graphics.Color.HSVToColor(hsv))
+}
+
+/** Item 7: every glass rim's border brush goes through this — a
+ *  tint → brighter-tint → tint gradient when [vibrantSecondary] is on, or a
+ *  single flat tint (at [edgeAlpha] strength) with no gradient at all when
+ *  the person's turned that off in Settings. */
+fun glassRimBrush(tint: Color, rimIntensity: Float, vibrantSecondary: Boolean, edgeAlpha: Float, midAlpha: Float): Brush =
+    if (vibrantSecondary) {
+        Brush.linearGradient(listOf(
+            tint.copy(alpha = edgeAlpha * rimIntensity),
+            vibrantRimHighlight(tint).copy(alpha = midAlpha * rimIntensity),
+            tint.copy(alpha = edgeAlpha * rimIntensity)
+        ))
+    } else {
+        androidx.compose.ui.graphics.SolidColor(tint.copy(alpha = edgeAlpha * rimIntensity))
+    }
+
 /**
  * A lighter-weight liquid-glass look expressed as a plain [Modifier] (rather
  * than the panel-composable above) so existing rows/buttons/chips across
@@ -214,6 +261,7 @@ fun Modifier.glassPanel(
     // too, which wasn't supposed to happen.
     val intensity = LocalGlassIntensity.current
     val rimIntensity = LocalGlassRimIntensity.current
+    val rimVibrantSecondary = LocalGlassRimVibrantSecondary.current
     val scrimAlpha = scrimAlphaFor(tint) * intensity
 
     this
@@ -226,7 +274,7 @@ fun Modifier.glassPanel(
         .then(if (scrimAlpha > 0f) Modifier.background(Color.Black.copy(alpha = scrimAlpha)) else Modifier)
         .border(
             width = 1.dp,
-            brush = Brush.linearGradient(listOf(tint.copy(alpha = 0.85f * rimIntensity), Color.White.copy(alpha = 0.5f * rimIntensity), tint.copy(alpha = 0.7f * rimIntensity))),
+            brush = glassRimBrush(tint, rimIntensity, rimVibrantSecondary, edgeAlpha = 0.85f, midAlpha = 0.5f),
             shape = shape
         )
 }
@@ -260,6 +308,7 @@ fun Modifier.opaqueMaskPanel(
     rim: Boolean = true
 ): Modifier = composed {
     val rimIntensity = LocalGlassRimIntensity.current
+    val rimVibrantSecondary = LocalGlassRimVibrantSecondary.current
     var trackedOrigin by remember { mutableStateOf(Offset.Zero) }
     this
         .clip(shape)
@@ -298,7 +347,7 @@ fun Modifier.opaqueMaskPanel(
         .then(
             if (rim) Modifier.border(
                 width = 1.dp,
-                brush = Brush.linearGradient(listOf(tint.copy(alpha = 0.85f * rimIntensity), Color.White.copy(alpha = 0.5f * rimIntensity), tint.copy(alpha = 0.7f * rimIntensity))),
+                brush = glassRimBrush(tint, rimIntensity, rimVibrantSecondary, edgeAlpha = 0.85f, midAlpha = 0.5f),
                 shape = shape
             ) else Modifier
         )
@@ -357,6 +406,7 @@ fun LiquidGlassSurface(
     // independent of the background blur/tint intensity — see glassPanel.
     val intensity = LocalGlassIntensity.current
     val rimIntensity = LocalGlassRimIntensity.current
+    val rimVibrantSecondary = LocalGlassRimVibrantSecondary.current
     val scrimAlpha = scrimAlphaFor(tint) * intensity
     var trackedOrigin by remember { mutableStateOf(Offset.Zero) }
 
@@ -367,7 +417,16 @@ fun LiquidGlassSurface(
                 if (staticOrigin == null)
                     Modifier.onGloballyPositioned { coords -> trackedOrigin = coords.positionInRoot() }
                 else Modifier
-            )
+            ),
+        // Item 9 fix: this Box used to default to TopStart, so any caller
+        // that stretches the panel taller than its own inner content (e.g. a
+        // review-page pill sized to Modifier.fillMaxHeight() to match a
+        // sibling row's height) ended up with its text/icon pinned to the
+        // top of the now-taller panel instead of sitting in its middle.
+        // Every decorative layer above (backdrop/tint/scrim/rim) already
+        // uses matchParentSize(), so centering the actual content here only
+        // affects content that doesn't already fill the panel itself.
+        contentAlignment = Alignment.Center
     ) {
         // Big Update #4: the live backdrop — a magnified, blurred crop of
         // whatever is actually rendered directly under this panel right now,
@@ -404,9 +463,7 @@ fun LiquidGlassSurface(
         Box(
             Modifier.matchParentSize().border(
                 width = 1.2.dp,
-                brush = Brush.linearGradient(
-                    listOf(tint.copy(alpha = 0.95f * rimIntensity), Color.White.copy(alpha = 0.55f * rimIntensity), tint.copy(alpha = 0.85f * rimIntensity))
-                ),
+                brush = glassRimBrush(tint, rimIntensity, rimVibrantSecondary, edgeAlpha = 0.95f, midAlpha = 0.55f),
                 shape = shape
             )
         )

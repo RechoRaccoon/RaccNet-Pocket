@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -83,6 +85,12 @@ fun SearchOverlay(
     // at the call site.
     onLikedQueryTextChange: (String) -> Unit = {},
     onLikedSearchSubmit: () -> Unit = {},
+    // Item 14: the new "e621" filter option — only rendered in the filter
+    // row when true (see the filter row below); reuses the Tagged tab's
+    // exact same text-field/autocomplete wiring (onLikedQueryTextChange),
+    // just with its own submit action.
+    e621LoggedIn: Boolean = false,
+    onE621SearchSubmit: () -> Unit = {},
     onTagSuggestionSelected: (String) -> Unit = {},
     onSelectFilter: (MainViewModel.SearchFilter) -> Unit,
     onOpenPost: (Int) -> Unit,
@@ -116,7 +124,16 @@ fun SearchOverlay(
     // barWidthPx) and the suggestions panel (a later sibling of the whole
     // Column, so it draws on top of it) can see them.
     val isLiked = state.filter == MainViewModel.SearchFilter.LIKED_TAGS
-    val showSuggestions = isLiked && tagSuggestions.isNotEmpty()
+    // Item 14: e621 reuses the Tagged tab's text-field routing/autocomplete
+    // verbatim (see the doc comment on the `e621LoggedIn`/
+    // `onE621SearchSubmit` params above) — grouped with isLiked below
+    // wherever that means "route through updateLikedQueryText instead of a
+    // live per-keystroke query", but kept as its own flag wherever the two
+    // filters' *submit* behavior differs (isLiked queries inline; e621
+    // jumps straight to the feed).
+    val isE621Filter = state.filter == MainViewModel.SearchFilter.E621
+    val isTagInputFilter = isLiked || isE621Filter
+    val showSuggestions = isTagInputFilter && tagSuggestions.isNotEmpty()
     var barBottomLeft by remember { mutableStateOf(Offset.Zero) }
     var barWidthPx by remember { mutableStateOf(0) }
 
@@ -171,6 +188,7 @@ fun SearchOverlay(
                 }
                 @Composable
                 fun SearchFieldContent() {
+                    val haptic = LocalHapticFeedback.current
                     Row(
                         Modifier.fillMaxSize().padding(horizontal = 14.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -185,10 +203,19 @@ fun SearchOverlay(
                         // comments on MainViewModel.
                         BasicTextFieldWithPlaceholder(
                             value = state.query,
-                            onValueChange = if (isLiked) onLikedQueryTextChange else onQueryChange,
+                            onValueChange = if (isTagInputFilter) onLikedQueryTextChange else onQueryChange,
                             // Item 1: just "Search" — no app-name text needed.
                             placeholder = "Search", focusRequester = focusRequester,
-                            onSearch = { if (isLiked) onLikedSearchSubmit() else onQueryChange(state.query) }
+                            // Item 8: haptic tap when the keyboard's search
+                            // action actually submits a query.
+                            onSearch = {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                when {
+                                    isE621Filter -> onE621SearchSubmit()
+                                    isLiked -> onLikedSearchSubmit()
+                                    else -> onQueryChange(state.query)
+                                }
+                            }
                         )
                     }
                 }
@@ -231,6 +258,8 @@ fun SearchOverlay(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 MainViewModel.SearchFilter.entries.forEach { filter ->
+                    // Item 14: e621 filter only shows once logged into e621.
+                    if (filter == MainViewModel.SearchFilter.E621 && !e621LoggedIn) return@forEach
                     FilterChip(label = filter.label(), active = state.filter == filter, liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop) { onSelectFilter(filter) }
                 }
             }
@@ -267,6 +296,12 @@ fun SearchOverlay(
                                 }
                             }
                         }
+                    }
+                    // Item 14: e621 never shows inline results here — typing
+                    // a tag and hitting the keyboard's search key jumps
+                    // straight to the e621 feed (see onE621SearchSubmit).
+                    isE621Filter -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("Type e621 tags, then hit search", color = DimGray, fontSize = 13.sp, textAlign = TextAlign.Center)
                     }
                     state.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 1.5.dp)
@@ -407,6 +442,7 @@ private fun MainViewModel.SearchFilter.label(): String = when (this) {
     MainViewModel.SearchFilter.LIKED_TAGS    -> "Tagged"
     MainViewModel.SearchFilter.FEEDS         -> "Feeds"
     MainViewModel.SearchFilter.STARTER_PACKS -> "Starter Packs"
+    MainViewModel.SearchFilter.E621          -> "e621"
 }
 
 @Composable

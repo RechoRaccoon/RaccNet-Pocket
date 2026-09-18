@@ -43,6 +43,7 @@ import com.mediaviewer.model.ScreenState
 import com.mediaviewer.ui.GlassBackdrop
 import com.mediaviewer.ui.LocalGlassIntensity
 import com.mediaviewer.ui.LocalGlassRimIntensity
+import com.mediaviewer.ui.LocalGlassRimVibrantSecondary
 import com.mediaviewer.ui.NeutralGlassTint
 import com.mediaviewer.ui.DmInboxOverlay
 import com.mediaviewer.ui.ListPickerDialog
@@ -218,6 +219,7 @@ private fun AppRoot(viewModel: MainViewModel) {
     val liquidGlass        by viewModel.liquidGlass.collectAsState()
     val liquidGlassIntensity by viewModel.liquidGlassIntensity.collectAsState()
     val glassRimIntensity  by viewModel.glassRimIntensity.collectAsState()
+    val glassRimVibrantSecondary by viewModel.glassRimVibrantSecondary.collectAsState()
     val availableFeeds     by viewModel.availableFeeds.collectAsState()
     val selectedFeed       by viewModel.selectedFeedUri.collectAsState()
     val authorFeedState    by viewModel.authorFeedState.collectAsState()
@@ -553,7 +555,8 @@ private fun AppRoot(viewModel: MainViewModel) {
     // parameter list.
     CompositionLocalProvider(
         LocalGlassIntensity provides liquidGlassIntensity,
-        LocalGlassRimIntensity provides glassRimIntensity
+        LocalGlassRimIntensity provides glassRimIntensity,
+        LocalGlassRimVibrantSecondary provides glassRimVibrantSecondary
     ) {
     Box(Modifier.fillMaxSize()) {
         // Feature request #8: lifted out of MainFeedScreen so a multi-image
@@ -579,6 +582,8 @@ private fun AppRoot(viewModel: MainViewModel) {
             onSetLiquidGlassIntensity = viewModel::setLiquidGlassIntensity,
             glassRimIntensity         = glassRimIntensity,
             onSetGlassRimIntensity    = viewModel::setGlassRimIntensity,
+            glassRimVibrantSecondary  = glassRimVibrantSecondary,
+            onToggleGlassRimVibrantSecondary = viewModel::setGlassRimVibrantSecondary,
             dmConversations           = dmConversations,
             dmConversationsLoading    = dmConversationsLoading,
             friendsReviews            = friendsReviews,
@@ -735,23 +740,6 @@ private fun AppRoot(viewModel: MainViewModel) {
             onTogglePinterestThreeColumns = viewModel::setPinterestThreeColumns
         )
 
-        if (dmInboxOpen) {
-            DmInboxOverlay(
-                conversations   = dmConversations,
-                loading         = dmConversationsLoading,
-                thread          = dmThread,
-                liquidGlass     = liquidGlass,
-                selfAvatarUrl   = selfProfile?.author?.avatarUrl,
-                onSelectConvo   = viewModel::openDmThread,
-                onCloseThread   = viewModel::closeDmThread,
-                onSendReply     = viewModel::sendDmThreadReply,
-                onClose         = viewModel::closeDmInbox,
-                onTapAuthor     = { author -> viewModel.closeDmInbox(); viewModel.openProfile(author) },
-                onLoadMoreMessages   = viewModel::loadMoreDmMessages,
-                onOpenSharedPostsFeed = viewModel::openDmThreadSharedPostsFeed
-            )
-        }
-
         if (composePostOpen) {
             com.mediaviewer.ui.ComposePostScreen(
                 selfProfile    = selfProfile?.author,
@@ -788,6 +776,8 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onQueryChange      = viewModel::runSearch,
                 onLikedQueryTextChange = viewModel::updateLikedQueryText,
                 onLikedSearchSubmit    = viewModel::submitLikedSearch,
+                e621LoggedIn       = e621LoggedIn,
+                onE621SearchSubmit = viewModel::submitE621SearchFromOverlay,
                 onTagSuggestionSelected = viewModel::applyTagSuggestion,
                 onSelectFilter     = viewModel::setSearchFilter,
                 onOpenPost         = viewModel::openPostFromSearch,
@@ -874,6 +864,31 @@ private fun AppRoot(viewModel: MainViewModel) {
                     hateFunBlurNsfw   = hateFunBlurNsfw
                 )
             }
+        }
+
+        // Item 3: this used to render *before* ProfileOverlay below, so a
+        // Bluesky opened from a profile's DM button visibly built its
+        // thread "behind" the still-composed profile page (Compose draws
+        // later Box children on top of earlier ones — ProfileOverlay was
+        // the later child). Rendering it after ProfileOverlay instead (but
+        // still before every dialog/popup below it) puts it back on top,
+        // matching the "layered on top of everything else" comment this
+        // block used to sit under.
+        if (dmInboxOpen) {
+            DmInboxOverlay(
+                conversations   = dmConversations,
+                loading         = dmConversationsLoading,
+                thread          = dmThread,
+                liquidGlass     = liquidGlass,
+                selfAvatarUrl   = selfProfile?.author?.avatarUrl,
+                onSelectConvo   = viewModel::openDmThread,
+                onCloseThread   = viewModel::closeDmThread,
+                onSendReply     = viewModel::sendDmThreadReply,
+                onClose         = viewModel::closeDmInbox,
+                onTapAuthor     = { author -> viewModel.closeDmInbox(); viewModel.openProfile(author) },
+                onLoadMoreMessages   = viewModel::loadMoreDmMessages,
+                onOpenSharedPostsFeed = viewModel::openDmThreadSharedPostsFeed
+            )
         }
 
         val currentSendTarget = sendPopupTarget

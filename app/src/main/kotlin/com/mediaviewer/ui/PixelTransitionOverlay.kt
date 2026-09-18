@@ -344,12 +344,19 @@ fun PixelMatrixOverlay(controller: PixelTransitionController, modifier: Modifier
                 }
                 if (!visible) continue
 
-                // Discrete conveyor-belt hop: a hard-edged triangular
-                // brightness band that steps diagonally one grid cell per
-                // tick (see conveyorStep). Runs in every visible phase
-                // (WIPE_IN/LOADING/WIPE_OUT alike) — motion never pauses
-                // just because the wipe itself is mid-sweep.
-                val rawBand = ((gx + gy) - step) % BAND_PERIOD
+                // Discrete conveyor-belt hop (item 13): each cell still steps
+                // through the exact same brightness cycle, once per tick, so
+                // the whole grid keeps moving constantly — but which band a
+                // given cell is *currently on* is offset by a fixed,
+                // per-cell random phase (cellPhase) rather than being a pure
+                // function of (gx + gy). A pure (gx + gy) band read as clean
+                // parallel diagonal lines marching in lockstep; folding in a
+                // stable per-cell hash scrambles which cells share a band at
+                // any given instant into a scattered/noisy speckle instead,
+                // while every cell's own cycle still advances one step per
+                // tick exactly as before.
+                val cellPhase = (hash01(gx * 53 + 7, gy * 97 + 13) * BAND_PERIOD).toInt()
+                val rawBand = ((gx + gy) + cellPhase - step) % BAND_PERIOD
                 val bandPos = if (rawBand < 0) rawBand + BAND_PERIOD else rawBand
                 val conveyorFactor = when (bandPos) {
                     0 -> 1.45f

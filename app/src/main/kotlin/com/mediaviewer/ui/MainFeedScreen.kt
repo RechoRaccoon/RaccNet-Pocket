@@ -167,6 +167,8 @@ fun MainFeedScreen(
     onSetLiquidGlassIntensity: (Float) -> Unit = {},
     glassRimIntensity: Float = 1f,
     onSetGlassRimIntensity: (Float) -> Unit = {},
+    glassRimVibrantSecondary: Boolean = true,
+    onToggleGlassRimVibrantSecondary: (Boolean) -> Unit = {},
     // Item 8: Friends/Livestreams Hub sections.
     dmConversations: List<com.mediaviewer.model.DmConversation> = emptyList(),
     dmConversationsLoading: Boolean = false,
@@ -498,6 +500,8 @@ fun MainFeedScreen(
                         onSetLiquidGlassIntensity = onSetLiquidGlassIntensity,
                         glassRimIntensity         = glassRimIntensity,
                         onSetGlassRimIntensity    = onSetGlassRimIntensity,
+                        glassRimVibrantSecondary  = glassRimVibrantSecondary,
+                        onToggleGlassRimVibrantSecondary = onToggleGlassRimVibrantSecondary,
                         e621SearchTags            = e621SearchTags,
                         isLoading                 = isLoading,
                         onLoginBluesky            = onLoginBluesky,

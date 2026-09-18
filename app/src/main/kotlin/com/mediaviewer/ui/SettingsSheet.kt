@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -7,6 +9,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import kotlinx.coroutines.launch
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.Animatable
@@ -31,6 +38,8 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
@@ -68,6 +77,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.sp
@@ -91,7 +102,7 @@ import com.mediaviewer.viewmodel.MainViewModel
 // up into the feed itself. onSwitchMode is now only called from the
 // swipe-up-to-feed handler below, at the moment the user actually leaves
 // the Hub for the feed, based on whichever Hub page they're leaving from.
-private enum class HubPage { SETTINGS, AT_PROTOCOL, E621 }
+private enum class HubPage { SETTINGS, MAIN }
 
 @Composable
 fun SettingsSheet(
@@ -137,6 +148,8 @@ fun SettingsSheet(
     // background dial above.
     glassRimIntensity: Float = 1f,
     onSetGlassRimIntensity: (Float) -> Unit = {},
+    glassRimVibrantSecondary: Boolean = true,
+    onToggleGlassRimVibrantSecondary: (Boolean) -> Unit = {},
     combineListsAndPacks: Boolean,
     e621SearchTags: String,
     isLoading: Boolean,
@@ -261,17 +274,11 @@ fun SettingsSheet(
     // no risk of missing one across a file this size. Falls back to the
     // post color if there's no avatar yet (e.g. profile hasn't loaded).
     val dominantColor = selfAvatarUrl?.let { rememberDominantColor(it) } ?: dominantColor
-    var hubPage by remember {
-        mutableStateOf(if (appMode == AppMode.BLUESKY) HubPage.AT_PROTOCOL else HubPage.E621)
-    }
-    // Tracks the direction of the most recent page change, since the same
-    // pair of states can mean either direction once wraparound is involved
-    // (e.g. Settings -> e621 is "forward" via a wrap-around swipe, but
-    // "backward" if you just tapped the e621 chip directly) — inferring
-    // direction from the state pair alone is ambiguous, so it's tracked
-    // explicitly instead.
+    var hubPage by remember { mutableStateOf(HubPage.MAIN) }
+    // Tracks the direction of the most recent page change (Settings <-> Main
+    // via the More button / its own back action).
     var hubPageForward by remember { mutableStateOf(true) }
-    val hubPages = remember { listOf(HubPage.SETTINGS, HubPage.AT_PROTOCOL, HubPage.E621) }
+    val hubPages = remember { listOf(HubPage.SETTINGS, HubPage.MAIN) }
     // Bug fix (per feedback): this used to also call onSwitchMode(...) here,
     // meaning just navigating to (or swiping past) the AT Protocol/e621 Hub
     // page immediately flipped the active feed and triggered a load/refresh
@@ -283,31 +290,16 @@ fun SettingsSheet(
         hubPageForward = forward
         hubPage = target
     }
-    // Bug fix (per feedback): the actual AppMode switch — and therefore any
-    // feed load/refresh — now only happens right here, at the moment the
-    // user actually leaves the Hub for the feed, based on whichever Hub
-    // page they're leaving from. Browsing between Hub pages itself
-    // (including landing on e621, even by accident) never touches the
-    // feed. Settings has no corresponding mode, so returning to the feed
-    // from Settings leaves whatever mode was already active untouched — it
-    // was never changed just by visiting Settings in the first place.
-    //
-    // Item (this session): this used to fire from a swipe-up gesture
-    // (detected both via a raw pointerInput drag on the outer Box and via
-    // NestedScrollConnection so it kept working on scrollable pages). Per
-    // feedback, both the swipe-up-to-feed gesture and the swipe-left/right
-    // page-switch gesture have been removed entirely to avoid accidental
-    // triggers — this same logic now runs from the explicit "Return to
-    // Feed" button at the bottom of each Hub page instead (see
-    // ReturnToFeedBar below). Hub-page switching is unaffected: it was
-    // always also reachable via the HubChip taps at the top, which this
-    // doesn't touch.
+    // Item 14: the Hub is one page now (Settings/AT Protocol/e621 chips are
+    // gone — e621's own navigation folded into this page, its login moved
+    // to Settings, see AtProtocolPageContent/SettingsPageContent), so
+    // there's only one feed mode a generic "Return to Feed" tap can mean
+    // anymore: Bluesky. e621 Hot/Favorites/Following are self-contained
+    // now — each one switches mode and jumps straight to the feed itself,
+    // rather than deferring to this button (see AtProtocolPageContent's
+    // onOpenE621* handlers).
     fun onReturnToFeed() {
-        when (hubPage) {
-            HubPage.AT_PROTOCOL -> onSwitchMode(AppMode.BLUESKY)
-            HubPage.E621         -> onSwitchMode(AppMode.E621)
-            HubPage.SETTINGS     -> {}
-        }
+        if (hubPage == HubPage.MAIN) onSwitchMode(AppMode.BLUESKY)
         onSwipeToFeed()
     }
 
@@ -359,21 +351,12 @@ fun SettingsSheet(
         ) {
             Spacer(Modifier.height(8.dp))
 
-            // ── Hub header: 3-way page switcher — same visual language as the
-            // 3-button quick-access row (always-visible glass rim, equal
-            // width), differing only in that the active page's text is white.
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // Item 3/11: rims now reflect the post's own dominant color
-                // (the same `dominantColor` every other glass surface in the
-                // Hub uses), instead of a hardcoded neutral tint — keeps
-                // every button/chip in the Hub visually consistent.
-                HubChip("Settings", hubPage == HubPage.SETTINGS, liquidGlass, Modifier.weight(1f), dominantColor, backdrop) { goToHubPage(HubPage.SETTINGS) }
-                HubChip("AT Protocol", hubPage == HubPage.AT_PROTOCOL, liquidGlass, Modifier.weight(1f), dominantColor, backdrop) { goToHubPage(HubPage.AT_PROTOCOL) }
-                HubChip("e621", hubPage == HubPage.E621, liquidGlass, Modifier.weight(1f), dominantColor, backdrop) { goToHubPage(HubPage.E621) }
-            }
+            // Item 14: the Settings/AT Protocol/e621 chip row is gone — the
+            // Hub is a single page now (this Column's own scroll content
+            // starts with the search bar, per item 14's "search bar will
+            // now be at the top"), reached by default, with Settings
+            // reachable only via the new HubMoreButton at the bottom (see
+            // ReturnToFeedBar) instead of a top-level chip.
 
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 AnimatedContent(
@@ -396,6 +379,7 @@ fun SettingsSheet(
                             liquidGlass = liquidGlass, onToggleLiquidGlass = onToggleLiquidGlass,
                             liquidGlassIntensity = liquidGlassIntensity, onSetLiquidGlassIntensity = onSetLiquidGlassIntensity,
                             glassRimIntensity = glassRimIntensity, onSetGlassRimIntensity = onSetGlassRimIntensity,
+                            glassRimVibrantSecondary = glassRimVibrantSecondary, onToggleGlassRimVibrantSecondary = onToggleGlassRimVibrantSecondary,
                             translationEnabled = translationEnabled, translationTargetLang = translationTargetLang,
                             onToggleTranslation = onToggleTranslation, onSelectTranslationLanguage = onSelectTranslationLanguage,
                             customFontName = customFontName, onPickFontFile = onPickFontFile, onResetFont = onResetFont,
@@ -413,12 +397,13 @@ fun SettingsSheet(
                             combineListsAndPacks = combineListsAndPacks, onToggleCombineListsPacks = onToggleCombineListsPacks,
                             autoAddToOnFollow = autoAddToOnFollow, onToggleAutoAddToOnFollow = onToggleAutoAddToOnFollow,
                             onLogoutBluesky = onLogoutBluesky, onLogoutE621 = onLogoutE621,
+                            onSaveE621Credentials = onSaveE621Credentials,
                             dominantColor = dominantColor, backdrop = backdrop,
                             liveTwitchUrl = liveTwitchUrl, liveYoutubeUrl = liveYoutubeUrl,
                             onSaveLiveTwitchUrl = onSaveLiveTwitchUrl, onSaveLiveYoutubeUrl = onSaveLiveYoutubeUrl,
                             onCreateLiveLinkWidget = onCreateLiveLinkWidget
                         )
-                        HubPage.AT_PROTOCOL -> AtProtocolPageContent(
+                        HubPage.MAIN -> AtProtocolPageContent(
                             bskyLoggedIn = bskyLoggedIn, bskyHandle = bskyHandle,
                             availableFeeds = availableFeeds, selectedFeedUri = selectedFeedUri, authorFeedState = authorFeedState,
                             onShowLikes = onShowLikes, onShowFriends = onShowFriends,
@@ -445,16 +430,22 @@ fun SettingsSheet(
                             hasVisitedFeed = hasVisitedFeed,
                             liveTwitchUrl = liveTwitchUrl, liveYoutubeUrl = liveYoutubeUrl,
                             liveActivePlatform = liveActivePlatform,
-                            onToggleLiveLink = onToggleLiveLink, onEndLiveLink = onEndLiveLink
-                        )
-                        HubPage.E621 -> E621PageContent(
+                            onToggleLiveLink = onToggleLiveLink, onEndLiveLink = onEndLiveLink,
+                            // Item 14: e621's Hot/Favorites/Following quick
+                            // buttons folded in here (were the standalone
+                            // e621 page's whole reason to exist) — shown
+                            // only once logged in, and each one now jumps
+                            // straight to the feed itself (switching
+                            // AppMode.E621 first) instead of relying on a
+                            // separate page-aware "Return to Feed" tap, now
+                            // that there's only one such button left and it
+                            // always means Bluesky (see onReturnToFeed
+                            // above).
                             e621LoggedIn = e621LoggedIn, e621SearchTags = e621SearchTags,
-                            onSearchE621 = onSearchE621,
-                            onShowE621Favorites = onShowE621Favorites, onShowE621Following = onShowE621Following,
-                            isLoading = isLoading, onSaveE621Credentials = onSaveE621Credentials,
-                            liquidGlass = liquidGlass, dominantColor = dominantColor, backdrop = backdrop,
-                            onReturnToFeed = { onReturnToFeed() },
-                            hasVisitedFeed = hasVisitedFeed
+                            onOpenE621Hot = { onSwitchMode(AppMode.E621); onSearchE621("order:hot"); onSwipeToFeed() },
+                            onOpenE621Search = { tags -> onSwitchMode(AppMode.E621); onSearchE621(tags); onSwipeToFeed() },
+                            onOpenE621Favorites = { onSwitchMode(AppMode.E621); onShowE621Favorites(); onSwipeToFeed() },
+                            onOpenE621Following = { onSwitchMode(AppMode.E621); onShowE621Following(); onSwipeToFeed() }
                         )
                     }
                 }
@@ -476,21 +467,20 @@ fun SettingsSheet(
             // exactly what AtProtocolPageContent/E621PageContent used to
             // gate on internally.
             val showReturnBar = when (hubPage) {
-                HubPage.AT_PROTOCOL -> bskyLoggedIn
-                HubPage.E621 -> e621LoggedIn
+                HubPage.MAIN -> bskyLoggedIn
                 HubPage.SETTINGS -> false
             }
-            if (showReturnBar) {
-                Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp).padding(top = 6.dp)) {
-                    ReturnToFeedBar(
-                        liquidGlass = liquidGlass, tint = dominantColor, backdrop = null,
-                        uploadBackdrop = hubBackgroundBackdrop,
-                        onReturnToFeed = { onReturnToFeed() },
-                        onRefresh = if (hubPage == HubPage.AT_PROTOCOL) onRefreshHub else null,
-                        hasVisitedFeed = hasVisitedFeed,
-                        onOpenComposePost = onOpenComposePost
-                    )
-                }
+            Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp).padding(top = 6.dp)) {
+                ReturnToFeedBar(
+                    liquidGlass = liquidGlass, tint = dominantColor, backdrop = null,
+                    uploadBackdrop = hubBackgroundBackdrop,
+                    onReturnToFeed = { onReturnToFeed() },
+                    onOpenSettings = { goToHubPage(if (hubPage == HubPage.SETTINGS) HubPage.MAIN else HubPage.SETTINGS) },
+                    onRefresh = if (hubPage == HubPage.MAIN) onRefreshHub else null,
+                    showPillAndUpload = showReturnBar,
+                    hasVisitedFeed = hasVisitedFeed,
+                    onOpenComposePost = onOpenComposePost
+                )
             }
 
             Text(
@@ -534,6 +524,8 @@ private fun SettingsPageContent(
     // background dial above.
     glassRimIntensity: Float,
     onSetGlassRimIntensity: (Float) -> Unit,
+    glassRimVibrantSecondary: Boolean,
+    onToggleGlassRimVibrantSecondary: (Boolean) -> Unit,
     translationEnabled: Boolean,
     translationTargetLang: String,
     onToggleTranslation: (Boolean) -> Unit,
@@ -549,6 +541,9 @@ private fun SettingsPageContent(
     bskyHandle: String,
     e621LoggedIn: Boolean,
     e621Username: String,
+    // Item 14: the e621 sign-in form now lives here (was on the removed
+    // e621 page) — see the SectionDivider("e621 Settings") block below.
+    onSaveE621Credentials: (String, String) -> Unit,
     downloadOnLike: Boolean,
     onToggleDownloadOnLike: (Boolean) -> Unit,
     downloadProgress: DownloadProgress?,
@@ -690,12 +685,11 @@ private fun SettingsPageContent(
         // removed — the classic two-row text-label tab layout is always
         // used now (see ProfileOverlay's classicProfileTabRow doc comment).
 
-        // Feature request #7: experimental 3-wide Pinterest-style grid for
-        // the Posts/Reposts/Likes tabs' All/Images filters (default is 2).
-        CompactRow {
-            Text("3-Column Pinterest Layout (Experimental)", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(end = 12.dp))
-            CompactSwitch(checked = pinterestThreeColumns, onCheckedChange = onTogglePinterestThreeColumns)
-        }
+        // Item 15: the old "3-Column Pinterest Layout (Experimental)"
+        // toggle is gone — 3-column masonry is now just one stop on the
+        // profile interaction bar's own Grid cycle (gridMode 0/1/2, see
+        // ProfileInteractionBar/gridModeFor in ProfileOverlay.kt), available
+        // per-tab without a separate global setting.
 
         // Feature request #8: "I hate fun" — blurs Bluesky-labeled sexual/
         // adult posts behind a tap-to-reveal cover instead of hiding them.
@@ -779,6 +773,15 @@ private fun SettingsPageContent(
                         CompactSlider(value = glassRimIntensity, onValueChange = onSetGlassRimIntensity, modifier = Modifier.weight(1f))
                         Text("${(glassRimIntensity * 100).toInt()}%", color = DimGray, fontSize = 12.sp,
                             modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
+                    }
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
+                    // Item 7: the outline's gradient blends its tint into a
+                    // brighter/more-saturated version of that same tint by
+                    // default — this drops it back to a single flat
+                    // reflected color with no gradient at all.
+                    CompactRow {
+                        Text("Vibrant Outline Highlight", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(end = 12.dp))
+                        CompactSwitch(checked = glassRimVibrantSecondary, onCheckedChange = onToggleGlassRimVibrantSecondary)
                     }
                 }
             }
@@ -1014,9 +1017,8 @@ private fun SettingsPageContent(
         }
 
         // ── e621 Settings (moved from the e621 page) ─────────────────────
+        SectionDivider("e621 Settings")
         if (e621LoggedIn) {
-            SectionDivider("e621 Settings")
-
             CompactRow {
                 Text("Download When Favorited", color = Color.White, fontSize = 14.sp)
                 CompactSwitch(checked = downloadOnLike, onCheckedChange = onToggleDownloadOnLike)
@@ -1052,8 +1054,37 @@ private fun SettingsPageContent(
                 Text("Logout", color = Color(0xFFEF5350), fontSize = 12.sp, fontWeight = FontWeight.Medium,
                     modifier = Modifier.clickable(onClick = onLogoutE621))
             }
+        } else {
+            // Item 14: e621 sign-in itself now lives in Settings too — used
+            // to be the whole point of the standalone e621 page, which is
+            // gone now that the Hub's page-switcher (Settings/AT Protocol/
+            // e621 chips) has been replaced by the More button.
+            var e621SignInUser by remember { mutableStateOf("") }
+            var e621SignInKey by remember { mutableStateOf("") }
+            OutlinedTextField(value = e621SignInUser, onValueChange = { e621SignInUser = it },
+                placeholder = { Text("Username", color = DimGray) },
+                singleLine = true, colors = fieldColors(), modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(value = e621SignInKey, onValueChange = { e621SignInKey = it },
+                placeholder = { Text("API Key", color = DimGray) },
+                singleLine = true, visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                colors = fieldColors(), modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(8.dp))
+            @Composable
+            fun SignInE621Content() {
+                Box(Modifier.fillMaxSize().clickable(enabled = e621SignInUser.isNotBlank() && e621SignInKey.isNotBlank()) {
+                    onSaveE621Credentials(e621SignInUser, e621SignInKey)
+                }, contentAlignment = Alignment.Center) {
+                    Text("Sign in to e621", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+            if (liquidGlass) {
+                LiquidGlassSurface(Modifier.fillMaxWidth().height(44.dp), tint = dominantColor, backdrop = backdrop) { SignInE621Content() }
+            } else {
+                Box(Modifier.fillMaxWidth().height(44.dp).clip(RoundedCornerShape(14.dp)).background(Color.White.copy(0.08f))) { SignInE621Content() }
+            }
         }
-
         // ── AI Tagging (this session) ─────────────────────────────────────
         // Available in both AT Protocol and e621 modes — whichever is
         // currently logged in is what startTaggingAllLiked() reads.
@@ -1321,7 +1352,16 @@ private fun AtProtocolPageContent(
     liveYoutubeUrl: String? = null,
     liveActivePlatform: com.mediaviewer.model.LiveNowPlatform? = null,
     onToggleLiveLink: (com.mediaviewer.model.LiveNowPlatform) -> Unit = {},
-    onEndLiveLink: () -> Unit = {}
+    onEndLiveLink: () -> Unit = {},
+    // Item 14: e621's Hot/Favorites/Following/tag-search quick access,
+    // folded in here from the removed standalone e621 page — shown only
+    // once logged in (login itself now lives in Settings).
+    e621LoggedIn: Boolean = false,
+    e621SearchTags: String = "",
+    onOpenE621Hot: () -> Unit = {},
+    onOpenE621Search: (String) -> Unit = {},
+    onOpenE621Favorites: () -> Unit = {},
+    onOpenE621Following: () -> Unit = {}
 ) {
     // Item 8: both of the new sections' fetches are lazy — kick them off once
     // when this page first composes rather than eagerly for every Hub visit
@@ -1829,6 +1869,90 @@ private fun AtProtocolPageContent(
         }
         }
 
+        // ── e621 (item 14: folded in from the removed standalone e621 page)
+        if (e621LoggedIn) {
+            var localE621Tags by remember(e621SearchTags) { mutableStateOf(e621SearchTags) }
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+                Text("e621", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 10.dp))
+                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+            }
+            Spacer(Modifier.height(6.dp))
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(value = localE621Tags, onValueChange = { localE621Tags = it },
+                    placeholder = { Text("Search tags…", color = DimGray, fontSize = 13.sp) },
+                    singleLine = true, colors = fieldColors(),
+                    modifier = Modifier.weight(1f).height(52.dp))
+                Button(onClick = { onOpenE621Search(localE621Tags) },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.1f), contentColor = Color.White),
+                    modifier = Modifier.height(52.dp)) { Text("Search") }
+            }
+            Spacer(Modifier.height(8.dp))
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                @Composable
+                fun HotContent() {
+                    Row(
+                        modifier = Modifier.fillMaxSize().clickable(onClick = onOpenE621Hot),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Text("\uD83D\uDD25", fontSize = 16.sp)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Hot", color = Color.White, fontSize = 13.sp)
+                    }
+                }
+                if (liquidGlass) {
+                    LiquidGlassSurface(Modifier.fillMaxWidth().height(46.dp), tint = dominantColor, backdrop = backdrop) { HotContent() }
+                } else {
+                    Box(Modifier.fillMaxWidth().height(46.dp).clip(RoundedCornerShape(20.dp)).background(Color.White.copy(0.08f))) { HotContent() }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    @Composable
+                    fun FavoritesContent() {
+                        Row(
+                            modifier = Modifier.fillMaxSize().clickable(onClick = onOpenE621Favorites),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(Icons.Default.Star, contentDescription = null, tint = BookmarkYellow, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Favorites", color = Color.White, fontSize = 13.sp)
+                        }
+                    }
+                    if (liquidGlass) {
+                        LiquidGlassSurface(Modifier.weight(1f).height(46.dp), tint = dominantColor, backdrop = backdrop) { FavoritesContent() }
+                    } else {
+                        Box(Modifier.weight(1f).height(46.dp).clip(RoundedCornerShape(20.dp)).background(Color.White.copy(0.08f))) { FavoritesContent() }
+                    }
+                    @Composable
+                    fun FollowingContent() {
+                        Row(
+                            modifier = Modifier.fillMaxSize().clickable(onClick = onOpenE621Following),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(Icons.Default.PersonAdd, contentDescription = null, tint = VoteGreen, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Following", color = Color.White, fontSize = 13.sp)
+                        }
+                    }
+                    if (liquidGlass) {
+                        LiquidGlassSurface(Modifier.weight(1f).height(46.dp), tint = dominantColor, backdrop = backdrop) { FollowingContent() }
+                    } else {
+                        Box(Modifier.weight(1f).height(46.dp).clip(RoundedCornerShape(20.dp)).background(Color.White.copy(0.08f))) { FollowingContent() }
+                    }
+                }
+            }
+        }
+
         Spacer(Modifier.height(8.dp))
     }
 
@@ -2160,45 +2284,71 @@ private fun embedUrlFor(stream: com.mediaviewer.model.BlueskyLiveNowStream): Str
  *  specifically. [size] lets it be matched to whatever it's sitting next to
  *  (the Return to Feed bar's own height). */
 @Composable
-private fun HubRefreshBubble(
-    liquidGlass: Boolean, tint: Color, onRefresh: () -> Unit, size: androidx.compose.ui.unit.Dp = 26.dp,
-    modifier: Modifier = Modifier,
-    // Item 2: no longer reflective — callers now pass `null` here (same as
-    // the Return to Feed bar beside it and the HubUploadBubble on its other
-    // side), so this reads as a plain glass card matching the Settings/AT
-    // Protocol/e621 chips above rather than a live-reflection panel.
-    backdrop: GlassBackdrop? = null
+/** Item 14: replaces the old standalone refresh bubble. A circular "More"
+ *  button — visually identical to the feed interaction bar's own More
+ *  button — that pops open two small stacked circular icon bubbles directly
+ *  above itself: Settings on top, Refresh right above the button (the
+ *  request's own top-to-bottom order). Simpler than the feed's
+ *  [MoreBubbleMenu] (no full-screen anchored popup/backdrop capture needed)
+ *  since this always renders in the same fixed spot at the bottom of the
+ *  Hub, with nothing else it could ever visually collide with. */
+@Composable
+private fun HubMoreButton(
+    liquidGlass: Boolean, tint: Color, onOpenSettings: () -> Unit, onRefresh: () -> Unit,
+    size: Dp = 26.dp, modifier: Modifier = Modifier, backdrop: GlassBackdrop? = null
 ) {
+    var expanded by remember { mutableStateOf(false) }
     val rotation = remember { Animatable(0f) }
-    val shape = CircleShape
     val scope = rememberCoroutineScope()
-    // Bug fix (item 11): the forced opaque backing here (and on
-    // HubUploadBubble below) is gone — see ReturnToFeedBar's own comment.
-    // Both bubbles now render below the scrollable page content instead of
-    // on top of it, so there's nothing underneath for the plain glass tint
-    // to visually compete with anymore.
-    val clickModifier = Modifier
-        .size(size)
-        .clickable {
-            onRefresh()
-            scope.launch {
-                rotation.snapTo(0f)
-                rotation.animateTo(360f, animationSpec = tween(600, easing = LinearEasing))
+    val shape = CircleShape
+    // Item 8: haptic tap on opening/closing the stack.
+    val haptic = LocalHapticFeedback.current
+
+    @Composable
+    fun Bubble(icon: ImageVector, label: String, iconSize: Dp = 14.dp, iconRotation: Float = 0f, onClick: () -> Unit) {
+        val clickModifier = Modifier.size(size).clickable(onClick = onClick)
+        @Composable fun IconContent() {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Icon(icon, contentDescription = label, tint = Color.White, modifier = Modifier.size(iconSize).graphicsLayer { rotationZ = iconRotation })
+            }
+        }
+        if (liquidGlass) LiquidGlassSurface(clickModifier, shape = shape, tint = tint, backdrop = backdrop) { IconContent() }
+        else Box(clickModifier.clip(shape).background(Color.White.copy(0.10f))) { IconContent() }
+    }
+
+    Box(modifier) {
+        AnimatedVisibility(
+            visible = expanded,
+            enter = fadeIn(tween(150)) + scaleIn(tween(150), initialScale = 0.8f, transformOrigin = TransformOrigin(0f, 1f)),
+            exit = fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.8f, transformOrigin = TransformOrigin(0f, 1f)),
+            modifier = Modifier.align(Alignment.BottomStart).offset(y = -(size + 8.dp))
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Bubble(Icons.Filled.Settings, "Settings") { expanded = false; onOpenSettings() }
+                Bubble(Icons.Filled.Refresh, "Refresh", iconRotation = rotation.value) {
+                    expanded = false
+                    onRefresh()
+                    scope.launch { rotation.snapTo(0f); rotation.animateTo(360f, animationSpec = tween(600, easing = LinearEasing)) }
+                }
             }
         }
 
-    @Composable
-    fun IconContent() {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Icon(Icons.Filled.Refresh, contentDescription = "Refresh Hub", tint = Color.White,
-                modifier = Modifier.size(14.dp).graphicsLayer { rotationZ = rotation.value })
+        val clickModifier = Modifier.size(size).clickable {
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+            expanded = !expanded
         }
-    }
-
-    if (liquidGlass) {
-        LiquidGlassSurface(modifier.then(clickModifier), shape = shape, tint = tint, backdrop = backdrop) { IconContent() }
-    } else {
-        Box(modifier.then(clickModifier).clip(shape).background(Color.White.copy(0.10f))) { IconContent() }
+        @Composable
+        fun MoreIconContent() {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Icon(if (expanded) Icons.Default.Close else Icons.Default.MoreVert, contentDescription = "More",
+                    tint = Color.White, modifier = Modifier.size(16.dp))
+            }
+        }
+        if (liquidGlass) {
+            LiquidGlassSurface(clickModifier, shape = shape, tint = tint, backdrop = backdrop) { MoreIconContent() }
+        } else {
+            Box(clickModifier.clip(shape).background(Color.White.copy(0.10f))) { MoreIconContent() }
+        }
     }
 }
 
@@ -2250,19 +2400,27 @@ private fun HubUploadBubble(
 }
 
 /** Bottom-of-page control group that replaces the removed swipe-up-to-feed
- *  gesture: a centered "Return to Feed" glass pill that does exactly what
- *  swiping up used to. When [onRefresh] is supplied (the AT Protocol page,
- *  which owns the Hub refresh action), a refresh bubble sits at its left
- *  edge and the upload bubble (item 3/5) sits at its right edge — both
+ *  gesture: a centered "Return to Feed" glass pill, with the Hub's More
+ *  button (item 14 — Settings + Refresh, see [HubMoreButton]) at its left
+ *  edge and the upload bubble (item 3/5) at its right edge — both
  *  height-matched to the pill, so the group reads as one centered control
- *  rather than several separate ones. */
+ *  rather than several separate ones. The More button (and its left-edge
+ *  slot) always renders, even when [showPillAndUpload] is false — Settings
+ *  has to stay reachable before the person has logged into anything, when
+ *  there's no feed to return to and nothing to refresh yet. */
 @Composable
 private fun ReturnToFeedBar(
     liquidGlass: Boolean,
     tint: Color,
     backdrop: GlassBackdrop?,
     onReturnToFeed: () -> Unit,
+    onOpenSettings: () -> Unit,
     onRefresh: (() -> Unit)? = null,
+    // Item 14: false pre-login (nothing to return to / refresh yet, only
+    // Settings needs to be reachable) — the pill/label/upload bubble are
+    // skipped entirely and only the More button shows, still left-aligned
+    // in its usual spot.
+    showPillAndUpload: Boolean = true,
     // Item 5 (rework): the dedicated background-only backdrop the upload
     // bubble stack uses for its "cutout" look — see the doc comment where
     // this is built, on the Hub's root `hubBackgroundLayer`. Deliberately a
@@ -2285,6 +2443,9 @@ private fun ReturnToFeedBar(
     val barHeight = 40.dp
     val shape = RoundedCornerShape(20.dp)
     val label = if (hasVisitedFeed) "Return to Feed" else "Open Feed"
+    // Item 8: haptic tap when leaving the Hub back to the feed.
+    val haptic = LocalHapticFeedback.current
+    val onReturnToFeedHaptic = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onReturnToFeed() }
     // Bug fix (per feedback): the pill used to shrink-wrap its own text
     // and sit centered as a small standalone group with the refresh bubble
     // — not the wide, left-anchored bar it used to be. The pill itself now
@@ -2298,15 +2459,14 @@ private fun ReturnToFeedBar(
     // the screen the way a plain "Return to Feed" button always did,
     // regardless of how much room the bubbles eat out of either side.
     //
-    // Item 3: refresh moved from the right side to the left, and a new
-    // circular upload placeholder (item 5) now sits on the right in its
-    // place — both reserved independently since a caller could in theory
-    // supply one without the other (only [onRefresh] is actually optional
-    // today; the upload bubble always shows).
-    val refreshReserve = if (onRefresh != null) (barHeight + 10.dp) else 0.dp
+    // Item 14: the left slot is always reserved now — it's the Hub's More
+    // button (Settings + Refresh), which always shows, not the old
+    // conditionally-optional refresh bubble.
+    val moreReserve = barHeight + 10.dp
     val uploadReserve = barHeight + 10.dp
 
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
+        if (showPillAndUpload) {
         // Bug fix (item 11): this used to force an opaque
         // Color.Black.copy(alpha = 0.62f) backing under the glass tint,
         // because this bar used to be layered on top of the same busy
@@ -2322,27 +2482,32 @@ private fun ReturnToFeedBar(
         // normal LiquidGlassSurface, same as the HubChip row above it.
         if (liquidGlass) {
             LiquidGlassSurface(
-                Modifier.fillMaxWidth().padding(start = refreshReserve, end = uploadReserve).height(barHeight)
-                    .clickable(onClick = onReturnToFeed),
+                Modifier.fillMaxWidth().padding(start = moreReserve, end = uploadReserve).height(barHeight)
+                    .clickable(onClick = onReturnToFeedHaptic),
                 shape = shape, tint = tint, backdrop = backdrop
             ) {}
         } else {
             Box(
-                Modifier.fillMaxWidth().padding(start = refreshReserve, end = uploadReserve).height(barHeight)
-                    .clip(shape).background(Color.White.copy(0.08f)).clickable(onClick = onReturnToFeed)
+                Modifier.fillMaxWidth().padding(start = moreReserve, end = uploadReserve).height(barHeight)
+                    .clip(shape).background(Color.White.copy(0.08f)).clickable(onClick = onReturnToFeedHaptic)
             )
         }
         Text(
             label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
             modifier = Modifier.align(Alignment.Center)
         )
-        if (onRefresh != null) {
-            HubRefreshBubble(liquidGlass, tint, onRefresh, size = barHeight, modifier = Modifier.align(Alignment.CenterStart), backdrop = backdrop)
-        }
         HubUploadBubble(
             liquidGlass, tint, size = barHeight, modifier = Modifier.align(Alignment.CenterEnd),
             backdrop = backdrop, menuBackdrop = uploadBackdrop,
             onOpenComposePost = onOpenComposePost
+        )
+        }
+        // Item 14: always shown, in the same left slot, whether or not the
+        // pill/upload bubble above are — Settings must stay reachable even
+        // pre-login.
+        HubMoreButton(
+            liquidGlass, tint, onOpenSettings = onOpenSettings, onRefresh = onRefresh,
+            size = barHeight, modifier = Modifier.align(Alignment.CenterStart), backdrop = backdrop
         )
     }
 }
@@ -2484,155 +2649,6 @@ private fun HubAuthorBubble(displayName: String, avatarUrl: String?, liquidGlass
     }
 }
 
-// ── e621 page: login form, search bar, and every e621-specific setting —
-// item 5. ──────────────────────────────────────────────────────────────────
-@Composable
-private fun E621PageContent(
-    e621LoggedIn: Boolean,
-    e621SearchTags: String,
-    onSearchE621: (String) -> Unit,
-    onShowE621Favorites: () -> Unit,
-    onShowE621Following: () -> Unit,
-    isLoading: Boolean,
-    onSaveE621Credentials: (String, String) -> Unit,
-    liquidGlass: Boolean,
-    dominantColor: Color,
-    backdrop: GlassBackdrop?,
-    // Item (this session): replaces the removed swipe-up-to-feed gesture.
-    onReturnToFeed: () -> Unit = {},
-    hasVisitedFeed: Boolean = false
-) {
-    var e621User by remember { mutableStateOf("") }
-    var e621Key by remember { mutableStateOf("") }
-    var localE621Tags by remember(e621SearchTags) { mutableStateOf(e621SearchTags) }
-
-    // Bug fix (per feedback — Return to Feed/Refresh should read as a plain
-    // card like the Settings/AT Protocol/e621 chips above): same fix as
-    // AtProtocolPageContent's — the bar's live per-frame backdrop recording
-    // is gone; it's passed `backdrop = null` at the call site below instead,
-    // matching the chips' still-card look. This page's Hot/Favorites/
-    // Following buttons are unaffected — they keep using the feed-level
-    // `backdrop` param as before.
-    // Bug fix (item 11): the Refresh/Return to Feed/Upload bar no longer
-    // renders inside this page at all — see the matching comment on
-    // AtProtocolPageContent above. It's rendered once, by the outer Hub
-    // composable, below the whole page-switching area.
-    Column(
-        Modifier
-            .fillMaxSize()
-    ) {
-        if (!e621LoggedIn) {
-            Column(
-                modifier = Modifier.fillMaxSize().padding(horizontal = 36.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                OutlinedTextField(value = e621User, onValueChange = { e621User = it },
-                    placeholder = { Text("Username", color = DimGray) },
-                    singleLine = true, colors = fieldColors(), modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(value = e621Key, onValueChange = { e621Key = it },
-                    placeholder = { Text("API Key", color = DimGray) },
-                    singleLine = true, visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
-                    colors = fieldColors(), modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(12.dp))
-                Button(onClick = { onSaveE621Credentials(e621User, e621Key) },
-                    enabled = e621User.isNotBlank() && e621Key.isNotBlank(),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black),
-                    modifier = Modifier.fillMaxWidth().height(46.dp)) {
-                    Text("Sign in to e621", fontWeight = FontWeight.SemiBold)
-                }
-            }
-            return@Column
-        }
-
-        // Item: Download When Favorited, Download All Saved Media, and the
-        // Logged in/Logout row all moved into the Settings page's "e621
-        // Settings" section — this page now only holds navigation: search
-        // and the three quick-access buttons. Short enough to never need
-        // its own scroll, so swipe-up-to-feed keeps working the same simple
-        // way it always did here.
-        Spacer(Modifier.height(10.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            OutlinedTextField(value = localE621Tags, onValueChange = { localE621Tags = it },
-                placeholder = { Text("Search tags…", color = DimGray, fontSize = 13.sp) },
-                singleLine = true, colors = fieldColors(),
-                modifier = Modifier.weight(1f).height(56.dp))
-            Button(onClick = { onSearchE621(localE621Tags) },
-                colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.1f), contentColor = Color.White),
-                modifier = Modifier.height(56.dp)) { Text("Search") }
-        }
-
-        Spacer(Modifier.height(14.dp))
-
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            @Composable
-            fun HotContent() {
-                Row(
-                    modifier = Modifier.fillMaxSize().clickable(onClick = { onSearchE621("order:hot") }),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Text("\uD83D\uDD25", fontSize = 16.sp)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Hot", color = Color.White, fontSize = 13.sp)
-                }
-            }
-            if (liquidGlass) {
-                LiquidGlassSurface(Modifier.fillMaxWidth().height(46.dp), tint = dominantColor, backdrop = backdrop) { HotContent() }
-            } else {
-                Box(Modifier.fillMaxWidth().height(46.dp).clip(RoundedCornerShape(20.dp)).background(Color.White.copy(0.08f))) { HotContent() }
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                @Composable
-                fun FavoritesContent() {
-                    Row(
-                        modifier = Modifier.fillMaxSize().clickable(onClick = onShowE621Favorites),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        Icon(Icons.Default.Star, contentDescription = null, tint = BookmarkYellow, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Favorites", color = Color.White, fontSize = 13.sp)
-                    }
-                }
-                if (liquidGlass) {
-                    LiquidGlassSurface(Modifier.weight(1f).height(46.dp), tint = dominantColor, backdrop = backdrop) { FavoritesContent() }
-                } else {
-                    Box(Modifier.weight(1f).height(46.dp).clip(RoundedCornerShape(20.dp)).background(Color.White.copy(0.08f))) { FavoritesContent() }
-                }
-                @Composable
-                fun FollowingContent() {
-                    Row(
-                        modifier = Modifier.fillMaxSize().clickable(onClick = onShowE621Following),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        Icon(Icons.Default.PersonAdd, contentDescription = null, tint = VoteGreen, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Following", color = Color.White, fontSize = 13.sp)
-                    }
-                }
-                if (liquidGlass) {
-                    LiquidGlassSurface(Modifier.weight(1f).height(46.dp), tint = dominantColor, backdrop = backdrop) { FollowingContent() }
-                } else {
-                    Box(Modifier.weight(1f).height(46.dp).clip(RoundedCornerShape(20.dp)).background(Color.White.copy(0.08f))) { FollowingContent() }
-                }
-            }
-
-            Spacer(Modifier.height(8.dp))
-        }
-    }
-}
 
 // ── Settings Update: quick-access button grid ────────────────────────────────
 

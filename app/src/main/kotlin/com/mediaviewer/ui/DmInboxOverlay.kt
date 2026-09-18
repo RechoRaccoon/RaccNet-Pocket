@@ -78,6 +78,17 @@ fun DmInboxOverlay(
     // color to the page background and every other glass surface here.
     val profileTint = if (selfAvatarUrl != null) rememberDominantColor(selfAvatarUrl) else NeutralGlassTint
 
+    // Item 11: while a specific thread is open, the header (back button +
+    // the other person's avatar/name) reflects *their* color instead of the
+    // logged-in user's own — same dominant-color pattern, just sourced from
+    // the other side of the conversation. Falls back to profileTint at the
+    // conversation-picker screen, where there's no single "other person"
+    // yet, and to NeutralGlassTint if the other person has no avatar.
+    val theirTint = if (thread != null) {
+        if (thread.convo.member.avatarUrl != null) rememberDominantColor(thread.convo.member.avatarUrl!!) else NeutralGlassTint
+    } else profileTint
+    val headerTint = if (thread != null) theirTint else profileTint
+
     // Item 12 follow-up: the input box, send button, and shared-post cards
     // now sample a live recording of this page's own background — the same
     // technique SearchOverlay uses — instead of a flat rectangular fill.
@@ -97,7 +108,14 @@ fun DmInboxOverlay(
             Modifier.fillMaxSize()
                 .onGloballyPositioned { backdropOrigin = it.positionInRoot() }
                 .then(
-                    if (liquidGlass) Modifier.background(postBackgroundBrush(profileTint)).drawWithContent {
+                    // Item 11: two-tone (mine-at-bottom, theirs-at-top)
+                    // gradient while a thread is open; the plain single-tint
+                    // gradient everywhere else (no "other person" yet on the
+                    // conversation picker).
+                    if (liquidGlass) Modifier.background(
+                        if (thread != null) dmThreadBackgroundBrush(bottomColor = profileTint, topColor = theirTint)
+                        else postBackgroundBrush(profileTint)
+                    ).drawWithContent {
                         backdropLayer.record { this@drawWithContent.drawContent() }
                         drawContent()
                     } else Modifier.background(OledBlack)
@@ -114,7 +132,7 @@ fun DmInboxOverlay(
                 val shape = CircleShape
                 Box(
                     Modifier.size(32.dp)
-                        .then(if (liquidGlass) Modifier.glassPanel(true, shape = shape, tint = profileTint) else Modifier.clip(shape).background(Color.White.copy(0.14f)))
+                        .then(if (liquidGlass) Modifier.glassPanel(true, shape = shape, tint = headerTint) else Modifier.clip(shape).background(Color.White.copy(0.14f)))
                         .clickable(onClick = if (thread != null) onCloseThread else onClose),
                     contentAlignment = Alignment.Center
                 ) {

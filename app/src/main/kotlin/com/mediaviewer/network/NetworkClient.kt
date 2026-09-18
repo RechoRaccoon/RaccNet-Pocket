@@ -78,6 +78,17 @@ object NetworkClient {
             .create(StreamplaceApi::class.java)
     }
 
+    /** Item 16: Rocksky music-scrobbling integration — see RockskyApi's own
+     *  doc comment for the endpoints this backs. */
+    fun buildRockskyApi(): RockskyApi {
+        return Retrofit.Builder()
+            .baseUrl("https://api.rocksky.app/")
+            .client(buildOkHttp("MediaViewer/1.0 (RaccNet Pocket)"))
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+            .create(RockskyApi::class.java)
+    }
+
     // Compose Post (upload flow): video upload/processing lives on its own
     // service, separate from the user's PDS — see BlueskyRepository.
     // uploadVideoBlob. Longer timeouts than the default client since a
