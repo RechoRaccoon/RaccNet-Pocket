@@ -262,7 +262,6 @@ private fun ListModeIcon(modifier: Modifier = Modifier, tint: Color = Color.Whit
 /** Bluesky's own logo — a simplified butterfly silhouette good enough to
  *  read clearly at a small button size — drawn by hand since it isn't part
  *  of the Material icon set the rest of the app's icon buttons pull from. */
-@Composable
 // Item 1: this used to be a hand-drawn Canvas approximation of a butterfly
 // that didn't actually read as one (see the profile interaction bar
 // screenshot in the feedback — it looked closer to a mask than a

@@ -2276,14 +2276,6 @@ private fun embedUrlFor(stream: com.mediaviewer.model.BlueskyLiveNowStream): Str
     }
 }
 
-/** Circular liquid-glass refresh button, now living beside the "Return to
- *  Feed" bar at the bottom of the AT Protocol page (moved down from the
- *  "Mutuals" divider) — re-checks Mutuals, Reviews, and Blogs against the
- *  network on tap. Spins briefly on tap for feedback since the underlying
- *  fetch has no progress/loading state surfaced up to this button
- *  specifically. [size] lets it be matched to whatever it's sitting next to
- *  (the Return to Feed bar's own height). */
-@Composable
 /** Item 14: replaces the old standalone refresh bubble. A circular "More"
  *  button — visually identical to the feed interaction bar's own More
  *  button — that pops open two small stacked circular icon bubbles directly
@@ -2294,7 +2286,7 @@ private fun embedUrlFor(stream: com.mediaviewer.model.BlueskyLiveNowStream): Str
  *  Hub, with nothing else it could ever visually collide with. */
 @Composable
 private fun HubMoreButton(
-    liquidGlass: Boolean, tint: Color, onOpenSettings: () -> Unit, onRefresh: () -> Unit,
+    liquidGlass: Boolean, tint: Color, onOpenSettings: () -> Unit, onRefresh: (() -> Unit)?,
     size: Dp = 26.dp, modifier: Modifier = Modifier, backdrop: GlassBackdrop? = null
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -2325,10 +2317,12 @@ private fun HubMoreButton(
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Bubble(Icons.Filled.Settings, "Settings") { expanded = false; onOpenSettings() }
-                Bubble(Icons.Filled.Refresh, "Refresh", iconRotation = rotation.value) {
-                    expanded = false
-                    onRefresh()
-                    scope.launch { rotation.snapTo(0f); rotation.animateTo(360f, animationSpec = tween(600, easing = LinearEasing)) }
+                if (onRefresh != null) {
+                    Bubble(Icons.Filled.Refresh, "Refresh", iconRotation = rotation.value) {
+                        expanded = false
+                        onRefresh()
+                        scope.launch { rotation.snapTo(0f); rotation.animateTo(360f, animationSpec = tween(600, easing = LinearEasing)) }
+                    }
                 }
             }
         }
