@@ -114,6 +114,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { prefs.setClassicProfileTabRow(enabled) }
     }
 
+    // Fix (per feedback): "Rounded grid tiles" setting — false (default)
+    // renders flat square tiles with no outline in the profile square grid.
+    private val _squareGridRounded = MutableStateFlow(false)
+    val squareGridRounded: StateFlow<Boolean> = _squareGridRounded
+
+    fun setSquareGridRounded(enabled: Boolean) {
+        _squareGridRounded.value = enabled
+        viewModelScope.launch { prefs.setSquareGridRounded(enabled) }
+    }
+
     // Feature request #7: experimental 3-wide variant of the Pinterest-style
     // masonry (Posts tab's All/Images filters). Default (false) stays 2.
     private val _pinterestThreeColumns = MutableStateFlow(false)
@@ -408,6 +418,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val reviews: List<PopfeedReview> = emptyList(),
         val backlog: List<PopfeedBacklogItem> = emptyList(),
         val vods: List<StreamplaceVideoView> = emptyList(),
+        // Fix (per feedback): which sub-filter pills had content, per tab —
+        // tab name -> sub-filter names that matched at least one loaded
+        // item (same predicates the UI's subtab strips use). Lets the
+        // subtab strip render instantly from memory on the next open,
+        // instead of waiting for fresh data to decide which pills exist.
+        val subtabs: Map<String, Set<String>> = emptyMap(),
         val savedAt: Long = 0L
     )
     // How many items of each per-tab list get persisted to disk — just
@@ -472,6 +488,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     reviews = state.tabStates[ProfileTab.REVIEWS]?.reviews ?: emptyList(),
                     backlog = state.tabStates[ProfileTab.BACKLOG]?.backlog ?: emptyList(),
                     vods = state.tabStates[ProfileTab.VODS]?.vods?.take(PROFILE_TAB_CACHE_ITEM_LIMIT) ?: emptyList(),
+                    // Fix (per feedback): remember which sub-filter pills
+                    // had content, using the exact same predicates the
+                    // UI's subtab strips use — recomputed from the full
+                    // current tab state on every persist, so it reconciles
+                    // as fresh data arrives.
+                    subtabs = buildMap {
+                        fun postSubtabs(tab: ProfileTab) {
+                            val items = state.tabStates[tab]?.items ?: return
+                            put(tab.name, PostKindFilter.entries
+                                .filter { f -> items.any { item -> f.matches(item) } }
+                                .map { it.name }.toSet())
+                        }
+                        postSubtabs(ProfileTab.POSTS)
+                        postSubtabs(ProfileTab.REPOSTS)
+                        postSubtabs(ProfileTab.LIKES)
+                        val reviews = state.tabStates[ProfileTab.REVIEWS]?.reviews
+                        if (reviews != null) {
+                            put(ProfileTab.REVIEWS.name, ReviewKindFilter.entries
+                                .filter { f -> reviews.any { r -> f.matchesReview(r) } }
+                                .map { it.name }.toSet())
+                        }
+                        val backlog = state.tabStates[ProfileTab.BACKLOG]?.backlog
+                        if (backlog != null) {
+                            put(ProfileTab.BACKLOG.name, ReviewKindFilter.entries
+                                .filter { f -> backlog.any { b -> f.matchesBacklog(b) } }
+                                .map { it.name }.toSet())
+                        }
+                    },
                     savedAt = System.currentTimeMillis()
                 )
                 profileTabCache[state.author.did] = entry
@@ -511,6 +555,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // openProfile().
         val availableTabs: Set<ProfileTab> = setOf(ProfileTab.POSTS, ProfileTab.REPOSTS, ProfileTab.LIKES),
         val tabStates: Map<ProfileTab, ProfileTabState> = emptyMap(),
+        // Fix (per feedback): which sub-filter pills had content the last
+        // time this profile's tabs were loaded (from the on-disk cache —
+        // see openProfile's seeding). The subtab strips union this with
+        // the freshly-loaded matches, so they render instantly from memory
+        // and reconcile once real data arrives.
+        val seededSubtabs: Map<ProfileTab, Set<String>> = emptyMap(),
         val openBlog: LeafletBlog? = null,
         val openReview: PopfeedReview? = null,
         // Backlog cards' own "full info menu" (Titles feature) — see
@@ -1780,6 +1830,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { prefs.reducedAnimations.collect { _reducedAnimations.value = it } }
         viewModelScope.launch { prefs.liquidGlass.collect { _liquidGlass.value = it } }
         viewModelScope.launch { prefs.classicProfileTabRow.collect { _classicProfileTabRow.value = it } }
+        viewModelScope.launch { prefs.squareGridRounded.collect { _squareGridRounded.value = it } }
         viewModelScope.launch(Dispatchers.IO) { ensureProfileTabCacheHydrated() }
         viewModelScope.launch { prefs.pinterestThreeColumns.collect { _pinterestThreeColumns.value = it } }
         viewModelScope.launch { prefs.hateFunBlurNsfw.collect { _hateFunBlurNsfw.value = it } }
@@ -2269,7 +2320,12 @@ _bskyDid.value          = session.did
         _profileOverlay.value = ProfileOverlayState(
             author = author, selectedTab = initialTab, parent = parent, openReview = review, openBlog = blog,
             openTitle = title, openTitlePreselectedReview = preselectedReview,
-            availableTabs = seededAvailableTabs, tabStates = seededTabStates
+            availableTabs = seededAvailableTabs, tabStates = seededTabStates,
+            // Fix (per feedback): seed the sub-filter memory from the
+            // on-disk cache so subtab strips render instantly.
+            seededSubtabs = cached?.subtabs?.mapNotNull { (tabName, subNames) ->
+                runCatching { ProfileTab.valueOf(tabName) }.getOrNull()?.let { it to subNames }
+            }?.toMap() ?: emptyMap()
         )
 
         viewModelScope.launch(Dispatchers.IO) {

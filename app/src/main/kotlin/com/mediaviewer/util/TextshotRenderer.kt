@@ -8,93 +8,85 @@ import android.text.StaticLayout
 import android.text.TextPaint
 
 /**
- * Renders Textshot mode's final post image — transparent background, white
- * text. ComposePostScreen's live preview (see TextshotPreview there) calls
- * this exact same function to build what it shows on screen, so the preview
- * and the actual uploaded image can never drift apart (item 9) — there's
- * only one rendering path.
+ * Renders Textshot mode's final post image — black background, white text.
+ * ComposePostScreen's live preview (see TextshotPreview there) calls this
+ * exact same function to build what it shows on screen, so the preview and
+ * the actual uploaded image can never drift apart — there's only one
+ * rendering path.
  *
- * Fix (per feedback): text is no longer one long horizontal line until the
- * person manually breaks it. The layout now word-wraps automatically at the
- * frame's full width (the person's own "\n" still force line breaks too),
- * and the text size is auto-fitted so the block fills the whole 1:1 square:
- *  - At a large reference size, a wrapping StaticLayout is built across the
- *    full available width. Two scale ceilings are computed from it: one
- *    that would make the *widest* wrapped line span exactly the available
- *    width (edge-to-edge), one that would make the *whole block* span
- *    exactly the available height. Whichever is smaller wins.
- *  - The layout is rebuilt at that fitted size (a bounded shrink loop
- *    guards against line-wrap shifts pushing the block back over the
- *    height), then drawn centered in the square.
- *  - Short text grows until its widest line runs edge to edge (or the block
- *    fills the height); long text shrinks until the whole block fits — so
- *    the square is always as full as the content allows, never overflowing.
+ * Fix (per feedback): the old fit math mis-centered single characters and
+ * could split a word's letters across rows (visible in the screenshots:
+ * text not edge-to-edge/centered, single letters on their own rows). The
+ * renderer now:
+ *  - wraps by WHOLE WORDS only — a pre-pass shrinks the size ceiling until
+ *    the longest whitespace-delimited word fits the line width, so no
+ *    word's letters can ever be split across rows;
+ *  - fills the square edge-to-edge — binary-searches the largest text size
+ *    whose wrapped layout fits inside the frame minus a small (~6%) pad;
+ *  - centers on both axes with a plain canvas.translate + layout.draw —
+ *    no pivot-scale tricks, so single characters land dead-center too.
  */
 object TextshotRenderer {
-    private const val WIDTH = 1080
-    private const val HEIGHT = 1080
-    // Item 10: "edge to edge, with a very very small gap" — was 56 (~5% of
-    // the frame each side).
-    private const val PADDING = 16
-    private const val REFERENCE_SIZE = 300f
-    private const val LINE_SPACING_MULT = 1.05f
+    // Item 10: "edge to edge, with a very very small gap" — ~6% of the
+    // frame each side.
+    private const val PAD_FRACTION = 0.06f
+    private const val LINE_SPACING_MULT = 1.15f
     // Not a visual ceiling — just a floor so pathologically long input never
     // rounds all the way to an invisible/zero-size draw.
-    private const val MIN_TEXT_SIZE = 4f
+    private const val MIN_TEXT_SIZE = 20f
 
-    fun render(text: String): Bitmap {
-        val bitmap = Bitmap.createBitmap(WIDTH, HEIGHT, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap) // left fully transparent behind the text
-        if (text.isEmpty()) return bitmap
+    fun render(text: String, sizePx: Int = 1080): Bitmap {
+        val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        canvas.drawColor(Color.BLACK)
 
-        val maxWidth = (WIDTH - PADDING * 2).toFloat()
-        val maxHeight = (HEIGHT - PADDING * 2).toFloat()
+        // Blank text would crash StaticLayout — render a single space.
+        val safeText = if (text.isBlank()) " " else text
+
+        val pad = sizePx * PAD_FRACTION
+        val maxWidth = sizePx - 2 * pad
+        val maxHeight = sizePx - 2 * pad
 
         val paint = TextPaint().apply {
             isAntiAlias = true
             color = Color.WHITE
         }
 
-        // Builds a word-wrapping layout at the paint's current text size —
-        // StaticLayout breaks lines automatically at maxWidth, so text is
-        // never one long horizontal line; the person's own "\n" still force
-        // breaks on top of that.
         fun buildLayout(): StaticLayout =
             StaticLayout.Builder
-                .obtain(text, 0, text.length, paint, maxWidth.toInt())
+                .obtain(safeText, 0, safeText.length, paint, maxWidth.toInt())
                 .setAlignment(Layout.Alignment.ALIGN_CENTER)
                 .setLineSpacing(0f, LINE_SPACING_MULT)
+                .setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
+                .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
                 .build()
 
-        // Measure at the reference size, then take the smaller of the two
-        // fit ceilings: widest wrapped line -> full width (edge-to-edge),
-        // whole block -> full height (fills the square).
-        paint.textSize = REFERENCE_SIZE
-        val ref = buildLayout()
-        val widestLine = (0 until ref.lineCount).maxOf { ref.getLineWidth(it) }.coerceAtLeast(1f)
-        val blockHeight = ref.height.toFloat().coerceAtLeast(1f)
-        val scale = minOf(maxWidth / widestLine, maxHeight / blockHeight)
-            .coerceAtLeast(MIN_TEXT_SIZE / REFERENCE_SIZE)
+        fun longestWordWidth(): Float =
+            safeText.split("\\s+".toRegex())
+                .maxOfOrNull { paint.measureText(it) } ?: 0f
 
-        // Rebuild at the fitted size; if wrap shifts push the block back
-        // over the height, shrink until it fits (bounded — always ends).
-        var textSize = (REFERENCE_SIZE * scale).coerceAtLeast(MIN_TEXT_SIZE)
-        var layout: StaticLayout
-        var guard = 0
-        while (true) {
-            paint.textSize = textSize
-            layout = buildLayout()
-            if (layout.height <= maxHeight || textSize <= MIN_TEXT_SIZE || guard++ >= 8) break
-            textSize *= 0.92f
+        // Pre-pass: shrink the ceiling until even the longest single word
+        // fits the line width — with BREAK_STRATEGY_SIMPLE and no
+        // hyphenation, no word's letters can then be split across rows.
+        var hi = sizePx * 0.5f
+        paint.textSize = hi
+        while (hi > MIN_TEXT_SIZE && longestWordWidth() > maxWidth) {
+            hi *= 0.9f
+            paint.textSize = hi
         }
 
-        val drawnWidth = (0 until layout.lineCount).maxOf { layout.getLineWidth(it) }
-        val drawnHeight = layout.height.toFloat()
-        val offsetX = PADDING + ((maxWidth - drawnWidth) / 2f).coerceAtLeast(0f)
-        val offsetY = PADDING + ((maxHeight - drawnHeight) / 2f).coerceAtLeast(0f)
+        // Binary-search the largest size whose wrapped block fits the frame.
+        var lo = MIN_TEXT_SIZE
+        repeat(20) {
+            val mid = (lo + hi) / 2f
+            paint.textSize = mid
+            if (buildLayout().height <= maxHeight) lo = mid else hi = mid
+        }
+        paint.textSize = lo
+        val layout = buildLayout()
 
         canvas.save()
-        canvas.translate(offsetX, offsetY)
+        canvas.translate((sizePx - maxWidth) / 2f, (sizePx - layout.height) / 2f)
         layout.draw(canvas)
         canvas.restore()
         return bitmap

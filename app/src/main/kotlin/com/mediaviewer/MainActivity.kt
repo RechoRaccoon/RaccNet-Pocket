@@ -214,6 +214,7 @@ private fun AppRoot(viewModel: MainViewModel) {
     val navDirection       by viewModel.navDirection.collectAsState()
     val reducedAnimations  by viewModel.reducedAnimations.collectAsState()
     val classicProfileTabRow by viewModel.classicProfileTabRow.collectAsState()
+    val squareGridRounded by viewModel.squareGridRounded.collectAsState()
     val pinterestThreeColumns by viewModel.pinterestThreeColumns.collectAsState()
     val hateFunBlurNsfw by viewModel.hateFunBlurNsfw.collectAsState()
     val liquidGlass        by viewModel.liquidGlass.collectAsState()
@@ -658,6 +659,8 @@ private fun AppRoot(viewModel: MainViewModel) {
             onToggleReducedAnimations = viewModel::setReducedAnimations,
             classicProfileTabRow      = classicProfileTabRow,
             onToggleClassicProfileTabRow = viewModel::setClassicProfileTabRow,
+            squareGridRounded        = squareGridRounded,
+            onToggleSquareGridRounded = viewModel::setSquareGridRounded,
             selfDid                   = bskyDid,
             subscribedReviewDids      = subscribedReviewDids,
             subscribedBlogDids        = subscribedBlogDids,
@@ -830,6 +833,7 @@ private fun AppRoot(viewModel: MainViewModel) {
                     liquidGlass       = liquidGlass,
                     reducedAnimations = reducedAnimations,
                     classicProfileTabRow = classicProfileTabRow,
+                    roundedGridTiles     = squareGridRounded,
                     selfDid           = bskyDid,
                     onClose           = viewModel::closeProfile,
                     onSelectTab       = viewModel::selectProfileTab,

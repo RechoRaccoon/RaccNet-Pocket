@@ -149,7 +149,7 @@ private fun PostKindFilter.label() = when (this) {
     PostKindFilter.HORIZONTAL_VIDEOS  -> "Horizontal Videos"
     PostKindFilter.VERTICAL_VIDEOS    -> "Vertical Videos"
 }
-private fun PostKindFilter.matches(item: MediaItem) = when (this) {
+fun PostKindFilter.matches(item: MediaItem) = when (this) {
     PostKindFilter.ALL              -> true
     PostKindFilter.IMAGES            -> !item.isVideo && !item.isTextOnly
     PostKindFilter.TEXT_POSTS        -> item.isTextOnly
@@ -187,8 +187,8 @@ fun categoryBucket(raw: String?): ReviewKindFilter? {
         else -> null
     }
 }
-private fun ReviewKindFilter.matchesReview(review: PopfeedReview) = this == ReviewKindFilter.ALL || categoryBucket(review.mediaCategory) == this
-private fun ReviewKindFilter.matchesBacklog(item: PopfeedBacklogItem) = this == ReviewKindFilter.ALL || categoryBucket(item.mediaCategory) == this
+fun ReviewKindFilter.matchesReview(review: PopfeedReview) = this == ReviewKindFilter.ALL || categoryBucket(review.mediaCategory) == this
+fun ReviewKindFilter.matchesBacklog(item: PopfeedBacklogItem) = this == ReviewKindFilter.ALL || categoryBucket(item.mediaCategory) == this
 // Titles feature: same bucketing, applied to a search result instead of a
 // Popfeed backlog/review record.
 fun ReviewKindFilter.matchesTitle(result: com.mediaviewer.model.TitleSearchResult) =
@@ -198,6 +198,15 @@ fun ReviewKindFilter.matchesTitle(result: com.mediaviewer.model.TitleSearchResul
 // The interaction bar's Grid button now cycles through three layouts instead
 // of toggling two, and — per feedback — each tab/sub-tab remembers its own
 // choice independently instead of sharing one flag across the whole profile.
+//
+// Fix (per feedback): this map used to live inside ProfileOverlay as
+// remember(author.did) — per-profile — so setting square-grid on one
+// profile's Images sub-tab didn't carry over to the next profile. It's now
+// a process-global snapshot-state map keyed by (tab, filter) ONLY, so a
+// layout choice applies to every profile's same tab/sub-tab and survives
+// profile switches. (mutableStateMapOf is a @Composable-free runtime API —
+// safe at top level — and Compose still observes reads/writes to it.)
+private val sharedGridModes = mutableStateMapOf<Pair<MainViewModel.ProfileTab, PostKindFilter>, Int>()
 // Which trio applies depends on the sub-tab's own natural shape:
 //  - Image-like sub-tabs (All/Images) cycle 2-col masonry -> 3-col
 //    "experimental" masonry (previously Settings-only) -> the uniform
@@ -418,6 +427,10 @@ fun ProfileOverlay(
     // Feature request #6: profile page interaction bar.
     onOpenAddTo: (String) -> Unit = {},
     onOpenDm: (AuthorInfo) -> Unit = {},
+    // Fix (per feedback): "Rounded grid tiles" setting — off by default, so
+    // the square grid renders flat squares with no outline; on restores the
+    // old rounded + outlined tiles.
+    roundedGridTiles: Boolean = false,
     // Adjustment #7: promotes the sub-filter row's selection out of local
     // Compose state and into the ViewModel (see
     // ProfileOverlayState.postKindFilter's own doc comment) so it survives
@@ -505,10 +518,10 @@ fun ProfileOverlay(
     // changes, same reasoning as the filters above. 0/1/2 — see
     // PostKindFilter.isMasonryKind()/isListKind() above for what each
     // index actually renders in a given sub-tab.
-    val gridModeByTab = remember(author.did) {
-        androidx.compose.runtime.mutableStateMapOf<Pair<MainViewModel.ProfileTab, PostKindFilter>, Int>()
-    }
-    fun gridModeFor(tab: MainViewModel.ProfileTab, filter: PostKindFilter): Int = gridModeByTab[tab to filter] ?: 0
+    // Fix (per feedback): grid-mode choices are shared across profiles —
+    // see the file-level sharedGridModes above; keyed by (tab, filter)
+    // only, no author.did.
+    fun gridModeFor(tab: MainViewModel.ProfileTab, filter: PostKindFilter): Int = sharedGridModes[tab to filter] ?: 0
     val density = LocalDensity.current
     val configuration = LocalConfiguration.current
 
@@ -594,16 +607,16 @@ fun ProfileOverlay(
 
     fun onGridButtonTap() {
         val key = state.selectedTab to postKindFilter
-        val curMode = gridModeByTab[key] ?: 0
+        val curMode = sharedGridModes[key] ?: 0
         val newMode = (curMode + 1) % 3
         val tabItems = state.tabStates[state.selectedTab]?.items ?: emptyList()
         val matched = tabItems.filter { postKindFilter.matches(it) }
         if (matched.isEmpty() || state.selectedTab !in setOf(MainViewModel.ProfileTab.POSTS, MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES)) {
-            gridModeByTab[key] = newMode
+            sharedGridModes[key] = newMode
             return
         }
         val localIndex = localIndexAtViewportMiddle(curMode, matched)
-        gridModeByTab[key] = newMode
+        sharedGridModes[key] = newMode
         scrollToViewportMiddle(newMode, matched, localIndex)
     }
 
@@ -740,8 +753,13 @@ fun ProfileOverlay(
                         when (state.selectedTab) {
                             MainViewModel.ProfileTab.POSTS -> {
                                 val loadedPosts = subFilterTabState?.items ?: emptyList()
+                                // Fix (per feedback): union the remembered
+                                // subtab set so the strip renders instantly
+                                // from memory, reconciling once fresh data
+                                // arrives.
+                                val remembered = state.seededSubtabs[MainViewModel.ProfileTab.POSTS] ?: emptySet()
                                 val visiblePostFilters = PostKindFilter.entries.filter {
-                                    it == postKindFilter || loadedPosts.any { item -> it.matches(item) }
+                                    it == postKindFilter || it.name in remembered || loadedPosts.any { item -> it.matches(item) }
                                 }
                                 if (visiblePostFilters.size > 1) {
                                     ProfileSubFilterRow(
@@ -759,8 +777,13 @@ fun ProfileOverlay(
                             // profileResultsContent's REPOSTS/LIKES branch.
                             MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES -> {
                                 val loadedItems = subFilterTabState?.items ?: emptyList()
+                                // Fix (per feedback): same remembered-subtab
+                                // union as Posts — per tab (this branch
+                                // covers both Reposts and Likes, keyed by
+                                // whichever is selected).
+                                val remembered = state.seededSubtabs[state.selectedTab] ?: emptySet()
                                 val visiblePostFilters = PostKindFilter.entries.filter {
-                                    it == postKindFilter || loadedItems.any { item -> it.matches(item) }
+                                    it == postKindFilter || it.name in remembered || loadedItems.any { item -> it.matches(item) }
                                 }
                                 if (visiblePostFilters.size > 1) {
                                     ProfileSubFilterRow(
@@ -772,8 +795,10 @@ fun ProfileOverlay(
                             }
                             MainViewModel.ProfileTab.REVIEWS -> {
                                 val loadedReviews = subFilterTabState?.reviews ?: emptyList()
+                                // Fix (per feedback): remembered-subtab union.
+                                val remembered = state.seededSubtabs[MainViewModel.ProfileTab.REVIEWS] ?: emptySet()
                                 val visibleReviewFilters = ReviewKindFilter.entries.filter {
-                                    it == reviewKindFilter || loadedReviews.any { r -> it.matchesReview(r) }
+                                    it == reviewKindFilter || it.name in remembered || loadedReviews.any { r -> it.matchesReview(r) }
                                 }
                                 ProfileSubFilterRow(
                                     options = visibleReviewFilters, selected = reviewKindFilter,
@@ -783,8 +808,10 @@ fun ProfileOverlay(
                             }
                             MainViewModel.ProfileTab.BACKLOG -> {
                                 val loadedBacklog = subFilterTabState?.backlog ?: emptyList()
+                                // Fix (per feedback): remembered-subtab union.
+                                val remembered = state.seededSubtabs[MainViewModel.ProfileTab.BACKLOG] ?: emptySet()
                                 val visibleBacklogFilters = ReviewKindFilter.entries.filter {
-                                    it == reviewKindFilter || loadedBacklog.any { b -> it.matchesBacklog(b) }
+                                    it == reviewKindFilter || it.name in remembered || loadedBacklog.any { b -> it.matchesBacklog(b) }
                                 }
                                 ProfileSubFilterRow(
                                     options = visibleBacklogFilters, selected = reviewKindFilter,
@@ -798,12 +825,18 @@ fun ProfileOverlay(
                         // ── New default layout: one row, icons only, two
                         // independently-scrolling halves — see
                         // ProfileIconTabRow's own doc comment.
+                        // Fix (per feedback): the unreachable icon row gets the
+                        // same remembered-subtab unions as the classic
+                        // strips above, so it stays correct if revisited.
+                        val rememberedPost = state.seededSubtabs[state.selectedTab] ?: emptySet()
+                        val rememberedReviews = state.seededSubtabs[MainViewModel.ProfileTab.REVIEWS] ?: emptySet()
+                        val rememberedBacklog = state.seededSubtabs[MainViewModel.ProfileTab.BACKLOG] ?: emptySet()
                         ProfileIconTabRow(
                             tabs = availableTabs, selectedTab = state.selectedTab, onSelectTab = onSelectTab,
                             liquidGlass = liquidGlass, tint = blended,
                             postKindFilter = postKindFilter, onSelectPostKindFilter = onSelectPostKindFilter,
                             visiblePostFilters = PostKindFilter.entries.filter {
-                                it == postKindFilter || (subFilterTabState?.items ?: emptyList()).any { item -> it.matches(item) }
+                                it == postKindFilter || it.name in rememberedPost || (subFilterTabState?.items ?: emptyList()).any { item -> it.matches(item) }
                             },
                             mediaKindFilter = mediaKindFilter, onSelectMediaKindFilter = { mediaKindFilter = it },
                             visibleMediaFilters = MediaKindFilter.entries.filter {
@@ -811,10 +844,10 @@ fun ProfileOverlay(
                             },
                             reviewKindFilter = reviewKindFilter, onSelectReviewKindFilter = onSelectReviewKindFilter,
                             visibleReviewFilters = ReviewKindFilter.entries.filter {
-                                it == reviewKindFilter || (subFilterTabState?.reviews ?: emptyList()).any { r -> it.matchesReview(r) }
+                                it == reviewKindFilter || it.name in rememberedReviews || (subFilterTabState?.reviews ?: emptyList()).any { r -> it.matchesReview(r) }
                             },
                             visibleBacklogFilters = ReviewKindFilter.entries.filter {
-                                it == reviewKindFilter || (subFilterTabState?.backlog ?: emptyList()).any { b -> it.matchesBacklog(b) }
+                                it == reviewKindFilter || it.name in rememberedBacklog || (subFilterTabState?.backlog ?: emptyList()).any { b -> it.matchesBacklog(b) }
                             }
                         )
                     }
@@ -840,7 +873,8 @@ fun ProfileOverlay(
                 onOpenBlog = onOpenBlog,
                 onOpenReview = onOpenReview,
                 onOpenTitle = onOpenTitle,
-                gridModeFor = { filter -> gridModeFor(state.selectedTab, filter) }
+                gridModeFor = { filter -> gridModeFor(state.selectedTab, filter) },
+                roundedGridTiles = roundedGridTiles
             )
         }
         } // close the backdrop-recording Box (LazyColumn only) — see its own doc comment above
@@ -862,11 +896,7 @@ fun ProfileOverlay(
                     gridMode = gridModeFor(state.selectedTab, postKindFilter),
                     gridCyclesListLayout = postKindFilter.isListKind(),
                     showGrid = state.selectedTab in setOf(MainViewModel.ProfileTab.POSTS, MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES) &&
-                        (postKindFilter.isMasonryKind() || postKindFilter.isListKind()) ||
-                        // Item 16: Music History's Grid button is a plain
-                        // 1/2/3 column cycle (see profileMusicHistoryRows),
-                        // not gated by PostKindFilter at all.
-                        state.selectedTab == MainViewModel.ProfileTab.MUSIC_HISTORY,
+                        (postKindFilter.isMasonryKind() || postKindFilter.isListKind()),
                     showDm = selfDid.isNotBlank() && author.did != selfDid && author.isFollowing && profile.followedByMe,
                     onGrid = { onGridButtonTap() },
                     onAddTo = { onOpenAddTo(author.did) },
@@ -969,8 +999,12 @@ private fun ProfileInteractionBar(
 ) {
     val shape = RoundedCornerShape(26.dp)
     val iconSize = 20.dp
+    // The pill's visible height — 44dp glass / 36dp flat, exactly what the
+    // old full-width pill measured after its 8dp vertical padding inside
+    // the 60dp/52dp bar. Declared up here so BarContent's Row can use it.
+    val pillHeight = if (liquidGlass) 44.dp else 36.dp
     // Item 8: haptic tap on the grid-layout swap button specifically.
-    // Fix 9: the shared light-tap helper replaces the old LongPress here.
+    // Fix 9: the shared deep-tap helper (see util/Haptics.kt).
     val tap = rememberHapticTap()
     val onGridHaptic = { tap(); onGrid() }
     // Item 4: PlaylistAdd is a thin, mostly-negative-space glyph, so at the
@@ -999,10 +1033,14 @@ private fun ProfileInteractionBar(
     }
     @Composable
     fun BarContent() {
+        // Fix (per feedback): the pill hugs its own buttons — the Row wraps
+        // its content width (icons + even 2.dp gaps) instead of stretching
+        // across the whole bar, while keeping the same fixed visible height
+        // (44dp glass / 36dp flat) it always had.
         Row(
-            Modifier.fillMaxSize().padding(horizontal = 10.dp),
+            Modifier.height(pillHeight).wrapContentWidth().padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceEvenly
+            horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally)
         ) {
             if (showGrid) {
                 IconButton(onClick = onGridHaptic) {
@@ -1030,22 +1068,18 @@ private fun ProfileInteractionBar(
         }
     }
 
-    // Item 2 (round 2): height now tracks liquidGlass exactly like the feed's
-    // ActionRow does (60dp glass / 52dp flat) — this bar used to stay 60dp
-    // in both modes, so it only matched the feed bar's size when glass was
-    // actually on, and read visibly taller than the feed bar otherwise.
-    // Fix 6: the bar now mirrors ActionRow's own outer modifier —
-    // fillMaxWidth().windowInsetsPadding(navigationBars).height(...) — and
-    // the glass/flat pill inside carries the same 12dp/8dp internal
-    // padding the feed's bar does, so the visible pill is 44dp/36dp tall
-    // in both places.
+    // Item 2 (round 2) + fix (per feedback): the bar keeps its full-width
+    // 60dp/52dp slot, but the pill inside it now hugs its own buttons and
+    // sits centered horizontally instead of stretching edge to edge.
     val barModifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)
         .height(if (liquidGlass) 60.dp else 52.dp).fillMaxWidth()
-    val pillModifier = barModifier.padding(horizontal = 12.dp, vertical = 8.dp)
-    if (liquidGlass) {
-        LiquidGlassSurface(modifier = pillModifier, shape = shape, tint = tint, backdrop = backdrop) { BarContent() }
-    } else {
-        Box(pillModifier.clip(shape).background(Color.Black.copy(alpha = 0.7f))) { BarContent() }
+    val pillModifier = Modifier.height(pillHeight)
+    Box(modifier = barModifier, contentAlignment = Alignment.Center) {
+        if (liquidGlass) {
+            LiquidGlassSurface(modifier = pillModifier, shape = shape, tint = tint, backdrop = backdrop) { BarContent() }
+        } else {
+            Box(pillModifier.clip(shape).background(Color.Black.copy(alpha = 0.7f))) { BarContent() }
+        }
     }
 }
 
@@ -1652,11 +1686,15 @@ private fun LazyListScope.profileResultsContent(
     onOpenReview: (PopfeedReview) -> Unit,
     onOpenTitle: (PopfeedBacklogItem) -> Unit = {},
     // Adjustment #5: the interaction bar's Grid button is now a 3-way cycle
-    // remembered per (tab, sub-tab) — the caller (ProfileOverlay) owns that
-    // map and hands back just this tab's current mode for whichever
-    // PostKindFilter is asked about. See PostKindFilter.isMasonryKind()/
+    // remembered per (tab, sub-tab) — ProfileOverlay owns that map as a
+    // file-level shared map (sharedGridModes) so the choice applies to
+    // every profile's same tab/sub-tab, and hands back just this tab's
+    // current mode for whichever PostKindFilter is asked about. See PostKindFilter.isMasonryKind()/
     // isListKind() and postsLayoutRows below for what each index means.
-    gridModeFor: (PostKindFilter) -> Int = { 0 }
+    gridModeFor: (PostKindFilter) -> Int = { 0 },
+    // Fix (per feedback): "Rounded grid tiles" setting — forwarded to the
+    // square grid (profileMediaGridRows) below.
+    roundedGridTiles: Boolean = false
 ) {
     val tabState = state.tabStates[state.selectedTab]
 
@@ -1671,7 +1709,8 @@ private fun LazyListScope.profileResultsContent(
             PostKindFilter.ALL, PostKindFilter.IMAGES -> when (gridModeFor(postKindFilter)) {
                 2 -> profileMediaGridRows(
                     items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
-                    onTapItem = onTapItem, onLoadMore = onLoadMore, filter = { postKindFilter.matches(it) }
+                    onTapItem = onTapItem, onLoadMore = onLoadMore, filter = { postKindFilter.matches(it) },
+                    roundedGridTiles = roundedGridTiles, onSeedSubImageIndex = onSeedSubImageIndex
                 )
                 1 -> postsPinterestGridRows(
                     items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
@@ -1773,14 +1812,9 @@ private fun LazyListScope.profileResultsContent(
             }
         }
         MainViewModel.ProfileTab.MUSIC_HISTORY -> {
-            // Item 16: same Grid button/gridMode the Posts/Reposts/Likes
-            // tabs already use, just read as a literal 1/2/3 column count
-            // here instead of the masonry/square modes those tabs use it
-            // for — 0 -> 1 column (VodBubble-style horizontal row, cover
-            // left/info right), 1 -> 2 columns, 2 -> 3 columns (both grids
-            // of TitlePosterCard, the exact same poster-tile format the
-            // Backlog tab uses).
-            profileMusicHistoryRows(tracks = tabState?.musicHistory ?: emptyList(), columns = gridModeFor(postKindFilter) + 1, liquidGlass = liquidGlass, tint = profileTint)
+            // Item 16: songs are list-only (the old 1/2/3-column Grid-button
+            // cycle was removed per feedback) — see profileMusicHistoryRows.
+            profileMusicHistoryRows(tracks = tabState?.musicHistory ?: emptyList(), liquidGlass = liquidGlass, tint = profileTint)
         }
     }
 
@@ -1805,13 +1839,20 @@ private fun LazyListScope.profileResultsContent(
 private fun LazyListScope.profileMediaGridRows(
     items: List<MediaItem>, loading: Boolean, profileTint: Color, liquidGlass: Boolean,
     onTapItem: (List<MediaItem>, Int) -> Unit, onLoadMore: () -> Unit,
-    filter: (MediaItem) -> Boolean = { true }
+    filter: (MediaItem) -> Boolean = { true },
+    // Fix (per feedback): the "Rounded grid tiles" setting — off by default,
+    // so square-grid tiles are flat squares with no outline; on keeps the
+    // old rounded + outlined look.
+    roundedGridTiles: Boolean,
+    // Fix (per feedback): multi-image posts are swipeable right in the
+    // square grid, like Pinterest mode — needs the sub-image seed callback.
+    onSeedSubImageIndex: (String, Int) -> Unit
 ) {
-    // Multi-image posts (per feature request): show only the post's first
-    // image, not one tile per image in the group — a small "1/N" counter
-    // badge (added below) marks that there's more to see once it's opened.
     val matched = items.filter(filter)
-    val shape = RoundedCornerShape(10.dp)
+    // Fix (per feedback): flat squares by default — no rounded corners, no
+    // outline (ThumbBox/SwipeableThumbBox skip the rim entirely when
+    // rounded is false).
+    val shape = if (roundedGridTiles) RoundedCornerShape(10.dp) else RoundedCornerShape(0.dp)
 
     // Edge case: a sub-filter (e.g. "Videos") can match nothing in the
     // currently-loaded page even though `items` itself isn't empty — in
@@ -1830,8 +1871,18 @@ private fun LazyListScope.profileMediaGridRows(
         }
         Row(Modifier.fillMaxWidth()) {
             row.forEach { (localIndex, item) ->
-                ThumbBox(item, profileTint, shape, Modifier.weight(1f).aspectRatio(1f), liquidGlass, playIconSize = 16.dp) {
-                    onTapItem(matched, localIndex)
+                // Fix (per feedback): multi-image posts page through their
+                // images right in the square grid (same as Pinterest mode)
+                // instead of only ever showing the first one.
+                val cellModifier = Modifier.weight(1f).aspectRatio(1f)
+                if (item.mediaGroup.size > 1) {
+                    SwipeableThumbBox(item, profileTint, shape, cellModifier, liquidGlass,
+                        onSeedSubImageIndex = onSeedSubImageIndex, rounded = roundedGridTiles,
+                        onClick = { onTapItem(matched, localIndex) })
+                } else {
+                    ThumbBox(item, profileTint, shape, cellModifier, liquidGlass, rounded = roundedGridTiles, playIconSize = 16.dp) {
+                        onTapItem(matched, localIndex)
+                    }
                 }
             }
             // Pad out a short last row so cells keep their square aspect ratio and stay left-aligned.
@@ -1916,7 +1967,7 @@ private fun <T> emptyAfterFilterLoadMore(
 }
 
 @Composable
-private fun ThumbBox(item: MediaItem, tint: Color, shape: RoundedCornerShape, modifier: Modifier, liquidGlass: Boolean, playIconSize: Dp = 18.dp, onClick: () -> Unit) {
+private fun ThumbBox(item: MediaItem, tint: Color, shape: RoundedCornerShape, modifier: Modifier, liquidGlass: Boolean, playIconSize: Dp = 18.dp, rounded: Boolean = true, onClick: () -> Unit) {
     // Fix 9: the shared light tap, via the shared helper.
     val tap = rememberHapticTap()
     Box(
@@ -1927,7 +1978,10 @@ private fun ThumbBox(item: MediaItem, tint: Color, shape: RoundedCornerShape, mo
             // now-deleted media — reads as "no preview" instead of a stark
             // empty void with just an outline around it.
             .background(Color.White.copy(alpha = 0.05f))
-            .tileRim(tint, shape, liquidGlass)
+            // Fix (per feedback): with the "Rounded grid tiles" setting off,
+            // square-grid tiles are flat — no rounded corners (the caller
+            // passes a 0.dp shape) and no outline at all.
+            .then(if (rounded) Modifier.tileRim(tint, shape, liquidGlass) else Modifier)
             .clickable(onClick = { tap(); onClick() })
     ) {
         // Bug fix: the NSFW cover used to be a solid, already-opaque black
@@ -1980,7 +2034,7 @@ private fun ThumbBox(item: MediaItem, tint: Color, shape: RoundedCornerShape, mo
 @Composable
 private fun SwipeableThumbBox(
     item: MediaItem, tint: Color, shape: RoundedCornerShape, modifier: Modifier, liquidGlass: Boolean,
-    onSeedSubImageIndex: (String, Int) -> Unit, onClick: () -> Unit
+    onSeedSubImageIndex: (String, Int) -> Unit, onClick: () -> Unit, rounded: Boolean = true
 ) {
     val pagerState = rememberPagerState(pageCount = { item.mediaGroup.size })
     // Fix 9: the shared light tap, via the shared helper.
@@ -1989,7 +2043,9 @@ private fun SwipeableThumbBox(
         modifier
             .clip(shape)
             .background(Color.White.copy(alpha = 0.05f))
-            .tileRim(tint, shape, liquidGlass)
+            // Fix (per feedback): flat tiles when the "Rounded grid tiles"
+            // setting is off — same treatment as ThumbBox.
+            .then(if (rounded) Modifier.tileRim(tint, shape, liquidGlass) else Modifier)
             .clickable { tap(); onSeedSubImageIndex(item.id, pagerState.currentPage); onClick() }
     ) {
         // Bug fix: see ThumbBox's own comment above — blur the actual page
@@ -2320,48 +2376,36 @@ private fun MultiImageCountBadge(count: Int, currentPage: Int = 0, modifier: Mod
 
 // ─── Backlog (Popfeed) ───────────────────────────────────────────────────────
 
-/** Item 16: Rocksky "Music History" tab. columns=1 is a vertical list of
+/** Item 16: Rocksky "Music History" tab — always a vertical list of
  *  horizontal rows (cover left, info right — same shape as [VodBubble]
- *  above); columns=2/3 are grids of [TitlePosterCard] (the exact same
- *  poster-tile format the Backlog tab uses), cover on top with the
- *  song/artist shrink-to-fit underneath. */
-private fun LazyListScope.profileMusicHistoryRows(tracks: List<RockskyTrack>, columns: Int, liquidGlass: Boolean, tint: Color) {
-    if (columns <= 1) {
-        items(tracks, key = { "track_${it.playedAt}_${it.title}_${it.artist}" }) { track ->
-            MusicHistoryRow(track = track, liquidGlass = liquidGlass, tint = tint,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp))
-        }
-    } else {
-        val rows = tracks.chunked(columns)
-        itemsIndexed(rows, key = { i, row -> "music_row_${i}_${row.firstOrNull()?.title ?: i}" }) { _, row ->
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 5.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                row.forEach { track ->
-                    TitlePosterCard(
-                        title = "${track.title}\n${track.artist}", imageUrl = track.albumArtUrl,
-                        liquidGlass = liquidGlass, onClick = {}, modifier = Modifier.weight(1f)
-                    )
-                }
-                repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
-            }
-        }
+ *  above). Fix (per feedback): the old 1/2/3-column Grid-button cycle is
+ *  gone — songs are list-only now, so there's no grid button on this tab
+ *  and no columns parameter anymore. */
+private fun LazyListScope.profileMusicHistoryRows(tracks: List<RockskyTrack>, liquidGlass: Boolean, tint: Color) {
+    items(tracks, key = { "track_${it.playedAt}_${it.title}_${it.artist}" }) { track ->
+        MusicHistoryRow(track = track, liquidGlass = liquidGlass, tint = tint,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp))
     }
 }
 
 @Composable
 private fun MusicHistoryRow(track: RockskyTrack, liquidGlass: Boolean, tint: Color, modifier: Modifier = Modifier) {
+    // Fix (per feedback): the bubble's outline matches the song's own cover
+    // color — the same dominant-color treatment review bubbles get — and
+    // the bubble is wrapped tighter around its content (cover closer to the
+    // left edge, same overall width).
+    val coverTint = rememberDominantColor(track.albumArtUrl ?: "")
     val shape = RoundedCornerShape(16.dp)
     Row(
         modifier
             .fillMaxWidth()
             .then(
-                if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
+                if (liquidGlass) Modifier.glassPanel(true, tint = coverTint, shape = shape)
                 else Modifier.clip(shape).background(Color.White.copy(0.06f))
+                    .border(1.dp, coverTint.copy(alpha = 0.6f), shape)
             )
-            .padding(12.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Box(Modifier.size(56.dp).clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(0.3f))) {
             if (track.albumArtUrl != null) {

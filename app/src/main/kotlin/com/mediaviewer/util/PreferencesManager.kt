@@ -129,6 +129,11 @@ object PrefKeys {
     // content behind a tap-to-reveal cover instead of filtering it out.
     val HATE_FUN_BLUR_NSFW = booleanPreferencesKey("hate_fun_blur_nsfw")
 
+    // Fix (per feedback): square-grid tiles render as flat squares (no
+    // rounded corners, no outline) by default; this opts back into the old
+    // rounded + outlined tiles.
+    val SQUARE_GRID_ROUNDED = booleanPreferencesKey("square_grid_rounded")
+
     // ── Blogs/Reviews auto-subscribe (feature: automatic subscriptions) ───
     // The actual review/blog *content* cache already exists —
     // HUB_REVIEWS_CACHE_JSON/HUB_BLOGS_CACHE_JSON above, written by
@@ -191,6 +196,9 @@ class PreferencesManager(private val context: Context) {
     val profileTabCacheJson: Flow<String>       = context.dataStore.data.map { it[PrefKeys.PROFILE_TAB_CACHE_JSON] ?: "{}" }
     val pinterestThreeColumns: Flow<Boolean>    = context.dataStore.data.map { it[PrefKeys.PINTEREST_THREE_COLUMNS] ?: false }
     val hateFunBlurNsfw: Flow<Boolean>          = context.dataStore.data.map { it[PrefKeys.HATE_FUN_BLUR_NSFW] ?: false }
+    // Fix (per feedback): default false — flat square tiles with no outline;
+    // true restores the old rounded + outlined tiles.
+    val squareGridRounded: Flow<Boolean>        = context.dataStore.data.map { it[PrefKeys.SQUARE_GRID_ROUNDED] ?: false }
     val followerScanCompleted: Flow<Boolean>     = context.dataStore.data.map { it[PrefKeys.FOLLOWER_SCAN_COMPLETED] ?: false }
     val followerScanLastRunMs: Flow<Long>        = context.dataStore.data.map { it[PrefKeys.FOLLOWER_SCAN_LAST_RUN_MS] ?: 0L }
     val followerScanCursor: Flow<String?>        = context.dataStore.data.map { it[PrefKeys.FOLLOWER_SCAN_CURSOR] }
@@ -474,6 +482,11 @@ class PreferencesManager(private val context: Context) {
 
     suspend fun setClassicProfileTabRow(enabled: Boolean) {
         context.dataStore.edit { prefs -> prefs[PrefKeys.CLASSIC_PROFILE_TAB_ROW] = enabled }
+    }
+
+    // Fix (per feedback): "Rounded grid tiles" setting.
+    suspend fun setSquareGridRounded(enabled: Boolean) {
+        context.dataStore.edit { prefs -> prefs[PrefKeys.SQUARE_GRID_ROUNDED] = enabled }
     }
 
     suspend fun setProfileTabCacheJson(json: String) {

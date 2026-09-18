@@ -36,6 +36,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.MoreVert
@@ -129,6 +130,10 @@ fun SettingsSheet(
     onTogglePinterestThreeColumns: (Boolean) -> Unit = {},
     hateFunBlurNsfw: Boolean = false,
     onToggleHateFunBlurNsfw: (Boolean) -> Unit = {},
+    // Fix (per feedback): "Rounded grid tiles" — off by default (flat
+    // square tiles with no outline in the profile square grid).
+    squareGridRounded: Boolean = false,
+    onToggleSquareGridRounded: (Boolean) -> Unit = {},
     selfDid: String = "",
     subscribedReviewDids: Set<String> = emptySet(),
     subscribedBlogDids: Set<String> = emptySet(),
@@ -373,6 +378,7 @@ fun SettingsSheet(
                             classicProfileTabRow = classicProfileTabRow, onToggleClassicProfileTabRow = onToggleClassicProfileTabRow,
                             pinterestThreeColumns = pinterestThreeColumns, onTogglePinterestThreeColumns = onTogglePinterestThreeColumns,
                             hateFunBlurNsfw = hateFunBlurNsfw, onToggleHateFunBlurNsfw = onToggleHateFunBlurNsfw,
+                            squareGridRounded = squareGridRounded, onToggleSquareGridRounded = onToggleSquareGridRounded,
                             followerScanState = followerScanState, onRescanFollowersFromScratch = onRescanFollowersFromScratch,
                             hideTextOnlyPosts = hideTextOnlyPosts, onToggleHideTextOnlyPosts = onToggleHideTextOnlyPosts,
                             liquidGlass = liquidGlass, onToggleLiquidGlass = onToggleLiquidGlass,
@@ -475,10 +481,15 @@ fun SettingsSheet(
                     uploadBackdrop = hubBackgroundBackdrop,
                     onReturnToFeed = { onReturnToFeed() },
                     onOpenSettings = { goToHubPage(if (hubPage == HubPage.SETTINGS) HubPage.MAIN else HubPage.SETTINGS) },
-                    onRefresh = if (hubPage == HubPage.MAIN) onRefreshHub else null,
+                    // Fix (per feedback): the More popup's Refresh bubble
+                    // must always appear — ReturnToFeedBar only feeds this
+                    // through to HubMoreButton, so pass it unconditionally
+                    // instead of nulling it on the Settings page.
+                    onRefresh = onRefreshHub,
                     showPillAndUpload = showReturnBar,
                     hasVisitedFeed = hasVisitedFeed,
-                    onOpenComposePost = onOpenComposePost
+                    onOpenComposePost = onOpenComposePost,
+                    settingsOpen = (hubPage == HubPage.SETTINGS)
                 )
             }
 
@@ -511,6 +522,8 @@ private fun SettingsPageContent(
     onTogglePinterestThreeColumns: (Boolean) -> Unit = {},
     hateFunBlurNsfw: Boolean = false,
     onToggleHateFunBlurNsfw: (Boolean) -> Unit = {},
+    squareGridRounded: Boolean = false,
+    onToggleSquareGridRounded: (Boolean) -> Unit = {},
     followerScanState: MainViewModel.FollowerScanState = MainViewModel.FollowerScanState.Idle,
     onRescanFollowersFromScratch: () -> Unit = {},
     hideTextOnlyPosts: Boolean,
@@ -699,6 +712,13 @@ private fun SettingsPageContent(
         CompactRow {
             Text("I Hate Fun (Blur NSFW Content)", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(end = 12.dp))
             CompactSwitch(checked = hateFunBlurNsfw, onCheckedChange = onToggleHateFunBlurNsfw)
+        }
+
+        // Fix (per feedback): square-grid tiles are flat squares with no
+        // outline by default — this restores the old rounded + outlined look.
+        CompactRow {
+            Text("Rounded grid tiles", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(end = 12.dp))
+            CompactSwitch(checked = squareGridRounded, onCheckedChange = onToggleSquareGridRounded)
         }
 
         // Feature: auto-subscribe — re-runs the one-time follower scan from
@@ -2197,7 +2217,12 @@ private fun embedUrlFor(stream: com.mediaviewer.model.BlueskyLiveNowStream): Str
 @Composable
 private fun HubMoreButton(
     liquidGlass: Boolean, tint: Color, onOpenSettings: () -> Unit, onRefresh: (() -> Unit)?,
-    size: Dp = 26.dp, modifier: Modifier = Modifier, backdrop: GlassBackdrop? = null
+    size: Dp = 26.dp, modifier: Modifier = Modifier, backdrop: GlassBackdrop? = null,
+    // Fix (per feedback): true while the Hub is showing the Settings page —
+    // the button then reads as "back to Hub" (right arrow) instead of the
+    // More/Close stack, and tapping it calls onOpenSettings() (which the
+    // caller wires to toggle back to MAIN) rather than expanding.
+    settingsOpen: Boolean = false
 ) {
     var expanded by remember { mutableStateOf(false) }
     val rotation = remember { Animatable(0f) }
@@ -2205,6 +2230,9 @@ private fun HubMoreButton(
     val shape = CircleShape
     // Item 8: haptic tap on opening/closing the stack.
     val tap = rememberHapticTap()
+    // Fix (per feedback): if the Settings page opens while the popup is
+    // expanded, collapse it — the button is a back-arrow there, not a menu.
+    LaunchedEffect(settingsOpen) { if (settingsOpen) expanded = false }
 
     @Composable
     fun Bubble(icon: ImageVector, label: String, iconSize: Dp = 14.dp, iconRotation: Float = 0f, onClick: () -> Unit) {
@@ -2243,12 +2271,20 @@ private fun HubMoreButton(
 
         val clickModifier = Modifier.size(size).clickable {
             tap()
-            expanded = !expanded
+            // Fix (per feedback): on the Settings page this button is a
+            // back-to-Hub arrow, not the More stack — tapping it returns to
+            // the Hub via onOpenSettings() instead of expanding.
+            if (settingsOpen) onOpenSettings() else expanded = !expanded
         }
         @Composable
         fun MoreIconContent() {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Icon(if (expanded) Icons.Default.Close else Icons.Default.MoreVert, contentDescription = "More",
+                val icon = when {
+                    settingsOpen -> Icons.AutoMirrored.Filled.ArrowForward
+                    expanded -> Icons.Default.Close
+                    else -> Icons.Default.MoreVert
+                }
+                Icon(icon, contentDescription = "More",
                     tint = Color.White, modifier = Modifier.size(16.dp))
             }
         }
@@ -2347,7 +2383,11 @@ private fun ReturnToFeedBar(
     // per-button state.
     hasVisitedFeed: Boolean = false,
     // Upload flow: forwarded down to HubUploadBubble's "Post" entry.
-    onOpenComposePost: () -> Unit = {}
+    onOpenComposePost: () -> Unit = {},
+    // Fix (per feedback): forwarded to HubMoreButton — true while the Hub
+    // is showing the Settings page, turning the More button into a
+    // right-arrow "back to Hub" button.
+    settingsOpen: Boolean = false
 ) {
     val barHeight = 40.dp
     val shape = RoundedCornerShape(20.dp)
@@ -2416,7 +2456,10 @@ private fun ReturnToFeedBar(
         // pre-login.
         HubMoreButton(
             liquidGlass, tint, onOpenSettings = onOpenSettings, onRefresh = onRefresh,
-            size = barHeight, modifier = Modifier.align(Alignment.CenterStart), backdrop = backdrop
+            size = barHeight, modifier = Modifier.align(Alignment.CenterStart), backdrop = backdrop,
+            // Fix (per feedback): on the Settings page the More button
+            // becomes a right-arrow "back to Hub" button.
+            settingsOpen = settingsOpen
         )
     }
 }
