@@ -482,6 +482,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             ensureProfileTabCacheHydrated()
             profileTabCacheMutex.withLock {
+                // Fix (per feedback): merge with the previously cached
+                // subtabs instead of rebuilding from scratch — otherwise a
+                // persist that runs before a tab has (re)loaded wipes its
+                // remembered pills, and they never survive a reopen.
+                val prevSubtabs = profileTabCache[state.author.did]?.subtabs ?: emptyMap()
                 val entry = CachedProfileTabs(
                     availableTabs = state.availableTabs.map { it.name }.toSet(),
                     posts = state.tabStates[ProfileTab.POSTS]?.items?.take(PROFILE_TAB_CACHE_ITEM_LIMIT) ?: emptyList(),
@@ -493,12 +498,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     vods = state.tabStates[ProfileTab.VODS]?.vods?.take(PROFILE_TAB_CACHE_ITEM_LIMIT) ?: emptyList(),
                     // Fix (per feedback): remember which sub-filter pills
                     // had content, using the exact same predicates the
-                    // UI's subtab strips use — recomputed from the full
-                    // current tab state on every persist, so it reconciles
-                    // as fresh data arrives.
+                    // UI's subtab strips use — merged over the previously
+                    // cached set so tabs without fresh data keep their
+                    // remembered pills instead of being wiped.
                     subtabs = buildMap {
+                        putAll(prevSubtabs)
                         fun postSubtabs(tab: ProfileTab) {
-                            val items = state.tabStates[tab]?.items ?: return
+                            val items = state.tabStates[tab]?.items
+                            if (items.isNullOrEmpty()) return
                             put(tab.name, PostKindFilter.entries
                                 .filter { f -> items.any { item -> f.matches(item) } }
                                 .map { it.name }.toSet())
@@ -507,13 +514,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         postSubtabs(ProfileTab.REPOSTS)
                         postSubtabs(ProfileTab.LIKES)
                         val reviews = state.tabStates[ProfileTab.REVIEWS]?.reviews
-                        if (reviews != null) {
+                        if (!reviews.isNullOrEmpty()) {
                             put(ProfileTab.REVIEWS.name, ReviewKindFilter.entries
                                 .filter { f -> reviews.any { r -> f.matchesReview(r) } }
                                 .map { it.name }.toSet())
                         }
                         val backlog = state.tabStates[ProfileTab.BACKLOG]?.backlog
-                        if (backlog != null) {
+                        if (!backlog.isNullOrEmpty()) {
                             put(ProfileTab.BACKLOG.name, ReviewKindFilter.entries
                                 .filter { f -> backlog.any { b -> f.matchesBacklog(b) } }
                                 .map { it.name }.toSet())
