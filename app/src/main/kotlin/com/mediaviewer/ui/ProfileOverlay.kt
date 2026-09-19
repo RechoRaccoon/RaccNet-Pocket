@@ -221,7 +221,7 @@ private val sharedGridModes = mutableStateMapOf<Pair<MainViewModel.ProfileTab, P
 // isListKind() below decide which of the two meanings applies when reading
 // it back.
 private fun PostKindFilter.isMasonryKind() = this == PostKindFilter.ALL || this == PostKindFilter.IMAGES
-private fun PostKindFilter.isListKind() = this == PostKindFilter.TEXT_POSTS || this == PostKindFilter.HORIZONTAL_VIDEOS
+private fun PostKindFilter.isListKind() = this == PostKindFilter.TEXT_POSTS
 
 /** Small custom vector icons for the Grid button — none of these shapes
  *  (uneven 2-col / uneven 3-col / dots+lines list) exist in the Material
@@ -986,8 +986,9 @@ fun ProfileOverlay(
  *  [gridMode] is 0/1/2, and [gridCyclesListLayout] picks which of the two
  *  three-icon sequences it's read against (see PostKindFilter.isListKind()
  *  above) — image-like sub-tabs cycle uneven-2-col -> uneven-3-col ->
- *  square-3x3; Text Posts/Horizontal Videos cycle list -> uneven-2-col ->
- *  uneven-3-col instead, per feedback. [showGrid] hides the button
+ *  square-3x3; Text Posts cycles list -> uneven-2-col -> uneven-3-col
+ *  instead, per feedback. Horizontal Videos has no grid options (always
+ *  the YouTube-style list). [showGrid] hides the button
  *  entirely on tabs/sub-tabs the Grid cycle has nothing to do to (Blogs,
  *  Reviews, Backlog, Vods, Vertical Videos — the last already renders as
  *  its own fixed 3-wide grid with no alternate layout to offer). */
@@ -1701,9 +1702,9 @@ private fun LazyListScope.profileResultsContent(
     // Shared by both the Posts and Reposts/Likes branches below (feature
     // request #5 made Reposts/Likes use the exact same sub-tabs and
     // per-filter layouts Posts does) — picks one of five layouts per
-    // PostKindFilter, and within the ALL/IMAGES/TEXT_POSTS/HORIZONTAL_VIDEOS
-    // sub-tabs, one of three further layouts per that sub-tab's own
-    // remembered grid-mode index (adjustment #5).
+    // PostKindFilter, and within the ALL/IMAGES/TEXT_POSTS sub-tabs, one of
+    // three further layouts per that sub-tab's own remembered grid-mode
+    // index (adjustment #5). HORIZONTAL_VIDEOS is always the list.
     fun postsLayoutRows(allItems: List<MediaItem>, loading: Boolean) {
         when (postKindFilter) {
             PostKindFilter.ALL, PostKindFilter.IMAGES -> when (gridModeFor(postKindFilter)) {
@@ -1740,23 +1741,13 @@ private fun LazyListScope.profileResultsContent(
                     filter = { postKindFilter.matches(it) }
                 )
             }
-            PostKindFilter.HORIZONTAL_VIDEOS -> when (gridModeFor(postKindFilter)) {
-                2 -> postsPinterestGridRows(
-                    items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
-                    onTapItem = onTapItem, onSeedSubImageIndex = onSeedSubImageIndex, onLoadMore = onLoadMore,
-                    filter = { postKindFilter.matches(it) }, columns = 3
-                )
-                1 -> postsPinterestGridRows(
-                    items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
-                    onTapItem = onTapItem, onSeedSubImageIndex = onSeedSubImageIndex, onLoadMore = onLoadMore,
-                    filter = { postKindFilter.matches(it) }, columns = 2
-                )
-                else -> postsHorizontalVideoRows(
-                    items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
-                    onTapItem = onTapItem, onLoadMore = onLoadMore,
-                    filter = { postKindFilter.matches(it) }
-                )
-            }
+            // Fix (per feedback): Horizontal Videos is always the YouTube-style
+            // list — no grid options, so gridMode is ignored here.
+            PostKindFilter.HORIZONTAL_VIDEOS -> postsHorizontalVideoRows(
+                items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
+                onTapItem = onTapItem, onLoadMore = onLoadMore,
+                filter = { postKindFilter.matches(it) }
+            )
             PostKindFilter.VERTICAL_VIDEOS -> postsVerticalVideoGridRows(
                 items = allItems, loading = loading, profileTint = profileTint, liquidGlass = liquidGlass,
                 onTapItem = onTapItem, onLoadMore = onLoadMore,
