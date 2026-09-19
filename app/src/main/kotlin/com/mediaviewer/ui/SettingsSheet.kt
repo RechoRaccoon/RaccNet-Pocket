@@ -2234,17 +2234,6 @@ private fun HubMoreButton(
     // expanded, collapse it — the button is a back-arrow there, not a menu.
     LaunchedEffect(settingsOpen) { if (settingsOpen) expanded = false }
 
-    @Composable
-    fun Bubble(icon: ImageVector, label: String, iconSize: Dp = 14.dp, iconRotation: Float = 0f, onClick: () -> Unit) {
-        val clickModifier = Modifier.size(size).clickable { tap(); onClick() }
-        @Composable fun IconContent() {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Icon(icon, contentDescription = label, tint = Color.White, modifier = Modifier.size(iconSize).graphicsLayer { rotationZ = iconRotation })
-            }
-        }
-        if (liquidGlass) LiquidGlassSurface(clickModifier, shape = shape, tint = tint, backdrop = backdrop) { IconContent() }
-        else Box(clickModifier.clip(shape).background(Color.White.copy(0.10f))) { IconContent() }
-    }
 
     // Item 7: fixed-size root so the expanded popup (drawn above via a
     // negative offset, unclipped) can never change this Box's measured
@@ -2258,13 +2247,38 @@ private fun HubMoreButton(
             modifier = Modifier.align(Alignment.BottomStart).offset(y = -(size + 8.dp))
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Bubble(Icons.Filled.Settings, "Settings") { expanded = false; onOpenSettings() }
-                // Fix (per feedback): Refresh is always in the popup — above
-                // the More button, below the Settings bubble. No conditional.
-                Bubble(Icons.Filled.Refresh, "Refresh", iconRotation = rotation.value) {
+                // Fix (per feedback): bubbles inlined (no local function) —
+                // Settings above, Refresh below, both unconditional.
+                val settingsMod = Modifier.size(size).clickable { tap(); expanded = false; onOpenSettings() }
+                if (liquidGlass) {
+                    LiquidGlassSurface(settingsMod, shape = shape, tint = tint, backdrop = backdrop) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Icon(Icons.Filled.Settings, "Settings", tint = Color.White, modifier = Modifier.size(14.dp))
+                        }
+                    }
+                } else {
+                    Box(settingsMod.clip(shape).background(Color.White.copy(0.10f)), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Filled.Settings, "Settings", tint = Color.White, modifier = Modifier.size(14.dp))
+                    }
+                }
+                val refreshMod = Modifier.size(size).clickable {
+                    tap()
                     expanded = false
                     onRefresh()
                     scope.launch { rotation.snapTo(0f); rotation.animateTo(360f, animationSpec = tween(600, easing = LinearEasing)) }
+                }
+                if (liquidGlass) {
+                    LiquidGlassSurface(refreshMod, shape = shape, tint = tint, backdrop = backdrop) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Icon(Icons.Filled.Refresh, "Refresh", tint = Color.White,
+                                modifier = Modifier.size(14.dp).graphicsLayer { rotationZ = rotation.value })
+                        }
+                    }
+                } else {
+                    Box(refreshMod.clip(shape).background(Color.White.copy(0.10f)), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Filled.Refresh, "Refresh", tint = Color.White,
+                            modifier = Modifier.size(14.dp).graphicsLayer { rotationZ = rotation.value })
+                    }
                 }
             }
         }

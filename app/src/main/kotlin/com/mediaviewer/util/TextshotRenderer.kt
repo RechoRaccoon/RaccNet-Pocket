@@ -54,8 +54,7 @@ object TextshotRenderer {
                 .build()
 
         /** Tight ink rect of [layout], in layout coordinates. */
-        fun inkOf(layout: StaticLayout): Rect {
-            val out = Rect()
+        fun inkOf(layout: StaticLayout): Rect {            val out = Rect()
             for (i in 0 until layout.lineCount) {
                 val start = layout.getLineStart(i)
                 val end = layout.getLineEnd(i)
@@ -74,7 +73,23 @@ object TextshotRenderer {
 
         fun fits(size: Float): Boolean {
             paint.textSize = size
-            val r = inkOf(buildLayout())
+            val layout = buildLayout()
+            // Never split a normal word mid-word: if the layout broke a word
+            // of 25 chars or fewer across lines, this size is too big. Longer
+            // tokens (pathological unbroken strings) are allowed to wrap
+            // mid-word rather than shrinking the whole block tiny.
+            for (i in 0 until layout.lineCount - 1) {
+                val b = layout.getLineEnd(i)
+                if (b <= 0 || b >= text.length) continue
+                if (!text[b - 1].isWhitespace() && !text[b].isWhitespace()) {
+                    var s = b - 1
+                    while (s > 0 && !text[s - 1].isWhitespace()) s--
+                    var e = b
+                    while (e < text.length && !text[e].isWhitespace()) e++
+                    if (e - s <= 25) return false
+                }
+            }
+            val r = inkOf(layout)
             return !r.isEmpty && r.width() <= maxW && r.height() <= maxH
         }
 
