@@ -591,7 +591,7 @@ fun ComposePostScreen(
                         )
                         Spacer(Modifier.height(14.dp))
                         TextshotPreview(
-                            text = singleText.text.ifBlank { "Your post will look like this." },
+                            text = singleText.text.ifBlank { "Preview" },
                             liquidGlass = liquidGlass, tint = dominantColor
                         )
                     }

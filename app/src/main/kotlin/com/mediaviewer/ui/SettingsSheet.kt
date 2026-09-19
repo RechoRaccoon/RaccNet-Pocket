@@ -2216,7 +2216,7 @@ private fun embedUrlFor(stream: com.mediaviewer.model.BlueskyLiveNowStream): Str
  *  Hub, with nothing else it could ever visually collide with. */
 @Composable
 private fun HubMoreButton(
-    liquidGlass: Boolean, tint: Color, onOpenSettings: () -> Unit, onRefresh: (() -> Unit)?,
+    liquidGlass: Boolean, tint: Color, onOpenSettings: () -> Unit, onRefresh: () -> Unit = {},
     size: Dp = 26.dp, modifier: Modifier = Modifier, backdrop: GlassBackdrop? = null,
     // Fix (per feedback): true while the Hub is showing the Settings page —
     // the button then reads as "back to Hub" (right arrow) instead of the
@@ -2259,12 +2259,12 @@ private fun HubMoreButton(
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Bubble(Icons.Filled.Settings, "Settings") { expanded = false; onOpenSettings() }
-                if (onRefresh != null) {
-                    Bubble(Icons.Filled.Refresh, "Refresh", iconRotation = rotation.value) {
-                        expanded = false
-                        onRefresh()
-                        scope.launch { rotation.snapTo(0f); rotation.animateTo(360f, animationSpec = tween(600, easing = LinearEasing)) }
-                    }
+                // Fix (per feedback): Refresh is always in the popup — above
+                // the More button, below the Settings bubble. No conditional.
+                Bubble(Icons.Filled.Refresh, "Refresh", iconRotation = rotation.value) {
+                    expanded = false
+                    onRefresh()
+                    scope.launch { rotation.snapTo(0f); rotation.animateTo(360f, animationSpec = tween(600, easing = LinearEasing)) }
                 }
             }
         }
@@ -2360,7 +2360,7 @@ private fun ReturnToFeedBar(
     backdrop: GlassBackdrop?,
     onReturnToFeed: () -> Unit,
     onOpenSettings: () -> Unit,
-    onRefresh: (() -> Unit)? = null,
+    onRefresh: () -> Unit = {},
     // Item 14: false pre-login (nothing to return to / refresh yet, only
     // Settings needs to be reachable) — the pill/label/upload bubble are
     // skipped entirely and only the More button shows, still left-aligned
