@@ -93,19 +93,13 @@ object TextshotRenderer {
             return !r.isEmpty && r.width() <= maxW && r.height() <= maxH
         }
 
-        // Grow the ceiling by doubling until the ink overflows (bounded), so
-        // short text can reach edge-to-edge sizes far above the frame width.
+        // Binary-search the largest fitting size, starting from a large
+        // ceiling. (No doubling-up loop: fits() rejects sizes with
+        // mid-word splits, and doubling would stop at the first such size
+        // even when a smaller size fits fine — leaving text too small.)
         var lo = MIN_TEXT_SIZE
-        var hi = MIN_TEXT_SIZE
-        var guard = 0
-        while (guard++ < 16) {
-            val probe = hi * 2f
-            if (probe > sizePx * 4f) break
-            if (!fits(probe)) break
-            hi = probe
-        }
-        // Binary-search the largest fitting size.
-        repeat(18) {
+        var hi = sizePx * 2f
+        repeat(24) {
             val mid = (lo + hi) / 2f
             if (fits(mid)) lo = mid else hi = mid
         }

@@ -2235,50 +2235,57 @@ private fun HubMoreButton(
     LaunchedEffect(settingsOpen) { if (settingsOpen) expanded = false }
 
 
-    // Item 7: fixed-size root so the expanded popup (drawn above via a
-    // negative offset, unclipped) can never change this Box's measured
+    // Item 7: fixed-size root so the expanded popups (drawn above via
+    // negative offsets, unclipped) can never change this Box's measured
     // height — without this, opening the popup stretched the whole bottom
-    // bar upward and the popup could overlap the close/refresh bubbles.
+    // bar upward. Each bubble is its own AnimatedVisibility with its own
+    // upward offset (no shared Column that a fixed-size parent can clip),
+    // so both always render: Settings above, Refresh below.
     Box(modifier.size(size)) {
+        // Settings bubble — two slots above the More button.
+        AnimatedVisibility(
+            visible = expanded,
+            enter = fadeIn(tween(150)) + scaleIn(tween(150), initialScale = 0.8f, transformOrigin = TransformOrigin(0f, 1f)),
+            exit = fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.8f, transformOrigin = TransformOrigin(0f, 1f)),
+            modifier = Modifier.align(Alignment.BottomStart).offset(y = -(size * 2 + 16.dp))
+        ) {
+            val settingsMod = Modifier.size(size).clickable { tap(); expanded = false; onOpenSettings() }
+            if (liquidGlass) {
+                LiquidGlassSurface(settingsMod, shape = shape, tint = tint, backdrop = backdrop) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Filled.Settings, "Settings", tint = Color.White, modifier = Modifier.size(14.dp))
+                    }
+                }
+            } else {
+                Box(settingsMod.clip(shape).background(Color.White.copy(0.10f)), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Filled.Settings, "Settings", tint = Color.White, modifier = Modifier.size(14.dp))
+                }
+            }
+        }
+        // Refresh bubble — one slot above the More button.
         AnimatedVisibility(
             visible = expanded,
             enter = fadeIn(tween(150)) + scaleIn(tween(150), initialScale = 0.8f, transformOrigin = TransformOrigin(0f, 1f)),
             exit = fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.8f, transformOrigin = TransformOrigin(0f, 1f)),
             modifier = Modifier.align(Alignment.BottomStart).offset(y = -(size + 8.dp))
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                // Fix (per feedback): bubbles inlined (no local function) —
-                // Settings above, Refresh below, both unconditional.
-                val settingsMod = Modifier.size(size).clickable { tap(); expanded = false; onOpenSettings() }
-                if (liquidGlass) {
-                    LiquidGlassSurface(settingsMod, shape = shape, tint = tint, backdrop = backdrop) {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Icon(Icons.Filled.Settings, "Settings", tint = Color.White, modifier = Modifier.size(14.dp))
-                        }
-                    }
-                } else {
-                    Box(settingsMod.clip(shape).background(Color.White.copy(0.10f)), contentAlignment = Alignment.Center) {
-                        Icon(Icons.Filled.Settings, "Settings", tint = Color.White, modifier = Modifier.size(14.dp))
-                    }
-                }
-                val refreshMod = Modifier.size(size).clickable {
-                    tap()
-                    expanded = false
-                    onRefresh()
-                    scope.launch { rotation.snapTo(0f); rotation.animateTo(360f, animationSpec = tween(600, easing = LinearEasing)) }
-                }
-                if (liquidGlass) {
-                    LiquidGlassSurface(refreshMod, shape = shape, tint = tint, backdrop = backdrop) {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Icon(Icons.Filled.Refresh, "Refresh", tint = Color.White,
-                                modifier = Modifier.size(14.dp).graphicsLayer { rotationZ = rotation.value })
-                        }
-                    }
-                } else {
-                    Box(refreshMod.clip(shape).background(Color.White.copy(0.10f)), contentAlignment = Alignment.Center) {
+            val refreshMod = Modifier.size(size).clickable {
+                tap()
+                expanded = false
+                onRefresh()
+                scope.launch { rotation.snapTo(0f); rotation.animateTo(360f, animationSpec = tween(600, easing = LinearEasing)) }
+            }
+            if (liquidGlass) {
+                LiquidGlassSurface(refreshMod, shape = shape, tint = tint, backdrop = backdrop) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Icon(Icons.Filled.Refresh, "Refresh", tint = Color.White,
                             modifier = Modifier.size(14.dp).graphicsLayer { rotationZ = rotation.value })
                     }
+                }
+            } else {
+                Box(refreshMod.clip(shape).background(Color.White.copy(0.10f)), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Filled.Refresh, "Refresh", tint = Color.White,
+                        modifier = Modifier.size(14.dp).graphicsLayer { rotationZ = rotation.value })
                 }
             }
         }
