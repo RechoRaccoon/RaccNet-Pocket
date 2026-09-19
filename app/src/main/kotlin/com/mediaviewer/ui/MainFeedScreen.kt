@@ -149,6 +149,8 @@ fun MainFeedScreen(
     reducedAnimations: Boolean,
     classicProfileTabRow: Boolean = false,
     onToggleClassicProfileTabRow: (Boolean) -> Unit = {},
+    squareGridRounded: Boolean = false,
+    onToggleSquareGridRounded: (Boolean) -> Unit = {},
     // Feature: auto-subscribe — used by the Hub's Reviews/Blogs rows to
     // exclude the signed-in user's own reviews/blogs from that preview row
     // (their own account is auto-subscribed too, but only so their reviews
@@ -538,6 +540,8 @@ fun MainFeedScreen(
                         onToggleReducedAnimations = onToggleReducedAnimations,
                         classicProfileTabRow      = classicProfileTabRow,
                         onToggleClassicProfileTabRow = onToggleClassicProfileTabRow,
+                        squareGridRounded         = squareGridRounded,
+                        onToggleSquareGridRounded = onToggleSquareGridRounded,
                         pinterestThreeColumns     = pinterestThreeColumns,
                         onTogglePinterestThreeColumns = onTogglePinterestThreeColumns,
                         hateFunBlurNsfw           = hateFunBlurNsfw,

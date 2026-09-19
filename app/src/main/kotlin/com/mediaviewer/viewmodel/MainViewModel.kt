@@ -16,6 +16,9 @@ import com.mediaviewer.repository.StreamplaceRepository
 import com.mediaviewer.repository.WikipediaRepository
 import com.mediaviewer.ui.PostKindFilter
 import com.mediaviewer.ui.ReviewKindFilter
+import com.mediaviewer.ui.matches
+import com.mediaviewer.ui.matchesReview
+import com.mediaviewer.ui.matchesBacklog
 import com.mediaviewer.tagging.TagDatabase
 import com.mediaviewer.tagging.TaggerModelManager
 import com.mediaviewer.tagging.TaggingRepository
