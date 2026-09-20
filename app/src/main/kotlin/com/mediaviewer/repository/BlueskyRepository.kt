@@ -1967,17 +1967,32 @@ class BlueskyRepository {
      *  Bluesky's current app.bsky.embed.images limits (2,000,000 byte blob
      *  cap, images rendered at up to 4000×4000 — see the class doc comment
      *  in ComposePostScreen.kt for where these numbers come from), then
-     *  uploads it via com.atproto.repo.uploadBlob. */
+     *  uploads it via com.atproto.repo.uploadBlob. Returns the blob plus
+     *  the final uploaded dimensions for embed aspect-ratio metadata. */
     suspend fun uploadImageBlob(
         token: String, context: android.content.Context, uri: android.net.Uri
-    ): Result<BskyBlob> = withContext(Dispatchers.IO) {
+    ): Result<UploadedImage> = withContext(Dispatchers.IO) {
         runCatching {
             val (bytes, mimeType) = prepareImageForUpload(context, uri)
             val body = bytes.toRequestBody(mimeType.toMediaType())
             val resp = api.uploadBlob("Bearer $token", mimeType, body)
-            resp.body()?.blob ?: error("uploadBlob ${resp.code()}: ${resp.errorBody()?.string()}")
+            val blob = resp.body()?.blob ?: error("uploadBlob ${resp.code()}: ${resp.errorBody()?.string()}")
+            // Measure the exact bytes uploaded (they may have been
+            // downscaled/re-encoded by prepareImageForUpload above) —
+            // inJustDecodeBounds reads the dimensions without decoding the
+            // full bitmap.
+            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            UploadedImage(blob, bounds.outWidth, bounds.outHeight)
         }
     }
+
+    /** An image blob that was just uploaded, plus the exact pixel dimensions
+     *  of the bytes that were sent — so post embeds can carry the
+     *  `aspectRatio` metadata Bluesky needs to render correct (non-square)
+     *  feed previews. Without it, image/video posts show a square preview
+     *  until the post is opened. */
+    data class UploadedImage(val blob: BskyBlob, val width: Int, val height: Int)
 
     private val IMAGE_MAX_BLOB_BYTES = 2_000_000
     private val IMAGE_MAX_DIMENSION = 4000
@@ -2020,14 +2035,22 @@ class BlueskyRepository {
      *  app.bsky.embed.gallery embed (5-10 images) depending on count — the
      *  two are different lexicons; images tops out at 4 by schema, gallery
      *  covers 5-10 (soft-capped in authoring UIs; schema ceiling is 20). */
-    private fun buildImagesEmbed(blobs: List<BskyBlob>, alts: List<String> = emptyList()): Map<String, Any> {
-        val imageObjs = blobs.mapIndexed { i, blob -> mapOf("image" to blob, "alt" to (alts.getOrNull(i) ?: "")) }
-        return if (blobs.size <= 4) {
+    private fun buildImagesEmbed(images: List<UploadedImage>, alts: List<String> = emptyList()): Map<String, Any> {
+        return if (images.size <= 4) {
+            val imageObjs = images.mapIndexed { i, img ->
+                val obj = mutableMapOf<String, Any>("image" to img.blob, "alt" to (alts.getOrNull(i) ?: ""))
+                // app.bsky.embed.images#image aspectRatio — without this,
+                // feed previews render square until the post is opened.
+                if (img.width > 0 && img.height > 0) {
+                    obj["aspectRatio"] = mapOf("width" to img.width, "height" to img.height)
+                }
+                obj
+            }
             mapOf("\$type" to "app.bsky.embed.images", "images" to imageObjs)
         } else {
             mapOf(
                 "\$type" to "app.bsky.embed.gallery",
-                "items" to blobs.mapIndexed { i, blob -> mapOf("\$type" to "app.bsky.embed.gallery#image", "image" to blob, "alt" to (alts.getOrNull(i) ?: "")) }
+                "items" to images.mapIndexed { i, img -> mapOf("\$type" to "app.bsky.embed.gallery#image", "image" to img.blob, "alt" to (alts.getOrNull(i) ?: "")) }
             )
         }
     }
@@ -2037,7 +2060,7 @@ class BlueskyRepository {
      *  self-reply chain). Returns the new post's (uri, cid). */
     suspend fun createPost(
         token: String, did: String, text: String,
-        imageBlobs: List<BskyBlob> = emptyList(),
+        images: List<UploadedImage> = emptyList(),
         reply: BskyReplyRef? = null,
         // Item 10: per-image alt text, by index — used by createTextshotPost
         // below to tag Textshot images with "A textshot post reading: ..."
@@ -2052,7 +2075,7 @@ class BlueskyRepository {
             "text" to text,
             "createdAt" to Instant.now().toString()
         )
-        if (imageBlobs.isNotEmpty()) record["embed"] = buildImagesEmbed(imageBlobs, imageAlts)
+        if (images.isNotEmpty()) record["embed"] = buildImagesEmbed(images, imageAlts)
         if (reply != null) record["reply"] = mapOf(
             "root" to mapOf("uri" to reply.root.uri, "cid" to reply.root.cid),
             "parent" to mapOf("uri" to reply.parent.uri, "cid" to reply.parent.cid)
@@ -2079,11 +2102,11 @@ class BlueskyRepository {
         val created = mutableListOf<BskyRef>()
         var root: BskyRef? = null
         for (post in posts) {
-            val blobs = post.images.map { uri ->
+            val images = post.images.map { uri ->
                 uploadImageBlob(token, context, uri).getOrElse { throw it }
             }
             val reply = root?.let { r -> BskyReplyRef(root = r, parent = created.last()) }
-            val ref = createPost(token, did, post.text, blobs, reply).getOrElse { throw it }
+            val ref = createPost(token, did, post.text, images, reply).getOrElse { throw it }
             if (root == null) root = ref
             created += ref
         }
@@ -2114,7 +2137,7 @@ class BlueskyRepository {
                 val resp = api.uploadBlob("Bearer $token", "image/png", body)
                 val blob = resp.body()?.blob ?: error("uploadBlob ${resp.code()}: ${resp.errorBody()?.string()}")
                 val alt = TEXTSHOT_ALT_PREFIX + textshotText
-                createPost(token, did, "", listOf(blob), imageAlts = listOf(alt)).getOrElse { throw it }
+                createPost(token, did, "", listOf(UploadedImage(blob, textshotBitmap.width, textshotBitmap.height)), imageAlts = listOf(alt)).getOrElse { throw it }
             }
         }
 
@@ -2167,10 +2190,19 @@ class BlueskyRepository {
             val blob = jobStatus?.blob ?: error("Video job completed with no blob")
 
             val text = if (description.isBlank()) title else "$title\n\n$description"
+            // Probe the exact bytes being uploaded for dimensions — the
+            // video embed's aspectRatio is what makes feed previews render
+            // at the right shape instead of square. A probing failure must
+            // never break the post, so unknown dimensions are just omitted.
+            val (videoW, videoH) = videoDimensions(context, uploadUri)
+            val videoEmbed = mutableMapOf<String, Any>("\$type" to "app.bsky.embed.video", "video" to blob)
+            if (videoW > 0 && videoH > 0) {
+                videoEmbed["aspectRatio"] = mapOf("width" to videoW, "height" to videoH)
+            }
             val record = mutableMapOf<String, Any>(
                 "\$type" to "app.bsky.feed.post",
                 "text" to text,
-                "embed" to mapOf("\$type" to "app.bsky.embed.video", "video" to blob),
+                "embed" to videoEmbed,
                 "createdAt" to Instant.now().toString()
             )
             val resp = api.createRecord("Bearer $token", BskyCreateRecordRequest(did, "app.bsky.feed.post", record))
@@ -2182,6 +2214,25 @@ class BlueskyRepository {
     private val videoApi: com.mediaviewer.network.BlueskyVideoApi by lazy { NetworkClient.buildBlueskyVideoApi() }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /** Returns the (width, height) of the video at [uri], swapping the axes
+     *  when rotation metadata says the frame is displayed turned 90/270° so
+     *  the ratio describes the displayed frame. Returns (0, 0) when probing
+     *  fails — callers treat that as "unknown" and omit aspectRatio. */
+    private fun videoDimensions(context: android.content.Context, uri: android.net.Uri): Pair<Int, Int> {
+        val retriever = android.media.MediaMetadataRetriever()
+        return try {
+            runCatching {
+                retriever.setDataSource(context, uri)
+                val w = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+                val h = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+                val rot = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+                if (rot == 90 || rot == 270) h to w else w to h
+            }.getOrDefault(0 to 0)
+        } finally {
+            runCatching { retriever.release() }
+        }
+    }
 
     private suspend fun createRecord(token: String, did: String, collection: String, record: Map<String, Any>): Result<String> = runCatching {
         val resp = api.createRecord("Bearer $token", BskyCreateRecordRequest(did, collection, record))

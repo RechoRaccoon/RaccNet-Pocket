@@ -912,8 +912,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val post = draft.posts.firstOrNull()
                 if (post == null) Result.failure(IllegalStateException("Empty post"))
                 else runCatching {
-                    val blobs = post.images.map { uri -> bskyRepo.uploadImageBlob(bskyToken, context, uri).getOrElse { throw it } }
-                    bskyRepo.createPost(bskyToken, did, post.text, blobs).getOrElse { throw it }
+                    val images = post.images.map { uri -> bskyRepo.uploadImageBlob(bskyToken, context, uri).getOrElse { throw it } }
+                    bskyRepo.createPost(bskyToken, did, post.text, images).getOrElse { throw it }
                 }
             }
             com.mediaviewer.ui.ComposeMode.THREAD -> runCatching {
