@@ -2055,6 +2055,15 @@ class BlueskyRepository {
         }
     }
 
+    /** Builds the `labels` field of an app.bsky.feed.post record — Bluesky's
+     *  self-label object, the same one the official app writes when a person
+     *  adds a content warning. Valid values: "sexual" (Suggestive), "nudity",
+     *  "porn" (Adult), "graphic-media". */
+    private fun selfLabelsField(values: List<String>): Map<String, Any> = mapOf(
+        "\$type" to "com.atproto.label.defs#selfLabels",
+        "values" to values.distinct().map { mapOf("val" to it) }
+    )
+
     /** Creates a single post — optionally with up to 10 images attached —
      *  and optionally as a reply (used by [createThread] below for the
      *  self-reply chain). Returns the new post's (uri, cid). */
@@ -2067,7 +2076,9 @@ class BlueskyRepository {
         // so RaccNet Pocket can detect and route them back into the Text
         // Post tab instead of Images when loading a profile (see
         // parseAuthorFeed's isTextshotAltText check).
-        imageAlts: List<String> = emptyList()
+        imageAlts: List<String> = emptyList(),
+        // Bluesky self-labels (content warnings) — see selfLabelsField.
+        selfLabels: List<String> = emptyList()
     ): Result<BskyRef> = withContext(Dispatchers.IO) {
         runCatching {
         val record = mutableMapOf<String, Any>(
@@ -2081,6 +2092,7 @@ class BlueskyRepository {
             "parent" to mapOf("uri" to reply.parent.uri, "cid" to reply.parent.cid)
         )
         buildHashtagFacets(text).takeIf { it.isNotEmpty() }?.let { record["facets"] = it }
+        if (selfLabels.isNotEmpty()) record["labels"] = selfLabelsField(selfLabels)
 
         val resp = api.createRecord("Bearer $token", BskyCreateRecordRequest(did, "app.bsky.feed.post", record))
         val body = resp.body() ?: error("createPost ${resp.code()}: ${resp.errorBody()?.string()}")
@@ -2096,7 +2108,8 @@ class BlueskyRepository {
      *  silently vanishing. */
     suspend fun createThread(
         token: String, did: String, context: android.content.Context,
-        posts: List<ThreadPostToSend>
+        posts: List<ThreadPostToSend>,
+        selfLabels: List<String> = emptyList()
     ): Result<List<BskyRef>> = withContext(Dispatchers.IO) {
         runCatching {
         val created = mutableListOf<BskyRef>()
@@ -2106,7 +2119,7 @@ class BlueskyRepository {
                 uploadImageBlob(token, context, uri).getOrElse { throw it }
             }
             val reply = root?.let { r -> BskyReplyRef(root = r, parent = created.last()) }
-            val ref = createPost(token, did, post.text, images, reply).getOrElse { throw it }
+            val ref = createPost(token, did, post.text, images, reply, selfLabels = selfLabels).getOrElse { throw it }
             if (root == null) root = ref
             created += ref
         }
@@ -2127,7 +2140,7 @@ class BlueskyRepository {
      *  Textshot image apart from a regular attached image when loading a
      *  profile, and show it in the Text Post tab instead of Images — see
      *  isTextshotAltText/textshotTextFromAlt below. */
-    suspend fun createTextshotPost(token: String, did: String, textshotBitmap: android.graphics.Bitmap, textshotText: String): Result<BskyRef> =
+    suspend fun createTextshotPost(token: String, did: String, textshotBitmap: android.graphics.Bitmap, textshotText: String, selfLabels: List<String> = emptyList()): Result<BskyRef> =
         withContext(Dispatchers.IO) {
             runCatching {
                 val out = java.io.ByteArrayOutputStream()
@@ -2137,7 +2150,7 @@ class BlueskyRepository {
                 val resp = api.uploadBlob("Bearer $token", "image/png", body)
                 val blob = resp.body()?.blob ?: error("uploadBlob ${resp.code()}: ${resp.errorBody()?.string()}")
                 val alt = TEXTSHOT_ALT_PREFIX + textshotText
-                createPost(token, did, "", listOf(UploadedImage(blob, textshotBitmap.width, textshotBitmap.height)), imageAlts = listOf(alt)).getOrElse { throw it }
+                createPost(token, did, "", listOf(UploadedImage(blob, textshotBitmap.width, textshotBitmap.height)), imageAlts = listOf(alt), selfLabels = selfLabels).getOrElse { throw it }
             }
         }
 
@@ -2149,7 +2162,8 @@ class BlueskyRepository {
     suspend fun createVideoPost(
         token: String, did: String, context: android.content.Context,
         videoUri: android.net.Uri, thumbnailUri: android.net.Uri? = null,
-        title: String, description: String
+        title: String, description: String,
+        selfLabels: List<String> = emptyList()
     ): Result<BskyRef> = withContext(Dispatchers.IO) {
         runCatching {
             val pdsHost = currentPdsHost()
@@ -2205,6 +2219,7 @@ class BlueskyRepository {
                 "embed" to videoEmbed,
                 "createdAt" to Instant.now().toString()
             )
+            if (selfLabels.isNotEmpty()) record["labels"] = selfLabelsField(selfLabels)
             val resp = api.createRecord("Bearer $token", BskyCreateRecordRequest(did, "app.bsky.feed.post", record))
             val respBody = resp.body() ?: error("createPost ${resp.code()}")
             BskyRef(respBody.uri, respBody.cid)

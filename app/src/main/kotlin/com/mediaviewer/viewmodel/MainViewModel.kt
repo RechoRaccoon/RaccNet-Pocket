@@ -913,22 +913,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (post == null) Result.failure(IllegalStateException("Empty post"))
                 else runCatching {
                     val images = post.images.map { uri -> bskyRepo.uploadImageBlob(bskyToken, context, uri).getOrElse { throw it } }
-                    bskyRepo.createPost(bskyToken, did, post.text, images).getOrElse { throw it }
+                    bskyRepo.createPost(bskyToken, did, post.text, images, selfLabels = draft.selfLabels).getOrElse { throw it }
                 }
             }
             com.mediaviewer.ui.ComposeMode.THREAD -> runCatching {
                 val posts = draft.posts.map { com.mediaviewer.repository.BlueskyRepository.ThreadPostToSend(it.text, it.images) }
-                bskyRepo.createThread(bskyToken, did, context, posts).getOrElse { throw it }
+                bskyRepo.createThread(bskyToken, did, context, posts, draft.selfLabels).getOrElse { throw it }
             }
             com.mediaviewer.ui.ComposeMode.TEXTSHOT -> runCatching {
                 val bitmap = com.mediaviewer.util.TextshotRenderer.render(draft.textshotText)
-                bskyRepo.createTextshotPost(bskyToken, did, bitmap, draft.textshotText).getOrElse { throw it }
+                bskyRepo.createTextshotPost(bskyToken, did, bitmap, draft.textshotText, draft.selfLabels).getOrElse { throw it }
             }
             com.mediaviewer.ui.ComposeMode.VIDEO -> {
                 val uri = draft.videoUri
                 if (uri == null) Result.failure(IllegalStateException("No video attached"))
                 else runCatching {
-                    bskyRepo.createVideoPost(bskyToken, did, context, uri, draft.videoThumbnailUri, draft.videoTitle, draft.videoDescription).getOrElse { throw it }
+                    bskyRepo.createVideoPost(bskyToken, did, context, uri, draft.videoThumbnailUri, draft.videoTitle, draft.videoDescription, draft.selfLabels).getOrElse { throw it }
                 }
             }
             // Item 10: posts a real social.popfeed.feed.review record (not

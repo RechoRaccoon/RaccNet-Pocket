@@ -8,9 +8,11 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Article
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PlayArrow
@@ -42,6 +45,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
@@ -102,12 +106,31 @@ import kotlinx.coroutines.withContext
  *     builds the exact same layout for the live preview — see
  *     [TextshotPreview]), upload it as a single image blob, and post it as
  *     a normal one-image post.
+ *   - Labels: the bottom bar's "Labels" button opens [ContentLabelsPopup],
+ *     which mirrors Bluesky's own "Add a content warning" menu. The choice
+ *     rides along on [ComposePostDraft.selfLabels] and is written to each
+ *     post record as a standard com.atproto.label.defs#selfLabels object,
+ *     which is what Bluesky's official labeler/moderation UI reads.
  */
 
 private const val POST_CHAR_LIMIT = 300
 private const val MAX_IMAGES = 10
 
 enum class ComposeMode { SINGLE, THREAD, TEXTSHOT, VIDEO, REVIEW }
+
+/** The three mutually-exclusive "Adult Content" self-labels from Bluesky's
+ *  own content-warning menu, in Bluesky's order. [value] is the exact
+ *  self-label string Bluesky's moderation system expects; [description] is
+ *  the same helper text Bluesky shows under each option. */
+enum class AdultContentLabel(val value: String, val title: String, val description: String) {
+    SUGGESTIVE("sexual", "Suggestive", "Pictures meant for adults."),
+    NUDITY("nudity", "Nudity", "Artistic or non-erotic nudity."),
+    ADULT("porn", "Adult", "Sexual activity or erotic nudity.")
+}
+
+/** Bluesky's independent "Other" self-label. */
+private const val GRAPHIC_MEDIA_LABEL = "graphic-media"
+private const val GRAPHIC_MEDIA_DESCRIPTION = "Media that may be disturbing or inappropriate for some audiences."
 
 /** One post's worth of content inside a [ComposeMode.THREAD] thread. */
 data class ThreadPostDraft(
@@ -139,7 +162,11 @@ data class ComposePostDraft(
     // Item 12: mirrors social.popfeed.feed.review's own "containsSpoilers"
     // boolean (see review.json) — set from the composer's "Mark as Spoiler"
     // toggle, only meaningful for ComposeMode.REVIEW.
-    val reviewContainsSpoilers: Boolean = false
+    val reviewContainsSpoilers: Boolean = false,
+    // Bluesky self-label values picked via the composer's "Labels" popup
+    // (e.g. "sexual", "nudity", "porn", "graphic-media"). Empty = no labels.
+    // Applied to every post the draft produces (all posts of a thread).
+    val selfLabels: List<String> = emptyList()
 )
 
 @Composable
@@ -205,6 +232,12 @@ fun ComposePostScreen(
     // yank whatever they type in post 2 or 3 back into post 1 the moment it
     // could technically still fit there.
     var autoFormat by remember { mutableStateOf(true) }
+    // Bluesky self-labels: at most one of the three Adult Content options,
+    // plus an independent Graphic Media toggle.
+    var adultLabel by remember { mutableStateOf<AdultContentLabel?>(null) }
+    var graphicMedia by remember { mutableStateOf(false) }
+    var labelsOpen by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
 
     // Item 3: focus targets so a tap anywhere on the blank background can
     // land the keyboard caret in whichever field is actually active, rather
@@ -252,9 +285,10 @@ fun ComposePostScreen(
         activeThreadIndex = threadPosts.lastIndex
     }
 
-    // Item 9: typing past the limit in a plain post now turns it straight
-    // into a thread — no more "Thread/Textshot" choice sitting in the
-    // status bubble. `minPosts` is floored at the thread's *current* size
+    // Item 9: turns text into a thread with Auto Format on. Typing past the
+    // limit in a plain post no longer lands here (it switches to Textshot —
+    // see the SINGLE editor below); this is now reached by turning Textshot
+    // off over the limit, or by growing an already-started thread. `minPosts` is floored at the thread's *current* size
     // (see the doc comment on computeThreadPosts) purely so this is safe to
     // reuse below for re-flowing an already-started thread too. Always turns
     // Auto Format on — this is always the "genuinely needs splitting" path,
@@ -267,9 +301,25 @@ fun ComposePostScreen(
         autoFormat = true
     }
 
-    fun switchToTextshot() {
-        val seed = if (mode == ComposeMode.THREAD) threadPosts.joinToString("") { it.text } else singleText.text
-        singleText = TextFieldValue(seed)
+    // Bumped whenever the editor is swapped out from under the person mid-
+    // typing (see the auto-Textshot switch below) so focus/keyboard are put
+    // back into the new field instead of being dropped with the old one.
+    var refocusTick by remember { mutableStateOf(0) }
+    LaunchedEffect(refocusTick) {
+        if (refocusTick > 0) {
+            withFrameNanos { }
+            focusActiveField()
+        }
+    }
+
+    // [keepValue] carries the exact text *and* caret through when typing/
+    // pasting past the limit triggers this automatically; the Textshot
+    // button itself leaves it null and re-seeds from whatever is current.
+    fun switchToTextshot(keepValue: TextFieldValue? = null) {
+        singleText = keepValue ?: run {
+            val seed = if (mode == ComposeMode.THREAD) threadPosts.joinToString("") { it.text } else singleText.text
+            TextFieldValue(seed)
+        }
         isBlogMode = false
         mode = ComposeMode.TEXTSHOT
     }
@@ -387,7 +437,9 @@ fun ComposePostScreen(
                 posts = listOf(ThreadPostDraft(text = singleText.text, images = images, video = null))
             )
         }
-        onSubmit(draft)
+        val selfLabels = listOfNotNull(adultLabel?.value, if (graphicMedia) GRAPHIC_MEDIA_LABEL else null)
+        // Reviews are Popfeed records, not Bluesky posts — labels don't apply.
+        onSubmit(if (mode == ComposeMode.REVIEW || selfLabels.isEmpty()) draft else draft.copy(selfLabels = selfLabels))
     }
 
     // Item 9: this is now always a plain label — Thread/Textshot are no
@@ -609,17 +661,20 @@ fun ComposePostScreen(
                         GrowingTextField(
                             value = singleText,
                             onValueChange = { newVal ->
-                                // Item 9: overflowing the limit here turns
-                                // this straight into a thread — no more
-                                // in-between "choose Thread or Textshot"
-                                // state living in the status bubble. Item 6:
-                                // Blog is long-form on purpose, so it's left
-                                // alone here — going over the limit while
-                                // blogging doesn't interrupt typing; it's
-                                // only handled when the person actually taps
+                                // Overflowing the limit here now switches
+                                // to Textshot by default (long text becomes
+                                // one image post instead of a thread). A
+                                // thread is still one tap away via "+", or
+                                // by turning Textshot off again (see
+                                // disableTextshot). Item 6: Blog is long-
+                                // form on purpose, so it's left alone here
+                                // — going over the limit while blogging
+                                // doesn't interrupt typing; it's only
+                                // handled when the person actually taps
                                 // "+" (see startThreadFromSingle).
                                 if (!isBlogMode && newVal.text.length > POST_CHAR_LIMIT) {
-                                    growTextIntoThread(newVal.text, floor = threadPosts.size)
+                                    switchToTextshot(keepValue = newVal)
+                                    refocusTick++
                                 } else {
                                     singleText = newVal
                                 }
@@ -663,6 +718,7 @@ fun ComposePostScreen(
                         TextToggleButton(
                             label = "Mark as Spoiler",
                             liquidGlass = liquidGlass, tint = dominantColor,
+                            chrome = false,
                             selected = reviewContainsSpoilers,
                             onClick = { reviewContainsSpoilers = !reviewContainsSpoilers }
                         )
@@ -690,10 +746,17 @@ fun ComposePostScreen(
                         // Item 1: one consistent gap between every button in
                         // this cluster instead of a mix of a 6dp Spacer
                         // between some and none between others.
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        // Scrolls sideways as a safety net: with Labels and
+                        // (in thread mode) Auto Format the row can be wider
+                        // than a small phone. The "+" stays pinned at right.
+                        Row(
+                            Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically
+                        ) {
                             GlassCircleButton(
                                 icon = Icons.Default.Image, contentDescription = "Attach image or video",
                                 liquidGlass = liquidGlass, tint = dominantColor, size = 40.dp,
+                                chrome = false,
                                 enabled = mode != ComposeMode.TEXTSHOT && mode != ComposeMode.REVIEW,
                                 onClick = {
                                     mediaPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
@@ -705,6 +768,7 @@ fun ComposePostScreen(
                             TextToggleButton(
                                 label = "Blog",
                                 liquidGlass = liquidGlass, tint = dominantColor,
+                                chrome = false,
                                 enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW,
                                 selected = isBlogMode,
                                 onClick = {
@@ -718,6 +782,7 @@ fun ComposePostScreen(
                             TextToggleButton(
                                 label = "Textshot",
                                 liquidGlass = liquidGlass, tint = dominantColor,
+                                chrome = false,
                                 enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW,
                                 selected = mode == ComposeMode.TEXTSHOT,
                                 onClick = {
@@ -728,6 +793,20 @@ fun ComposePostScreen(
                                     }
                                 }
                             )
+                            // Bluesky content-warning self-labels. Lit whenever
+                            // any label is currently applied. Focus is dropped
+                            // first so the keyboard is out of the way of the
+                            // centered popup.
+                            TextToggleButton(
+                                label = "Labels",
+                                liquidGlass = liquidGlass, tint = dominantColor,
+                                chrome = false,
+                                selected = adultLabel != null || graphicMedia,
+                                onClick = {
+                                    focusManager.clearFocus()
+                                    labelsOpen = true
+                                }
+                            )
                             // Item 3: Auto Format is thread-mode exclusive —
                             // it only appears once a thread actually exists,
                             // right after Textshot.
@@ -735,6 +814,7 @@ fun ComposePostScreen(
                                 TextToggleButton(
                                     label = "Auto Format",
                                     liquidGlass = liquidGlass, tint = dominantColor,
+                                    chrome = false,
                                     selected = autoFormat,
                                     onClick = {
                                         autoFormat = !autoFormat
@@ -752,10 +832,10 @@ fun ComposePostScreen(
                                 )
                             }
                         }
-                        Spacer(Modifier.weight(1f))
                         GlassCircleButton(
                             icon = Icons.Default.Add, contentDescription = "Add post to thread",
                             liquidGlass = liquidGlass, tint = dominantColor, size = 36.dp,
+                            chrome = false,
                             enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW,
                             onClick = {
                                 if (mode == ComposeMode.THREAD) addThreadPost() else startThreadFromSingle()
@@ -765,10 +845,115 @@ fun ComposePostScreen(
                 }
             }
         }
+
+        if (labelsOpen) {
+            ContentLabelsPopup(
+                adult = adultLabel, graphic = graphicMedia,
+                liquidGlass = liquidGlass, tint = dominantColor,
+                // Only one Adult Content option at a time; tapping the
+                // selected one clears it. Graphic Media is independent.
+                onAdultChange = { picked -> adultLabel = if (adultLabel == picked) null else picked },
+                onGraphicChange = { graphicMedia = it },
+                onDismiss = { labelsOpen = false }
+            )
+        }
     }
 }
 
 // ── Sub-components ──────────────────────────────────────────────────────
+
+/** Compact, centered version of Bluesky's "Add a content warning" menu.
+ *  Same options in the same order as Bluesky, except every option's
+ *  description is visible at once on its right instead of only under the
+ *  selected one. Rendered in-place (no separate Dialog window) like the
+ *  app's other popups. */
+@Composable
+private fun ContentLabelsPopup(
+    adult: AdultContentLabel?, graphic: Boolean,
+    liquidGlass: Boolean, tint: Color,
+    onAdultChange: (AdultContentLabel) -> Unit,
+    onGraphicChange: (Boolean) -> Unit,
+    onDismiss: () -> Unit
+) {
+    // Registered after the composer's own BackHandler, so Back closes this
+    // popup first instead of closing the whole composer.
+    BackHandler(onBack = onDismiss)
+    val tap = rememberHapticTap()
+    val shape = RoundedCornerShape(18.dp)
+    val base = Color(red = tint.red * 0.22f, green = tint.green * 0.22f, blue = tint.blue * 0.22f, alpha = 0.94f)
+
+    Box(
+        Modifier.fillMaxSize().zIndex(5f).background(Color.Black.copy(alpha = 0.55f))
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            Modifier.padding(horizontal = 16.dp).widthIn(max = 400.dp).fillMaxWidth()
+                .clip(shape).background(base).glassPanel(liquidGlass, tint = tint, shape = shape)
+                // Swallow taps on the panel itself so only the scrim dismisses.
+                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { }
+                .padding(horizontal = 12.dp, vertical = 12.dp)
+        ) {
+            Text(
+                "Add a content warning", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+
+            HubDivider("Adult Content")
+            AdultContentLabel.values().forEach { option ->
+                LabelOptionRow(
+                    title = option.title, description = option.description,
+                    checked = adult == option, onClick = { onAdultChange(option) }
+                )
+            }
+
+            HubDivider("Other")
+            LabelOptionRow(
+                title = "Graphic Media", description = GRAPHIC_MEDIA_DESCRIPTION,
+                checked = graphic, onClick = { onGraphicChange(!graphic) }
+            )
+
+            Spacer(Modifier.height(10.dp))
+            Box(
+                Modifier.fillMaxWidth().height(38.dp).clip(RoundedCornerShape(19.dp))
+                    .background(Color(0xFF1083FE))
+                    .clickable { tap(); onDismiss() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("Done", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+    }
+}
+
+/** One row of [ContentLabelsPopup]: checkbox + title on the left, that
+ *  option's description on the right (always visible). */
+@Composable
+private fun LabelOptionRow(title: String, description: String, checked: Boolean, onClick: () -> Unit) {
+    val tap = rememberHapticTap()
+    val boxShape = RoundedCornerShape(5.dp)
+    val blue = Color(0xFF1083FE)
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+            .clickable { tap(); onClick() }
+            .padding(horizontal = 4.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Row(Modifier.width(118.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(18.dp).clip(boxShape)
+                    .background(if (checked) blue else Color.White.copy(alpha = 0.06f))
+                    .border(1.dp, if (checked) blue else Color.White.copy(alpha = 0.35f), boxShape),
+                contentAlignment = Alignment.Center
+            ) {
+                if (checked) Icon(Icons.Default.Check, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
+            }
+            Spacer(Modifier.width(7.dp))
+            Text(title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 2)
+        }
+        Text(description, color = DimGray, fontSize = 11.sp, lineHeight = 14.sp, modifier = Modifier.weight(1f))
+    }
+}
 
 /** Item 10: the cover/title/rating row shown between the author row and the
  *  text field while reviewing. Deliberately short (spec: "this row is
@@ -867,13 +1052,20 @@ private fun GlassCircleButton(
     // button represents the currently-active status, same visual treatment
     // as a disabled button but independent of `enabled`.
     selected: Boolean = true,
+    // false = no glass/background plate at all — just the bare icon (still
+    // dimmed unless enabled/selected). Used by the bottom bar's buttons.
+    chrome: Boolean = true,
     onClick: () -> Unit
 ) {
     val tap = rememberHapticTap()
     val shape = CircleShape
     val clickMod = modifier.size(size).clip(shape).clickable(enabled = enabled, onClick = { tap(); onClick() })
     val alpha = if (enabled && selected) 1f else 0.35f
-    if (liquidGlass) {
+    if (!chrome) {
+        Box(clickMod, contentAlignment = Alignment.Center) {
+            Icon(icon, contentDescription = contentDescription, tint = Color.White.copy(alpha = alpha), modifier = Modifier.size(size * 0.55f))
+        }
+    } else if (liquidGlass) {
         LiquidGlassSurface(clickMod, shape = shape, tint = tint) {
             Box(Modifier.matchParentSize(), contentAlignment = Alignment.Center) {
                 Icon(icon, contentDescription = contentDescription, tint = Color.White.copy(alpha = alpha), modifier = Modifier.size(size * 0.45f))
@@ -895,6 +1087,8 @@ private fun TextToggleButton(
     liquidGlass: Boolean, tint: Color,
     enabled: Boolean = true,
     selected: Boolean = true,
+    // false = no glass/background plate at all — just the bare label.
+    chrome: Boolean = true,
     onClick: () -> Unit
 ) {
     val tap = rememberHapticTap()
@@ -906,10 +1100,12 @@ private fun TextToggleButton(
     fun Content() {
         Text(
             label, color = Color.White.copy(alpha = alpha), fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+            modifier = Modifier.padding(horizontal = if (chrome) 12.dp else 10.dp, vertical = 8.dp)
         )
     }
-    if (liquidGlass) {
+    if (!chrome) {
+        Box(clickMod) { Content() }
+    } else if (liquidGlass) {
         LiquidGlassSurface(clickMod, shape = shape, tint = tint) { Content() }
     } else {
         Box(clickMod.background(Color.White.copy(0.10f))) { Content() }
