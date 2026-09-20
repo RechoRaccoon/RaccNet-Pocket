@@ -6,12 +6,15 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -40,13 +43,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -54,6 +61,7 @@ import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
@@ -475,10 +483,22 @@ fun ComposePostScreen(
                 indication = null
             ) { focusActiveField() }
     ) {
-        Column(Modifier.fillMaxSize()) {
+        // Height of the floating bottom bar (counter row + button row), measured
+        // below. The text scrolls *behind* the bar, so this is used to leave
+        // matching room at the end of the content and to keep the caret
+        // above the bar while typing.
+        var bottomBarHeight by remember { mutableStateOf(84.dp) }
+        val barDensity = LocalDensity.current
+        Box(Modifier.fillMaxSize()) {
             // ── Scrollable content ──────────────────────────────────────
+            // Fills the whole screen down to the keyboard/nav bar (instead
+            // of stopping at the top of the button bar) so text scrolls
+            // visibly behind the buttons rather than being cut off in a
+            // hard edge above them.
+            CompositionLocalProvider(LocalBottomBarClearance provides bottomBarHeight) {
             Column(
-                Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())
+                Modifier.fillMaxSize().imePadding().navigationBarsPadding()
+                    .verticalScroll(rememberScrollState())
                     .padding(horizontal = 14.dp)
             ) {
                 Spacer(Modifier.height(rememberTopCutoutClearance()))
@@ -690,9 +710,10 @@ fun ComposePostScreen(
                     }
                 }
 
-                // Room for the fixed bottom bar so the last field/image row
-                // never sits underneath it while scrolling.
-                Spacer(Modifier.height(72.dp))
+                // Room for the floating bottom bar so the last field/image
+                // row can always be scrolled up clear of it.
+                Spacer(Modifier.height(bottomBarHeight + 12.dp))
+            }
             }
 
             // ── Fixed bottom bar — rides up above the keyboard via
@@ -702,7 +723,8 @@ fun ComposePostScreen(
             // the far right of the button row underneath it instead of
             // squeezed in next to the counter text. ────────────────────
             Column(
-                Modifier.fillMaxWidth().imePadding().navigationBarsPadding()
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth().imePadding().navigationBarsPadding()
+                    .onSizeChanged { bottomBarHeight = with(barDensity) { it.height.toDp() } }
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
                 // Item 12: Review mode has no attach-image/Blog/Textshot/
@@ -718,7 +740,6 @@ fun ComposePostScreen(
                         TextToggleButton(
                             label = "Mark as Spoiler",
                             liquidGlass = liquidGlass, tint = dominantColor,
-                            chrome = false,
                             selected = reviewContainsSpoilers,
                             onClick = { reviewContainsSpoilers = !reviewContainsSpoilers }
                         )
@@ -751,12 +772,11 @@ fun ComposePostScreen(
                         // than a small phone. The "+" stays pinned at right.
                         Row(
                             Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically
+                            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically
                         ) {
                             GlassCircleButton(
                                 icon = Icons.Default.Image, contentDescription = "Attach image or video",
                                 liquidGlass = liquidGlass, tint = dominantColor, size = 40.dp,
-                                chrome = false,
                                 enabled = mode != ComposeMode.TEXTSHOT && mode != ComposeMode.REVIEW,
                                 onClick = {
                                     mediaPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
@@ -768,7 +788,6 @@ fun ComposePostScreen(
                             TextToggleButton(
                                 label = "Blog",
                                 liquidGlass = liquidGlass, tint = dominantColor,
-                                chrome = false,
                                 enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW,
                                 selected = isBlogMode,
                                 onClick = {
@@ -782,7 +801,6 @@ fun ComposePostScreen(
                             TextToggleButton(
                                 label = "Textshot",
                                 liquidGlass = liquidGlass, tint = dominantColor,
-                                chrome = false,
                                 enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW,
                                 selected = mode == ComposeMode.TEXTSHOT,
                                 onClick = {
@@ -800,7 +818,6 @@ fun ComposePostScreen(
                             TextToggleButton(
                                 label = "Labels",
                                 liquidGlass = liquidGlass, tint = dominantColor,
-                                chrome = false,
                                 selected = adultLabel != null || graphicMedia,
                                 onClick = {
                                     focusManager.clearFocus()
@@ -814,7 +831,6 @@ fun ComposePostScreen(
                                 TextToggleButton(
                                     label = "Auto Format",
                                     liquidGlass = liquidGlass, tint = dominantColor,
-                                    chrome = false,
                                     selected = autoFormat,
                                     onClick = {
                                         autoFormat = !autoFormat
@@ -835,7 +851,6 @@ fun ComposePostScreen(
                         GlassCircleButton(
                             icon = Icons.Default.Add, contentDescription = "Add post to thread",
                             liquidGlass = liquidGlass, tint = dominantColor, size = 36.dp,
-                            chrome = false,
                             enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW,
                             onClick = {
                                 if (mode == ComposeMode.THREAD) addThreadPost() else startThreadFromSingle()
@@ -1052,20 +1067,13 @@ private fun GlassCircleButton(
     // button represents the currently-active status, same visual treatment
     // as a disabled button but independent of `enabled`.
     selected: Boolean = true,
-    // false = no glass/background plate at all — just the bare icon (still
-    // dimmed unless enabled/selected). Used by the bottom bar's buttons.
-    chrome: Boolean = true,
     onClick: () -> Unit
 ) {
     val tap = rememberHapticTap()
     val shape = CircleShape
     val clickMod = modifier.size(size).clip(shape).clickable(enabled = enabled, onClick = { tap(); onClick() })
     val alpha = if (enabled && selected) 1f else 0.35f
-    if (!chrome) {
-        Box(clickMod, contentAlignment = Alignment.Center) {
-            Icon(icon, contentDescription = contentDescription, tint = Color.White.copy(alpha = alpha), modifier = Modifier.size(size * 0.55f))
-        }
-    } else if (liquidGlass) {
+    if (liquidGlass) {
         LiquidGlassSurface(clickMod, shape = shape, tint = tint) {
             Box(Modifier.matchParentSize(), contentAlignment = Alignment.Center) {
                 Icon(icon, contentDescription = contentDescription, tint = Color.White.copy(alpha = alpha), modifier = Modifier.size(size * 0.45f))
@@ -1087,8 +1095,6 @@ private fun TextToggleButton(
     liquidGlass: Boolean, tint: Color,
     enabled: Boolean = true,
     selected: Boolean = true,
-    // false = no glass/background plate at all — just the bare label.
-    chrome: Boolean = true,
     onClick: () -> Unit
 ) {
     val tap = rememberHapticTap()
@@ -1100,12 +1106,10 @@ private fun TextToggleButton(
     fun Content() {
         Text(
             label, color = Color.White.copy(alpha = alpha), fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(horizontal = if (chrome) 12.dp else 10.dp, vertical = 8.dp)
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
         )
     }
-    if (!chrome) {
-        Box(clickMod) { Content() }
-    } else if (liquidGlass) {
+    if (liquidGlass) {
         LiquidGlassSurface(clickMod, shape = shape, tint = tint) { Content() }
     } else {
         Box(clickMod.background(Color.White.copy(0.10f))) { Content() }
@@ -1177,6 +1181,11 @@ private fun HubDivider(label: String) {
     }
 }
 
+/** How much of the screen's bottom the floating bar covers — text fields use
+ *  it to keep the caret scrolled clear of the bar while typing. */
+private val LocalBottomBarClearance = compositionLocalOf { 0.dp }
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun GrowingTextField(
     value: TextFieldValue,
@@ -1191,15 +1200,31 @@ private fun GrowingTextField(
     // content.
     visualTransformation: VisualTransformation = VisualTransformation.None
 ) {
+    // The scroll area now extends behind the floating bottom bar, so the
+    // default "scroll the caret into view" would park it right under the
+    // buttons. Ask for the caret's rect plus the bar's height instead.
+    val clearancePx = with(LocalDensity.current) { LocalBottomBarClearance.current.toPx() }
+    val bringIntoView = remember { BringIntoViewRequester() }
+    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    var focused by remember { mutableStateOf(false) }
+    LaunchedEffect(value.selection, value.text, layout, focused, clearancePx) {
+        val l = layout ?: return@LaunchedEffect
+        if (!focused || clearancePx <= 0f) return@LaunchedEffect
+        val end = l.layoutInput.text.length
+        val r = l.getCursorRect(value.selection.end.coerceIn(0, end))
+        bringIntoView.bringIntoView(Rect(r.left, r.top, r.right, r.bottom + clearancePx))
+    }
     Box(Modifier.fillMaxWidth().defaultMinSize(minHeight = 28.dp)) {
         BasicTextField(
             value = value, onValueChange = onValueChange,
             textStyle = TextStyle(color = Color.White, fontSize = 16.sp, lineHeight = 22.sp),
             cursorBrush = SolidColor(Color.White),
             visualTransformation = visualTransformation,
+            onTextLayout = { layout = it },
             modifier = Modifier.fillMaxWidth()
+                .bringIntoViewRequester(bringIntoView)
                 .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-                .onFocusChanged { if (it.isFocused) onFocus() }
+                .onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocus() }
         )
         if (value.text.isEmpty()) {
             Text(placeholder, color = DimGray, fontSize = 16.sp)
