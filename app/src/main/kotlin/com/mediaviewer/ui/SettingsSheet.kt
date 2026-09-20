@@ -1124,9 +1124,7 @@ private fun AtProtocolPageContent(
             Spacer(Modifier.height(8.dp))
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-                // Centered when the avatars fit; still scrolls sideways
-                // (from the start) once there are too many to fit.
-                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally)
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 otherAccounts.forEach { account ->
                     val avatarShape = CircleShape
