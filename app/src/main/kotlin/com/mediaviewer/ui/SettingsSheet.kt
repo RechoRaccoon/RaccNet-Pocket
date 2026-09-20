@@ -288,8 +288,6 @@ fun SettingsSheet(
     // Settings.
     var settingsTab by remember { mutableStateOf(SettingsTab.SETTINGS) }
     LaunchedEffect(hubPage) { if (hubPage != HubPage.SETTINGS) settingsTab = SettingsTab.SETTINGS }
-    // The e621 sign-in page, opened from Settings' e621 row.
-    var showE621Login by remember { mutableStateOf(false) }
     // Tracks the direction of the most recent page change (Settings <-> Main
     // via the More button / its own back action).
     var hubPageForward by remember { mutableStateOf(true) }
@@ -370,7 +368,7 @@ fun SettingsSheet(
             // Hub is a single page now (this Column's own scroll content
             // starts with the search bar, per item 14's "search bar will
             // now be at the top"), reached by default, with Settings
-            // reachable only via the new HubMoreButton at the bottom (see
+            // reachable only via the new HubSettingsButton at the bottom (see
             // ReturnToFeedBar) instead of a top-level chip.
 
             Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -407,7 +405,7 @@ fun SettingsSheet(
                                     bskyLoggedIn = bskyLoggedIn, bskyHandle = bskyHandle,
                                     isLoading = isLoading, onLoginBluesky = onLoginBluesky, onLogoutBluesky = onLogoutBluesky,
                                     e621LoggedIn = e621LoggedIn, e621Username = e621Username,
-                                    onOpenE621Login = { showE621Login = true }, onLogoutE621 = onLogoutE621,
+                                    onLoginE621 = { user, key -> onSaveE621Credentials(user, key) }, onLogoutE621 = onLogoutE621,
                                     downloadOnLike = downloadOnLike, onToggleDownloadOnLike = onToggleDownloadOnLike,
                                     downloadProgress = downloadProgress, onDownloadAllLiked = onDownloadAllLiked, onCancelDownload = onCancelDownload,
                                     tagPostWhenLiked = tagPostWhenLiked, onToggleTagPostWhenLiked = onToggleTagPostWhenLiked,
@@ -505,7 +503,7 @@ fun SettingsSheet(
                     onOpenSettings = { goToHubPage(if (hubPage == HubPage.SETTINGS) HubPage.MAIN else HubPage.SETTINGS) },
                     // Fix (per feedback): the More popup's Refresh bubble
                     // must always appear — ReturnToFeedBar only feeds this
-                    // through to HubMoreButton, so pass it unconditionally
+                    // through to HubSettingsButton, so pass it unconditionally
                     // instead of nulling it on the Settings page.
                     onRefresh = onRefreshHub,
                     showPillAndUpload = showReturnBar,
@@ -524,16 +522,6 @@ fun SettingsSheet(
                 },
                 color = DimGray, fontSize = 11.sp, textAlign = TextAlign.Center,
                 modifier = Modifier.padding(bottom = 20.dp, top = 2.dp)
-            )
-        }
-
-        // e621 sign-in page — covers the whole Hub (bottom bar included);
-        // closing it, whether by signing in or the X, lands back on Settings.
-        if (showE621Login) {
-            E621LoginPage(
-                liquidGlass = liquidGlass, tint = dominantColor,
-                onClose = { showE621Login = false },
-                onLogin = { user, key -> onSaveE621Credentials(user, key) }
             )
         }
     }
@@ -1488,32 +1476,37 @@ private fun embedUrlFor(stream: com.mediaviewer.model.BlueskyLiveNowStream): Str
     }
 }
 
-/** Item 14: replaces the old standalone refresh bubble. A circular "More"
- *  button — visually identical to the feed interaction bar's own More
- *  button — that pops open two small stacked circular icon bubbles directly
- *  above itself: Settings on top, Refresh right above the button (the
- *  request's own top-to-bottom order). Simpler than the feed's
- *  [MoreBubbleMenu] (no full-screen anchored popup/backdrop capture needed)
- *  since this always renders in the same fixed spot at the bottom of the
- *  Hub, with nothing else it could ever visually collide with. */
+/** Master switch for the Hub's Refresh bubble. While false (current), the
+ *  Hub's left-hand button is just a plain Settings button. Flip to true to
+ *  bring back the old "More" behavior: a ⋮ button that pops open Settings +
+ *  Refresh bubbles above it. All of that code is still in [HubSettingsButton]
+ *  and the `onRefresh` wiring is still passed all the way down, so nothing
+ *  else needs to change. */
+private const val HUB_REFRESH_IN_UI = false
+
+/** The Hub's left-hand bottom-bar button: a circular Settings (gear) button
+ *  — visually identical to the feed interaction bar's own round buttons.
+ *  While [HUB_REFRESH_IN_UI] is true it doubles as the old "More" button
+ *  (Settings + Refresh popup stack); otherwise it goes straight to Settings. */
 @Composable
-private fun HubMoreButton(
+private fun HubSettingsButton(
     liquidGlass: Boolean, tint: Color, onOpenSettings: () -> Unit, onRefresh: () -> Unit = {},
     size: Dp = 26.dp, modifier: Modifier = Modifier, backdrop: GlassBackdrop? = null,
-    // Fix (per feedback): true while the Hub is showing the Settings page —
-    // the button then reads as "back to Hub" (right arrow) instead of the
-    // More/Close stack, and tapping it calls onOpenSettings() (which the
-    // caller wires to toggle back to MAIN) rather than expanding.
+    // True while the Hub is showing the Settings page — the button then
+    // reads as "back to Hub" (right arrow) instead of the gear, and tapping
+    // it calls onOpenSettings() (which the caller wires to toggle back to
+    // MAIN).
     settingsOpen: Boolean = false
 ) {
+    val stackEnabled = HUB_REFRESH_IN_UI
     var expanded by remember { mutableStateOf(false) }
     val rotation = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
     val shape = CircleShape
     // Item 8: haptic tap on opening/closing the stack.
     val tap = rememberHapticTap()
-    // Fix (per feedback): if the Settings page opens while the popup is
-    // expanded, collapse it — the button is a back-arrow there, not a menu.
+    // If the Settings page opens while the popup is expanded, collapse it —
+    // the button is a back-arrow there, not a menu.
     LaunchedEffect(settingsOpen) { if (settingsOpen) expanded = false }
 
 
@@ -1524,7 +1517,8 @@ private fun HubMoreButton(
     // upward offset (no shared Column that a fixed-size parent can clip),
     // so both always render: Settings above, Refresh below.
     Box(modifier.size(size)) {
-        // Settings bubble — two slots above the More button.
+        if (stackEnabled) {
+        // Settings bubble — two slots above the button.
         AnimatedVisibility(
             visible = expanded,
             enter = fadeIn(tween(150)) + scaleIn(tween(150), initialScale = 0.8f, transformOrigin = TransformOrigin(0f, 1f)),
@@ -1544,7 +1538,7 @@ private fun HubMoreButton(
                 }
             }
         }
-        // Refresh bubble — one slot above the More button.
+        // Refresh bubble — one slot above the button.
         AnimatedVisibility(
             visible = expanded,
             enter = fadeIn(tween(150)) + scaleIn(tween(150), initialScale = 0.8f, transformOrigin = TransformOrigin(0f, 1f)),
@@ -1571,30 +1565,32 @@ private fun HubMoreButton(
                 }
             }
         }
+        }
 
         val clickModifier = Modifier.size(size).clickable {
             tap()
-            // Fix (per feedback): on the Settings page this button is a
-            // back-to-Hub arrow, not the More stack — tapping it returns to
-            // the Hub via onOpenSettings() instead of expanding.
-            if (settingsOpen) onOpenSettings() else expanded = !expanded
+            // On the Settings page this button is a back-to-Hub arrow, and
+            // with the Refresh stack disabled it's a plain Settings button:
+            // either way tapping just toggles via onOpenSettings().
+            if (settingsOpen || !stackEnabled) onOpenSettings() else expanded = !expanded
         }
         @Composable
-        fun MoreIconContent() {
+        fun ButtonIconContent() {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 val icon = when {
                     settingsOpen -> Icons.AutoMirrored.Filled.ArrowForward
+                    !stackEnabled -> Icons.Filled.Settings
                     expanded -> Icons.Default.Close
                     else -> Icons.Default.MoreVert
                 }
-                Icon(icon, contentDescription = "More",
+                Icon(icon, contentDescription = if (stackEnabled) "More" else "Settings",
                     tint = Color.White, modifier = Modifier.size(16.dp))
             }
         }
         if (liquidGlass) {
-            LiquidGlassSurface(clickModifier, shape = shape, tint = tint, backdrop = backdrop) { MoreIconContent() }
+            LiquidGlassSurface(clickModifier, shape = shape, tint = tint, backdrop = backdrop) { ButtonIconContent() }
         } else {
-            Box(clickModifier.clip(shape).background(Color.White.copy(0.10f))) { MoreIconContent() }
+            Box(clickModifier.clip(shape).background(Color.White.copy(0.10f))) { ButtonIconContent() }
         }
     }
 }
@@ -1687,8 +1683,8 @@ private fun SettingsCreditsSwitch(
 }
 
 /** Bottom-of-page control group that replaces the removed swipe-up-to-feed
- *  gesture: a centered "Return to Feed" glass pill, with the Hub's More
- *  button (item 14 — Settings + Refresh, see [HubMoreButton]) at its left
+ *  gesture: a centered "Return to Feed" glass pill, with the Hub's
+ *  Settings button (see [HubSettingsButton]) at its left
  *  edge and the upload bubble (item 3/5) at its right edge — both
  *  height-matched to the pill, so the group reads as one centered control
  *  rather than several separate ones. The More button (and its left-edge
@@ -1726,8 +1722,8 @@ private fun ReturnToFeedBar(
     hasVisitedFeed: Boolean = false,
     // Upload flow: forwarded down to HubUploadBubble's "Post" entry.
     onOpenComposePost: () -> Unit = {},
-    // Fix (per feedback): forwarded to HubMoreButton — true while the Hub
-    // is showing the Settings page, turning the More button into a
+    // Fix (per feedback): forwarded to HubSettingsButton — true while the Hub
+    // is showing the Settings page, turning the Settings button into a
     // right-arrow "back to Hub" button.
     settingsOpen: Boolean = false,
     // Settings/Credits switch shown at the right end of the bar while the
@@ -1807,7 +1803,7 @@ private fun ReturnToFeedBar(
         // Item 14: always shown, in the same left slot, whether or not the
         // pill/upload bubble above are — Settings must stay reachable even
         // pre-login.
-        HubMoreButton(
+        HubSettingsButton(
             liquidGlass, tint, onOpenSettings = onOpenSettings, onRefresh = onRefresh,
             size = barHeight, modifier = Modifier.align(Alignment.CenterStart), backdrop = backdrop,
             // Fix (per feedback): on the Settings page the More button

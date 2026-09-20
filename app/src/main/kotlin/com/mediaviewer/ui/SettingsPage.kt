@@ -198,6 +198,21 @@ private fun PillButton(
     }
 }
 
+/** The white X that follows a Login pill in an inline sign-in row: closes the
+ *  row again without signing in. Sized to sit level with [PillButton]. */
+@Composable
+private fun CancelXButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val tap = rememberHapticTap()
+    Box(
+        modifier.size(28.dp).clip(CircleShape)
+            .background(Color.White.copy(0.12f))
+            .clickable { tap(); onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(Icons.Default.Close, contentDescription = "Cancel", tint = Color.White, modifier = Modifier.size(16.dp))
+    }
+}
+
 @Composable
 private fun ToggleBubble(
     label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit,
@@ -293,7 +308,7 @@ internal fun SettingsPageContent(
     onLogoutBluesky: () -> Unit,
     e621LoggedIn: Boolean,
     e621Username: String,
-    onOpenE621Login: () -> Unit,
+    onLoginE621: (String, String) -> Unit,
     onLogoutE621: () -> Unit,
     downloadOnLike: Boolean,
     onToggleDownloadOnLike: (Boolean) -> Unit,
@@ -452,6 +467,59 @@ internal fun SettingsPageContent(
             ToggleBubble("Show \"Add To\" After Following", autoAddToOnFollow, onToggleAutoAddToOnFollow, liquidGlass, tint, backdrop)
         }
 
+        // ── Integrations ────────────────────────────────────────────────
+        SectionHeader("Integrations", tint)
+
+        AtProtocolAccountsBubble(
+            bskyLoggedIn = bskyLoggedIn, bskyHandle = bskyHandle, isLoading = isLoading,
+            onLoginBluesky = onLoginBluesky, onLogoutBluesky = onLogoutBluesky,
+            extras = extras, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop
+        )
+
+        E621AccountBubble(
+            e621LoggedIn = e621LoggedIn, e621Username = e621Username,
+            onLoginE621 = onLoginE621, onLogoutE621 = onLogoutE621,
+            liquidGlass = liquidGlass, tint = tint, backdrop = backdrop
+        )
+
+        // ── Live Link widget feature ────────────────────────────────────
+        // Save a Twitch and/or YouTube channel URL here, then "Create
+        // Widget" (enabled once at least one is saved) requests the
+        // resizable home-screen widget be pinned. Gated behind
+        // FeatureFlags.LIVE_LINK_ENABLED: unfinished, so hidden for now, but
+        // left fully in place to resume from later.
+        if (bskyLoggedIn && com.mediaviewer.util.FeatureFlags.LIVE_LINK_ENABLED) {
+            var twitchField by remember(liveTwitchUrl) { mutableStateOf(liveTwitchUrl.orEmpty()) }
+            var youtubeField by remember(liveYoutubeUrl) { mutableStateOf(liveYoutubeUrl.orEmpty()) }
+            val linkColors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = Color.White, unfocusedTextColor = Color.White,
+                focusedBorderColor = tint, unfocusedBorderColor = DimGray,
+                cursorColor = tint, focusedLabelColor = tint, unfocusedLabelColor = DimGray
+            )
+            OutlinedTextField(value = twitchField, onValueChange = { twitchField = it },
+                label = { Text("Twitch channel URL", fontSize = 12.sp) },
+                singleLine = true, modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { onSaveLiveTwitchUrl(twitchField) }),
+                colors = linkColors)
+            OutlinedTextField(value = youtubeField, onValueChange = { youtubeField = it },
+                label = { Text("YouTube channel URL", fontSize = 12.sp) },
+                singleLine = true, modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { onSaveLiveYoutubeUrl(youtubeField) }),
+                colors = linkColors)
+            val widgetEnabled = twitchField.isNotBlank() || youtubeField.isNotBlank() ||
+                !liveTwitchUrl.isNullOrBlank() || !liveYoutubeUrl.isNullOrBlank()
+            SettingsBubble(liquidGlass, tint, backdrop) {
+                BubbleRow {
+                    RowLabel("Live Link", Modifier.weight(1f), sub = "The widget can only be created once at least one link is saved.")
+                    PillButton("Save", { onSaveLiveTwitchUrl(twitchField); onSaveLiveYoutubeUrl(youtubeField) })
+                    Spacer(Modifier.width(6.dp))
+                    PillButton("Widget", onCreateLiveLinkWidget, enabled = widgetEnabled)
+                }
+            }
+        }
+
         // ── Media Tagging ───────────────────────────────────────────────
         SectionHeader("Media Tagging", tint)
 
@@ -480,7 +548,7 @@ internal fun SettingsPageContent(
                 PillButton("Import", { importLauncher.launch(arrayOf("application/json")) })
             }
             // Every imported dataset, each removable on its own (the
-            // on-device dataset isn't listed — it has its own delete below).
+            // on-device dataset isn't listed — its delete is in the AI tagging bubble below).
             importedDatasets.forEach { dataset ->
                 BubbleDivider()
                 BubbleRow {
@@ -494,25 +562,6 @@ internal fun SettingsPageContent(
                     ) {
                         Icon(Icons.Default.Close, contentDescription = "Remove ${dataset.name}", tint = DimGray, modifier = Modifier.size(16.dp))
                     }
-                }
-            }
-            if (hasTaggedData) {
-                BubbleDivider()
-                BubbleRow {
-                    RowLabel("Export Dataset", Modifier.weight(1f))
-                    PillButton("Export", { pendingExportName = ""; showExportNameDialog = true })
-                }
-                BubbleDivider()
-                BubbleRow {
-                    RowLabel("Delete Tagged Post Database", Modifier.weight(1f))
-                    PillButton(
-                        if (confirmingDelete) "Confirm" else "Delete",
-                        onClick = {
-                            if (confirmingDelete) { confirmingDelete = false; onDeleteTaggedDatabase() }
-                            else confirmingDelete = true
-                        },
-                        enabled = !taggingRunning, color = DangerRed
-                    )
                 }
             }
         }
@@ -569,6 +618,28 @@ internal fun SettingsPageContent(
                     }
                 }
             }
+            // Dataset housekeeping lives at the very bottom of this bubble,
+            // and stays visible whether or not the model is downloaded (an
+            // imported dataset can exist without it).
+            if (hasTaggedData) {
+                BubbleDivider()
+                BubbleRow {
+                    RowLabel("Export Dataset", Modifier.weight(1f))
+                    PillButton("Export", { pendingExportName = ""; showExportNameDialog = true })
+                }
+                BubbleDivider()
+                BubbleRow {
+                    RowLabel("Delete Tagged Posts Dataset", Modifier.weight(1f))
+                    PillButton(
+                        if (confirmingDelete) "Really?" else "Delete",
+                        onClick = {
+                            if (confirmingDelete) { confirmingDelete = false; onDeleteTaggedDatabase() }
+                            else confirmingDelete = true
+                        },
+                        enabled = !taggingRunning, color = DangerRed
+                    )
+                }
+            }
         }
 
         // ── Data ────────────────────────────────────────────────────────
@@ -613,62 +684,6 @@ internal fun SettingsPageContent(
             ToggleBubble("Auto-Download New Likes and Saves", downloadOnLike, onToggleDownloadOnLike, liquidGlass, tint, backdrop)
         }
 
-        // ── Integrations ────────────────────────────────────────────────
-        SectionHeader("Integrations", tint)
-
-        AtProtocolAccountsBubble(
-            bskyLoggedIn = bskyLoggedIn, bskyHandle = bskyHandle, isLoading = isLoading,
-            onLoginBluesky = onLoginBluesky, onLogoutBluesky = onLogoutBluesky,
-            extras = extras, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop
-        )
-
-        ActionBubble(
-            label = "e621",
-            sub = if (e621LoggedIn) "@$e621Username" else null,
-            buttonLabel = if (e621LoggedIn) "Log out" else "Login",
-            onClick = { if (e621LoggedIn) onLogoutE621() else onOpenE621Login() },
-            liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
-            buttonColor = if (e621LoggedIn) DangerRed else Color.White
-        )
-
-        // ── Live Link widget feature ────────────────────────────────────
-        // Save a Twitch and/or YouTube channel URL here, then "Create
-        // Widget" (enabled once at least one is saved) requests the
-        // resizable home-screen widget be pinned. Gated behind
-        // FeatureFlags.LIVE_LINK_ENABLED: unfinished, so hidden for now, but
-        // left fully in place to resume from later.
-        if (bskyLoggedIn && com.mediaviewer.util.FeatureFlags.LIVE_LINK_ENABLED) {
-            var twitchField by remember(liveTwitchUrl) { mutableStateOf(liveTwitchUrl.orEmpty()) }
-            var youtubeField by remember(liveYoutubeUrl) { mutableStateOf(liveYoutubeUrl.orEmpty()) }
-            val linkColors = OutlinedTextFieldDefaults.colors(
-                focusedTextColor = Color.White, unfocusedTextColor = Color.White,
-                focusedBorderColor = tint, unfocusedBorderColor = DimGray,
-                cursorColor = tint, focusedLabelColor = tint, unfocusedLabelColor = DimGray
-            )
-            OutlinedTextField(value = twitchField, onValueChange = { twitchField = it },
-                label = { Text("Twitch channel URL", fontSize = 12.sp) },
-                singleLine = true, modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { onSaveLiveTwitchUrl(twitchField) }),
-                colors = linkColors)
-            OutlinedTextField(value = youtubeField, onValueChange = { youtubeField = it },
-                label = { Text("YouTube channel URL", fontSize = 12.sp) },
-                singleLine = true, modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { onSaveLiveYoutubeUrl(youtubeField) }),
-                colors = linkColors)
-            val widgetEnabled = twitchField.isNotBlank() || youtubeField.isNotBlank() ||
-                !liveTwitchUrl.isNullOrBlank() || !liveYoutubeUrl.isNullOrBlank()
-            SettingsBubble(liquidGlass, tint, backdrop) {
-                BubbleRow {
-                    RowLabel("Live Link", Modifier.weight(1f), sub = "The widget can only be created once at least one link is saved.")
-                    PillButton("Save", { onSaveLiveTwitchUrl(twitchField); onSaveLiveYoutubeUrl(youtubeField) })
-                    Spacer(Modifier.width(6.dp))
-                    PillButton("Widget", onCreateLiveLinkWidget, enabled = widgetEnabled)
-                }
-            }
-        }
-
         Spacer(Modifier.height(16.dp))
     }
 }
@@ -691,10 +706,10 @@ private fun AtProtocolAccountsBubble(
     var addBusy by remember { mutableStateOf(false) }
     var addError by remember { mutableStateOf<String?>(null) }
 
+    fun cancelAdd() { adding = false; handleField = ""; passwordField = ""; addError = null }
+
     // Back closes an open add row instead of leaving the page.
-    BackHandler(enabled = adding && bskyLoggedIn) {
-        adding = false; handleField = ""; passwordField = ""; addError = null
-    }
+    BackHandler(enabled = adding && bskyLoggedIn) { cancelAdd() }
 
     fun submit() {
         val id = handleField.trim()
@@ -716,7 +731,7 @@ private fun AtProtocolAccountsBubble(
     }
 
     @Composable
-    fun LoginFieldsRow(buttonLabel: String, busy: Boolean) {
+    fun LoginFieldsRow(buttonLabel: String, busy: Boolean, onCancel: (() -> Unit)? = null) {
         BubbleRow {
             CompactField(handleField, { handleField = it }, "handle", Modifier.weight(1f))
             Spacer(Modifier.width(6.dp))
@@ -729,6 +744,10 @@ private fun AtProtocolAccountsBubble(
                 if (busy) "…" else buttonLabel, { submit() },
                 enabled = !busy && handleField.isNotBlank() && passwordField.isNotBlank()
             )
+            if (onCancel != null) {
+                Spacer(Modifier.width(6.dp))
+                CancelXButton(onCancel)
+            }
         }
     }
 
@@ -776,7 +795,7 @@ private fun AtProtocolAccountsBubble(
 
         BubbleDivider()
         if (adding) {
-            LoginFieldsRow("Login", addBusy)
+            LoginFieldsRow("Login", addBusy, onCancel = { cancelAdd() })
             val error = addError
             if (error != null) {
                 Text(
@@ -801,79 +820,57 @@ private fun AtProtocolAccountsBubble(
     }
 }
 
-// ── e621 login page ─────────────────────────────────────────────────────────
+// ── e621 account bubble ─────────────────────────────────────────────────────
 
-/** Full-screen e621 sign-in, opened from Settings' e621 row. Signing in
- *  just closes the page and returns to Settings — it never opens the feed. */
+/** The e621 row: shows the signed-in user with a Log out button, or a Login
+ *  button that swaps the row for the same inline username + API key + Login
+ *  (+ white X to cancel) layout the AT Protocol "Add" row uses. */
 @Composable
-internal fun E621LoginPage(
-    liquidGlass: Boolean,
-    tint: Color,
-    onClose: () -> Unit,
-    onLogin: (String, String) -> Unit
+private fun E621AccountBubble(
+    e621LoggedIn: Boolean, e621Username: String,
+    onLoginE621: (String, String) -> Unit, onLogoutE621: () -> Unit,
+    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?
 ) {
-    BackHandler(onBack = onClose)
-    var user by remember { mutableStateOf("") }
-    var key by remember { mutableStateOf("") }
-    val canSubmit = user.isNotBlank() && key.isNotBlank()
+    var adding by remember { mutableStateOf(false) }
+    var userField by remember { mutableStateOf("") }
+    var keyField by remember { mutableStateOf("") }
+    val canSubmit = userField.isNotBlank() && keyField.isNotBlank()
+
+    fun cancel() { adding = false; userField = ""; keyField = "" }
     fun submit() {
         if (!canSubmit) return
-        onLogin(user.trim(), key.trim())
-        onClose()
+        // Signing in just returns to this row (now showing the username);
+        // it never opens the feed.
+        onLoginE621(userField.trim(), keyField.trim())
+        cancel()
     }
 
-    Box(
-        Modifier.fillMaxSize()
-            .then(if (liquidGlass) Modifier.background(postBackgroundBrush(tint)) else Modifier.background(OledBlack))
-            .blockClicksBehind()
-    ) {
-        // Close bubble, top-left — same look as the Search/Profile pages'.
-        Box(
-            Modifier.fillMaxSize().padding(top = rememberTopCutoutClearance()).padding(16.dp),
-            contentAlignment = Alignment.TopStart
-        ) {
-            val closeModifier = Modifier.size(30.dp).clickable(onClick = onClose)
-            if (liquidGlass) {
-                LiquidGlassSurface(closeModifier, shape = CircleShape, tint = tint, backdrop = null) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(16.dp))
-                    }
-                }
-            } else {
-                Box(closeModifier.clip(CircleShape).background(Color.Black.copy(alpha = 0.5f)), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(16.dp))
-                }
-            }
-        }
+    // Back closes the open sign-in row instead of leaving the page.
+    BackHandler(enabled = adding && !e621LoggedIn) { cancel() }
 
-        Column(
-            Modifier.fillMaxSize().padding(horizontal = 36.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Text("e621", color = headerColorFor(tint), fontSize = 26.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(20.dp))
-            OutlinedTextField(
-                value = user, onValueChange = { user = it },
-                placeholder = { Text("Username", color = DimGray) },
-                singleLine = true, colors = fieldColors(), modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, imeAction = ImeAction.Next)
-            )
-            Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
-                value = key, onValueChange = { key = it },
-                placeholder = { Text("API Key", color = DimGray) },
-                singleLine = true, visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { submit() }),
-                colors = fieldColors(), modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(16.dp))
-            Button(
-                onClick = { submit() }, enabled = canSubmit,
-                colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black),
-                modifier = Modifier.fillMaxWidth().height(46.dp)
-            ) { Text("Login", fontWeight = FontWeight.SemiBold) }
+    SettingsBubble(liquidGlass, tint, backdrop) {
+        if (adding && !e621LoggedIn) {
+            BubbleRow {
+                CompactField(userField, { userField = it }, "e621 username", Modifier.weight(1f))
+                Spacer(Modifier.width(6.dp))
+                CompactField(
+                    keyField, { keyField = it }, "API key", Modifier.weight(1f),
+                    password = true, imeAction = ImeAction.Done, onDone = { submit() }
+                )
+                Spacer(Modifier.width(6.dp))
+                PillButton("Login", { submit() }, enabled = canSubmit)
+                Spacer(Modifier.width(6.dp))
+                CancelXButton({ cancel() })
+            }
+        } else {
+            BubbleRow {
+                RowLabel("e621", Modifier.weight(1f), sub = if (e621LoggedIn) "@$e621Username" else null)
+                PillButton(
+                    if (e621LoggedIn) "Log out" else "Login",
+                    { if (e621LoggedIn) onLogoutE621() else adding = true },
+                    color = if (e621LoggedIn) DangerRed else Color.White
+                )
+            }
         }
     }
 }
