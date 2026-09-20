@@ -98,6 +98,15 @@ class TaggingRepository(
 
     fun cancel() { cancelRequested = true }
 
+    /** Settings' "Download On-Device Tagging Model" button: fetches the model
+     *  and tag list without starting a tagging pass. Reports the same
+     *  [TaggerModelManager.State] updates [tagAllLiked] does while it fetches
+     *  them. Throws CancellationException if the calling coroutine is
+     *  cancelled mid-download (partial files are cleaned up first). */
+    suspend fun downloadModel(onState: (TaggerModelManager.State) -> Unit) {
+        modelManager.ensureReady(onState)
+    }
+
     /** Settings' "Delete Tagged Post Database" button (item 5): wipes every
      *  scanned/tagged post so the person can restart the dataset from
      *  scratch. Only clears the tag data — the already-downloaded model
@@ -308,6 +317,11 @@ class TaggingRepository(
     suspend fun tagOnLike(item: MediaItem) {
         if (!modelManager.isReady()) return
         withContext(Dispatchers.IO) {
+            // A post that's already part of an imported dataset counts as
+            // tagged — leave the imported tags alone instead of overwriting
+            // them with this device's own model's guesses. (The backlog pass
+            // in tagBatch already skips these via db.isIndexed.)
+            if (db.isInImportedDataset(item.postUri)) return@withContext
             val loadedTagger = try { ensureTagger { } } catch (_: Exception) { return@withContext }
             tagOnePost(loadedTagger, item)
         }

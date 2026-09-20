@@ -91,7 +91,7 @@ fun TaggingOverlay(
         when {
             state.errorMessage != null -> {
                 CenteredCard(liquidGlass, profileTint, backdrop) {
-                    Text("Tagging Failed", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                    Text("Model Download Failed", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(8.dp))
                     Text(state.errorMessage, color = DimGray, fontSize = 13.sp, textAlign = TextAlign.Center)
                 }
@@ -105,8 +105,10 @@ fun TaggingOverlay(
                     Text("Tagging Complete", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(6.dp))
                     Text("${state.tagged} of ${state.scanned} liked posts tagged · ${formatBytes(state.datasetBytes)}", color = DimGray, fontSize = 12.sp, textAlign = TextAlign.Center)
-                    Spacer(Modifier.height(20.dp))
-                    DismissButton(liquidGlass, profileTint, "Search Liked Posts", onSearchLiked)
+                    if (state.tagged > 0) {
+                        Spacer(Modifier.height(20.dp))
+                        DismissButton(liquidGlass, profileTint, "Search Liked Posts", onSearchLiked)
+                    }
                 }
             }
             modelState is TaggerModelManager.State.Downloading -> {

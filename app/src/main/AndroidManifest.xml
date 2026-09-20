@@ -30,6 +30,16 @@
             </intent-filter>
         </activity>
 
+        <!-- Account switching: relaunches the app in a fresh process — see
+             RestartActivity's doc comment for why this has to live in its
+             own process. -->
+        <activity
+            android:name=".RestartActivity"
+            android:process=":restart"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <!-- Live Link widget: only ever created from within the app via
              requestPinAppWidget() (Settings' "Create Widget" button) — see
              the feature request ("should only be creatable from the app via

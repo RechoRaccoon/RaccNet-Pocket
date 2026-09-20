@@ -8,6 +8,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import kotlinx.coroutines.launch
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -259,7 +260,10 @@ fun SettingsSheet(
     onSaveLiveYoutubeUrl: (String) -> Unit = {},
     onCreateLiveLinkWidget: () -> Unit = {},
     onToggleLiveLink: (com.mediaviewer.model.LiveNowPlatform) -> Unit = {},
-    onEndLiveLink: () -> Unit = {}
+    onEndLiveLink: () -> Unit = {},
+    // Reworked Settings page: multiple accounts, tagging-model download and
+    // the e621 download button — see SettingsExtras.
+    settingsExtras: SettingsExtras = SettingsExtras()
 ) {
     // Feature (this session): every rim/background tint throughout the Hub
     // (all three pages — Settings/AT Protocol/e621 — plus the background
@@ -279,6 +283,13 @@ fun SettingsSheet(
     // post color if there's no avatar yet (e.g. profile hasn't loaded).
     val dominantColor = selfAvatarUrl?.let { rememberDominantColor(it) } ?: dominantColor
     var hubPage by remember { mutableStateOf(HubPage.MAIN) }
+    // Settings/Credits switch at the right end of the bottom bar — only
+    // meaningful while the Settings page is showing, and always starts on
+    // Settings.
+    var settingsTab by remember { mutableStateOf(SettingsTab.SETTINGS) }
+    LaunchedEffect(hubPage) { if (hubPage != HubPage.SETTINGS) settingsTab = SettingsTab.SETTINGS }
+    // The e621 sign-in page, opened from Settings' e621 row.
+    var showE621Login by remember { mutableStateOf(false) }
     // Tracks the direction of the most recent page change (Settings <-> Main
     // via the More button / its own back action).
     var hubPageForward by remember { mutableStateOf(true) }
@@ -373,41 +384,49 @@ fun SettingsSheet(
                     label = "hubPage"
                 ) { page ->
                     when (page) {
-                        HubPage.SETTINGS -> SettingsPageContent(
-                            reducedAnimations = reducedAnimations, onToggleReducedAnimations = onToggleReducedAnimations,
-                            classicProfileTabRow = classicProfileTabRow, onToggleClassicProfileTabRow = onToggleClassicProfileTabRow,
-                            pinterestThreeColumns = pinterestThreeColumns, onTogglePinterestThreeColumns = onTogglePinterestThreeColumns,
-                            hateFunBlurNsfw = hateFunBlurNsfw, onToggleHateFunBlurNsfw = onToggleHateFunBlurNsfw,
-                            squareGridRounded = squareGridRounded, onToggleSquareGridRounded = onToggleSquareGridRounded,
-                            followerScanState = followerScanState, onRescanFollowersFromScratch = onRescanFollowersFromScratch,
-                            hideTextOnlyPosts = hideTextOnlyPosts, onToggleHideTextOnlyPosts = onToggleHideTextOnlyPosts,
-                            liquidGlass = liquidGlass, onToggleLiquidGlass = onToggleLiquidGlass,
-                            liquidGlassIntensity = liquidGlassIntensity, onSetLiquidGlassIntensity = onSetLiquidGlassIntensity,
-                            glassRimIntensity = glassRimIntensity, onSetGlassRimIntensity = onSetGlassRimIntensity,
-                            glassRimVibrantSecondary = glassRimVibrantSecondary, onToggleGlassRimVibrantSecondary = onToggleGlassRimVibrantSecondary,
-                            translationEnabled = translationEnabled, translationTargetLang = translationTargetLang,
-                            onToggleTranslation = onToggleTranslation, onSelectTranslationLanguage = onSelectTranslationLanguage,
-                            customFontName = customFontName, onPickFontFile = onPickFontFile, onResetFont = onResetFont,
-                            bskyLoggedIn = bskyLoggedIn, bskyHandle = bskyHandle,
-                            e621LoggedIn = e621LoggedIn, e621Username = e621Username,
-                            downloadOnLike = downloadOnLike, onToggleDownloadOnLike = onToggleDownloadOnLike,
-                            downloadProgress = downloadProgress, onDownloadAllLiked = onDownloadAllLiked, onCancelDownload = onCancelDownload,
-                            tagPostWhenLiked = tagPostWhenLiked, onToggleTagPostWhenLiked = onToggleTagPostWhenLiked,
-                            taggingRunning = taggingRunning, taggingScanned = taggingScanned, taggingTagged = taggingTagged,
-                            onLocallyTagAllLiked = onLocallyTagAllLiked,
-                            onDeleteTaggedDatabase = onDeleteTaggedDatabase,
-                            importedDatasets = importedDatasets,
-                            onExportDataset = onExportDataset, onImportDataset = onImportDataset,
-                            onDeleteImportedDataset = onDeleteImportedDataset,
-                            combineListsAndPacks = combineListsAndPacks, onToggleCombineListsPacks = onToggleCombineListsPacks,
-                            autoAddToOnFollow = autoAddToOnFollow, onToggleAutoAddToOnFollow = onToggleAutoAddToOnFollow,
-                            onLogoutBluesky = onLogoutBluesky, onLogoutE621 = onLogoutE621,
-                            onSaveE621Credentials = onSaveE621Credentials,
-                            dominantColor = dominantColor, backdrop = backdrop,
-                            liveTwitchUrl = liveTwitchUrl, liveYoutubeUrl = liveYoutubeUrl,
-                            onSaveLiveTwitchUrl = onSaveLiveTwitchUrl, onSaveLiveYoutubeUrl = onSaveLiveYoutubeUrl,
-                            onCreateLiveLinkWidget = onCreateLiveLinkWidget
-                        )
+                        HubPage.SETTINGS -> Crossfade(
+                            targetState = settingsTab,
+                            animationSpec = tween(if (reducedAnimations) 0 else 200),
+                            label = "settingsTab"
+                        ) { tab ->
+                            when (tab) {
+                                SettingsTab.CREDITS -> CreditsPageContent()
+                                SettingsTab.SETTINGS -> SettingsPageContent(
+                                    reducedAnimations = reducedAnimations, onToggleReducedAnimations = onToggleReducedAnimations,
+                                    hateFunBlurNsfw = hateFunBlurNsfw, onToggleHateFunBlurNsfw = onToggleHateFunBlurNsfw,
+                                    squareGridRounded = squareGridRounded, onToggleSquareGridRounded = onToggleSquareGridRounded,
+                                    followerScanState = followerScanState, onRescanFollowersFromScratch = onRescanFollowersFromScratch,
+                                    hideTextOnlyPosts = hideTextOnlyPosts, onToggleHideTextOnlyPosts = onToggleHideTextOnlyPosts,
+                                    liquidGlass = liquidGlass, onToggleLiquidGlass = onToggleLiquidGlass,
+                                    liquidGlassIntensity = liquidGlassIntensity, onSetLiquidGlassIntensity = onSetLiquidGlassIntensity,
+                                    glassRimIntensity = glassRimIntensity, onSetGlassRimIntensity = onSetGlassRimIntensity,
+                                    glassRimVibrantSecondary = glassRimVibrantSecondary, onToggleGlassRimVibrantSecondary = onToggleGlassRimVibrantSecondary,
+                                    translationEnabled = translationEnabled, translationTargetLang = translationTargetLang,
+                                    onToggleTranslation = onToggleTranslation, onSelectTranslationLanguage = onSelectTranslationLanguage,
+                                    customFontName = customFontName, onPickFontFile = onPickFontFile, onResetFont = onResetFont,
+                                    bskyLoggedIn = bskyLoggedIn, bskyHandle = bskyHandle,
+                                    isLoading = isLoading, onLoginBluesky = onLoginBluesky, onLogoutBluesky = onLogoutBluesky,
+                                    e621LoggedIn = e621LoggedIn, e621Username = e621Username,
+                                    onOpenE621Login = { showE621Login = true }, onLogoutE621 = onLogoutE621,
+                                    downloadOnLike = downloadOnLike, onToggleDownloadOnLike = onToggleDownloadOnLike,
+                                    downloadProgress = downloadProgress, onDownloadAllLiked = onDownloadAllLiked, onCancelDownload = onCancelDownload,
+                                    tagPostWhenLiked = tagPostWhenLiked, onToggleTagPostWhenLiked = onToggleTagPostWhenLiked,
+                                    taggingRunning = taggingRunning, taggingScanned = taggingScanned, taggingTagged = taggingTagged,
+                                    onLocallyTagAllLiked = onLocallyTagAllLiked,
+                                    onDeleteTaggedDatabase = onDeleteTaggedDatabase,
+                                    importedDatasets = importedDatasets,
+                                    onExportDataset = onExportDataset, onImportDataset = onImportDataset,
+                                    onDeleteImportedDataset = onDeleteImportedDataset,
+                                    combineListsAndPacks = combineListsAndPacks, onToggleCombineListsPacks = onToggleCombineListsPacks,
+                                    autoAddToOnFollow = autoAddToOnFollow, onToggleAutoAddToOnFollow = onToggleAutoAddToOnFollow,
+                                    extras = settingsExtras,
+                                    dominantColor = dominantColor, backdrop = backdrop,
+                                    liveTwitchUrl = liveTwitchUrl, liveYoutubeUrl = liveYoutubeUrl,
+                                    onSaveLiveTwitchUrl = onSaveLiveTwitchUrl, onSaveLiveYoutubeUrl = onSaveLiveYoutubeUrl,
+                                    onCreateLiveLinkWidget = onCreateLiveLinkWidget
+                                )
+                            }
+                        }
                         HubPage.MAIN -> AtProtocolPageContent(
                             bskyLoggedIn = bskyLoggedIn, bskyHandle = bskyHandle,
                             availableFeeds = availableFeeds, selectedFeedUri = selectedFeedUri, authorFeedState = authorFeedState,
@@ -446,6 +465,9 @@ fun SettingsSheet(
                             // that there's only one such button left and it
                             // always means Bluesky (see onReturnToFeed
                             // above).
+                            otherAccounts = settingsExtras.otherBskyAccounts,
+                            showSwitchAccountsRow = settingsExtras.showSwitchAccountsRow,
+                            onSwitchAccount = settingsExtras.onSwitchBskyAccount,
                             e621LoggedIn = e621LoggedIn, e621SearchTags = e621SearchTags,
                             onOpenE621Hot = { onSwitchMode(AppMode.E621); onSearchE621("order:hot"); onSwipeToFeed() },
                             onOpenE621Search = { tags -> onSwitchMode(AppMode.E621); onSearchE621(tags); onSwipeToFeed() },
@@ -489,7 +511,9 @@ fun SettingsSheet(
                     showPillAndUpload = showReturnBar,
                     hasVisitedFeed = hasVisitedFeed,
                     onOpenComposePost = onOpenComposePost,
-                    settingsOpen = (hubPage == HubPage.SETTINGS)
+                    settingsOpen = (hubPage == HubPage.SETTINGS),
+                    settingsTab = settingsTab,
+                    onSettingsTabChange = { settingsTab = it }
                 )
             }
 
@@ -502,806 +526,16 @@ fun SettingsSheet(
                 modifier = Modifier.padding(bottom = 20.dp, top = 2.dp)
             )
         }
-    }
-}
 
-// ── Settings page (item 5/6): universal, mode-independent settings. Its own
-// scroll container, isolated from the AT Protocol/e621 pages' feed rows —
-// item 5's "independently scrollable, can't be scrolled up into a feed" is
-// satisfied structurally: this page simply never contains any feed content.
-// Item 6: rows here are more compact than the mode pages' — no description
-// subtext, tighter padding — and the two translation settings are merged
-// into a single bubble with an internal divider. ──────────────────────────
-@Composable
-private fun SettingsPageContent(
-    reducedAnimations: Boolean,
-    onToggleReducedAnimations: (Boolean) -> Unit,
-    classicProfileTabRow: Boolean,
-    onToggleClassicProfileTabRow: (Boolean) -> Unit,
-    pinterestThreeColumns: Boolean = false,
-    onTogglePinterestThreeColumns: (Boolean) -> Unit = {},
-    hateFunBlurNsfw: Boolean = false,
-    onToggleHateFunBlurNsfw: (Boolean) -> Unit = {},
-    squareGridRounded: Boolean = false,
-    onToggleSquareGridRounded: (Boolean) -> Unit = {},
-    followerScanState: MainViewModel.FollowerScanState = MainViewModel.FollowerScanState.Idle,
-    onRescanFollowersFromScratch: () -> Unit = {},
-    hideTextOnlyPosts: Boolean,
-    onToggleHideTextOnlyPosts: (Boolean) -> Unit,
-    liquidGlass: Boolean,
-    onToggleLiquidGlass: (Boolean) -> Unit,
-    liquidGlassIntensity: Float,
-    onSetLiquidGlassIntensity: (Float) -> Unit,
-    // Bug fix: independent rim/outline strength dial, split out from the
-    // background dial above.
-    glassRimIntensity: Float,
-    onSetGlassRimIntensity: (Float) -> Unit,
-    glassRimVibrantSecondary: Boolean,
-    onToggleGlassRimVibrantSecondary: (Boolean) -> Unit,
-    translationEnabled: Boolean,
-    translationTargetLang: String,
-    onToggleTranslation: (Boolean) -> Unit,
-    onSelectTranslationLanguage: (String) -> Unit,
-    customFontName: String?,
-    onPickFontFile: (android.net.Uri) -> Unit,
-    onResetFont: () -> Unit,
-    // Item: every setting that used to live on the AT Protocol/e621 pages
-    // (below their 6-button/3-button grids) now lives here instead, grouped
-    // under their own compact section dividers, alongside the universal
-    // "App Settings" above.
-    bskyLoggedIn: Boolean,
-    bskyHandle: String,
-    e621LoggedIn: Boolean,
-    e621Username: String,
-    // Item 14: the e621 sign-in form now lives here (was on the removed
-    // e621 page) — see the SectionDivider("e621 Settings") block below.
-    onSaveE621Credentials: (String, String) -> Unit,
-    downloadOnLike: Boolean,
-    onToggleDownloadOnLike: (Boolean) -> Unit,
-    downloadProgress: DownloadProgress?,
-    onDownloadAllLiked: () -> Unit,
-    onCancelDownload: () -> Unit,
-    // AI Tagging feature
-    tagPostWhenLiked: Boolean,
-    onToggleTagPostWhenLiked: (Boolean) -> Unit,
-    taggingRunning: Boolean,
-    taggingScanned: Int,
-    taggingTagged: Int,
-    onLocallyTagAllLiked: () -> Unit,
-    onDeleteTaggedDatabase: () -> Unit = {},
-    // Import/Export (item 4)
-    importedDatasets: List<com.mediaviewer.tagging.TagDatabase.DatasetInfo> = emptyList(),
-    onExportDataset: (String, android.net.Uri) -> Unit = { _, _ -> },
-    onImportDataset: (android.net.Uri) -> Unit = {},
-    onDeleteImportedDataset: (String) -> Unit = {},
-    combineListsAndPacks: Boolean,
-    onToggleCombineListsPacks: (Boolean) -> Unit,
-    autoAddToOnFollow: Boolean,
-    onToggleAutoAddToOnFollow: (Boolean) -> Unit,
-    onLogoutBluesky: () -> Unit,
-    onLogoutE621: () -> Unit,
-    dominantColor: Color,
-    backdrop: GlassBackdrop?,
-    // Live Link widget feature
-    liveTwitchUrl: String? = null,
-    liveYoutubeUrl: String? = null,
-    onSaveLiveTwitchUrl: (String) -> Unit = {},
-    onSaveLiveYoutubeUrl: (String) -> Unit = {},
-    onCreateLiveLinkWidget: () -> Unit = {}
-) {
-    // Fix 9: shared haptic tap for the Settings page's primary actions —
-    // declared once here so the toggle rows (via CompactSwitch below) and
-    // the follower-scan rescan button share one consistent light feel.
-    val tap = rememberHapticTap()
-    @Composable
-    fun CompactRow(content: @Composable RowScope.() -> Unit) {
-        // Item 5: half the previous vertical padding — the switch rows were
-        // taller than they needed to be.
-        val rowModifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp)
-        if (liquidGlass) {
-            LiquidGlassSurface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), tint = dominantColor, backdrop = backdrop) {
-                Row(rowModifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, content = content)
-            }
-        } else {
-            Row(rowModifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, content = content)
-        }
-    }
-
-    // Item 5: Material3's Switch has no compact size variant, so this fixes
-    // the switch's actual layout footprint to roughly two-thirds its default
-    // size via an outer fixed-size Box, then visually scales the real Switch
-    // down to fit inside it — constraining the outer Box (not just visually
-    // scaling the Switch itself) is what actually shrinks the row, since
-    // Modifier.scale alone only affects drawing, not the space reserved
-    // during layout.
-    @Composable
-    fun CompactSwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
-        Box(modifier = Modifier.size(width = 36.dp, height = 22.dp), contentAlignment = Alignment.Center) {
-            Switch(
-                checked = checked, onCheckedChange = { tap(); onCheckedChange(it) },
-                modifier = Modifier.scale(0.7f),
-                colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = VoteGreen,
-                    uncheckedThumbColor = DimGray, uncheckedTrackColor = Color.White.copy(0.1f))
+        // e621 sign-in page — covers the whole Hub (bottom bar included);
+        // closing it, whether by signing in or the X, lands back on Settings.
+        if (showE621Login) {
+            E621LoginPage(
+                liquidGlass = liquidGlass, tint = dominantColor,
+                onClose = { showE621Login = false },
+                onLogin = { user, key -> onSaveE621Credentials(user, key) }
             )
         }
-    }
-
-    // Item 4/5: Material3's default Slider reserves a large (48dp)
-    // accessibility touch target around its thumb — that reserved space,
-    // not the vertical padding around it, was what inflated the
-    // Background/Outline rows well past the height of the surrounding
-    // toggle rows. Supplying fully custom thumb/track composables (instead
-    // of the default Slider overload, which always draws its thumb inside
-    // that reserved touch box) removes it entirely; the row's height then
-    // just follows the same tight padding every other compact row uses.
-    @Composable
-    fun CompactSlider(value: Float, onValueChange: (Float) -> Unit, modifier: Modifier = Modifier) {
-        Slider(
-            value = value, onValueChange = onValueChange, valueRange = 0f..1f,
-            modifier = modifier.height(20.dp),
-            thumb = {
-                Box(Modifier.size(14.dp).clip(CircleShape).background(Color.White))
-            },
-            track = { sliderState ->
-                Box(
-                    Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp))
-                        .background(Color.White.copy(alpha = 0.15f))
-                ) {
-                    Box(
-                        Modifier.fillMaxHeight()
-                            .fillMaxWidth(fraction = sliderState.value.coerceIn(0f, 1f))
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(VoteGreen)
-                    )
-                }
-            }
-        )
-    }
-
-    // Item: compact section divider — smaller/tighter than the Hub header's
-    // own divider-with-label rows, since this separates settings sub-groups
-    // within a single already-scrollable page rather than distinct Hub pages.
-    @Composable
-    fun SectionDivider(label: String) {
-        Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.1f))
-            Text(label, color = DimGray, fontSize = 11.sp, lineHeight = 11.sp, fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(horizontal = 8.dp))
-            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.1f))
-        }
-    }
-
-    Column(
-        // Bug fix (revert per feedback — Hub is meant to scroll again): this
-        // used to be a non-scrolling Column with a comment explaining that
-        // scroll had been removed to avoid fighting the swipe gesture. The
-        // user has since reconsidered and wants the Hub scrollable again.
-        // Item (this session): the swipe-up-to-feed/swipe-to-switch-page
-        // gestures this comment used to reference are gone entirely now (see
-        // onReturnToFeed above), so this scrollable Column no longer needs
-        // to coexist with anything competing for the same drag gestures.
-        // Order matters: scroll comes before padding so the padding scrolls
-        // with the content rather than staying fixed.
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        SectionDivider("App Settings")
-
-        CompactRow {
-            Text("Hide Text Only Posts", color = Color.White, fontSize = 14.sp)
-            CompactSwitch(checked = hideTextOnlyPosts, onCheckedChange = onToggleHideTextOnlyPosts)
-        }
-
-        CompactRow {
-            Text("Reduced Animations", color = Color.White, fontSize = 14.sp)
-            CompactSwitch(checked = reducedAnimations, onCheckedChange = onToggleReducedAnimations)
-        }
-
-        // Item (this session): the "Classic Profile Tabs" toggle was
-        // removed — the classic two-row text-label tab layout is always
-        // used now (see ProfileOverlay's classicProfileTabRow doc comment).
-
-        // Item 15: the old "3-Column Pinterest Layout (Experimental)"
-        // toggle is gone — 3-column masonry is now just one stop on the
-        // profile interaction bar's own Grid cycle (gridMode 0/1/2, see
-        // ProfileInteractionBar/gridModeFor in ProfileOverlay.kt), available
-        // per-tab without a separate global setting.
-
-        // Feature request #8: "I hate fun" — blurs Bluesky-labeled sexual/
-        // adult posts behind a tap-to-reveal cover instead of hiding them.
-        CompactRow {
-            Text("I Hate Fun (Blur NSFW Content)", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(end = 12.dp))
-            CompactSwitch(checked = hateFunBlurNsfw, onCheckedChange = onToggleHateFunBlurNsfw)
-        }
-
-        // Fix (per feedback): square-grid tiles are flat squares with no
-        // outline by default — this restores the old rounded + outlined look.
-        CompactRow {
-            Text("Rounded grid tiles", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(end = 12.dp))
-            CompactSwitch(checked = squareGridRounded, onCheckedChange = onToggleSquareGridRounded)
-        }
-
-        // Feature: auto-subscribe — re-runs the one-time follower scan from
-        // scratch (ignores any saved resume point), for anyone who wants to
-        // pick up accounts that started posting reviews/blogs after the
-        // last scan, or who skipped/never ran it from the Hub's intro
-        // bubble. Most people won't need this — opening a profile already
-        // auto-subscribes it the moment it turns out to have any (see
-        // MainViewModel.maybeAutoSubscribeOnProfileOpen) — this is just for
-        // the accounts a user never happens to visit.
-        CompactRow {
-            val scanning = followerScanState is MainViewModel.FollowerScanState.Scanning
-            Text(
-                if (scanning) "Scanning Who You Follow…" else "Rescan Following for Reviews/Blogs",
-                color = if (scanning) DimGray else Color.White, fontSize = 14.sp
-            )
-            Box(
-                Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(if (scanning) Color.White.copy(0.05f) else Color.White.copy(0.12f))
-                    .clickable(enabled = !scanning) { tap(); onRescanFollowersFromScratch() }
-                    .padding(horizontal = 10.dp, vertical = 6.dp)
-            ) {
-                Text(if (scanning) "…" else "Rescan", color = if (scanning) DimGray else Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            }
-        }
-
-        // Item 4: Glass Theme + the Background/Outline intensity sliders are
-        // merged into a single bubble with internal dividers, the same way
-        // Translate Post Text + Translate To are — instead of separate
-        // bubbles for the on/off toggle and each slider.
-        val glassShape = RoundedCornerShape(14.dp)
-        @Composable
-        fun GlassBubbleContent() {
-            Column(Modifier.fillMaxWidth()) {
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("Glass Theme", color = Color.White, fontSize = 14.sp)
-                    CompactSwitch(checked = liquidGlass, onCheckedChange = onToggleLiquidGlass)
-                }
-                if (liquidGlass) {
-                    // Item 4: "Background" controls the blur/magnify/tint
-                    // behind a panel; "Outline" controls the colored rim
-                    // border around it — split into two independent dials
-                    // instead of one slider affecting both.
-                    HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        // Bug fix: a fixed 76.dp width wasn't wide enough for
-                        // "Background" in the app's (wider, pixel-style)
-                        // custom font, so it wrapped to two lines and blew
-                        // out the row's height. widthIn(min=) instead of a
-                        // hard width lets the label grow just enough to fit
-                        // on one line without wrapping, while still lining
-                        // up with "Outline" below it.
-                        Text("Background", color = Color.White, fontSize = 13.sp, maxLines = 1, softWrap = false,
-                            modifier = Modifier.widthIn(min = 74.dp))
-                        CompactSlider(value = liquidGlassIntensity, onValueChange = onSetLiquidGlassIntensity, modifier = Modifier.weight(1f))
-                        Text("${(liquidGlassIntensity * 100).toInt()}%", color = DimGray, fontSize = 12.sp,
-                            modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
-                    }
-                    HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Text("Outline", color = Color.White, fontSize = 13.sp, maxLines = 1, softWrap = false,
-                            modifier = Modifier.widthIn(min = 74.dp))
-                        CompactSlider(value = glassRimIntensity, onValueChange = onSetGlassRimIntensity, modifier = Modifier.weight(1f))
-                        Text("${(glassRimIntensity * 100).toInt()}%", color = DimGray, fontSize = 12.sp,
-                            modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
-                    }
-                    HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
-                    // Item 7: the outline's gradient blends its tint into a
-                    // brighter/more-saturated version of that same tint by
-                    // default — this drops it back to a single flat
-                    // reflected color with no gradient at all.
-                    CompactRow {
-                        Text("Vibrant Outline Highlight", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(end = 12.dp))
-                        CompactSwitch(checked = glassRimVibrantSecondary, onCheckedChange = onToggleGlassRimVibrantSecondary)
-                    }
-                }
-            }
-        }
-        if (liquidGlass) {
-            LiquidGlassSurface(modifier = Modifier.fillMaxWidth(), shape = glassShape, tint = dominantColor, backdrop = backdrop) { GlassBubbleContent() }
-        } else {
-            Box(Modifier.fillMaxWidth().clip(glassShape).background(Color.White.copy(0.04f))) { GlassBubbleContent() }
-        }
-
-        // Item 6: Translate Post Text + Translate To merged into one bubble
-        // with an internal divider, instead of two separate ones.
-        val translateShape = RoundedCornerShape(14.dp)
-        @Composable
-        fun TranslateBubbleContent() {
-            Column(Modifier.fillMaxWidth()) {
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("Translate Post Text", color = Color.White, fontSize = 14.sp)
-                    CompactSwitch(checked = translationEnabled, onCheckedChange = onToggleTranslation)
-                }
-                if (translationEnabled) {
-                    HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
-                    var langMenuExpanded by remember { mutableStateOf(false) }
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Translate To", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                        Box {
-                            Row(
-                                modifier = Modifier.clickable { langMenuExpanded = true },
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Text(
-                                    com.mediaviewer.util.TranslationManager.SUPPORTED_LANGUAGES
-                                        .firstOrNull { it.first == translationTargetLang }?.second
-                                        ?: com.mediaviewer.util.TranslationManager.displayNameFor(translationTargetLang),
-                                    color = VoteGreen, fontSize = 13.sp, fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                            DropdownMenu(expanded = langMenuExpanded, onDismissRequest = { langMenuExpanded = false }) {
-                                com.mediaviewer.util.TranslationManager.SUPPORTED_LANGUAGES.forEach { (tag, name) ->
-                                    DropdownMenuItem(
-                                        text = { Text(name) },
-                                        onClick = { onSelectTranslationLanguage(tag); langMenuExpanded = false }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if (liquidGlass) {
-            LiquidGlassSurface(modifier = Modifier.fillMaxWidth(), shape = translateShape, tint = dominantColor, backdrop = backdrop) { TranslateBubbleContent() }
-        } else {
-            Box(Modifier.fillMaxWidth().clip(translateShape).background(Color.White.copy(0.04f))) { TranslateBubbleContent() }
-        }
-
-        // Item 6: App Font — the label stays put ("App Font") instead of
-        // being replaced by the imported font's name; when a custom font is
-        // active, its name shows on its own row below a divider, the same
-        // bubble-with-divider pattern as Translate Post Text/Translate To
-        // and Glass Theme/Background/Outline above.
-        val fontShape = RoundedCornerShape(14.dp)
-        run {
-            val fontPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-                if (uri != null) onPickFontFile(uri)
-            }
-            @Composable
-            fun FontBubbleContent() {
-                Column(Modifier.fillMaxWidth()) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("App Font", color = Color.White, fontSize = 14.sp)
-                        Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                            if (customFontName != null) {
-                                Text("Reset", color = Color(0xFFEF5350), fontSize = 12.sp, fontWeight = FontWeight.Medium,
-                                    modifier = Modifier.clickable(onClick = onResetFont))
-                            }
-                            Text("Choose File", color = VoteGreen, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
-                                modifier = Modifier.clickable { fontPickerLauncher.launch("*/*") })
-                        }
-                    }
-                    if (customFontName != null) {
-                        HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("Font: $customFontName", color = DimGray, fontSize = 12.sp,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                    }
-                }
-            }
-            if (liquidGlass) {
-                LiquidGlassSurface(modifier = Modifier.fillMaxWidth(), shape = fontShape, tint = dominantColor, backdrop = backdrop) { FontBubbleContent() }
-            } else {
-                Box(Modifier.fillMaxWidth().clip(fontShape).background(Color.White.copy(0.04f))) { FontBubbleContent() }
-            }
-        }
-
-        // ── AT Protocol Settings (moved from the AT Protocol page) ──────
-        if (bskyLoggedIn) {
-            SectionDivider("AT Protocol Settings")
-
-            CompactRow {
-                Text("Download When Liked", color = Color.White, fontSize = 14.sp)
-                CompactSwitch(checked = downloadOnLike, onCheckedChange = onToggleDownloadOnLike)
-            }
-            CompactRow {
-                Text("Merge Lists & Starter Packs", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(end = 12.dp))
-                CompactSwitch(checked = combineListsAndPacks, onCheckedChange = onToggleCombineListsPacks)
-            }
-            CompactRow {
-                Text("Show \"Add To\" After Following", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(end = 12.dp))
-                CompactSwitch(checked = autoAddToOnFollow, onCheckedChange = onToggleAutoAddToOnFollow)
-            }
-
-            val progBsky = downloadProgress
-            @Composable
-            fun DownloadAllLikedContent() {
-                Box(Modifier.fillMaxSize().clickable { if (progBsky?.isRunning != true) onDownloadAllLiked() }, contentAlignment = Alignment.Center) {
-                    Text(
-                        when {
-                            progBsky?.isRunning == true        -> "Downloading… ${progBsky.count} queued"
-                            progBsky != null && progBsky.count > 0 -> "Done — ${progBsky.count} queued"
-                            else                                -> "Download All Liked Media"
-                        },
-                        color = Color.White, fontSize = 13.sp, textAlign = TextAlign.Center
-                    )
-                    if (progBsky?.isRunning == true) {
-                        IconButton(onClick = onCancelDownload, modifier = Modifier.align(Alignment.CenterEnd).size(40.dp)) {
-                            Icon(Icons.Default.Close, contentDescription = "Cancel", tint = DimGray, modifier = Modifier.size(18.dp))
-                        }
-                    }
-                }
-            }
-            if (liquidGlass) {
-                LiquidGlassSurface(Modifier.fillMaxWidth().height(44.dp), tint = dominantColor, backdrop = backdrop) { DownloadAllLikedContent() }
-            } else {
-                Box(Modifier.fillMaxWidth().height(44.dp).clip(RoundedCornerShape(14.dp)).background(Color.White.copy(0.08f))) { DownloadAllLikedContent() }
-            }
-
-            CompactRow {
-                Text("Logged in as @$bskyHandle", color = DimGray, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                Text("Logout", color = Color(0xFFEF5350), fontSize = 12.sp, fontWeight = FontWeight.Medium,
-                    modifier = Modifier.clickable(onClick = onLogoutBluesky))
-            }
-
-            // ── Live Link widget feature ──────────────────────────────
-            // Save a Twitch and/or YouTube channel URL here, then the
-            // "Create Widget" button (only enabled once at least one is
-            // saved — see the feature request) requests the resizable
-            // home-screen widget be pinned. The widget itself, and this
-            // same toggle mirrored as a row at the bottom of the AT
-            // Protocol Hub page, both read these two saved URLs and act on
-            // them identically via LiveLinkManager.
-            //
-            // Gated behind FeatureFlags.LIVE_LINK_ENABLED: the feature isn't
-            // finished yet, so it's hidden from the app for now, but every
-            // line below stays in place to resume from later.
-            if (com.mediaviewer.util.FeatureFlags.LIVE_LINK_ENABLED) {
-            SectionDivider("Live Link")
-            var twitchField by remember(liveTwitchUrl) { mutableStateOf(liveTwitchUrl.orEmpty()) }
-            var youtubeField by remember(liveYoutubeUrl) { mutableStateOf(liveYoutubeUrl.orEmpty()) }
-            OutlinedTextField(value = twitchField, onValueChange = { twitchField = it },
-                label = { Text("Twitch channel URL", fontSize = 12.sp) },
-                singleLine = true, modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { onSaveLiveTwitchUrl(twitchField) }),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = Color.White, unfocusedTextColor = Color.White,
-                    focusedBorderColor = dominantColor, unfocusedBorderColor = DimGray,
-                    cursorColor = dominantColor, focusedLabelColor = dominantColor, unfocusedLabelColor = DimGray
-                )
-            )
-            Spacer(Modifier.height(6.dp))
-            OutlinedTextField(value = youtubeField, onValueChange = { youtubeField = it },
-                label = { Text("YouTube channel URL", fontSize = 12.sp) },
-                singleLine = true, modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { onSaveLiveYoutubeUrl(youtubeField) }),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = Color.White, unfocusedTextColor = Color.White,
-                    focusedBorderColor = dominantColor, unfocusedBorderColor = DimGray,
-                    cursorColor = dominantColor, focusedLabelColor = dominantColor, unfocusedLabelColor = DimGray
-                )
-            )
-            Spacer(Modifier.height(8.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                @Composable
-                fun SaveLinksBubbleContent() {
-                    Box(Modifier.fillMaxSize().clickable {
-                        onSaveLiveTwitchUrl(twitchField)
-                        onSaveLiveYoutubeUrl(youtubeField)
-                    }, contentAlignment = Alignment.Center) {
-                        Text("Save Links", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                    }
-                }
-                val widgetEnabled = twitchField.isNotBlank() || youtubeField.isNotBlank() ||
-                    !liveTwitchUrl.isNullOrBlank() || !liveYoutubeUrl.isNullOrBlank()
-                @Composable
-                fun CreateWidgetBubbleContent() {
-                    Box(
-                        Modifier.fillMaxSize().alpha(if (widgetEnabled) 1f else 0.4f)
-                            .clickable(enabled = widgetEnabled, onClick = onCreateLiveLinkWidget),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("Create Widget", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center)
-                    }
-                }
-                if (liquidGlass) {
-                    LiquidGlassSurface(modifier = Modifier.weight(1f).height(44.dp), tint = dominantColor, backdrop = backdrop) { SaveLinksBubbleContent() }
-                    LiquidGlassSurface(modifier = Modifier.weight(1f).height(44.dp), tint = dominantColor, backdrop = backdrop) { CreateWidgetBubbleContent() }
-                } else {
-                    Box(Modifier.weight(1f).height(44.dp).clip(RoundedCornerShape(14.dp)).background(Color.White.copy(0.08f))) { SaveLinksBubbleContent() }
-                    Box(Modifier.weight(1f).height(44.dp).clip(RoundedCornerShape(14.dp)).background(Color.White.copy(0.08f))) { CreateWidgetBubbleContent() }
-                }
-            }
-            Text(
-                "The widget can only be created once at least one link is saved.",
-                color = DimGray, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp)
-            )
-            }
-        }
-
-        // ── e621 Settings (moved from the e621 page) ─────────────────────
-        SectionDivider("e621 Settings")
-        if (e621LoggedIn) {
-            CompactRow {
-                Text("Download When Favorited", color = Color.White, fontSize = 14.sp)
-                CompactSwitch(checked = downloadOnLike, onCheckedChange = onToggleDownloadOnLike)
-            }
-
-            val progE621 = downloadProgress
-            @Composable
-            fun DownloadAllSavedContent() {
-                Box(Modifier.fillMaxSize().clickable { if (progE621?.isRunning != true) onDownloadAllLiked() }, contentAlignment = Alignment.Center) {
-                    Text(
-                        when {
-                            progE621?.isRunning == true            -> "Downloading… ${progE621.count} queued"
-                            progE621 != null && progE621.count > 0 -> "Done — ${progE621.count} queued"
-                            else                                    -> "Download All Saved Media"
-                        },
-                        color = Color.White, fontSize = 13.sp, textAlign = TextAlign.Center
-                    )
-                    if (progE621?.isRunning == true) {
-                        IconButton(onClick = onCancelDownload, modifier = Modifier.align(Alignment.CenterEnd).size(40.dp)) {
-                            Icon(Icons.Default.Close, contentDescription = "Cancel", tint = DimGray, modifier = Modifier.size(18.dp))
-                        }
-                    }
-                }
-            }
-            if (liquidGlass) {
-                LiquidGlassSurface(Modifier.fillMaxWidth().height(44.dp), tint = dominantColor, backdrop = backdrop) { DownloadAllSavedContent() }
-            } else {
-                Box(Modifier.fillMaxWidth().height(44.dp).clip(RoundedCornerShape(14.dp)).background(Color.White.copy(0.08f))) { DownloadAllSavedContent() }
-            }
-
-            CompactRow {
-                Text("Logged in as @$e621Username", color = DimGray, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                Text("Logout", color = Color(0xFFEF5350), fontSize = 12.sp, fontWeight = FontWeight.Medium,
-                    modifier = Modifier.clickable(onClick = onLogoutE621))
-            }
-        } else {
-            // Item 14: e621 sign-in itself now lives in Settings too — used
-            // to be the whole point of the standalone e621 page, which is
-            // gone now that the Hub's page-switcher (Settings/AT Protocol/
-            // e621 chips) has been replaced by the More button.
-            var e621SignInUser by remember { mutableStateOf("") }
-            var e621SignInKey by remember { mutableStateOf("") }
-            OutlinedTextField(value = e621SignInUser, onValueChange = { e621SignInUser = it },
-                placeholder = { Text("Username", color = DimGray) },
-                singleLine = true, colors = fieldColors(), modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(value = e621SignInKey, onValueChange = { e621SignInKey = it },
-                placeholder = { Text("API Key", color = DimGray) },
-                singleLine = true, visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
-                colors = fieldColors(), modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(8.dp))
-            @Composable
-            fun SignInE621Content() {
-                Box(Modifier.fillMaxSize().clickable(enabled = e621SignInUser.isNotBlank() && e621SignInKey.isNotBlank()) {
-                    onSaveE621Credentials(e621SignInUser, e621SignInKey)
-                }, contentAlignment = Alignment.Center) {
-                    Text("Sign in to e621", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                }
-            }
-            if (liquidGlass) {
-                LiquidGlassSurface(Modifier.fillMaxWidth().height(44.dp), tint = dominantColor, backdrop = backdrop) { SignInE621Content() }
-            } else {
-                Box(Modifier.fillMaxWidth().height(44.dp).clip(RoundedCornerShape(14.dp)).background(Color.White.copy(0.08f))) { SignInE621Content() }
-            }
-        }
-        // ── AI Tagging (this session) ─────────────────────────────────────
-        // Available in both AT Protocol and e621 modes — whichever is
-        // currently logged in is what startTaggingAllLiked() reads.
-        if (bskyLoggedIn || e621LoggedIn) {
-            SectionDivider("AI Tagging")
-
-            // Item 1 (this session): "Locally Tag All Liked Posts" used to be
-            // the top row *inside* the AI Tagging glass bubble below,
-            // squeezed in above a divider like it was just one more setting.
-            // It's the main action of this whole section, so it now gets its
-            // own full standalone button — same 44dp-tall single-purpose
-            // glass bubble every other primary action in Settings uses (e.g.
-            // "Download All Liked Media" above), not a row buried inside a
-            // taller bubble.
-            val tagAllShape = RoundedCornerShape(14.dp)
-            @Composable
-            fun LocallyTagAllLikedContent() {
-                Box(
-                    Modifier.fillMaxWidth().height(44.dp)
-                        .clickable(enabled = !taggingRunning) { onLocallyTagAllLiked() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        when {
-                            taggingRunning -> "Tagging… $taggingScanned scanned"
-                            taggingScanned > 0 -> "Locally Tag All Liked Posts — $taggingTagged tagged"
-                            else -> "Locally Tag All Liked Posts"
-                        },
-                        color = Color.White, fontSize = 13.sp, textAlign = TextAlign.Center
-                    )
-                }
-            }
-            if (liquidGlass) {
-                LiquidGlassSurface(modifier = Modifier.fillMaxWidth(), shape = tagAllShape, tint = dominantColor, backdrop = backdrop) { LocallyTagAllLikedContent() }
-            } else {
-                Box(Modifier.fillMaxWidth().clip(tagAllShape).background(Color.White.copy(0.08f))) { LocallyTagAllLikedContent() }
-            }
-
-            val aiShape = RoundedCornerShape(14.dp)
-            // Item 5: tap-to-arm confirmation for the destructive delete
-            // row below — same lightweight pattern as FeedResultRow's
-            // "Add" -> "Added" swap rather than a separate AlertDialog,
-            // so a stray tap can't wipe the whole dataset by accident but
-            // confirming doesn't need a whole new modal. Resets back to
-            // the normal label if left armed and untouched.
-            var confirmingDelete by remember { mutableStateOf(false) }
-            LaunchedEffect(confirmingDelete) {
-                if (confirmingDelete) {
-                    kotlinx.coroutines.delay(3000)
-                    confirmingDelete = false
-                }
-            }
-            @Composable
-            fun AiTaggingBubbleContent() {
-                Column(Modifier.fillMaxWidth()) {
-                    CompactRow {
-                        Text("Tag Post When Liked", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f).padding(end = 12.dp))
-                        CompactSwitch(checked = tagPostWhenLiked, onCheckedChange = onToggleTagPostWhenLiked)
-                    }
-                    // Item 2 (this session): the prefetch-depth slider that
-                    // used to live here is gone — it barely moved the needle
-                    // on real-world tagging speed (bottlenecked on inference,
-                    // not fetch/decode) but was one more thing to explain and
-                    // tune, so it's now just hardcoded to 3 (its own former
-                    // default) — see MainViewModel.taggingPrefetchDepth.
-                    HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
-                    // Item 5: lets the person wipe the tagged-post dataset
-                    // and start over, instead of only ever being able to
-                    // add to it.
-                    Box(
-                        Modifier.fillMaxWidth().height(44.dp)
-                            .clickable(enabled = !taggingRunning) {
-                                if (confirmingDelete) {
-                                    confirmingDelete = false
-                                    onDeleteTaggedDatabase()
-                                } else {
-                                    confirmingDelete = true
-                                }
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            if (confirmingDelete) "Tap again to confirm delete" else "Delete Tagged Post Database",
-                            color = if (confirmingDelete) Color(0xFFEF5350) else Color(0xFFEF5350).copy(alpha = 0.85f),
-                            fontSize = 13.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center
-                        )
-                    }
-                }
-            }
-            if (liquidGlass) {
-                LiquidGlassSurface(modifier = Modifier.fillMaxWidth(), shape = aiShape, tint = dominantColor, backdrop = backdrop) { AiTaggingBubbleContent() }
-            } else {
-                Box(Modifier.fillMaxWidth().clip(aiShape).background(Color.White.copy(0.04f))) { AiTaggingBubbleContent() }
-            }
-
-            // ── Import/Export (item 4) ──────────────────────────────────
-            // "Export" first (get your own data out) then "Import" (bring
-            // someone else's in) — a person is far more likely to reach for
-            // Export first the very first time they notice this row (to
-            // back their own tagging up), so it leads.
-            var showExportNameDialog by remember { mutableStateOf(false) }
-            var pendingExportName by remember { mutableStateOf("") }
-            val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
-                if (uri != null) onExportDataset(pendingExportName, uri)
-            }
-            val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-                if (uri != null) onImportDataset(uri)
-            }
-
-            val exportShape = RoundedCornerShape(topStart = 14.dp, bottomStart = 14.dp, topEnd = 3.dp, bottomEnd = 3.dp)
-            val importShape = RoundedCornerShape(topStart = 3.dp, bottomStart = 3.dp, topEnd = 14.dp, bottomEnd = 14.dp)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                @Composable
-                fun ExportBubbleContent() {
-                    Box(
-                        Modifier.fillMaxSize().clickable {
-                            pendingExportName = ""
-                            showExportNameDialog = true
-                        },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("Export", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                    }
-                }
-                @Composable
-                fun ImportBubbleContent() {
-                    Box(
-                        Modifier.fillMaxSize().clickable { importLauncher.launch(arrayOf("application/json")) },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("Import", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                    }
-                }
-                if (liquidGlass) {
-                    LiquidGlassSurface(modifier = Modifier.weight(1f).height(44.dp), shape = exportShape, tint = dominantColor, backdrop = backdrop) { ExportBubbleContent() }
-                    LiquidGlassSurface(modifier = Modifier.weight(1f).height(44.dp), shape = importShape, tint = dominantColor, backdrop = backdrop) { ImportBubbleContent() }
-                } else {
-                    Box(Modifier.weight(1f).height(44.dp).clip(exportShape).background(Color.White.copy(0.08f))) { ExportBubbleContent() }
-                    Box(Modifier.weight(1f).height(44.dp).clip(importShape).background(Color.White.copy(0.08f))) { ImportBubbleContent() }
-                }
-            }
-
-            if (showExportNameDialog) {
-                ExportDatasetNameDialog(
-                    liquidGlass = liquidGlass, dominantColor = dominantColor, backdrop = backdrop,
-                    onConfirm = { name ->
-                        pendingExportName = name
-                        showExportNameDialog = false
-                        val fileSafeName = name.ifBlank { "dataset" }.replace(Regex("[^A-Za-z0-9 _-]"), "").ifBlank { "dataset" }
-                        exportLauncher.launch("$fileSafeName.json")
-                    },
-                    onDismiss = { showExportNameDialog = false }
-                )
-            }
-
-            // Imported-datasets list — every dataset someone else exported
-            // and this device has imported, each removable independently of
-            // every other one (including the local on-device dataset, which
-            // isn't in this list at all — see TagDatabase's `datasets` table
-            // doc comment).
-            if (importedDatasets.isNotEmpty()) {
-                val listShape = RoundedCornerShape(14.dp)
-                @Composable
-                fun ImportedDatasetsListContent() {
-                    Column(Modifier.fillMaxWidth()) {
-                        importedDatasets.forEachIndexed { index, dataset ->
-                            if (index > 0) HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
-                            CompactRow {
-                                Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                                    Text(dataset.name, color = Color.White, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    Text(
-                                        "${dataset.postCount} post${if (dataset.postCount == 1) "" else "s"}",
-                                        color = DimGray, fontSize = 11.sp
-                                    )
-                                }
-                                Box(
-                                    Modifier.size(28.dp).clip(CircleShape).clickable { onDeleteImportedDataset(dataset.id) },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(Icons.Default.Close, contentDescription = "Remove ${dataset.name}", tint = DimGray, modifier = Modifier.size(16.dp))
-                                }
-                            }
-                        }
-                    }
-                }
-                if (liquidGlass) {
-                    LiquidGlassSurface(modifier = Modifier.fillMaxWidth(), shape = listShape, tint = dominantColor, backdrop = backdrop) { ImportedDatasetsListContent() }
-                } else {
-                    Box(Modifier.fillMaxWidth().clip(listShape).background(Color.White.copy(0.04f))) { ImportedDatasetsListContent() }
-                }
-            }
-        }
-
-        Spacer(Modifier.height(16.dp))
     }
 }
 
@@ -1379,6 +613,11 @@ private fun AtProtocolPageContent(
     // Item 14: e621's Hot/Favorites/Following/tag-search quick access,
     // folded in here from the removed standalone e621 page — shown only
     // once logged in (login itself now lives in Settings).
+    // Multiple accounts: every other signed-in AT Protocol account, for the
+    // "Switch Accounts" row at the very bottom of this page.
+    otherAccounts: List<com.mediaviewer.util.StoredBskyAccount> = emptyList(),
+    showSwitchAccountsRow: Boolean = true,
+    onSwitchAccount: (String) -> Unit = {},
     e621LoggedIn: Boolean = false,
     e621SearchTags: String = "",
     onOpenE621Hot: () -> Unit = {},
@@ -1881,6 +1120,49 @@ private fun AtProtocolPageContent(
             }
         }
         }
+
+        // ── Switch Accounts — same avatar-row look as Mutuals, at the very
+        // bottom of the Hub. Only present once another AT Protocol account is
+        // signed in (and the person hasn't turned it off in Settings). Tapping
+        // an account switches to it straight away; the whole app refreshes.
+        if (showSwitchAccountsRow && otherAccounts.isNotEmpty()) {
+            Spacer(Modifier.height(14.dp))
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+                Text("Switch Accounts", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 10.dp))
+                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                otherAccounts.forEach { account ->
+                    val avatarShape = CircleShape
+                    Column(
+                        Modifier.width(60.dp).clickable { onSwitchAccount(account.did) },
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Box(
+                            Modifier.size(52.dp)
+                                .then(if (liquidGlass) Modifier.glassPanel(true, shape = avatarShape, tint = dominantColor) else Modifier.clip(avatarShape).background(Color.White.copy(0.1f))),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (account.avatarUrl != null) {
+                                AsyncImage(model = account.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                                    modifier = Modifier.size(46.dp).clip(avatarShape))
+                            } else {
+                                Box(Modifier.size(46.dp).clip(avatarShape).background(Color.White.copy(0.15f)))
+                            }
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(account.displayName.ifBlank { account.handle }, color = Color.White, fontSize = 10.sp, lineHeight = 11.sp,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        }
         Spacer(Modifier.height(8.dp))
     }
 
@@ -2365,6 +1647,45 @@ private fun HubUploadBubble(
     }
 }
 
+/** The "Settings / Credits" tab switch at the right end of the Hub's bottom
+ *  bar (visible only on the Settings page): a glass pill split into two
+ *  segments, the selected one filled in. */
+@Composable
+private fun SettingsCreditsSwitch(
+    selected: SettingsTab, onSelect: (SettingsTab) -> Unit,
+    liquidGlass: Boolean, tint: Color, height: Dp, modifier: Modifier = Modifier
+) {
+    val tap = rememberHapticTap()
+    val shape = RoundedCornerShape(20.dp)
+    @Composable
+    fun Segments() {
+        Row(Modifier.padding(3.dp), verticalAlignment = Alignment.CenterVertically) {
+            listOf(SettingsTab.SETTINGS to "Settings", SettingsTab.CREDITS to "Credits").forEach { (tab, label) ->
+                val isSelected = tab == selected
+                Box(
+                    Modifier
+                        .height(height - 6.dp)
+                        .clip(RoundedCornerShape(17.dp))
+                        .background(if (isSelected) Color.White.copy(alpha = 0.18f) else Color.Transparent)
+                        .clickable { if (!isSelected) { tap(); onSelect(tab) } }
+                        .padding(horizontal = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        label, color = if (isSelected) Color.White else DimGray,
+                        fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false
+                    )
+                }
+            }
+        }
+    }
+    if (liquidGlass) {
+        LiquidGlassSurface(modifier.height(height), shape = shape, tint = tint, backdrop = null) { Segments() }
+    } else {
+        Box(modifier.height(height).clip(shape).background(Color.White.copy(0.10f))) { Segments() }
+    }
+}
+
 /** Bottom-of-page control group that replaces the removed swipe-up-to-feed
  *  gesture: a centered "Return to Feed" glass pill, with the Hub's More
  *  button (item 14 — Settings + Refresh, see [HubMoreButton]) at its left
@@ -2408,7 +1729,11 @@ private fun ReturnToFeedBar(
     // Fix (per feedback): forwarded to HubMoreButton — true while the Hub
     // is showing the Settings page, turning the More button into a
     // right-arrow "back to Hub" button.
-    settingsOpen: Boolean = false
+    settingsOpen: Boolean = false,
+    // Settings/Credits switch shown at the right end of the bar while the
+    // Settings page is open.
+    settingsTab: SettingsTab = SettingsTab.SETTINGS,
+    onSettingsTabChange: (SettingsTab) -> Unit = {}
 ) {
     val barHeight = 40.dp
     val shape = RoundedCornerShape(20.dp)
@@ -2471,6 +1796,13 @@ private fun ReturnToFeedBar(
             backdrop = backdrop, menuBackdrop = uploadBackdrop,
             onOpenComposePost = onOpenComposePost
         )
+        }
+        if (settingsOpen) {
+            SettingsCreditsSwitch(
+                selected = settingsTab, onSelect = onSettingsTabChange,
+                liquidGlass = liquidGlass, tint = tint, height = barHeight,
+                modifier = Modifier.align(Alignment.CenterEnd)
+            )
         }
         // Item 14: always shown, in the same left slot, whether or not the
         // pill/upload bubble above are — Settings must stay reachable even
@@ -2826,7 +2158,7 @@ private fun HubChip(
 }
 
 @Composable
-private fun fieldColors() = OutlinedTextFieldDefaults.colors(
+internal fun fieldColors() = OutlinedTextFieldDefaults.colors(
     focusedTextColor = Color.White, unfocusedTextColor = Color.White,
     focusedBorderColor = Color.White.copy(0.3f), unfocusedBorderColor = Color.White.copy(0.1f),
     cursorColor = Color.White, focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent
@@ -2840,7 +2172,7 @@ private fun fieldColors() = OutlinedTextFieldDefaults.colors(
  *  ReplyDialog's own scaffold rather than introducing a different dialog
  *  shape into the app. */
 @Composable
-private fun ExportDatasetNameDialog(
+internal fun ExportDatasetNameDialog(
     liquidGlass: Boolean,
     dominantColor: Color,
     backdrop: GlassBackdrop?,

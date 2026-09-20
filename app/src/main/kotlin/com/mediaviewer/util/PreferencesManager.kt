@@ -146,7 +146,46 @@ object PrefKeys {
     // of the scan (manual retry from Settings) doesn't have to start over
     // from scratch and re-spend PDS calls on accounts it already checked.
     val FOLLOWER_SCAN_CURSOR       = stringPreferencesKey("follower_scan_cursor")
+
+    // ── Multiple AT Protocol accounts ────────────────────────────────────
+    // The ACTIVE account's session always lives in the BSKY_* keys at the top
+    // of this object, exactly as it did before multi-account support existed
+    // — every existing reader (workers, widget, ViewModel init) keeps working
+    // untouched. This key holds only the OTHER, signed-in-but-not-active
+    // accounts, as a JSON array of [StoredBskyAccount]. Switching accounts
+    // swaps one of these with the active session (see
+    // PreferencesManager.switchActiveBskyAccount).
+    val BSKY_OTHER_ACCOUNTS_JSON   = stringPreferencesKey("bsky_other_accounts_json")
+    // Whether the Hub shows its "Switch Accounts" row once at least one other
+    // account is signed in. Defaults ON.
+    val SHOW_SWITCH_ACCOUNTS_ROW   = booleanPreferencesKey("show_switch_accounts_row")
+    // Per-account local state (history, subscriptions, Hub caches, ...) is
+    // parked under "bsky_acct_state_<did>" while that account is inactive.
+    const val BSKY_ACCOUNT_STATE_PREFIX = "bsky_acct_state_"
 }
+
+/** One signed-in AT Protocol account. [displayName]/[avatarUrl] are cached
+ *  purely so the Settings rows and the Hub's "Switch Accounts" row can show
+ *  the account without a network round trip. */
+data class StoredBskyAccount(
+    val did: String = "",
+    val handle: String = "",
+    val displayName: String = "",
+    val avatarUrl: String? = null,
+    val accessJwt: String = "",
+    val refreshJwt: String = ""
+)
+
+/** Local, per-account state that must not leak from one AT Protocol account
+ *  to another. Everything here is either derived from the account's own
+ *  data (Hub caches, follower scan progress) or is that account's own
+ *  personal record (history, subscriptions). */
+private data class AccountStateSnapshot(
+    val strings: Map<String, String> = emptyMap(),
+    val stringSets: Map<String, Set<String>> = emptyMap(),
+    val booleans: Map<String, Boolean> = emptyMap(),
+    val longs: Map<String, Long> = emptyMap()
+)
 
 
 class PreferencesManager(private val context: Context) {
@@ -202,6 +241,8 @@ class PreferencesManager(private val context: Context) {
     val followerScanCompleted: Flow<Boolean>     = context.dataStore.data.map { it[PrefKeys.FOLLOWER_SCAN_COMPLETED] ?: false }
     val followerScanLastRunMs: Flow<Long>        = context.dataStore.data.map { it[PrefKeys.FOLLOWER_SCAN_LAST_RUN_MS] ?: 0L }
     val followerScanCursor: Flow<String?>        = context.dataStore.data.map { it[PrefKeys.FOLLOWER_SCAN_CURSOR] }
+    val otherBskyAccounts: Flow<List<StoredBskyAccount>> = context.dataStore.data.map { parseAccounts(it[PrefKeys.BSKY_OTHER_ACCOUNTS_JSON]) }
+    val showSwitchAccountsRow: Flow<Boolean>     = context.dataStore.data.map { it[PrefKeys.SHOW_SWITCH_ACCOUNTS_ROW] ?: true }
     // Phase 4: on-device translation toggle + preferred target language (BCP-47 tag).
     // Defaults to the device's own language so a fresh install "just works" without
     // the user having to hunt for the setting first.
@@ -513,5 +554,131 @@ class PreferencesManager(private val context: Context) {
         context.dataStore.edit { prefs ->
             if (cursor == null) prefs.remove(PrefKeys.FOLLOWER_SCAN_CURSOR) else prefs[PrefKeys.FOLLOWER_SCAN_CURSOR] = cursor
         }
+    }
+
+    // ── Multiple AT Protocol accounts ────────────────────────────────────
+
+    private val accountGson = com.google.gson.Gson()
+
+    private fun parseAccounts(json: String?): List<StoredBskyAccount> {
+        if (json.isNullOrBlank()) return emptyList()
+        return try {
+            val type = object : com.google.gson.reflect.TypeToken<List<StoredBskyAccount>>() {}.type
+            (accountGson.fromJson<List<StoredBskyAccount>>(json, type) ?: emptyList())
+                .filter { it.did.isNotBlank() }
+        } catch (_: Exception) { emptyList() }
+    }
+
+    suspend fun setShowSwitchAccountsRow(enabled: Boolean) {
+        context.dataStore.edit { prefs -> prefs[PrefKeys.SHOW_SWITCH_ACCOUNTS_ROW] = enabled }
+    }
+
+    /** Adds (or replaces, if the DID is already present) a signed-in-but-not-
+     *  active account. New accounts go to the end of the list. */
+    suspend fun addOtherBskyAccount(account: StoredBskyAccount) {
+        context.dataStore.edit { prefs ->
+            val current = parseAccounts(prefs[PrefKeys.BSKY_OTHER_ACCOUNTS_JSON])
+            val index = current.indexOfFirst { it.did == account.did }
+            val updated = if (index >= 0) current.toMutableList().also { it[index] = account } else current + account
+            prefs[PrefKeys.BSKY_OTHER_ACCOUNTS_JSON] = accountGson.toJson(updated)
+        }
+    }
+
+    /** Signs an inactive account out: drops it from the list and discards the
+     *  local state parked for it. */
+    suspend fun removeOtherBskyAccount(did: String) {
+        context.dataStore.edit { prefs ->
+            val current = parseAccounts(prefs[PrefKeys.BSKY_OTHER_ACCOUNTS_JSON])
+            prefs[PrefKeys.BSKY_OTHER_ACCOUNTS_JSON] = accountGson.toJson(current.filter { it.did != did })
+            prefs.remove(stateKeyFor(did))
+        }
+    }
+
+    /** Makes [target] the active account.
+     *
+     *  Everything happens inside one DataStore transaction so a crash halfway
+     *  can never leave the active session pointing at one account and the
+     *  parked per-account state at another:
+     *   1. The outgoing account's per-account state is parked under its DID.
+     *   2. The per-account keys are cleared, then [target]'s parked state (if
+     *      any) is restored.
+     *   3. The BSKY_* session keys are pointed at [target].
+     *   4. [target] leaves the "other accounts" list. When [keepOutgoing] is
+     *      true, the outgoing account takes [target]'s slot in that list —
+     *      that swap is what lets the person flip back and forth. When it's
+     *      false (the outgoing account was logged out), it's simply dropped.
+     *
+     *  [outgoing] is null when there was no active session to hand over. */
+    suspend fun switchActiveBskyAccount(outgoing: StoredBskyAccount?, target: StoredBskyAccount, keepOutgoing: Boolean) {
+        context.dataStore.edit { prefs ->
+            // 1 + 2: park the outgoing account's state, restore the target's.
+            if (outgoing != null && keepOutgoing) {
+                prefs[stateKeyFor(outgoing.did)] = accountGson.toJson(snapshotAccountState(prefs))
+            }
+            if (outgoing != null && !keepOutgoing) prefs.remove(stateKeyFor(outgoing.did))
+            clearAccountState(prefs)
+            val parked = prefs[stateKeyFor(target.did)]
+            if (!parked.isNullOrBlank()) {
+                try {
+                    restoreAccountState(prefs, accountGson.fromJson(parked, AccountStateSnapshot::class.java))
+                } catch (_: Exception) { /* corrupt snapshot — start the account fresh */ }
+            }
+            prefs.remove(stateKeyFor(target.did))
+
+            // 3: the active session.
+            prefs[PrefKeys.BSKY_ACCESS_JWT]  = target.accessJwt
+            prefs[PrefKeys.BSKY_REFRESH_JWT] = target.refreshJwt
+            prefs[PrefKeys.BSKY_DID]         = target.did
+            prefs[PrefKeys.BSKY_HANDLE]      = target.handle
+
+            // 4: the account list.
+            val current = parseAccounts(prefs[PrefKeys.BSKY_OTHER_ACCOUNTS_JSON])
+            val slot = current.indexOfFirst { it.did == target.did }
+            val updated = current.toMutableList()
+            if (slot >= 0) {
+                if (outgoing != null && keepOutgoing) updated[slot] = outgoing else updated.removeAt(slot)
+            } else if (outgoing != null && keepOutgoing) {
+                updated.add(0, outgoing)
+            }
+            prefs[PrefKeys.BSKY_OTHER_ACCOUNTS_JSON] = accountGson.toJson(updated)
+        }
+    }
+
+    private fun stateKeyFor(did: String) = stringPreferencesKey(PrefKeys.BSKY_ACCOUNT_STATE_PREFIX + did)
+
+    private val accountStringKeys = listOf(
+        PrefKeys.HISTORY_JSON, PrefKeys.HUB_REVIEWS_CACHE_JSON, PrefKeys.HUB_BLOGS_CACHE_JSON,
+        PrefKeys.HUB_MUTUALS_CACHE_JSON, PrefKeys.PROFILE_TAB_CACHE_JSON, PrefKeys.LAST_FEED_URI,
+        PrefKeys.FOLLOWER_SCAN_CURSOR, PrefKeys.SELF_AVATAR_URL_CACHE
+    )
+    private val accountStringSetKeys = listOf(PrefKeys.SUBSCRIBED_REVIEW_DIDS, PrefKeys.SUBSCRIBED_BLOG_DIDS)
+    private val accountBooleanKeys = listOf(PrefKeys.FOLLOWER_SCAN_COMPLETED)
+    private val accountLongKeys = listOf(PrefKeys.HUB_CACHE_HYDRATED_AT, PrefKeys.FOLLOWER_SCAN_LAST_RUN_MS)
+
+    private fun snapshotAccountState(prefs: Preferences): AccountStateSnapshot {
+        val strings = HashMap<String, String>()
+        accountStringKeys.forEach { key -> prefs[key]?.let { strings[key.name] = it } }
+        val sets = HashMap<String, Set<String>>()
+        accountStringSetKeys.forEach { key -> prefs[key]?.let { sets[key.name] = it } }
+        val booleans = HashMap<String, Boolean>()
+        accountBooleanKeys.forEach { key -> prefs[key]?.let { booleans[key.name] = it } }
+        val longs = HashMap<String, Long>()
+        accountLongKeys.forEach { key -> prefs[key]?.let { longs[key.name] = it } }
+        return AccountStateSnapshot(strings, sets, booleans, longs)
+    }
+
+    private fun clearAccountState(prefs: MutablePreferences) {
+        accountStringKeys.forEach { prefs.remove(it) }
+        accountStringSetKeys.forEach { prefs.remove(it) }
+        accountBooleanKeys.forEach { prefs.remove(it) }
+        accountLongKeys.forEach { prefs.remove(it) }
+    }
+
+    private fun restoreAccountState(prefs: MutablePreferences, snapshot: AccountStateSnapshot?) {
+        if (snapshot == null) return
+        accountStringKeys.forEach { key -> snapshot.strings[key.name]?.let { prefs[key] = it } }
+        accountStringSetKeys.forEach { key -> snapshot.stringSets[key.name]?.let { prefs[key] = it } }
+        accountBooleanKeys.forEach { key -> snapshot.booleans[key.name]?.let { prefs[key] = it } }
+        accountLongKeys.forEach { key -> snapshot.longs[key.name]?.let { prefs[key] = it } }
     }
 }

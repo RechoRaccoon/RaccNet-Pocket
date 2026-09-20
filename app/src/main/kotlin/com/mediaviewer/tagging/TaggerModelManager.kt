@@ -1,7 +1,9 @@
 package com.mediaviewer.tagging
 
 import android.content.Context
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -59,10 +61,19 @@ class TaggerModelManager(private val context: Context) {
         withContext(Dispatchers.IO) {
             try {
                 onProgress(State.Downloading(0, 0))
-                downloadTo(TAGS_URL, tagsFile) { done, total -> onProgress(State.Downloading(done, total)) }
-                downloadTo(MODEL_URL, modelFile) { done, total -> onProgress(State.Downloading(done, total)) }
+                // ensureActive() on every chunk is what makes cancelling the
+                // download (closing the progress page) actually stop the
+                // transfer — the read loop below is plain blocking I/O and
+                // would otherwise run to completion regardless.
+                downloadTo(TAGS_URL, tagsFile) { done, total -> ensureActive(); onProgress(State.Downloading(done, total)) }
+                downloadTo(MODEL_URL, modelFile) { done, total -> ensureActive(); onProgress(State.Downloading(done, total)) }
                 if (isReady()) onProgress(State.Ready)
                 else onProgress(State.Failed("Download finished but files look incomplete"))
+            } catch (e: CancellationException) {
+                modelFile.delete(); tagsFile.delete()
+                File(modelFile.parentFile, modelFile.name + ".part").delete()
+                File(tagsFile.parentFile, tagsFile.name + ".part").delete()
+                throw e
             } catch (e: Exception) {
                 modelFile.delete(); tagsFile.delete()
                 onProgress(State.Failed(e.message ?: "Download failed"))

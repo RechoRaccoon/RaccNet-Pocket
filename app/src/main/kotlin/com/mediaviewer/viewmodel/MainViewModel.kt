@@ -24,6 +24,7 @@ import com.mediaviewer.tagging.TaggerModelManager
 import com.mediaviewer.tagging.TaggingRepository
 import com.mediaviewer.tagging.TagSuggestionProvider
 import com.mediaviewer.util.PreferencesManager
+import com.mediaviewer.util.StoredBskyAccount
 import com.mediaviewer.worker.DownloadWorker
 import com.mediaviewer.worker.GifDownloadWorker
 import com.mediaviewer.worker.urlToDownloadInfo
@@ -2001,6 +2002,14 @@ _bskyDid.value          = session.did
     }
 
     fun logoutBluesky() {
+        // Signed in to more than one AT Protocol account: logging out of the
+        // active one hands the session to the next account instead of
+        // leaving the app signed out with accounts still sitting unused.
+        val next = _otherBskyAccounts.value.firstOrNull()
+        if (next != null) {
+            switchBskyAccountInternal(next, keepOutgoing = false)
+            return
+        }
         viewModelScope.launch {
             prefs.clearBskySession()
             bskyToken = ""; bskyRefreshToken = ""; _bskyDid.value = ""; bskyHandle = ""
@@ -2036,6 +2045,120 @@ _bskyDid.value          = session.did
         }
     }
 
+    // ── Multiple AT Protocol accounts ────────────────────────────────────────
+    // The active account is everything above (bskyToken/_bskyDid/bskyHandle +
+    // the BSKY_* prefs). Every other signed-in account is parked in
+    // PreferencesManager's "other accounts" list with its own session, and
+    // switching swaps one for the other — see PreferencesManager.
+    // switchActiveBskyAccount and RestartActivity for why the switch ends in
+    // a full app restart.
+
+    private val _otherBskyAccounts = MutableStateFlow<List<StoredBskyAccount>>(emptyList())
+    val otherBskyAccounts: StateFlow<List<StoredBskyAccount>> = _otherBskyAccounts
+
+    private val _showSwitchAccountsRow = MutableStateFlow(true)
+    val showSwitchAccountsRow: StateFlow<Boolean> = _showSwitchAccountsRow
+
+    private val _accountSwitching = MutableStateFlow(false)
+    val accountSwitching: StateFlow<Boolean> = _accountSwitching
+
+    // Declared right after the flows they fill (rather than inside the big
+    // init{} far above) so the collectors can never run before the backing
+    // fields exist.
+    init {
+        viewModelScope.launch { prefs.otherBskyAccounts.collect { _otherBskyAccounts.value = it } }
+        viewModelScope.launch { prefs.showSwitchAccountsRow.collect { _showSwitchAccountsRow.value = it } }
+    }
+
+    fun setShowSwitchAccountsRow(enabled: Boolean) {
+        _showSwitchAccountsRow.value = enabled
+        viewModelScope.launch { prefs.setShowSwitchAccountsRow(enabled) }
+    }
+
+    /** Signs in to another AT Protocol account WITHOUT making it the active
+     *  one. [onResult] is called on the main thread with null on success, or
+     *  a message to show under the row on failure. */
+    fun addBskyAccount(identifier: String, password: String, onResult: (String?) -> Unit) {
+        val id = identifier.trim().removePrefix("@")
+        if (id.isBlank() || password.isBlank()) { onResult("Enter a handle and app password"); return }
+        viewModelScope.launch {
+            val session = bskyRepo.login(id, password).getOrElse {
+                onResult(it.message ?: "Login failed")
+                return@launch
+            }
+            if (session.did == _bskyDid.value || _otherBskyAccounts.value.any { it.did == session.did }) {
+                onResult("@${session.handle} is already added")
+                return@launch
+            }
+            // Best-effort — only used to show the account nicely in lists.
+            val profile = bskyRepo.getFullProfile(session.accessJwt, session.did).getOrNull()
+            prefs.addOtherBskyAccount(
+                StoredBskyAccount(
+                    did = session.did,
+                    handle = session.handle,
+                    displayName = profile?.author?.displayName?.takeIf { it.isNotBlank() } ?: session.handle,
+                    avatarUrl = profile?.author?.avatarUrl,
+                    accessJwt = session.accessJwt,
+                    refreshJwt = session.refreshJwt
+                )
+            )
+            onResult(null)
+        }
+    }
+
+    /** Signs an inactive account out. Nothing else is connected to an
+     *  inactive account (no polling, no background jobs), so removing its
+     *  stored session and parked state is the whole disconnect. */
+    fun removeBskyAccount(did: String) {
+        viewModelScope.launch { prefs.removeOtherBskyAccount(did) }
+    }
+
+    /** Makes [did] the active account and restarts the app. */
+    fun switchBskyAccount(did: String) {
+        val target = _otherBskyAccounts.value.firstOrNull { it.did == did } ?: return
+        switchBskyAccountInternal(target, keepOutgoing = true)
+    }
+
+    private fun switchBskyAccountInternal(target: StoredBskyAccount, keepOutgoing: Boolean) {
+        if (_accountSwitching.value) return
+        _accountSwitching.value = true
+        viewModelScope.launch {
+            // Refresh the target's session first: its access token has been
+            // sitting unused and has almost certainly expired, and doing this
+            // here means a dead session is reported now, instead of the app
+            // restarting into a signed-out state.
+            val refreshed = bskyRepo.refreshToken(target.refreshJwt).getOrNull()
+            if (refreshed == null) {
+                _errorMessage.value = "Couldn't sign in to @${target.handle}. Remove it and add it again."
+                _accountSwitching.value = false
+                return@launch
+            }
+            val freshTarget = target.copy(
+                handle = refreshed.handle.ifBlank { target.handle },
+                accessJwt = refreshed.accessJwt,
+                refreshJwt = refreshed.refreshJwt
+            )
+            val outgoing = if (_bskyLoggedIn.value && _bskyDid.value.isNotBlank()) {
+                val author = _selfProfile.value?.author
+                StoredBskyAccount(
+                    did = _bskyDid.value,
+                    handle = bskyHandle,
+                    displayName = author?.displayName?.takeIf { it.isNotBlank() } ?: bskyHandle,
+                    avatarUrl = author?.avatarUrl ?: prefs.selfAvatarUrlCache.first(),
+                    accessJwt = bskyToken,
+                    refreshJwt = bskyRefreshToken
+                )
+            } else null
+            prefs.switchActiveBskyAccount(outgoing, freshTarget, keepOutgoing)
+            prefs.setLastMode("BLUESKY")
+            // Everything is persisted (DataStore's edit{} returns only once
+            // the write is on disk) — now cold-start into the new account.
+            com.mediaviewer.RestartActivity.restartApp(getApplication<Application>())
+            // Only reached if the relaunch couldn't be started.
+            _accountSwitching.value = false
+        }
+    }
+
     fun saveE621Credentials(username: String, apiKey: String) {
         if (username.isBlank() || apiKey.isBlank()) return
         viewModelScope.launch {
@@ -2043,10 +2166,11 @@ _bskyDid.value          = session.did
             e621ApiKey   = apiKey
             prefs.saveE621Credentials(username, apiKey)
             _e621LoggedIn.value = true
-            _appMode.value = AppMode.E621
-            prefs.setLastMode("E621")
-            _screenState.value = ScreenState.FEED
-            loadE621Posts()
+            // Signing in only connects the account — it deliberately does
+            // NOT switch modes or open the feed. The e621 login page closes
+            // itself and drops the person back on Settings, where the row's
+            // button now reads "Log out"; e621 is reached from the Hub's
+            // quick-access buttons as before.
         }
     }
 
@@ -4159,6 +4283,27 @@ _bskyDid.value          = session.did
         else downloadAllE621Favorites()
     }
 
+    // Settings' Data section has one Download button per service, so each
+    // one has to download from ITS service regardless of which mode the feed
+    // happens to be in (downloadAllLiked above picks by mode, which is only
+    // right when there's a single button).
+    private val _downloadIsE621 = MutableStateFlow(false)
+    val downloadIsE621: StateFlow<Boolean> = _downloadIsE621
+
+    fun downloadAllBskyLikedMedia() {
+        if (_downloadProgress.value?.isRunning == true) return
+        cancelDownloadFlag = false
+        _downloadIsE621.value = false
+        downloadAllBskyLiked()
+    }
+
+    fun downloadAllE621SavedMedia() {
+        if (_downloadProgress.value?.isRunning == true) return
+        cancelDownloadFlag = false
+        _downloadIsE621.value = true
+        downloadAllE621Favorites()
+    }
+
     fun cancelDownloadAll() {
         cancelDownloadFlag = true
         _downloadProgress.value = _downloadProgress.value?.copy(isRunning = false)
@@ -4308,15 +4453,66 @@ _bskyDid.value          = session.did
     // banner) rather than a brand new one.
     private fun reportDatasetError(message: String) { _errorMessage.value = message }
 
+    // Whether the on-device tagging model is on disk — drives Settings'
+    // "Download On-Device Tagging Model" button ("Download" vs a grayed-out
+    // "Downloaded") and whether the tagging options beneath it appear.
+    private val _taggerModelReady = MutableStateFlow(taggingRepo.isModelReady())
+    val taggerModelReady: StateFlow<Boolean> = _taggerModelReady
+
+    private val _taggerModelDownloading = MutableStateFlow(false)
+    val taggerModelDownloading: StateFlow<Boolean> = _taggerModelDownloading
+
+    private var modelDownloadJob: Job? = null
+
     init {
         refreshTaggingCounts()
         refreshImportedDatasets()
     }
 
+    /** Settings' "Download On-Device Tagging Model" button. Opens the same
+     *  progress page the model download has always used (the tagging
+     *  overlay's "Downloading Tagging Model" card), and closes it by itself
+     *  the moment the download finishes. Closing the page early cancels the
+     *  download. A failure leaves the page open showing the error. */
+    fun downloadTaggerModel() {
+        if (_taggerModelDownloading.value || _taggerModelReady.value) return
+        _taggerModelDownloading.value = true
+        _taggingOverlayOpen.value = true
+        _taggingUiState.value = TaggingUiState(
+            scanned = _taggingUiState.value.scanned, tagged = _taggingUiState.value.tagged,
+            datasetBytes = _taggingUiState.value.datasetBytes,
+            isRunning = true, modelState = TaggerModelManager.State.Downloading(0, 0)
+        )
+        modelDownloadJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                taggingRepo.downloadModel { state ->
+                    _taggingUiState.value = _taggingUiState.value.copy(
+                        modelState = state,
+                        isRunning = state is TaggerModelManager.State.Downloading,
+                        errorMessage = (state as? TaggerModelManager.State.Failed)?.message
+                    )
+                    if (state is TaggerModelManager.State.Ready) {
+                        _taggerModelReady.value = true
+                        _taggingOverlayOpen.value = false
+                        _taggingUiState.value = _taggingUiState.value.copy(
+                            isRunning = false, modelState = TaggerModelManager.State.Ready, errorMessage = null
+                        )
+                    }
+                }
+            } finally {
+                _taggerModelDownloading.value = false
+            }
+        }
+    }
+
     private fun refreshTaggingCounts() {
         viewModelScope.launch(Dispatchers.IO) {
             val (scanned, tagged) = taggingRepo.currentCounts()
-            _hasTaggedDataset.value = scanned > 0
+            // The search page's "Tagged" tab only exists once there's at
+            // least one post that actually has tags to search — a dataset
+            // made only of posts that came back with no tags (text-only
+            // posts, say) would just be an empty tab.
+            _hasTaggedDataset.value = tagged > 0
             _taggingUiState.value = _taggingUiState.value.copy(scanned = scanned, tagged = tagged, datasetBytes = taggingRepo.datasetSizeBytes())
         }
     }
@@ -4366,7 +4562,8 @@ _bskyDid.value          = session.did
                     errorMessage = (progress.modelState as? TaggerModelManager.State.Failed)?.message,
                     currentItem = progress.currentItem
                 )
-                if (progress.scanned > 0) _hasTaggedDataset.value = true
+                if (progress.tagged > 0) _hasTaggedDataset.value = true
+                if (progress.modelState is TaggerModelManager.State.Ready) _taggerModelReady.value = true
             }
         }
     }
@@ -4492,6 +4689,10 @@ _bskyDid.value          = session.did
      *  "Tagging Complete" card without that meaning "stop", and dismissing
      *  mid-run should stop the in-flight pass. */
     fun dismissTaggingOverlay() {
+        if (_taggerModelDownloading.value) {
+            modelDownloadJob?.cancel()
+            _taggingUiState.value = _taggingUiState.value.copy(isRunning = false, modelState = TaggerModelManager.State.NotDownloaded, errorMessage = null)
+        }
         if (_taggingUiState.value.isRunning) taggingRepo.cancel()
         _taggingOverlayOpen.value = false
         // Item 2: land back on the Liked tab's default "everything, most

@@ -61,6 +61,7 @@ import com.mediaviewer.ui.QuoteRepostDialog
 import com.mediaviewer.ui.ReplyDialog
 import com.mediaviewer.ui.SearchOverlay
 import com.mediaviewer.ui.SendDmDialog
+import com.mediaviewer.ui.SettingsExtras
 import com.mediaviewer.ui.TaggingOverlay
 import com.mediaviewer.ui.theme.MediaViewerTheme
 import com.mediaviewer.viewmodel.MainViewModel
@@ -295,6 +296,13 @@ private fun AppRoot(viewModel: MainViewModel) {
     val tagSuggestions         by viewModel.tagSuggestions.collectAsState()
     val tagPostWhenLiked       by viewModel.tagPostWhenLiked.collectAsState()
     val importedDatasets       by viewModel.importedDatasets.collectAsState()
+    // Reworked Settings page
+    val otherBskyAccounts      by viewModel.otherBskyAccounts.collectAsState()
+    val showSwitchAccountsRow  by viewModel.showSwitchAccountsRow.collectAsState()
+    val accountSwitching       by viewModel.accountSwitching.collectAsState()
+    val taggerModelReady       by viewModel.taggerModelReady.collectAsState()
+    val taggerModelDownloading by viewModel.taggerModelDownloading.collectAsState()
+    val downloadIsE621         by viewModel.downloadIsE621.collectAsState()
     // Phase 4
     val translationEnabled     by viewModel.translationEnabled.collectAsState()
     val translationTargetLang  by viewModel.translationTargetLang.collectAsState()
@@ -640,7 +648,21 @@ private fun AppRoot(viewModel: MainViewModel) {
             // selecting the previous feed while in an author overlay restores scroll position
             onSelectFeed              = handleSelectFeed,
             onToggleDownloadOnLike    = viewModel::setDownloadOnLike,
-            onDownloadAllLiked        = viewModel::downloadAllLiked,
+            onDownloadAllLiked        = viewModel::downloadAllBskyLikedMedia,
+            settingsExtras            = SettingsExtras(
+                otherBskyAccounts = otherBskyAccounts,
+                showSwitchAccountsRow = showSwitchAccountsRow,
+                accountSwitching = accountSwitching,
+                taggerModelReady = taggerModelReady,
+                taggerModelDownloading = taggerModelDownloading,
+                downloadIsE621 = downloadIsE621,
+                onToggleShowSwitchAccountsRow = viewModel::setShowSwitchAccountsRow,
+                onAddBskyAccount = viewModel::addBskyAccount,
+                onSwitchBskyAccount = viewModel::switchBskyAccount,
+                onRemoveBskyAccount = viewModel::removeBskyAccount,
+                onDownloadTaggerModel = viewModel::downloadTaggerModel,
+                onDownloadAllE621Saved = viewModel::downloadAllE621SavedMedia
+            ),
             onCancelDownload          = viewModel::cancelDownloadAll,
             tagPostWhenLiked          = tagPostWhenLiked,
             onToggleTagPostWhenLiked  = viewModel::setTagPostWhenLiked,
@@ -773,7 +795,6 @@ private fun AppRoot(viewModel: MainViewModel) {
                 selfAvatarUrl      = selfProfile?.author?.avatarUrl,
                 hasTaggedDataset   = hasTaggedDataset,
                 likedTagResults    = likedTagSearchResults,
-                onStartTagging     = viewModel::startTaggingAllLiked,
                 onOpenLikedPost    = viewModel::openLikedPostFromSearch,
                 tagSuggestions     = tagSuggestions,
                 onQueryChange      = viewModel::runSearch,

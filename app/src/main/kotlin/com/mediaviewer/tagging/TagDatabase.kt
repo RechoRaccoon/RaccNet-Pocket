@@ -117,6 +117,17 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
         }
     }
 
+    /** True if this post came from an *imported* dataset (as opposed to being
+     *  tagged by this device's own model). The on-device tagger treats these
+     *  as already tagged and leaves them alone — see
+     *  [TaggingRepository.tagOnLike]. */
+    fun isInImportedDataset(postUri: String): Boolean {
+        readableDatabase.rawQuery(
+            "SELECT 1 FROM liked_media WHERE post_uri = ? AND dataset_id != ? LIMIT 1",
+            arrayOf(postUri, LOCAL_DATASET_ID)
+        ).use { return it.moveToFirst() }
+    }
+
     /** Records one post + its tags. Called once per successfully-tagged
      *  image; a post with zero tags above the confidence threshold still
      *  gets a liked_media row (so it counts as "scanned" and isn't retried
