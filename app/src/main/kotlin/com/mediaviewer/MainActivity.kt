@@ -883,6 +883,7 @@ private fun AppRoot(viewModel: MainViewModel) {
                     onToggleBlogSubscribe   = { viewModel.toggleBlogSubscription(currentProfileOverlay.author) },
                     onOpenAddTo       = viewModel::openListPickerForProfile,
                     onOpenDm          = viewModel::openDmWithProfile,
+                    onRefresh         = viewModel::refreshProfile,
                     onSelectPostKindFilter = viewModel::selectPostKindFilter,
                     onSelectReviewKindFilter = viewModel::selectReviewKindFilter,
                     pinterestThreeColumns = pinterestThreeColumns,

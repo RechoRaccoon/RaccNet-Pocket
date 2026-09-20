@@ -557,6 +557,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val author: AuthorInfo,
         val profile: ProfileData? = null,
         val loadingProfile: Boolean = true,
+        // True while a manual "Refresh" (see refreshProfile) is in flight —
+        // only drives the refresh button's spinner.
+        val refreshing: Boolean = false,
         // Item 16: this profile's live Rocksky now-playing track, if any —
         // see openProfile()'s own probe for how this is fetched.
         val nowPlaying: RockskyTrack? = null,
@@ -2462,19 +2465,39 @@ _bskyDid.value          = session.did
             }?.toMap() ?: emptyMap()
         )
 
+        launchProfileLoads(author, initialTab)
+    }
+
+    /** Every network load a profile overlay needs — the full profile, the
+     *  selected [tab]'s first page, and the Blogs/Reviews/Backlog/Vods/Music
+     *  probes. Shared by [openProfile] (fresh open) and [refreshProfile]
+     *  (reload in place). [isRefresh] skips the passive auto-subscribe, which
+     *  only makes sense the first time a profile is opened; [onProfileFetched]
+     *  fires once the full-profile request has settled either way. */
+    private fun launchProfileLoads(
+        author: AuthorInfo, tab: ProfileTab,
+        isRefresh: Boolean = false, onProfileFetched: () -> Unit = {}
+    ) {
         viewModelScope.launch(Dispatchers.IO) {
             var result = bskyRepo.getFullProfile(bskyToken, author.did)
             if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
                 if (refreshBskyTokenIfPossible()) result = bskyRepo.getFullProfile(bskyToken, author.did)
             }
-            result.onSuccess { data ->
-                _profileOverlay.value = _profileOverlay.value?.copy(profile = data, loadingProfile = false, author = data.author)
-            }.onFailure {
-                _profileOverlay.value = _profileOverlay.value?.copy(loadingProfile = false)
+            // Guarded on the same did so a slow request can never stamp
+            // this profile's data onto a different overlay that has since
+            // replaced it.
+            val curNow = _profileOverlay.value
+            if (curNow != null && curNow.author.did == author.did) {
+                result.onSuccess { data ->
+                    _profileOverlay.value = curNow.copy(profile = data, loadingProfile = false, author = data.author)
+                }.onFailure {
+                    _profileOverlay.value = curNow.copy(loadingProfile = false)
+                }
             }
+            onProfileFetched()
         }
 
-        loadProfileTab(initialTab, reset = true)
+        loadProfileTab(tab, reset = true)
 
         viewModelScope.launch(Dispatchers.IO) {
             val blogs = runCatching { bskyRepo.getLeafletBlogs(author.did, probeConcurrently = true) }.getOrDefault(emptyList())
@@ -2497,7 +2520,7 @@ _bskyDid.value          = session.did
             )
             _profileOverlay.value = updated
             persistProfileTabCache(updated)
-            maybeAutoSubscribeOnProfileOpen(cur.author, cur.author.isFollowing || cur.author.did == _bskyDid.value, hasReviews = false, hasBlogs = true)
+            if (!isRefresh) maybeAutoSubscribeOnProfileOpen(cur.author, cur.author.isFollowing || cur.author.did == _bskyDid.value, hasReviews = false, hasBlogs = true)
         }
         viewModelScope.launch(Dispatchers.IO) {
             val reviews = runCatching { bskyRepo.getPopfeedReviews(author.did, probeConcurrently = true) }.getOrDefault(emptyList())
@@ -2516,7 +2539,7 @@ _bskyDid.value          = session.did
             )
             _profileOverlay.value = updated
             persistProfileTabCache(updated)
-            maybeAutoSubscribeOnProfileOpen(cur.author, cur.author.isFollowing || cur.author.did == _bskyDid.value, hasReviews = true, hasBlogs = false)
+            if (!isRefresh) maybeAutoSubscribeOnProfileOpen(cur.author, cur.author.isFollowing || cur.author.did == _bskyDid.value, hasReviews = true, hasBlogs = false)
         }
         viewModelScope.launch(Dispatchers.IO) {
             val backlog = runCatching { bskyRepo.getPopfeedBacklog(author.did) }.getOrDefault(emptyList())
@@ -2589,6 +2612,31 @@ _bskyDid.value          = session.did
             val track = rockskyRepo.getNowPlaying(author.did)
             val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
             _profileOverlay.value = cur.copy(nowPlaying = track)
+        }
+    }
+
+    /** Profile page "Refresh" button: re-fetches the open profile in place —
+     *  header/counts, the selected tab, and the tab probes — without
+     *  touching the overlay stack, the selected tab/sub-filter, or scroll
+     *  position. Existing content stays on screen until fresh data replaces
+     *  it (a failed reload keeps what was already there).
+     *  [ProfileOverlayState.refreshing] drives the button's spinner and is
+     *  cleared once the profile request and the current tab's first page
+     *  have settled (or after a 20s safety timeout). */
+    fun refreshProfile() {
+        val cur = _profileOverlay.value ?: return
+        if (cur.refreshing || cur.hidden) return
+        tapHaptic()
+        val did = cur.author.did
+        _profileOverlay.value = cur.copy(refreshing = true)
+        val profileDone = kotlinx.coroutines.CompletableDeferred<Unit>()
+        launchProfileLoads(cur.author, cur.selectedTab, isRefresh = true) { profileDone.complete(Unit) }
+        viewModelScope.launch {
+            kotlinx.coroutines.withTimeoutOrNull(20_000) {
+                profileDone.await()
+                _profileOverlay.first { o -> o == null || o.author.did != did || o.tabStates[o.selectedTab]?.loading != true }
+            }
+            _profileOverlay.value?.takeIf { it.author.did == did }?.let { _profileOverlay.value = it.copy(refreshing = false) }
         }
     }
 

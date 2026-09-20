@@ -1,6 +1,7 @@
 package com.mediaviewer.ui
 
 import androidx.compose.animation.*
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -30,6 +31,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.StarHalf
@@ -58,6 +60,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -427,6 +430,9 @@ fun ProfileOverlay(
     // Feature request #6: profile page interaction bar.
     onOpenAddTo: (String) -> Unit = {},
     onOpenDm: (AuthorInfo) -> Unit = {},
+    // Interaction bar's Refresh button (leftmost) — reloads this profile in
+    // place; see MainViewModel.refreshProfile.
+    onRefresh: () -> Unit = {},
     // Fix (per feedback): "Rounded grid tiles" setting — off by default, so
     // the square grid renders flat squares with no outline; on restores the
     // old rounded + outlined tiles.
@@ -889,15 +895,18 @@ fun ProfileOverlay(
         // Bluesky/DM, fixed to the bottom (same "reserve extra bottom
         // content padding above" pattern as TitleDetailOverlay's own bottom
         // bar). Hidden while loading (no profile yet to act on).
-        if (profile != null) {
+        // Also shown once loading has *failed* (no profile, not loading) so
+        // the Refresh button is there exactly when it's needed most.
+        if (profile != null || !state.loadingProfile) {
             Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 8.dp)) {
                 ProfileInteractionBar(
                     liquidGlass = liquidGlass, tint = blended, backdrop = backdrop,
+                    refreshing = state.refreshing, animateRefresh = !reducedAnimations, onRefresh = onRefresh,
                     gridMode = gridModeFor(state.selectedTab, postKindFilter),
                     gridCyclesListLayout = postKindFilter.isListKind(),
                     showGrid = state.selectedTab in setOf(MainViewModel.ProfileTab.POSTS, MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES) &&
                         (postKindFilter.isMasonryKind() || postKindFilter.isListKind()),
-                    showDm = selfDid.isNotBlank() && author.did != selfDid && author.isFollowing && profile.followedByMe,
+                    showDm = selfDid.isNotBlank() && author.did != selfDid && author.isFollowing && profile?.followedByMe == true,
                     onGrid = { onGridButtonTap() },
                     onAddTo = { onOpenAddTo(author.did) },
                     onViewOnBluesky = { uriHandler.openUri("https://bsky.app/profile/${author.handle}") },
@@ -995,6 +1004,7 @@ fun ProfileOverlay(
 @Composable
 private fun ProfileInteractionBar(
     liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
+    refreshing: Boolean, animateRefresh: Boolean, onRefresh: () -> Unit,
     gridMode: Int, gridCyclesListLayout: Boolean, showGrid: Boolean, showDm: Boolean,
     onGrid: () -> Unit, onAddTo: () -> Unit, onViewOnBluesky: () -> Unit, onDm: () -> Unit
 ) {
@@ -1043,6 +1053,25 @@ private fun ProfileInteractionBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally)
         ) {
+            // Refresh — always the leftmost button. Spins while a reload is
+            // in flight (dimmed instead when animations are reduced); taps
+            // are ignored until it finishes. Haptic comes from the ViewModel.
+            IconButton(onClick = { if (!refreshing) onRefresh() }) {
+                val angle = if (refreshing && animateRefresh) {
+                    androidx.compose.animation.core.rememberInfiniteTransition(label = "profileRefresh").animateFloat(
+                        initialValue = 0f, targetValue = 360f,
+                        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+                            androidx.compose.animation.core.tween(900, easing = androidx.compose.animation.core.LinearEasing)
+                        ),
+                        label = "profileRefreshSpin"
+                    ).value
+                } else 0f
+                Icon(
+                    Icons.Filled.Refresh, contentDescription = "Refresh profile",
+                    tint = Color.White.copy(alpha = if (refreshing && !animateRefresh) 0.5f else 1f),
+                    modifier = Modifier.size(iconSize).rotate(angle)
+                )
+            }
             if (showGrid) {
                 IconButton(onClick = onGridHaptic) {
                     when {
