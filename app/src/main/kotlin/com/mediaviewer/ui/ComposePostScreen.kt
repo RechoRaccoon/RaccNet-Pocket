@@ -40,15 +40,20 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -489,12 +494,29 @@ fun ComposePostScreen(
         // above the bar while typing.
         var bottomBarHeight by remember { mutableStateOf(84.dp) }
         val barDensity = LocalDensity.current
+        // Live glass backdrop for the bottom bar's buttons — same "record what's
+        // drawn, read it back through a blurred glass panel" system the rest of
+        // the app uses (see GlassBackdrop). Only the scrolling content is
+        // recorded; nothing inside it reads [backdrop] (the bottom bar is a
+        // sibling, not a child), which would otherwise recurse mid-recording.
+        val backdropLayer = rememberGraphicsLayer()
+        var backdropOrigin by remember { mutableStateOf(Offset.Zero) }
+        val backdrop = if (liquidGlass) remember(backdropLayer) { GlassBackdrop(backdropLayer) { backdropOrigin } } else null
         Box(Modifier.fillMaxSize()) {
             // ── Scrollable content ──────────────────────────────────────
             // Fills the whole screen down to the keyboard/nav bar (instead
             // of stopping at the top of the button bar) so text scrolls
             // visibly behind the buttons rather than being cut off in a
             // hard edge above them.
+            Box(
+                Modifier.fillMaxSize()
+                    .onGloballyPositioned { backdropOrigin = it.positionInRoot() }
+                    .drawWithContent {
+                        if (liquidGlass) backdropLayer.record { this@drawWithContent.drawContent() }
+                        drawContent()
+                    }
+                    .background(postBackgroundBrush(dominantColor))
+            ) {
             CompositionLocalProvider(LocalBottomBarClearance provides bottomBarHeight) {
             Column(
                 Modifier.fillMaxSize().imePadding().navigationBarsPadding()
@@ -715,6 +737,7 @@ fun ComposePostScreen(
                 Spacer(Modifier.height(bottomBarHeight + 12.dp))
             }
             }
+            }
 
             // ── Fixed bottom bar — rides up above the keyboard via
             // imePadding() so it always sits directly on top of it.
@@ -739,7 +762,7 @@ fun ComposePostScreen(
                         // "containsSpoilers" boolean (see review.json).
                         TextToggleButton(
                             label = "Mark as Spoiler",
-                            liquidGlass = liquidGlass, tint = dominantColor,
+                            liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
                             selected = reviewContainsSpoilers,
                             onClick = { reviewContainsSpoilers = !reviewContainsSpoilers }
                         )
@@ -776,7 +799,7 @@ fun ComposePostScreen(
                         ) {
                             GlassCircleButton(
                                 icon = Icons.Default.Image, contentDescription = "Attach image or video",
-                                liquidGlass = liquidGlass, tint = dominantColor, size = 40.dp,
+                                liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop, size = 40.dp,
                                 enabled = mode != ComposeMode.TEXTSHOT && mode != ComposeMode.REVIEW,
                                 onClick = {
                                     mediaPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
@@ -787,7 +810,7 @@ fun ComposePostScreen(
                             // one currently active.
                             TextToggleButton(
                                 label = "Blog",
-                                liquidGlass = liquidGlass, tint = dominantColor,
+                                liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
                                 enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW,
                                 selected = isBlogMode,
                                 onClick = {
@@ -800,7 +823,7 @@ fun ComposePostScreen(
                             )
                             TextToggleButton(
                                 label = "Textshot",
-                                liquidGlass = liquidGlass, tint = dominantColor,
+                                liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
                                 enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW,
                                 selected = mode == ComposeMode.TEXTSHOT,
                                 onClick = {
@@ -817,7 +840,7 @@ fun ComposePostScreen(
                             // centered popup.
                             TextToggleButton(
                                 label = "Labels",
-                                liquidGlass = liquidGlass, tint = dominantColor,
+                                liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
                                 selected = adultLabel != null || graphicMedia,
                                 onClick = {
                                     focusManager.clearFocus()
@@ -830,7 +853,7 @@ fun ComposePostScreen(
                             if (mode == ComposeMode.THREAD) {
                                 TextToggleButton(
                                     label = "Auto Format",
-                                    liquidGlass = liquidGlass, tint = dominantColor,
+                                    liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
                                     selected = autoFormat,
                                     onClick = {
                                         autoFormat = !autoFormat
@@ -850,7 +873,7 @@ fun ComposePostScreen(
                         }
                         GlassCircleButton(
                             icon = Icons.Default.Add, contentDescription = "Add post to thread",
-                            liquidGlass = liquidGlass, tint = dominantColor, size = 36.dp,
+                            liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop, size = 36.dp,
                             enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW,
                             onClick = {
                                 if (mode == ComposeMode.THREAD) addThreadPost() else startThreadFromSingle()
@@ -1067,6 +1090,9 @@ private fun GlassCircleButton(
     // button represents the currently-active status, same visual treatment
     // as a disabled button but independent of `enabled`.
     selected: Boolean = true,
+    // Live blur source — only passed for buttons that sit *outside* the
+    // recorded content (the bottom bar).
+    backdrop: GlassBackdrop? = null,
     onClick: () -> Unit
 ) {
     val tap = rememberHapticTap()
@@ -1074,7 +1100,7 @@ private fun GlassCircleButton(
     val clickMod = modifier.size(size).clip(shape).clickable(enabled = enabled, onClick = { tap(); onClick() })
     val alpha = if (enabled && selected) 1f else 0.35f
     if (liquidGlass) {
-        LiquidGlassSurface(clickMod, shape = shape, tint = tint) {
+        LiquidGlassSurface(clickMod, shape = shape, tint = tint, backdrop = backdrop) {
             Box(Modifier.matchParentSize(), contentAlignment = Alignment.Center) {
                 Icon(icon, contentDescription = contentDescription, tint = Color.White.copy(alpha = alpha), modifier = Modifier.size(size * 0.45f))
             }
@@ -1095,6 +1121,7 @@ private fun TextToggleButton(
     liquidGlass: Boolean, tint: Color,
     enabled: Boolean = true,
     selected: Boolean = true,
+    backdrop: GlassBackdrop? = null,
     onClick: () -> Unit
 ) {
     val tap = rememberHapticTap()
@@ -1110,7 +1137,7 @@ private fun TextToggleButton(
         )
     }
     if (liquidGlass) {
-        LiquidGlassSurface(clickMod, shape = shape, tint = tint) { Content() }
+        LiquidGlassSurface(clickMod, shape = shape, tint = tint, backdrop = backdrop) { Content() }
     } else {
         Box(clickMod.background(Color.White.copy(0.10f))) { Content() }
     }
