@@ -924,8 +924,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 bskyRepo.createThread(bskyToken, did, context, posts, draft.selfLabels).getOrElse { throw it }
             }
             com.mediaviewer.ui.ComposeMode.TEXTSHOT -> runCatching {
-                val bitmap = com.mediaviewer.util.TextshotRenderer.render(draft.textshotText)
-                bskyRepo.createTextshotPost(bskyToken, did, bitmap, draft.textshotText, draft.selfLabels).getOrElse { throw it }
+                val emoji = com.mediaviewer.util.EmojiStore.get(context)
+                emoji.load()
+                val hasEmoji = emoji.containsEmoji(draft.textshotText)
+                val bitmap = com.mediaviewer.util.TextshotRenderer.render(draft.textshotText, emojiBitmap = emoji::bitmapForChar)
+                // Alt text carries `:name:` shortcodes instead of the private-use
+                // token characters, so it stays readable everywhere.
+                val altText = emoji.toShortcodes(draft.textshotText)
+                bskyRepo.createTextshotPost(bskyToken, did, bitmap, altText, draft.selfLabels, hasEmoji).getOrElse { throw it }
             }
             com.mediaviewer.ui.ComposeMode.VIDEO -> {
                 val uri = draft.videoUri

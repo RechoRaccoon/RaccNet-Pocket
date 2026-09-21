@@ -423,7 +423,11 @@ private fun MainViewModel.SearchFilter.label(): String = when (this) {
 private fun SearchPostCell(item: MediaItem, onClick: () -> Unit) {
     val tap = rememberHapticTap()
     Box(Modifier.aspectRatio(1f).clickable(onClick = { tap(); onClick() })) {
-        if (item.isTextOnly) {
+        if (item.isEmojiTextshot) {
+            Box(Modifier.fillMaxSize().background(OffBlack)) {
+                TextshotEmojiImage(item.textshotImageUrl, cornerRadius = 0.dp, modifier = Modifier.fillMaxSize())
+            }
+        } else if (item.isTextOnly) {
             Box(Modifier.fillMaxSize().background(OffBlack).padding(6.dp), contentAlignment = Alignment.Center) {
                 Text(item.text, color = Color.White.copy(alpha = 0.85f), fontSize = 10.sp, maxLines = 5, overflow = TextOverflow.Ellipsis)
             }

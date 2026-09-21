@@ -57,6 +57,17 @@ import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.em
+import kotlin.math.min
+import kotlin.math.roundToInt
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
@@ -74,7 +85,8 @@ import coil.compose.AsyncImage
 import com.mediaviewer.model.AuthorInfo
 import com.mediaviewer.model.TitleSearchResult
 import com.mediaviewer.ui.theme.DimGray
-import com.mediaviewer.ui.theme.RepostGreen
+import com.mediaviewer.util.EmojiEntry
+import com.mediaviewer.util.EmojiStore
 import com.mediaviewer.util.rememberHapticTap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -182,6 +194,7 @@ data class ComposePostDraft(
     val selfLabels: List<String> = emptyList()
 )
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun ComposePostScreen(
     selfProfile: AuthorInfo?,
@@ -251,6 +264,54 @@ fun ComposePostScreen(
     var graphicMedia by remember { mutableStateOf(false) }
     var labelsOpen by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
+
+    // ── Emoji menu (Textshot mode) ───────────────────────────────────────
+    // The raccoon button swaps the keyboard for the emoji menu, which is sized
+    // to match the keyboard exactly (its last-seen height). While it's open the
+    // keyboard is hidden and the screen reserves the menu's height instead of
+    // the keyboard's, so nothing jumps when one replaces the other.
+    val emojiStore = remember { EmojiStore.get(context) }
+    LaunchedEffect(Unit) { emojiStore.load() }
+    var emojiPanelOpen by remember { mutableStateOf(false) }
+    // True while a folder tab is being renamed: the keyboard is needed then, so
+    // the menu shrinks to its tab row and rides on top of it.
+    var emojiTabEditing by remember { mutableStateOf(false) }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val imeDensity = LocalDensity.current
+    val imeBottomPx = WindowInsets.ime.getBottom(imeDensity)
+    var keyboardPx by remember { mutableStateOf(rememberedKeyboardPx) }
+    var lastImePx by remember { mutableStateOf(0) }
+    LaunchedEffect(imeBottomPx) {
+        // The keyboard growing again (the person tapped the text) means they want
+        // it back, so the menu steps aside. Shrinking (we just hid it) is ignored.
+        if (imeBottomPx > lastImePx && emojiPanelOpen && !emojiTabEditing) emojiPanelOpen = false
+        lastImePx = imeBottomPx
+        if (imeBottomPx > keyboardPx) {
+            keyboardPx = imeBottomPx
+            rememberedKeyboardPx = imeBottomPx
+        }
+    }
+    LaunchedEffect(mode) {
+        if (mode != ComposeMode.TEXTSHOT) { emojiPanelOpen = false; emojiTabEditing = false }
+    }
+    // Registered after the composer's own BackHandler, so Back closes the menu first.
+    BackHandler(enabled = emojiPanelOpen) { emojiPanelOpen = false; emojiTabEditing = false }
+    val emojiPanelHeight = with(imeDensity) { if (keyboardPx > 0) keyboardPx.toDp() else 300.dp }.coerceIn(240.dp, 480.dp)
+    val imeDp = with(imeDensity) { imeBottomPx.toDp() }
+    // What the scrolling content and the bottom bar reserve at the screen's bottom.
+    val bottomInsetModifier: Modifier = when {
+        emojiPanelOpen && emojiTabEditing -> Modifier.padding(bottom = imeDp + EmojiPanelCompactHeight)
+        emojiPanelOpen -> Modifier.padding(bottom = emojiPanelHeight)
+        else -> Modifier.imePadding().navigationBarsPadding()
+    }
+
+    // Emoji only exist inside Textshot text (each is one private-use character).
+    // Anywhere else that character would show as a blank box, so when a draft
+    // leaves Textshot mode they become readable :name: shortcodes instead.
+    fun emojiTokensToShortcodes() {
+        val converted = emojiStore.toShortcodes(singleText.text)
+        if (converted != singleText.text) singleText = TextFieldValue(converted, TextRange(converted.length))
+    }
 
     // Item 3: focus targets so a tap anywhere on the blank background can
     // land the keyboard caret in whichever field is actually active, rather
@@ -342,6 +403,7 @@ fun ComposePostScreen(
     // fit in one post any more, it goes straight into a thread with Auto
     // Format on, same as typing past the limit does anywhere else.
     fun disableTextshot() {
+        emojiTokensToShortcodes()
         if (singleText.text.length > POST_CHAR_LIMIT) {
             growTextIntoThread(singleText.text, floor = 1)
         } else {
@@ -356,11 +418,35 @@ fun ComposePostScreen(
     // blank line between each, so the original post breaks are still
     // visible) keeps all of it.
     fun enableBlogMode() {
+        if (mode == ComposeMode.TEXTSHOT) emojiTokensToShortcodes()
         if (mode == ComposeMode.THREAD) {
             singleText = TextFieldValue(threadPosts.joinToString("\n\n") { it.text.trimEnd() })
         }
         isBlogMode = true
         mode = ComposeMode.SINGLE
+    }
+
+    // Tapping an emoji in the menu drops it into the Textshot text at the caret
+    // (replacing any selection), like typing one.
+    fun insertEmoji(entry: EmojiEntry) {
+        val t = singleText
+        val start = t.selection.min.coerceIn(0, t.text.length)
+        val end = t.selection.max.coerceIn(start, t.text.length)
+        val token = emojiStore.charFor(entry).toString()
+        singleText = TextFieldValue(t.text.substring(0, start) + token + t.text.substring(end), TextRange(start + token.length))
+    }
+
+    // The raccoon button: keyboard -> emoji menu -> back to the keyboard.
+    fun toggleEmojiPanel() {
+        if (emojiPanelOpen) {
+            emojiPanelOpen = false
+            emojiTabEditing = false
+            focusActiveField()
+            keyboardController?.show()
+        } else {
+            emojiPanelOpen = true
+            keyboardController?.hide()
+        }
     }
 
     // ── Media pickers (Android Photo Picker — no storage permission
@@ -519,7 +605,7 @@ fun ComposePostScreen(
             ) {
             CompositionLocalProvider(LocalBottomBarClearance provides bottomBarHeight) {
             Column(
-                Modifier.fillMaxSize().imePadding().navigationBarsPadding()
+                Modifier.fillMaxSize().then(bottomInsetModifier)
                     .verticalScroll(rememberScrollState())
                     .padding(horizontal = 14.dp)
             ) {
@@ -681,12 +767,14 @@ fun ComposePostScreen(
                             value = singleText,
                             onValueChange = { singleText = it },
                             placeholder = "What's on your mind?",
-                            focusRequester = singleFocusRequester
+                            focusRequester = singleFocusRequester,
+                            emojiStore = emojiStore
                         )
                         Spacer(Modifier.height(14.dp))
                         TextshotPreview(
                             text = singleText.text.ifBlank { "Preview" },
-                            liquidGlass = liquidGlass, tint = dominantColor
+                            liquidGlass = liquidGlass, tint = dominantColor,
+                            emojiStore = emojiStore
                         )
                     }
 
@@ -746,7 +834,7 @@ fun ComposePostScreen(
             // the far right of the button row underneath it instead of
             // squeezed in next to the counter text. ────────────────────
             Column(
-                Modifier.align(Alignment.BottomCenter).fillMaxWidth().imePadding().navigationBarsPadding()
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth().then(bottomInsetModifier)
                     .onSizeChanged { bottomBarHeight = with(barDensity) { it.height.toDp() } }
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
@@ -871,16 +959,44 @@ fun ComposePostScreen(
                                 )
                             }
                         }
-                        GlassCircleButton(
-                            icon = Icons.Default.Add, contentDescription = "Add post to thread",
-                            liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop, size = 36.dp,
-                            enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW,
-                            onClick = {
-                                if (mode == ComposeMode.THREAD) addThreadPost() else startThreadFromSingle()
-                            }
-                        )
+                        if (mode == ComposeMode.TEXTSHOT) {
+                            // Textshot mode: no new-thread button — a raccoon
+                            // emoji button opens the custom emoji menu instead.
+                            GlassEmojiButton(
+                                emoji = "\uD83E\uDD9D",
+                                contentDescription = if (emojiPanelOpen) "Show keyboard" else "Open emoji menu",
+                                liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop, size = 36.dp,
+                                onClick = { toggleEmojiPanel() }
+                            )
+                        } else {
+                            GlassCircleButton(
+                                icon = Icons.Default.Add, contentDescription = "Add post to thread",
+                                liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop, size = 36.dp,
+                                enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW,
+                                onClick = {
+                                    if (mode == ComposeMode.THREAD) addThreadPost() else startThreadFromSingle()
+                                }
+                            )
+                        }
                     }
                 }
+            }
+
+            // ── Emoji menu — takes the keyboard's place (see the state block
+            // near the top of this function). When a tab is being renamed it
+            // is only the tab row, sitting right on top of the keyboard.
+            if (mode == ComposeMode.TEXTSHOT && emojiPanelOpen) {
+                EmojiPanel(
+                    store = emojiStore,
+                    height = emojiPanelHeight,
+                    compact = emojiTabEditing,
+                    liquidGlass = liquidGlass,
+                    tint = dominantColor,
+                    onPickEmoji = { insertEmoji(it) },
+                    onEditingChange = { emojiTabEditing = it },
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                        .padding(bottom = if (emojiTabEditing) imeDp else 0.dp)
+                )
             }
         }
 
@@ -1079,6 +1195,40 @@ private fun ReviewStarPicker(rating: Int, onRatingChange: (Int) -> Unit) {
     }
 }
 
+/** Last keyboard height seen (px), kept across composer sessions so the emoji
+ *  menu can match the keyboard's size even the first time it is opened. */
+private var rememberedKeyboardPx = 0
+
+/** [GlassCircleButton]'s twin for an emoji glyph instead of an icon (the
+ *  raccoon button in Textshot mode). Same size, glass and haptic tap. */
+@Composable
+private fun GlassEmojiButton(
+    emoji: String,
+    contentDescription: String,
+    liquidGlass: Boolean, tint: Color,
+    modifier: Modifier = Modifier, size: Dp = 36.dp,
+    backdrop: GlassBackdrop? = null,
+    onClick: () -> Unit
+) {
+    val tap = rememberHapticTap()
+    val shape = CircleShape
+    val clickMod = modifier.size(size).clip(shape)
+        .semantics { this.contentDescription = contentDescription }
+        .clickable(onClick = { tap(); onClick() })
+    val fontSize = (size.value * 0.5f).sp
+    if (liquidGlass) {
+        LiquidGlassSurface(clickMod, shape = shape, tint = tint, backdrop = backdrop) {
+            Box(Modifier.matchParentSize(), contentAlignment = Alignment.Center) {
+                Text(emoji, fontSize = fontSize, lineHeight = fontSize)
+            }
+        }
+    } else {
+        Box(clickMod.background(Color.White.copy(0.10f)), contentAlignment = Alignment.Center) {
+            Text(emoji, fontSize = fontSize, lineHeight = fontSize)
+        }
+    }
+}
+
 @Composable
 private fun GlassCircleButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
@@ -1191,7 +1341,7 @@ private fun PostButton(
         }
     }
     if (liquidGlass) {
-        LiquidGlassSurface(clickMod, shape = shape, tint = if (enabled) RepostGreen else tint) { Content() }
+        LiquidGlassSurface(clickMod, shape = shape, tint = tint) { Content() }
     } else {
         Box(clickMod.background(Color.White.copy(0.10f))) { Content() }
     }
@@ -1225,7 +1375,10 @@ private fun GrowingTextField(
     // Item 4: used by the thread fields to show the "x/n" counter as
     // trailing display-only text without it being part of the editable
     // content.
-    visualTransformation: VisualTransformation = VisualTransformation.None
+    visualTransformation: VisualTransformation = VisualTransformation.None,
+    // Textshot mode only: draws custom emoji (each stored as one private-use
+    // character) as pictures over their spot in the text.
+    emojiStore: EmojiStore? = null
 ) {
     // The scroll area now extends behind the floating bottom bar, so the
     // default "scroll the caret into view" would park it right under the
@@ -1234,6 +1387,10 @@ private fun GrowingTextField(
     val bringIntoView = remember { BringIntoViewRequester() }
     var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
     var focused by remember { mutableStateOf(false) }
+    val emojiState = emojiStore?.state // read here so the field recomposes when emoji change
+    val effectiveTransformation = if (emojiStore != null) {
+        remember(emojiStore, emojiState) { emojiVisualTransformation(emojiStore) }
+    } else visualTransformation
     LaunchedEffect(value.selection, value.text, layout, focused, clearancePx) {
         val l = layout ?: return@LaunchedEffect
         if (!focused || clearancePx <= 0f) return@LaunchedEffect
@@ -1246,17 +1403,54 @@ private fun GrowingTextField(
             value = value, onValueChange = onValueChange,
             textStyle = TextStyle(color = Color.White, fontSize = 16.sp, lineHeight = 22.sp),
             cursorBrush = SolidColor(Color.White),
-            visualTransformation = visualTransformation,
+            visualTransformation = effectiveTransformation,
             onTextLayout = { layout = it },
             modifier = Modifier.fillMaxWidth()
                 .bringIntoViewRequester(bringIntoView)
                 .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
                 .onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocus() }
         )
+        // Custom emoji: each one is a blank, roughly one-em-wide slot in the
+        // text (see emojiVisualTransformation) — put its picture right there.
+        val l = layout
+        if (emojiStore != null && l != null && l.layoutInput.text.length == value.text.length) {
+            val density = LocalDensity.current
+            value.text.forEachIndexed { i, c ->
+                val bmp = emojiStore.imageBitmapForChar(c) ?: return@forEachIndexed
+                val box = l.getBoundingBox(i)
+                val side = min(box.width, box.height) * 0.92f
+                if (side <= 0f) return@forEachIndexed
+                Image(
+                    bitmap = bmp, contentDescription = null, contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .offset { IntOffset((box.left + (box.width - side) / 2f).roundToInt(), (box.top + (box.height - side) / 2f).roundToInt()) }
+                        .size(with(density) { side.toDp() })
+                )
+            }
+        }
         if (value.text.isEmpty()) {
             Text(placeholder, color = DimGray, fontSize = 16.sp)
         }
     }
+}
+
+/** Stand-in for an emoji's spot in the *displayed* text: a CJK ideograph is
+ *  one em wide in every font and is a real (non-space) character, so the layout
+ *  gives it a solid, wrappable slot; it's painted transparent and the emoji
+ *  picture is drawn over it. A little letter-spacing widens the slot to the
+ *  ~1.25em that a normal emoji glyph takes. */
+private const val EMOJI_SLOT_CHAR = '\u4E00'
+private val EmojiSlotStyle = SpanStyle(color = Color.Transparent, letterSpacing = 0.25.em)
+
+/** Swaps every emoji token for a slot — one character for one character, so
+ *  caret/selection offsets map straight across (OffsetMapping.Identity). */
+private fun emojiVisualTransformation(store: EmojiStore) = VisualTransformation { text ->
+    val shown = buildAnnotatedString {
+        for (c in text.text) {
+            if (store.entryFor(c) != null) withStyle(EmojiSlotStyle) { append(EMOJI_SLOT_CHAR) } else append(c)
+        }
+    }
+    TransformedText(shown, OffsetMapping.Identity)
 }
 
 /** Up to 10 attached images, 5 per row, edge-to-edge square tiles. Hand-
@@ -1330,12 +1524,14 @@ private fun VideoAndThumbnailRow(
  *  its tight, content-hugging padding instead of sitting in a fixed square
  *  with a lot of dead space around short posts. */
 @Composable
-private fun TextshotPreview(text: String, liquidGlass: Boolean, tint: Color) {
+private fun TextshotPreview(text: String, liquidGlass: Boolean, tint: Color, emojiStore: EmojiStore) {
     val shape = RoundedCornerShape(14.dp)
     var bitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
-    LaunchedEffect(text) {
+    // Re-render when the emoji library changes too (e.g. after an import).
+    val emojiState = emojiStore.state
+    LaunchedEffect(text, emojiState) {
         bitmap = withContext(Dispatchers.Default) {
-            com.mediaviewer.util.TextshotRenderer.render(text)
+            com.mediaviewer.util.TextshotRenderer.render(text, emojiBitmap = emojiStore::bitmapForChar)
         }
     }
     val current = bitmap

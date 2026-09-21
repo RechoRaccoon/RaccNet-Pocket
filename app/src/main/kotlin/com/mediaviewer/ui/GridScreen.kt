@@ -214,7 +214,11 @@ private fun GridCell(item: MediaItem, thumbUrl: String, isActive: Boolean, onCli
     BoxWithConstraints(
         modifier = Modifier.aspectRatio(1f).clickable(onClick = onClick)
     ) {
-        if (item.isTextOnly) {
+        if (item.isEmojiTextshot) {
+            Box(Modifier.fillMaxSize().background(OffBlack)) {
+                TextshotEmojiImage(item.textshotImageUrl, cornerRadius = 0.dp, modifier = Modifier.fillMaxSize())
+            }
+        } else if (item.isTextOnly) {
             // Text-only posts have no thumbnail — show a compact text preview
             // tile instead of an empty image cell.
             Box(

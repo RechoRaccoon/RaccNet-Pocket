@@ -1342,7 +1342,10 @@ private fun PostContent(
             if (item.isTextOnly) {
                 // Big Update #3: text-only posts get a liquid-glass card shaped
                 // like a piece of media, centered where an image would sit.
-                TextOnlyPostCard(item.text, dominantColor, translationState, onToggleTranslationView)
+                TextOnlyPostCard(
+                    item.text, dominantColor, translationState, onToggleTranslationView,
+                    emojiImageUrl = item.textshotImageUrl, emojiAspectRatio = item.aspectRatio
+                )
             } else if (item.isVideo && item.videoPlaylistUrl != null) {
                 VideoPlayer(
                     item.videoPlaylistUrl, mediaModifier,
@@ -2062,8 +2065,23 @@ private fun TextOnlyPostCard(
     text: String,
     dominantColor: Color,
     translationState: TranslationState? = null,
-    onToggleTranslationView: () -> Unit = {}
+    onToggleTranslationView: () -> Unit = {},
+    // A Textshot with custom emoji can't be shown as text (the emoji would
+    // vanish), so it's shown as its posted picture on the same glass card,
+    // shaped to the picture's aspect ratio.
+    emojiImageUrl: String = "",
+    emojiAspectRatio: Float? = null
 ) {
+    if (emojiImageUrl.isNotBlank()) {
+        LiquidGlassSurface(
+            modifier = Modifier.fillMaxWidth(0.94f).aspectRatio((emojiAspectRatio ?: 1f).coerceIn(0.66f, 2f)),
+            shape = RoundedCornerShape(28.dp),
+            tint = dominantColor
+        ) {
+            TextshotEmojiImage(emojiImageUrl, cornerRadius = 28.dp, modifier = Modifier.fillMaxSize())
+        }
+        return
+    }
     val showTranslated = translationState?.status == TranslationStatus.DONE && translationState.showingTranslated
     val displayText = if (showTranslated) translationState!!.translatedText else text
     val toggleable = translationState?.status == TranslationStatus.DONE

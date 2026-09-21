@@ -243,6 +243,11 @@ class BlueskyRepository {
         // classification, see parseAuthorFeed) can never drift out of sync
         // with each other.
         const val TEXTSHOT_ALT_PREFIX = "A textshot post reading: "
+        /** Alt-text prefix for a Textshot that contains custom emoji (they appear
+         *  in the alt text as `:name:` shortcodes). Deliberately NOT starting
+         *  with TEXTSHOT_ALT_PREFIX, so an older RaccNet build that doesn't
+         *  know about it just shows the post as a normal image. */
+        const val TEXTSHOT_EMOJI_ALT_PREFIX = "A textshot post with emoji reading: "
 
         /** Sentinel URI standing in for the pinned "Following" home timeline, which
          *  (unlike every other saved feed) is served by getTimeline, not getFeed. */
@@ -2140,7 +2145,7 @@ class BlueskyRepository {
      *  Textshot image apart from a regular attached image when loading a
      *  profile, and show it in the Text Post tab instead of Images — see
      *  isTextshotAltText/textshotTextFromAlt below. */
-    suspend fun createTextshotPost(token: String, did: String, textshotBitmap: android.graphics.Bitmap, textshotText: String, selfLabels: List<String> = emptyList()): Result<BskyRef> =
+    suspend fun createTextshotPost(token: String, did: String, textshotBitmap: android.graphics.Bitmap, textshotText: String, selfLabels: List<String> = emptyList(), hasEmoji: Boolean = false): Result<BskyRef> =
         withContext(Dispatchers.IO) {
             runCatching {
                 val out = java.io.ByteArrayOutputStream()
@@ -2149,7 +2154,7 @@ class BlueskyRepository {
                 val body = bytes.toRequestBody("image/png".toMediaType())
                 val resp = api.uploadBlob("Bearer $token", "image/png", body)
                 val blob = resp.body()?.blob ?: error("uploadBlob ${resp.code()}: ${resp.errorBody()?.string()}")
-                val alt = TEXTSHOT_ALT_PREFIX + textshotText
+                val alt = (if (hasEmoji) TEXTSHOT_EMOJI_ALT_PREFIX else TEXTSHOT_ALT_PREFIX) + textshotText
                 createPost(token, did, "", listOf(UploadedImage(blob, textshotBitmap.width, textshotBitmap.height)), imageAlts = listOf(alt), selfLabels = selfLabels).getOrElse { throw it }
             }
         }
@@ -2441,6 +2446,27 @@ class BlueskyRepository {
                                     likeCount = post.likeCount ?: 0, replyCount = post.replyCount ?: 0,
                                     repostCount = post.repostCount ?: 0,
                                     text = firstAlt.removePrefix(TEXTSHOT_ALT_PREFIX),
+                                    labels = nsfwLabels
+                                )
+                            )
+                        } else if (images.size == 1 && firstAlt != null && firstAlt.startsWith(TEXTSHOT_EMOJI_ALT_PREFIX)) {
+                            // A Textshot containing custom emoji. Same idea as
+                            // above — blank mediaUrl/thumbUrl keeps it text-only
+                            // so it lands in the Text Posts tab — but the emoji
+                            // can't be rebuilt from text, so the posted picture
+                            // rides along in textshotImageUrl (with its aspect
+                            // ratio) for the text bubble to display instead.
+                            listOf(
+                                MediaItem(
+                                    id = post.cid, mediaUrl = "", thumbUrl = "", isVideo = false,
+                                    postUri = post.uri, postCid = post.cid, feedContext = item.feedContext,
+                                    author = author, likeUri = post.viewer?.like, repostUri = post.viewer?.repost,
+                                    isLiked = post.viewer?.like != null, isReposted = post.viewer?.repost != null,
+                                    likeCount = post.likeCount ?: 0, replyCount = post.replyCount ?: 0,
+                                    repostCount = post.repostCount ?: 0,
+                                    text = firstAlt.removePrefix(TEXTSHOT_EMOJI_ALT_PREFIX),
+                                    aspectRatio = resolvedRatio(first) ?: 1f,
+                                    textshotImageUrl = first.fullsize,
                                     labels = nsfwLabels
                                 )
                             )

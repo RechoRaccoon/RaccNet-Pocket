@@ -104,11 +104,18 @@ data class MediaItem(
     // specific values are treated as NSFW for this feature (see
     // isNsfwLabeled below) — "graphic-media" is violence/gore, not sexual
     // content, and isn't what this toggle is for.
-    val labels: List<String> = emptyList()
+    val labels: List<String> = emptyList(),
+    // Textshot-with-emoji posts: URL of the posted Textshot picture. Blank for
+    // every other item. See isEmojiTextshot below.
+    val textshotImageUrl: String = ""
 ) {
     /** True when this post has no image/video to show — feed renders it as a
      *  standalone liquid-glass text card instead of a media tile. */
     val isTextOnly: Boolean get() = mediaUrl.isBlank() && thumbUrl.isBlank() && !isVideo
+    /** A Textshot that contains custom emoji. It still counts as text-only (so it
+     *  lives in the Text Posts tab), but its text can't be drawn as plain text
+     *  — the emoji would vanish — so the posted picture is shown instead. */
+    val isEmojiTextshot: Boolean get() = textshotImageUrl.isNotBlank()
 
     /** A square (1:1) or wider frame counts as "horizontal"; anything
      *  taller than it is wide (including exactly-square, per the feature

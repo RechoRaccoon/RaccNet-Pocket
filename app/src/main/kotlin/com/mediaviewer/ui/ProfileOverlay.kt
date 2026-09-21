@@ -1940,6 +1940,8 @@ private fun LazyListScope.profileMediaGridRows(
  *  row's height. Text posts default to a slightly-portrait card since they
  *  have no natural media shape of their own. */
 private fun MediaItem.tileAspectRatio(): Float = when {
+    // A Textshot with emoji keeps the Textshot picture's own shape (usually a square).
+    isEmojiTextshot -> (aspectRatio ?: 1f).coerceIn(0.2f, 5f)
     isTextOnly -> 0.8f
     else -> aspectRatio?.takeIf { it in 0.2f..5f } ?: 1f
 }
@@ -1952,7 +1954,7 @@ private fun MediaItem.tileAspectRatio(): Float = when {
  *  estimate at the compact bubble's narrow width/small font instead —
  *  just needs to be roughly proportional to how tall that bubble will
  *  actually end up, not exact. */
-private fun MediaItem.estimatedMasonryHeightUnits(): Float = if (isTextOnly) {
+private fun MediaItem.estimatedMasonryHeightUnits(): Float = if (isTextOnly && !isEmojiTextshot) {
     val charsPerLine = 32
     val lines = kotlin.math.ceil(text.length.coerceAtLeast(1) / charsPerLine.toFloat())
     0.22f + lines * 0.16f
@@ -2016,7 +2018,13 @@ private fun ThumbBox(item: MediaItem, tint: Color, shape: RoundedCornerShape, mo
         // alone might not fully hide.
         val blurNsfw = LocalHateFunBlurNsfw.current && item.isNsfwLabeled
         val contentModifier = Modifier.fillMaxSize().let { if (blurNsfw) it.blur(20.dp) else it }
-        if (item.isTextOnly) {
+        if (item.isEmojiTextshot) {
+            // Textshot with custom emoji: show the posted picture (its text
+            // would lose the emoji), not the alt-text shortcodes.
+            Box(contentModifier.background(OledBlack)) {
+                TextshotEmojiImage(item.textshotImageUrl, cornerRadius = 10.dp, modifier = Modifier.fillMaxSize())
+            }
+        } else if (item.isTextOnly) {
             Box(contentModifier.background(OledBlack).padding(10.dp), contentAlignment = Alignment.Center) {
                 Text(item.text, color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp, maxLines = 8, overflow = TextOverflow.Ellipsis)
             }
@@ -2555,6 +2563,7 @@ private fun TextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, o
     val shape = RoundedCornerShape(16.dp)
     // Fix 9: the shared light tap, via the shared helper.
     val tap = rememberHapticTap()
+    val emoji = item.isEmojiTextshot
     Box(
         modifier
             .fillMaxWidth()
@@ -2562,11 +2571,20 @@ private fun TextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, o
                 if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
                 else Modifier.clip(shape).background(Color.White.copy(0.06f))
             )
+            // A Textshot with emoji is a picture: the bubble takes the
+            // picture's own aspect ratio (a square, normally) and the
+            // picture fills it. Plain text keeps its padded, text-sized bubble.
+            .then(if (emoji) Modifier.aspectRatio((item.aspectRatio ?: 1f).coerceIn(0.2f, 5f)) else Modifier)
             .clickable(onClick = { tap(); onOpen() })
-            .padding(16.dp)
+            .then(if (emoji) Modifier else Modifier.padding(16.dp))
     ) {
         val blurNsfw = LocalHateFunBlurNsfw.current && item.isNsfwLabeled
-        Text(
+        if (emoji) {
+            TextshotEmojiImage(
+                item.textshotImageUrl, cornerRadius = 16.dp,
+                modifier = (if (blurNsfw) Modifier.blur(8.dp) else Modifier).fillMaxSize()
+            )
+        } else Text(
             item.text, color = Color.White.copy(0.92f), fontSize = 14.sp, lineHeight = 19.sp,
             modifier = if (blurNsfw) Modifier.blur(8.dp) else Modifier
         )
@@ -2588,6 +2606,7 @@ private fun TextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, o
 private fun CompactTextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, shape: RoundedCornerShape, onOpen: () -> Unit) {
     // Fix 9: the shared light tap, via the shared helper.
     val tap = rememberHapticTap()
+    val emoji = item.isEmojiTextshot
     Box(
         Modifier
             .fillMaxWidth()
@@ -2595,11 +2614,18 @@ private fun CompactTextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: C
                 if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
                 else Modifier.clip(shape).background(Color.White.copy(0.06f))
             )
+            // Textshot with emoji: bubble matches the picture's aspect ratio.
+            .then(if (emoji) Modifier.aspectRatio((item.aspectRatio ?: 1f).coerceIn(0.2f, 5f)) else Modifier)
             .clickable(onClick = { tap(); onOpen() })
-            .padding(10.dp)
+            .then(if (emoji) Modifier else Modifier.padding(10.dp))
     ) {
         val blurNsfw = LocalHateFunBlurNsfw.current && item.isNsfwLabeled
-        Text(
+        if (emoji) {
+            TextshotEmojiImage(
+                item.textshotImageUrl, cornerRadius = 12.dp,
+                modifier = (if (blurNsfw) Modifier.blur(6.dp) else Modifier).fillMaxSize()
+            )
+        } else Text(
             item.text, color = Color.White.copy(0.92f), fontSize = 9.sp, lineHeight = 12.sp,
             modifier = if (blurNsfw) Modifier.blur(6.dp) else Modifier
         )

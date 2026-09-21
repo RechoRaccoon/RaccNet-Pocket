@@ -3,10 +3,19 @@ package com.mediaviewer.util
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Rect
+import android.graphics.RectF
 import android.text.Layout
+import android.text.SpannableStringBuilder
+import android.text.Spanned
 import android.text.StaticLayout
 import android.text.TextPaint
+import android.text.style.ReplacementSpan
+import kotlin.math.ceil
+import kotlin.math.floor
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * Renders Textshot mode's final post image — black background, white text.
@@ -21,14 +30,57 @@ import android.text.TextPaint
  * block to fit it on one line) grows until it fills the frame. Whole words
  * still wrap whole; only a word longer than a full line ever splits. No
  * hyphenation. The ink is centered on both axes.
+ *
+ * Custom emoji (see [EmojiStore]): when an [emojiBitmap] resolver is given,
+ * every emoji token character in the text is drawn as its picture, inline,
+ * sized to the line like a normal emoji, and counted as ink for the fit —
+ * so a Textshot of just one emoji fills the frame the same way an "R" does.
+ * Emoji are also line-break opportunities, so a row of them wraps like text.
  */
 object TextshotRenderer {
+    /** Stand-in character the layout sees for an emoji (Object Replacement
+     *  Character — the one line-breakers treat as a break opportunity). */
+    private const val OBJ = '\uFFFC'
+
     private const val PAD_FRACTION = 0.06f
     private const val LINE_SPACING_MULT = 1.15f
     // Floor so pathologically long input never rounds to an invisible size.
     private const val MIN_TEXT_SIZE = 20f
 
-    fun render(text: String, sizePx: Int = 1080): Bitmap {
+    /** Draws one emoji picture inline, in a square as tall as the text's line
+     *  (ascent to descent), aspect-fit and centered in it. */
+    private class EmojiSpan(private val bitmap: Bitmap) : ReplacementSpan() {
+        private val drawPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+
+        private fun side(paint: Paint): Float {
+            val fm = paint.fontMetrics
+            return fm.descent - fm.ascent
+        }
+
+        /** Where the picture lands when the span starts at [x] on [baseline]. */
+        fun rectAt(x: Float, baseline: Int, paint: Paint): RectF {
+            val fm = paint.fontMetrics
+            val box = side(paint)
+            val scale = min(box / bitmap.width, box / bitmap.height)
+            val w = bitmap.width * scale
+            val h = bitmap.height * scale
+            val cx = x + box / 2f
+            val cy = baseline + (fm.ascent + fm.descent) / 2f
+            return RectF(cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f)
+        }
+
+        override fun getSize(paint: Paint, text: CharSequence?, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int =
+            side(paint).roundToInt()
+
+        override fun draw(
+            canvas: Canvas, text: CharSequence?, start: Int, end: Int,
+            x: Float, top: Int, y: Int, bottom: Int, paint: Paint
+        ) {
+            canvas.drawBitmap(bitmap, null, rectAt(x, y, paint), drawPaint)
+        }
+    }
+
+    fun render(text: String, sizePx: Int = 1080, emojiBitmap: ((Char) -> Bitmap?)? = null): Bitmap {
         val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         canvas.drawColor(Color.BLACK)
@@ -44,29 +96,67 @@ object TextshotRenderer {
         }
         val lineBounds = Rect()
 
+        // Emoji tokens -> U+FFFC placeholders carrying an EmojiSpan. Indices
+        // never shift (one char in, one char out), so [text] offsets stay valid.
+        val chars = text.toCharArray()
+        val spans = HashMap<Int, EmojiSpan>()
+        if (emojiBitmap != null) {
+            for (i in chars.indices) {
+                if (!EmojiStore.isTokenChar(chars[i])) continue
+                val bmp = emojiBitmap(chars[i]) ?: continue
+                chars[i] = OBJ
+                spans[i] = EmojiSpan(bmp)
+            }
+        }
+        val plain = String(chars)
+        val rendered: CharSequence =
+            if (spans.isEmpty()) plain
+            else SpannableStringBuilder(plain).also { sb ->
+                for ((i, span) in spans) sb.setSpan(span, i, i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+
         fun buildLayout(): StaticLayout =
             StaticLayout.Builder
-                .obtain(text, 0, text.length, paint, maxW.toInt())
+                .obtain(rendered, 0, rendered.length, paint, maxW.toInt())
                 .setAlignment(Layout.Alignment.ALIGN_CENTER)
                 .setLineSpacing(0f, LINE_SPACING_MULT)
                 .setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
                 .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
                 .build()
 
-        /** Tight ink rect of [layout], in layout coordinates. */
-        fun inkOf(layout: StaticLayout): Rect {            val out = Rect()
+        /** Tight ink rect of [layout], in layout coordinates: the glyph pixels
+         *  of the text runs, plus each emoji picture's rect. */
+        fun inkOf(layout: StaticLayout): Rect {
+            val out = Rect()
+            fun add(left: Int, top: Int, right: Int, bottom: Int) {
+                if (out.isEmpty) out.set(left, top, right, bottom) else out.union(left, top, right, bottom)
+            }
             for (i in 0 until layout.lineCount) {
                 val start = layout.getLineStart(i)
                 val end = layout.getLineEnd(i)
                 if (start >= end) continue
-                paint.getTextBounds(text, start, end, lineBounds)
-                if (lineBounds.isEmpty) continue
-                val left = (layout.getLineLeft(i) + lineBounds.left).toInt()
-                val top = (layout.getLineBaseline(i) + lineBounds.top).toInt()
-                val right = (layout.getLineLeft(i) + lineBounds.right).toInt()
-                val bottom = (layout.getLineBaseline(i) + lineBounds.bottom).toInt()
-                if (out.isEmpty) out.set(left, top, right, bottom)
-                else out.union(left, top, right, bottom)
+                val baseline = layout.getLineBaseline(i)
+                var runStart = start
+                // Ink of the plain-text run [runStart, runEnd), positioned by
+                // where the layout actually put its first character.
+                fun flushRun(runEnd: Int) {
+                    if (runEnd <= runStart) return
+                    paint.getTextBounds(rendered, runStart, runEnd, lineBounds)
+                    if (lineBounds.isEmpty) return
+                    val x0 = layout.getPrimaryHorizontal(runStart)
+                    add(
+                        (x0 + lineBounds.left).toInt(), baseline + lineBounds.top,
+                        (x0 + lineBounds.right).toInt(), baseline + lineBounds.bottom
+                    )
+                }
+                for (k in start until end) {
+                    val span = spans[k] ?: continue
+                    flushRun(k)
+                    val r = span.rectAt(layout.getPrimaryHorizontal(k), baseline, paint)
+                    add(floor(r.left).toInt(), floor(r.top).toInt(), ceil(r.right).toInt(), ceil(r.bottom).toInt())
+                    runStart = k + 1
+                }
+                flushRun(end)
             }
             return out
         }
@@ -80,12 +170,14 @@ object TextshotRenderer {
             // mid-word rather than shrinking the whole block tiny.
             for (i in 0 until layout.lineCount - 1) {
                 val b = layout.getLineEnd(i)
-                if (b <= 0 || b >= text.length) continue
-                if (!text[b - 1].isWhitespace() && !text[b].isWhitespace()) {
+                if (b <= 0 || b >= plain.length) continue
+                // Breaking right next to an emoji is always fine.
+                if (plain[b - 1] == OBJ || plain[b] == OBJ) continue
+                if (!plain[b - 1].isWhitespace() && !plain[b].isWhitespace()) {
                     var s = b - 1
-                    while (s > 0 && !text[s - 1].isWhitespace()) s--
+                    while (s > 0 && !plain[s - 1].isWhitespace()) s--
                     var e = b
-                    while (e < text.length && !text[e].isWhitespace()) e++
+                    while (e < plain.length && !plain[e].isWhitespace()) e++
                     if (e - s <= 25) return false
                 }
             }
