@@ -6,6 +6,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -36,6 +37,9 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -46,6 +50,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
@@ -71,12 +76,15 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import coil.compose.AsyncImage
 import com.mediaviewer.ui.theme.DimGray
 import com.mediaviewer.util.EmojiEntry
+import com.mediaviewer.util.EmojiFolder
 import com.mediaviewer.util.EmojiStore
 import com.mediaviewer.util.rememberHapticTap
 import kotlinx.coroutines.launch
@@ -100,7 +108,7 @@ internal val EmojiPanelCompactHeight = 60.dp
  * Making a new folder immediately puts its tab into rename mode; tapping a
  * folder tab that's already selected renames it.
  */
-@OptIn(ExperimentalComposeUiApi::class)
+@OptIn(ExperimentalComposeUiApi::class, ExperimentalFoundationApi::class)
 @Composable
 internal fun EmojiPanel(
     store: EmojiStore,
@@ -126,6 +134,13 @@ internal fun EmojiPanel(
     var editValue by remember { mutableStateOf(TextFieldValue("")) }
     var importMenuOpen by remember { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
+
+    // Press-and-hold delete, for both a single emoji and a whole folder tab
+    // (long-pressing "All" instead deletes whichever emoji aren't filed into
+    // any folder, since "All" isn't a real, deletable folder of its own).
+    var pendingDeleteEmoji by remember { mutableStateOf<EmojiEntry?>(null) }
+    var pendingDeleteFolder by remember { mutableStateOf<EmojiFolder?>(null) }
+    var pendingDeleteOrphans by remember { mutableStateOf(false) }
 
     fun startEditing(id: Int, current: String) {
         editingId = id
@@ -190,6 +205,10 @@ internal fun EmojiPanel(
                     onClick = {
                         finishEditing()
                         selectedFolderId = null
+                    },
+                    onLongClick = {
+                        if (store.orphanEmojiCount() > 0) pendingDeleteOrphans = true
+                        else Toast.makeText(context, "No untagged emoji to delete", Toast.LENGTH_SHORT).show()
                     }
                 ) { PillLabel("All", selected = selectedFolderId == null) }
 
@@ -214,7 +233,8 @@ internal fun EmojiPanel(
                                     finishEditing()
                                     selectedFolderId = folder.id
                                 }
-                            }
+                            },
+                            onLongClick = { pendingDeleteFolder = folder }
                         ) { PillLabel(folder.name, selected = isSelected) }
                     }
                 }
@@ -283,7 +303,10 @@ internal fun EmojiPanel(
                     items(emoji, key = { it.id }) { e ->
                         Box(
                             Modifier.aspectRatio(1f).padding(2.dp).clip(RoundedCornerShape(6.dp))
-                                .clickable { tap(); onPickEmoji(e) },
+                                .combinedClickable(
+                                    onClick = { tap(); onPickEmoji(e) },
+                                    onLongClick = { tap(); pendingDeleteEmoji = e }
+                                ),
                             contentAlignment = Alignment.Center
                         ) {
                             AsyncImage(
@@ -296,19 +319,112 @@ internal fun EmojiPanel(
             }
         }
     }
+
+    // ── Delete confirmations ────────────────────────────────────────────
+    pendingDeleteEmoji?.let { e ->
+        EmojiDeleteConfirmDialog(
+            title = "Delete Emoji?",
+            message = "This removes \":${e.name}:\" from every folder and from any Textshot that hasn't been posted yet.",
+            liquidGlass = liquidGlass, tint = tint,
+            onConfirm = { store.deleteEmoji(e.id); pendingDeleteEmoji = null },
+            onDismiss = { pendingDeleteEmoji = null }
+        )
+    }
+    pendingDeleteFolder?.let { f ->
+        EmojiDeleteConfirmDialog(
+            title = "Delete Folder?",
+            message = "\"${f.name}\" will be removed. Its emoji stay in All and in any other folder they're also in.",
+            liquidGlass = liquidGlass, tint = tint,
+            onConfirm = {
+                store.deleteFolder(f.id)
+                if (selectedFolderId == f.id) selectedFolderId = null
+                pendingDeleteFolder = null
+            },
+            onDismiss = { pendingDeleteFolder = null }
+        )
+    }
+    if (pendingDeleteOrphans) {
+        val n = store.orphanEmojiCount()
+        EmojiDeleteConfirmDialog(
+            title = "Delete Emoji?",
+            message = if (n == 1) "This deletes the 1 emoji that isn't filed into any folder."
+                      else "This deletes the $n emoji that aren't filed into any folder.",
+            liquidGlass = liquidGlass, tint = tint,
+            onConfirm = { store.deleteOrphanEmoji(); pendingDeleteOrphans = false },
+            onDismiss = { pendingDeleteOrphans = false }
+        )
+    }
+}
+
+/** Same plain warning-dialog scaffold as [ExportDatasetNameDialog] (see
+ *  SettingsSheet.kt) — a title, a line of body text, Cancel/Delete — just
+ *  without the text field, and with Delete styled as a destructive action. */
+@Composable
+private fun EmojiDeleteConfirmDialog(
+    title: String, message: String, liquidGlass: Boolean, tint: Color,
+    onConfirm: () -> Unit, onDismiss: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(dismissOnClickOutside = true, dismissOnBackPress = true, usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.65f))
+                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss),
+            contentAlignment = Alignment.Center
+        ) {
+            val shape = RoundedCornerShape(20.dp)
+            @Composable
+            fun DialogContent() {
+                Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                    Text(
+                        title, color = Color.White, fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(message, color = DimGray, fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(14.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(
+                            onClick = onDismiss,
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                            modifier = Modifier.weight(1f).height(46.dp)
+                        ) { Text("Cancel") }
+                        Button(
+                            onClick = onConfirm,
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE53935)),
+                            modifier = Modifier.weight(1f).height(46.dp)
+                        ) { Text("Delete", color = Color.White, fontWeight = FontWeight.SemiBold) }
+                    }
+                }
+            }
+            if (liquidGlass) {
+                LiquidGlassSurface(Modifier.fillMaxWidth(0.86f), shape = shape, tint = tint) { DialogContent() }
+            } else {
+                Box(Modifier.fillMaxWidth(0.86f).clip(shape).background(Color(0xFF1E1E22))) { DialogContent() }
+            }
+        }
+    }
 }
 
 /** A glass pill (or circle) in the panel's tab row. [onClick] null = not tappable. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun PanelPill(
     liquidGlass: Boolean, tint: Color, shape: Shape,
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)?,
+    onLongClick: (() -> Unit)? = null,
     content: @Composable BoxScope.() -> Unit
 ) {
     val tap = rememberHapticTap()
     val clickMod = modifier.height(32.dp).clip(shape)
-        .then(if (onClick != null) Modifier.clickable { tap(); onClick() } else Modifier)
+        .then(
+            if (onClick != null) Modifier.combinedClickable(
+                onClick = { tap(); onClick() },
+                onLongClick = onLongClick?.let { { tap(); it() } }
+            ) else Modifier
+        )
     if (liquidGlass) {
         LiquidGlassSurface(clickMod, shape = shape, tint = tint, contentAlignment = Alignment.Center, content = content)
     } else {

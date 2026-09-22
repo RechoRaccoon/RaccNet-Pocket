@@ -184,6 +184,58 @@ class EmojiStore private constructor(context: Context) {
         commit(cur.copy(folders = cur.folders.map { if (it.id == id) it.copy(name = clean) else it }))
     }
 
+    /** Removes the folder itself. The emoji that were in it are untouched —
+     *  they stay in the library (and in "All", and in any other folder they
+     *  were also added to), since a folder is just a grouping over the
+     *  shared library, not a separate copy of the emoji. */
+    fun deleteFolder(id: Int) = synchronized(lock) {
+        val cur = state.index
+        commit(cur.copy(folders = cur.folders.filterNot { it.id == id }))
+    }
+
+    /** Deletes one emoji everywhere: out of the master library, out of every
+     *  folder that had it, and its stored picture. Also frees its id for
+     *  reuse by a future import. */
+    fun deleteEmoji(id: Int) = synchronized(lock) {
+        val cur = state.index
+        val entry = cur.emojis.firstOrNull { it.id == id } ?: return@synchronized
+        commit(
+            cur.copy(
+                emojis = cur.emojis - entry,
+                folders = cur.folders.map { f -> if (id in f.emojiIds) f.copy(emojiIds = f.emojiIds - id) else f }
+            )
+        )
+        bitmapCache.remove(id)?.recycle()
+        imageBitmapCache.remove(id)
+        runCatching { fileFor(entry).delete() }
+    }
+
+    /** "All" isn't a real folder, so long-pressing it can't delete "the All
+     *  folder" — instead it bulk-deletes every emoji that isn't filed into
+     *  any folder (i.e. the ones that only exist because of "All"). Returns
+     *  how many were removed. */
+    fun deleteOrphanEmoji(): Int = synchronized(lock) {
+        val cur = state.index
+        val filed = cur.folders.flatMapTo(mutableSetOf()) { it.emojiIds }
+        val orphans = cur.emojis.filter { it.id !in filed }
+        if (orphans.isEmpty()) return@synchronized 0
+        val orphanFiles = orphans.map { fileFor(it) }
+        commit(cur.copy(emojis = cur.emojis.filter { it.id in filed }))
+        for (e in orphans) {
+            bitmapCache.remove(e.id)?.recycle()
+            imageBitmapCache.remove(e.id)
+        }
+        orphanFiles.forEach { runCatching { it.delete() } }
+        orphans.size
+    }
+
+    /** How many emoji a long-press on "All" would remove (its orphan count),
+     *  used to word that confirmation prompt. */
+    fun orphanEmojiCount(): Int {
+        val filed = state.index.folders.flatMapTo(mutableSetOf()) { it.emojiIds }
+        return state.index.emojis.count { it.id !in filed }
+    }
+
     /** Emoji shown for a tab: [folderId] null = "All" (everything). */
     fun emojiFor(folderId: Int?): List<EmojiEntry> {
         val st = state
