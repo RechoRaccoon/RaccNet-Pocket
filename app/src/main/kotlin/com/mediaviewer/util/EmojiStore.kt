@@ -145,6 +145,22 @@ class EmojiStore private constructor(context: Context) {
         return sb.toString()
     }
 
+    /** Drops every emoji token, leaving no trace of its name — used for the
+     *  post's alt text, which should never expose what a custom emoji was
+     *  called. Each token is simply removed, not replaced with anything. */
+    fun stripEmoji(text: String): String {
+        if (text.none { entryFor(it) != null }) return text
+        val sb = StringBuilder(text.length)
+        for (c in text) if (entryFor(c) == null) sb.append(c)
+        return sb.toString()
+    }
+
+    /** Which of this emoji's folders (not counting "All", which every emoji
+     *  is implicitly part of) actually contain it right now. Used only to
+     *  word the delete-confirmation prompt precisely, so it never implies a
+     *  wider effect ("every folder") than what deleting it actually does. */
+    fun foldersContaining(id: Int): List<EmojiFolder> = state.index.folders.filter { id in it.emojiIds }
+
     // ── Images ──────────────────────────────────────────────────────────
 
     fun fileFor(entry: EmojiEntry): File = File(dir, entry.file)

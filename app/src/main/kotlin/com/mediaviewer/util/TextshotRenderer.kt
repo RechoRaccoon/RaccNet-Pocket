@@ -42,7 +42,13 @@ object TextshotRenderer {
      *  Character — the one line-breakers treat as a break opportunity). */
     private const val OBJ = '\uFFFC'
 
-    private const val PAD_FRACTION = 0.06f
+    /** Margin left around the text's tight ink, as a fraction of the frame's
+     *  side, on each edge — small on purpose (per feedback, Textshots were
+     *  reading as having way too much dead space around the text; this is
+     *  a real edge-to-edge frame now, not a padded card). [TextshotEmojiImage]
+     *  reads this same value so its rounded-corner inset stays correct no
+     *  matter how this is tuned. */
+    const val PAD_FRACTION = 0.02f
     private const val LINE_SPACING_MULT = 1.15f
     // Floor so pathologically long input never rounds to an invisible size.
     private const val MIN_TEXT_SIZE = 20f

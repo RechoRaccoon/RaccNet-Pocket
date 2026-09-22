@@ -322,9 +322,18 @@ internal fun EmojiPanel(
 
     // ── Delete confirmations ────────────────────────────────────────────
     pendingDeleteEmoji?.let { e ->
+        // Named precisely, not "every folder" — deleting only ever affects
+        // All (every emoji is implicitly part of it) plus whichever folder(s)
+        // this specific emoji is actually filed into, never folders it isn't in.
+        val ownerFolders = store.foldersContaining(e.id)
+        val message = when (ownerFolders.size) {
+            0 -> "This removes \":${e.name}:\" from All. It isn't filed into any folder."
+            1 -> "This removes \":${e.name}:\" from All and from \"${ownerFolders[0].name}\"."
+            else -> "This removes \":${e.name}:\" from All and from ${ownerFolders.size} folders it's in: ${ownerFolders.joinToString { it.name }}."
+        }
         EmojiDeleteConfirmDialog(
             title = "Delete Emoji?",
-            message = "This removes \":${e.name}:\" from every folder and from any Textshot that hasn't been posted yet.",
+            message = message,
             liquidGlass = liquidGlass, tint = tint,
             onConfirm = { store.deleteEmoji(e.id); pendingDeleteEmoji = null },
             onDismiss = { pendingDeleteEmoji = null }

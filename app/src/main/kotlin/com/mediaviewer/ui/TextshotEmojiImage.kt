@@ -11,6 +11,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import com.mediaviewer.util.TextshotRenderer
 
 /**
  * Makes the Textshot's black background see-through.
@@ -41,17 +42,20 @@ val TextshotBlackToClear: ColorFilter = ColorFilter.colorMatrix(
  * sized to the picture's aspect ratio (e.g. `Modifier.aspectRatio(ratio)`).
  *
  * "Rounded corners must never cut off the text": the renderer always leaves
- * ~6% of empty margin around the ink, so the picture only needs an extra
- * inset when the corner radius is large relative to the bubble. The inset is
- * the exact amount that keeps the ink's own corner inside the arc
- * (a rounded corner of radius r cuts in by r * (1 - 1/sqrt(2)) ~= 0.293 r
- * along the diagonal), which is zero for ordinary bubbles.
+ * [TextshotRenderer.PAD_FRACTION] of empty margin around the ink, so the
+ * picture only needs an extra inset when the corner radius is large relative
+ * to the bubble. The inset is the exact amount that keeps the ink's own
+ * corner inside the arc (a rounded corner of radius r cuts in by
+ * r * (1 - 1/sqrt(2)) ~= 0.293 r along the diagonal), which is zero for
+ * ordinary bubbles — that renderer margin is intentionally thin now (an
+ * edge-to-edge frame, not a padded card), so a bubble with a large corner
+ * radius leans on this inset more than it used to.
  */
 @Composable
 fun TextshotEmojiImage(url: String, cornerRadius: Dp, modifier: Modifier = Modifier) {
     BoxWithConstraints(modifier) {
         val minSide = if (maxWidth < maxHeight) maxWidth else maxHeight
-        val inset = (cornerRadius * 0.293f - minSide * 0.06f).coerceAtLeast(0.dp)
+        val inset = (cornerRadius * 0.293f - minSide * TextshotRenderer.PAD_FRACTION).coerceAtLeast(0.dp)
         AsyncImage(
             model = url,
             contentDescription = "Textshot post with emoji",

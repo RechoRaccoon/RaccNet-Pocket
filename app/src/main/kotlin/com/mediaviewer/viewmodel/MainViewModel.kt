@@ -928,9 +928,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 emoji.load()
                 val hasEmoji = emoji.containsEmoji(draft.textshotText)
                 val bitmap = com.mediaviewer.util.TextshotRenderer.render(draft.textshotText, emojiBitmap = emoji::bitmapForChar)
-                // Alt text carries `:name:` shortcodes instead of the private-use
-                // token characters, so it stays readable everywhere.
-                val altText = emoji.toShortcodes(draft.textshotText)
+                // Alt text never carries a custom emoji's name — just drop the
+                // token entirely rather than exposing it as a `:name:` shortcode.
+                val altText = emoji.stripEmoji(draft.textshotText)
                 bskyRepo.createTextshotPost(bskyToken, did, bitmap, altText, draft.selfLabels, hasEmoji).getOrElse { throw it }
             }
             com.mediaviewer.ui.ComposeMode.VIDEO -> {
