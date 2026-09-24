@@ -2,6 +2,19 @@ package com.mediaviewer.util
 
 import android.content.Context
 import android.net.Uri
+import androidx.media3.common.MediaItem
+import androidx.media3.transformer.Composition
+import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.EditedMediaItemSequence
+import androidx.media3.transformer.ExportException
+import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.Transformer
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import java.io.File
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * Splices a custom thumbnail image into a video's first frame before
@@ -11,30 +24,72 @@ import android.net.Uri
  * frame 0 *be* that image. RaccNet Legacy does this server-side with
  * ffmpeg (see `_process_video` in raccnet_server.py).
  *
- * CURRENTLY A NO-OP — this was implemented with Media3 Transformer
- * (EditedMediaItemSequence + experimentalSetForceAudioTrack, matching
- * Legacy's concat-a-still-frame trick), but that API only landed in
- * media3-transformer 1.8.0, and that version's own AAR metadata requires
- * compileSdk 35+ — which in turn needs Android Gradle Plugin 8.5+ and a
- * newer Gradle wrapper than this project currently uses (AGP 8.2.0 /
- * compileSdk 34 / Gradle 8.4). That's a real migration (AGP + Gradle +
- * compileSdk all move together, and it's worth testing deliberately rather
- * than as a side effect of one feature), so rather than force it through
- * silently this just passes the video through untouched for now — video
- * posts work fine, they just get Bluesky's own auto-generated (frame 0)
- * thumbnail instead of a custom one.
+ * Implemented with Media3 Transformer: the thumbnail is fed as an image
+ * [MediaItem] with a fixed display duration, concatenated in front of the
+ * real video via [EditedMediaItemSequence], with
+ * `experimentalSetForceAudioTrack` so the image-only first item doesn't
+ * drop the video's audio track. The export always re-muxes to mp4 —
+ * callers (see `BlueskyRepository.createVideoPost`) already account for
+ * that when picking the upload MIME type.
  *
- * To finish this: bump compileSdk to 35 (or 36) + AGP to a matching
- * version (check https://developer.android.com/studio/releases/gradle-plugin
- * for the AGP/Gradle-wrapper pairing) + media3-exoplayer/-ui to a matching
- * 1.8.0+ release, add media3-transformer/-effect/-muxer at that same
- * version, then restore the EditedMediaItemSequence-based implementation
- * (previous version of this file, still in this chat's history). Build and
- * test that whole migration on its own before layering this feature back
- * on top of it.
+ * Requires media3-transformer 1.8.0+ (hence compileSdk 35 / AGP 8.5.2 /
+ * Gradle 8.7 — see the root and app build files).
  */
 object VideoThumbnailStitcher {
-    /** Returns [thumbnailUri] spliced into [videoUri] as its first frame —
-     *  currently just returns [videoUri] unchanged; see class doc above. */
-    suspend fun stitch(context: Context, videoUri: Uri, thumbnailUri: Uri?): Uri = videoUri
+    /** How long the spliced-in thumbnail stays on screen. One second
+     *  guarantees frame 0 is the thumbnail on every player. */
+    private const val THUMBNAIL_DURATION_MS = 1000L
+
+    /** Returns a new mp4 [Uri] (in the app cache dir) with [thumbnailUri]
+     *  as its first frame, or [videoUri] unchanged when [thumbnailUri] is
+     *  null. Throws on export failure — the caller falls back to the
+     *  original video (a missing thumbnail beats a failed post). */
+    suspend fun stitch(context: Context, videoUri: Uri, thumbnailUri: Uri?): Uri {
+        if (thumbnailUri == null) return videoUri
+        val outputFile = withContext(Dispatchers.IO) {
+            File.createTempFile("stitched-", ".mp4", context.cacheDir)
+        }
+        // Transformer must be created and started on a Looper thread; the
+        // caller runs on Dispatchers.IO, so hop to Main for the export and
+        // suspend until the listener fires.
+        withContext(Dispatchers.Main) {
+            suspendCancellableCoroutine { cont ->
+                val imageItem = EditedMediaItem.Builder(
+                    MediaItem.Builder()
+                        .setUri(thumbnailUri)
+                        .setImageDurationMs(THUMBNAIL_DURATION_MS)
+                        .build()
+                ).build()
+                val videoItem = EditedMediaItem.Builder(MediaItem.fromUri(videoUri)).build()
+                val sequence = EditedMediaItemSequence.Builder(imageItem, videoItem)
+                    .experimentalSetForceAudioTrack(true)
+                    .build()
+                val composition = Composition.Builder(sequence).build()
+                val transformer = Transformer.Builder(context.applicationContext).build()
+                val listener = object : Transformer.Listener {
+                    override fun onCompleted(
+                        composition: Composition,
+                        exportResult: ExportResult
+                    ) {
+                        cont.resume(Unit)
+                    }
+
+                    override fun onError(
+                        composition: Composition,
+                        exportResult: ExportResult,
+                        exportException: ExportException
+                    ) {
+                        cont.resumeWithException(exportException)
+                    }
+                }
+                transformer.addListener(listener)
+                cont.invokeOnCancellation {
+                    transformer.removeListener(listener)
+                    transformer.cancel()
+                }
+                transformer.start(composition, outputFile.absolutePath)
+            }
+        }
+        return Uri.fromFile(outputFile)
+    }
 }

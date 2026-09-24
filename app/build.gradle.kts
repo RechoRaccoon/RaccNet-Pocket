@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.mediaviewer"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "rechoraccoon.raccnetlite"
@@ -59,9 +59,15 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.5.0")
     implementation("io.coil-kt:coil-video:2.5.0")
 
-    implementation("androidx.media3:media3-exoplayer:1.3.0")
-    implementation("androidx.media3:media3-exoplayer-hls:1.3.0")
-    implementation("androidx.media3:media3-ui:1.3.0")
+    implementation("androidx.media3:media3-exoplayer:1.8.0")
+    implementation("androidx.media3:media3-exoplayer-hls:1.8.0")
+    implementation("androidx.media3:media3-ui:1.8.0")
+    // Video-thumbnail stitching (VideoThumbnailStitcher): needs
+    // media3-transformer 1.8.0+ for EditedMediaItemSequence +
+    // experimentalSetForceAudioTrack, which is why compileSdk is 35.
+    implementation("androidx.media3:media3-transformer:1.8.0")
+    implementation("androidx.media3:media3-effect:1.8.0")
+    implementation("androidx.media3:media3-muxer:1.8.0")
 
     implementation("androidx.datastore:datastore-preferences:1.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
