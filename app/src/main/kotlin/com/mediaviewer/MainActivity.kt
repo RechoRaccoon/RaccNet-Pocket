@@ -345,7 +345,6 @@ private fun AppRoot(viewModel: MainViewModel) {
     // the state machine and rendering; everything below is just real app
     // events (never artificial timers) driving it.
     val pixelController = rememberPixelTransitionController()
-    val context = LocalContext.current
     val rootScope = rememberCoroutineScope()
 
     // Bug fix (item 3 — Login page/real UI flashing before the loading

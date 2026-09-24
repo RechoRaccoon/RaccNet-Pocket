@@ -503,11 +503,11 @@ private val BODY_LANDMARK_INDICES = intArrayOf(11, 12, 13, 14, 15, 16, 23, 24, 2
 /** VRM pipeline step 6 (arm + leg rotation): [BODY_LANDMARK_INDICES]'
  *  world-space positions (meters, hip-centered — MediaPipe's
  *  `worldLandmarks()`, not the normalized image-space `landmarks()`),
- *  each smoothed through [filters] and keyed by landmark index. Assumed
- *  shape is `Optional<List<List<Landmark>>>` with `Landmark.x()/y()/z()`
- *  accessors — same "unverified against the pinned tasks-vision AAR"
- *  caveat as [headTransformationMatrix] above and everywhere else in this
- *  pipeline. Returns an empty map (and resets `"pose."`-prefixed filter
+ *  each smoothed through [filters] and keyed by landmark index.
+ *  `worldLandmarks()` returns `List<List<Landmark>>` (one list per
+ *  detected pose — verified against the tasks-vision 0.10.14 AAR, not an
+ *  Optional), and `Landmark` exposes `getX()/getY()/getZ()`.
+ *  Returns an empty map (and resets `"pose."`-prefixed filter
  *  history, so a later reacquisition isn't smoothed across the gap) when
  *  no pose is currently detected, same shape as [smoothedFaceBlendshapes].
  *  One shared function for both arms and legs (not two near-duplicates) —
@@ -516,22 +516,30 @@ private val BODY_LANDMARK_INDICES = intArrayOf(11, 12, 13, 14, 15, 16, 23, 24, 2
  *  leg rotation is additionally gated on "Full Body" — see the call
  *  site), not to how the landmarks get smoothed. */
 private fun smoothedBodyWorldLandmarks(poseResult: PoseLandmarkerResult?, filters: OneEuroFilterBank): Map<Int, FloatArray> {
-    val worldLandmarks = poseResult?.worldLandmarks()?.orElse(null)?.firstOrNull()
+    val result = poseResult ?: run {
+        filters.resetPrefixed("pose.")
+        return emptyMap()
+    }
+    // Verified against the tasks-vision 0.10.14 AAR: worldLandmarks() is a
+    // plain List<List<Landmark>> (one list per detected pose) — NOT a
+    // java.util.Optional — and Landmark exposes getX()/getY()/getZ()
+    // (Kotlin `.x`/`.y`/`.z` properties), not `x()`/`y()`/`z()` methods.
+    val worldLandmarks = result.worldLandmarks().firstOrNull()
     if (worldLandmarks == null) {
         filters.resetPrefixed("pose.")
         return emptyMap()
     }
-    val timestampSeconds = poseResult.timestampMs() / 1000.0
-    val result = mutableMapOf<Int, FloatArray>()
+    val timestampSeconds = result.timestampMs() / 1000.0
+    val smoothed = mutableMapOf<Int, FloatArray>()
     for (index in BODY_LANDMARK_INDICES) {
         val landmark = worldLandmarks.getOrNull(index) ?: continue
-        result[index] = floatArrayOf(
-            filters.filter("pose.$index.x", landmark.x(), timestampSeconds),
-            filters.filter("pose.$index.y", landmark.y(), timestampSeconds),
-            filters.filter("pose.$index.z", landmark.z(), timestampSeconds)
+        smoothed[index] = floatArrayOf(
+            filters.filter("pose.$index.x", landmark.x, timestampSeconds),
+            filters.filter("pose.$index.y", landmark.y, timestampSeconds),
+            filters.filter("pose.$index.z", landmark.z, timestampSeconds)
         )
     }
-    return result
+    return smoothed
 }
 
 /**
@@ -653,7 +661,7 @@ private fun VrmSettingsSheet(
     onDismiss: () -> Unit
 ) {
     val tap = rememberHapticTap()
-    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f)).clickable { tap(); onDismiss() })
+    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f)).clickable { tap(); onDismiss() }) {
     Box(
         Modifier.fillMaxWidth().align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navigationBars)
             .padding(16.dp).clip(RoundedCornerShape(20.dp))
@@ -690,6 +698,7 @@ private fun VrmSettingsSheet(
                 )
             }
         }
+    }
     }
 }
 

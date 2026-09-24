@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.google.mediapipe.framework.image.MPImage
 import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.ImageProcessingOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
@@ -55,7 +56,7 @@ class PoseLandmarkerHelper private constructor(
             runCatching {
                 val baseOptions = BaseOptions.builder()
                     .setModelAssetPath(MODEL_ASSET_PATH)
-                    .setDelegate(BaseOptions.Delegate.GPU)
+                    .setDelegate(Delegate.GPU)
                     .build()
                 val options = PoseLandmarker.PoseLandmarkerOptions.builder()
                     .setBaseOptions(baseOptions)
