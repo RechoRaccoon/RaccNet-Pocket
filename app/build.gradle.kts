@@ -108,7 +108,7 @@ dependencies {
     // hood — both from the same release train, kept on the same version.
     // Check https://github.com/google/filament/releases for anything newer
     // before building; Filament ships frequently.
-    val filamentVersion = "1.51.4"
+    val filamentVersion = "1.51.6"
     implementation("com.google.android.filament:filament-android:$filamentVersion")
     implementation("com.google.android.filament:filament-utils-android:$filamentVersion")
     implementation("com.google.android.filament:gltfio-android:$filamentVersion")
