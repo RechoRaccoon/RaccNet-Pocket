@@ -21,7 +21,7 @@ import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -37,7 +37,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.view.OnApplyWindowInsetsListener
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import com.mediaviewer.util.rememberHapticTap
 
 /**
@@ -86,16 +88,38 @@ fun CameraNotchButton(
     var cutoutHeight by remember { mutableStateOf(28.dp) }
     var cutoutCenterX by remember { mutableStateOf<Dp?>(null) }
     var cutoutCenterY by remember { mutableStateOf<Dp?>(null) }
-    LaunchedEffect(view) {
-        val rect = ViewCompat.getRootWindowInsets(view)?.displayCutout?.boundingRects?.firstOrNull()
-        if (rect != null && rect.width() > 0 && rect.height() > 0) {
-            with(density) {
-                cutoutWidth = rect.width().toDp()
-                cutoutHeight = rect.height().toDp()
-                cutoutCenterX = rect.centerX().toDp()
-                cutoutCenterY = rect.centerY().toDp()
+    // Was a one-shot LaunchedEffect reading ViewCompat.getRootWindowInsets
+    // exactly once: on real devices the very first composition frequently
+    // runs *before* the system has dispatched WindowInsets to this view at
+    // all, so that single read came back null and the button was stuck on
+    // the no-cutout fallback (28.dp, screen-top-center) for the rest of the
+    // session — which is exactly "too big and misaligned" for a real
+    // cutout that's usually much smaller and rarely dead-center. A
+    // persistent OnApplyWindowInsetsListener (plus an explicit
+    // requestApplyInsets() to make sure one dispatch actually happens)
+    // instead keeps picking up the real cutout rect whenever insets do
+    // arrive/change — first layout, rotation, fold, etc. — not just once.
+    DisposableEffect(view) {
+        fun applyFrom(insets: WindowInsetsCompat?) {
+            val rect = insets?.displayCutout?.boundingRects?.firstOrNull()
+            if (rect != null && rect.width() > 0 && rect.height() > 0) {
+                with(density) {
+                    cutoutWidth = rect.width().toDp()
+                    cutoutHeight = rect.height().toDp()
+                    cutoutCenterX = rect.centerX().toDp()
+                    cutoutCenterY = rect.centerY().toDp()
+                }
             }
         }
+        // Covers the case insets are already available by now.
+        applyFrom(ViewCompat.getRootWindowInsets(view))
+        val listener = OnApplyWindowInsetsListener { _, insets ->
+            applyFrom(insets)
+            insets // don't consume — other views still need the real insets
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(view, listener)
+        view.requestApplyInsets()
+        onDispose { ViewCompat.setOnApplyWindowInsetsListener(view, null) }
     }
 
     val outlinePadding = 4.dp

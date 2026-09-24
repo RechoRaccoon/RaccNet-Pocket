@@ -11,6 +11,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import com.google.android.filament.Engine
 import com.google.android.filament.EntityManager
+import com.google.android.filament.IndirectLight
 import com.google.android.filament.LightManager
 import com.google.android.filament.utils.ModelViewer
 import com.google.android.filament.utils.Utils
@@ -153,6 +154,7 @@ fun VrmAvatarView(
             val viewer = ModelViewer(surfaceView)
             surfaceView.setOnTouchListener(viewer) // drag-to-orbit, ModelViewer's own manipulator
             addThreeLightRig(viewer.engine, viewer.scene)
+            addFlatAmbientLight(viewer.engine, viewer.scene)
             viewerHolder[0] = viewer
             if (vrmBytes != null) {
                 val parsedVrmData = runCatching { VrmParser.parse(vrmBytes) }.getOrNull()
@@ -208,6 +210,36 @@ private fun addThreeLightRig(engine: Engine, scene: com.google.android.filament.
     directionalLight(0.6f, -0.2f, -0.4f, 14_000f)   // fill: front-right, softer, keeps the key's shadow side readable
     directionalLight(0.0f, 0.3f, 1.0f, 10_000f)    // rim: from behind, separates the avatar's silhouette from the background
     directionalLight(0.0f, -0.1f, -1.0f, 9_000f)    // frontal lift: dim head-on light so unlit faces fall to dark grey, not pure black
+}
+
+/**
+ * Three plain directional lights alone leave every surface that isn't
+ * facing one of them completely unlit — for a PBR material that's true
+ * black, no matter what the underlying albedo/base-color texture actually
+ * contains. On a real device that reads as flat, blocky patches of pure
+ * material color (hair, clothing) next to solid black (anything angled
+ * away from all three lights, most of a face turned even slightly from
+ * camera) — easy to mistake for "textures aren't loading" when it's
+ * really "nothing is lighting the far side of the model at all."
+ *
+ * A real scene would fix this with an image-based light (IBL) baked from
+ * a `.ktx` cubemap — same "no network to fetch a binary asset" constraint
+ * as the MediaPipe `.task` models (see this file's top doc comment) — so
+ * this builds a flat ambient term instead: [IndirectLight] accepts raw
+ * spherical-harmonics coefficients directly, and passing only band 0 (a
+ * single constant RGB triple, no higher-order bands) gives a uniform
+ * ambient fill from every direction at once, entirely without a texture
+ * asset. It's flat/directionless on purpose — a real IBL captures how
+ * light varies by direction, this doesn't attempt to — but it's enough to
+ * lift every surface out of true-black and let its actual texture/albedo
+ * show, which a directional-only rig fundamentally can't do.
+ */
+private fun addFlatAmbientLight(engine: Engine, scene: com.google.android.filament.Scene) {
+    val indirectLight = IndirectLight.Builder()
+        .irradiance(1, floatArrayOf(0.65f, 0.65f, 0.68f)) // band 0 only: a flat, faintly cool-white ambient
+        .intensity(12_000f)
+        .build(engine)
+    scene.indirectLight = indirectLight
 }
 
 private const val TAG = "VrmAvatarView"

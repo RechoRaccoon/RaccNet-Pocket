@@ -226,11 +226,12 @@ object AvatarRetargeter {
      * 2. **Axis remap sign/axis choice**, just below — MediaPipe's
      *    camera-facing space and VRM's bone-local space are two
      *    conventions that were never designed against each other, same
-     *    situation as the ARKit→VRM expression table above. The signs
-     *    chosen here are a starting guess (flip yaw+roll, keep pitch); if
-     *    a real device shows nodding working but left/right turning
-     *    mirrored (or vice versa), that's this remap, not the calibration
-     *    or slerp logic beneath it.
+     *    situation as the ARKit→VRM expression table above. Flip yaw,
+     *    pitch, and roll (all three axes) — confirmed on-device that
+     *    keeping pitch's sign as-is made nodding up/down come out
+     *    backwards on the avatar, so pitch gets flipped here too now. If
+     *    a real device shows left/right turning mirrored (or vice versa),
+     *    that's this remap, not the calibration or slerp logic beneath it.
      *
      * Both are exactly the kind of thing this whole pipeline has been
      * honest about needing a real device to confirm — see this file's top
@@ -249,9 +250,11 @@ object AvatarRetargeter {
             Quaternion.fromRotationColumnMajorMatrix(facialTransformationMatrix)
         }.getOrNull() ?: return
 
-        // See this function's doc comment, point 2 — flip yaw (Y) and
-        // roll (Z), keep pitch (X), as the starting axis remap.
-        val remapped = Quaternion(tracked.x, -tracked.y, -tracked.z, tracked.w)
+        // See this function's doc comment, point 2 — flip yaw (Y), roll
+        // (Z), and pitch (X): keeping pitch's sign unflipped made looking
+        // up/down come out inverted on the avatar (nod up → avatar looks
+        // down), so it's flipped along with the other two axes now.
+        val remapped = Quaternion(-tracked.x, -tracked.y, -tracked.z, tracked.w)
 
         val calibration = target.headCalibration
         if (calibration == null) {
