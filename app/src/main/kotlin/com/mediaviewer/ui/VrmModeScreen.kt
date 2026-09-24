@@ -506,7 +506,7 @@ private val BODY_LANDMARK_INDICES = intArrayOf(11, 12, 13, 14, 15, 16, 23, 24, 2
  *  each smoothed through [filters] and keyed by landmark index.
  *  `worldLandmarks()` returns `List<List<Landmark>>` (one list per
  *  detected pose — verified against the tasks-vision 0.10.14 AAR, not an
- *  Optional), and `Landmark` exposes `getX()/getY()/getZ()`.
+ *  Optional), and `Landmark` exposes `x()/y()/z()` accessors.
  *  Returns an empty map (and resets `"pose."`-prefixed filter
  *  history, so a later reacquisition isn't smoothed across the gap) when
  *  no pose is currently detected, same shape as [smoothedFaceBlendshapes].
@@ -522,8 +522,8 @@ private fun smoothedBodyWorldLandmarks(poseResult: PoseLandmarkerResult?, filter
     }
     // Verified against the tasks-vision 0.10.14 AAR: worldLandmarks() is a
     // plain List<List<Landmark>> (one list per detected pose) — NOT a
-    // java.util.Optional — and Landmark exposes getX()/getY()/getZ()
-    // (Kotlin `.x`/`.y`/`.z` properties), not `x()`/`y()`/`z()` methods.
+    // java.util.Optional — and Landmark exposes x()/y()/z() accessors
+    // (verified against the tasks-vision 0.10.14 AAR).
     val worldLandmarks = result.worldLandmarks().firstOrNull()
     if (worldLandmarks == null) {
         filters.resetPrefixed("pose.")
@@ -534,9 +534,9 @@ private fun smoothedBodyWorldLandmarks(poseResult: PoseLandmarkerResult?, filter
     for (index in BODY_LANDMARK_INDICES) {
         val landmark = worldLandmarks.getOrNull(index) ?: continue
         smoothed[index] = floatArrayOf(
-            filters.filter("pose.$index.x", landmark.x, timestampSeconds),
-            filters.filter("pose.$index.y", landmark.y, timestampSeconds),
-            filters.filter("pose.$index.z", landmark.z, timestampSeconds)
+            filters.filter("pose.$index.x", landmark.x(), timestampSeconds),
+            filters.filter("pose.$index.y", landmark.y(), timestampSeconds),
+            filters.filter("pose.$index.z", landmark.z(), timestampSeconds)
         )
     }
     return smoothed
