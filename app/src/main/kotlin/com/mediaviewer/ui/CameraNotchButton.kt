@@ -4,6 +4,7 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -28,9 +30,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.ViewCompat
@@ -39,24 +43,31 @@ import com.mediaviewer.util.rememberHapticTap
 /**
  * Item 8: the phone's real front-camera cutout, turned into a button.
  *
- * Collapsed, it's a small glass-outlined bubble hugging the actual display
- * cutout — with a real gap between the outline and the cutout itself (see
- * [outlinePadding]) so it visibly reads as a tappable bubble rather than
- * just decoration drawn around the notch. Tapping it gives a deep haptic
- * tap and expands the bubble horizontally in *both* directions at once —
- * the notch's own position never moves, the outline just grows outward
- * around it — revealing a "Camera" text button on the left and a "VRM"
- * text button on the right. Both halves are the same fixed width and each
- * centers its own label within its own half, so the notch still reads as
- * dividing one continuous bubble into two separate buttons even though it's
- * visually one shape. Tapping the notch again, or anywhere else on screen,
- * smoothly collapses it back with no action taken.
+ * Collapsed, it's a small bubble hugging the actual display cutout — a
+ * tight outline (see [outlinePadding]) so it visibly reads as a tappable
+ * bubble rather than just decoration drawn around the notch. Tapping it
+ * gives a deep haptic tap and expands the bubble horizontally in *both*
+ * directions at once — the notch's own position never moves, the outline
+ * just grows outward around it — revealing a "Camera" text button on the
+ * left and a "VRM" text button on the right. Both halves are the same
+ * fixed width and each centers its own label within its own half, so the
+ * notch still reads as dividing one continuous bubble into two separate
+ * buttons even though it's visually one shape. Tapping the notch again,
+ * or anywhere else on screen, smoothly collapses it back with no action
+ * taken.
  *
  * Positioning/sizing come from the device's *real* [android.view.DisplayCutout]
- * (via the root view's window insets) rather than a guessed constant, so the
- * bubble actually hugs whatever cutout shape/size this specific device has.
- * Devices with no cutout (most emulators, some tablets) fall back to a small
- * fixed size so the button still renders sensibly.
+ * (via the root view's window insets) rather than a guessed constant: the
+ * bubble is offset so its center sits on the cutout rect's own center, so
+ * it actually hugs whatever cutout shape/size/position this specific
+ * device has — not just the screen's top-center. Devices with no cutout
+ * (most emulators, some tablets) fall back to a small fixed size near the
+ * top-center so the button still renders sensibly.
+ *
+ * Colors follow the app's adaptive [tint] (the feed's current dominant
+ * color): the bubble fill and outline are tinted in both glass and flat
+ * modes, so it reads as part of the adaptive UI rather than a floating
+ * white pill.
  */
 @Composable
 fun CameraNotchButton(
@@ -73,18 +84,22 @@ fun CameraNotchButton(
     val view = LocalView.current
     var cutoutWidth by remember { mutableStateOf(28.dp) }
     var cutoutHeight by remember { mutableStateOf(28.dp) }
+    var cutoutCenterX by remember { mutableStateOf<Dp?>(null) }
+    var cutoutCenterY by remember { mutableStateOf<Dp?>(null) }
     LaunchedEffect(view) {
         val rect = ViewCompat.getRootWindowInsets(view)?.displayCutout?.boundingRects?.firstOrNull()
         if (rect != null && rect.width() > 0 && rect.height() > 0) {
             with(density) {
                 cutoutWidth = rect.width().toDp()
                 cutoutHeight = rect.height().toDp()
+                cutoutCenterX = rect.centerX().toDp()
+                cutoutCenterY = rect.centerY().toDp()
             }
         }
     }
 
-    val outlinePadding = 10.dp
-    val sideWidth = 64.dp
+    val outlinePadding = 4.dp
+    val sideWidth = 56.dp
     val bubbleHeight = cutoutHeight + outlinePadding * 2
     val collapsedWidth = cutoutWidth + outlinePadding * 2
     val expandedWidth = collapsedWidth + sideWidth * 2
@@ -97,12 +112,24 @@ fun CameraNotchButton(
     )
     val shape = RoundedCornerShape(bubbleHeight / 2)
 
-    Box(modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
-        // Tap-away catcher: only present while expanded, so collapsed this
-        // is just a small bubble and everything else on screen behaves
-        // completely normally. Claims the whole screen's pointer input so a
-        // tap anywhere else closes the menu instead of reaching whatever's
-        // underneath it.
+    // Offset from top-center so the bubble's center lands on the cutout's
+    // own center — the cutout is rarely at the exact horizontal middle on
+    // real phones, and never at y=0 vertically. No-cutout fallback keeps
+    // the old top-center spot with a small top margin.
+    val screenWidth = LocalConfiguration.current.screenWidthDp.dp
+    val xOffset = cutoutCenterX?.let { it - screenWidth / 2 } ?: 0.dp
+    val yOffset = cutoutCenterY?.let { it - bubbleHeight / 2 } ?: 12.dp
+
+    // Expanded, this container takes the whole screen so the tap-away
+    // catcher below genuinely covers everything; collapsed it's just the
+    // bubble's own strip.
+    Box(
+        modifier.then(if (expanded) Modifier.fillMaxSize() else Modifier.fillMaxWidth()),
+        contentAlignment = Alignment.TopCenter
+    ) {
+        // Tap-away catcher: only present while expanded. Claims the whole
+        // screen's pointer input so a tap anywhere else closes the menu
+        // instead of reaching whatever's underneath it.
         if (expanded) {
             Box(
                 Modifier.fillMaxSize()
@@ -111,8 +138,11 @@ fun CameraNotchButton(
         }
 
         Box(
-            Modifier.width(width).height(bubbleHeight).clip(shape)
-                .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.background(Color.White.copy(0.10f)))
+            Modifier.offset(x = xOffset, y = yOffset).width(width).height(bubbleHeight).clip(shape)
+                .then(
+                    if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
+                    else Modifier.background(tint.copy(alpha = 0.22f)).border(1.dp, tint.copy(alpha = 0.55f), shape)
+                )
         ) {
             if (!expanded) {
                 Box(
@@ -121,7 +151,7 @@ fun CameraNotchButton(
                 ) {
                     Icon(
                         Icons.Default.PhotoCamera, contentDescription = "Camera / VRM",
-                        tint = Color.White.copy(0.55f), modifier = Modifier.height(cutoutHeight * 0.6f)
+                        tint = Color.White.copy(0.85f), modifier = Modifier.height(cutoutHeight * 0.55f)
                     )
                 }
             } else {

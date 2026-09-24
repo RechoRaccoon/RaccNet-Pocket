@@ -305,6 +305,7 @@ fun VrmModeScreen(
                 handResult = latestHandResult,
                 poseResult = latestPoseResult,
                 parsedVrmData = parsedVrmData,
+                retargetTarget = retargetTarget,
                 headTrackingActive = headMatrix != null,
                 armTrackingActive = smoothedBodyLandmarks.isNotEmpty(),
                 legTrackingActive = smoothedBodyLandmarks.isNotEmpty(),
@@ -572,6 +573,7 @@ private fun VrmTrackingOverlay(
     handResult: HandLandmarkerResult?,
     poseResult: PoseLandmarkerResult?,
     parsedVrmData: VrmData?,
+    retargetTarget: RetargetTarget?,
     headTrackingActive: Boolean,
     armTrackingActive: Boolean,
     legTrackingActive: Boolean,
@@ -616,6 +618,16 @@ private fun VrmTrackingOverlay(
         else -> "vrm file: ${parsedVrmData.specVersion} — ${parsedVrmData.humanBones.size} bones, ${parsedVrmData.expressions.size} expressions"
     }
 
+    // Retarget bridge health — how many of the file's glTF nodes actually
+    // resolved to Filament entities by name (see AvatarRetargeter's doc
+    // comment). If this reads 0/N, expressions AND bone rotation are both
+    // silently skipping everything; if it reads N/N and the avatar still
+    // doesn't move, the problem is downstream of entity resolution.
+    val retargetLine = retargetTarget?.let { target ->
+        val totalNodes = parsedVrmData?.nodeNames?.size ?: 0
+        "retarget: ${target.nodeIndexToEntity.size}/$totalNodes nodes → entities"
+    }
+
     // Step 6, head/neck rotation — no numeric readout (a raw quaternion
     // wouldn't mean much at a glance the way blendshape scores do); this
     // just confirms the pipeline is receiving a head matrix at all, so
@@ -640,7 +652,7 @@ private fun VrmTrackingOverlay(
 
     Box(modifier) {
         Text(
-            text = listOfNotNull(faceLine, handLine, poseLine, vrmDataLine, headRotationLine, armRotationLine, legRotationLine).joinToString("\n\n"),
+            text = listOfNotNull(faceLine, handLine, poseLine, vrmDataLine, retargetLine, headRotationLine, armRotationLine, legRotationLine).joinToString("\n\n"),
             color = Color.Green,
             fontSize = 12.sp,
             modifier = Modifier

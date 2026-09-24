@@ -1338,7 +1338,7 @@ private fun PostContent(
         ) {
             val mediaModifier = Modifier.fillMaxSize().graphicsLayer {
                 scaleX = scale; scaleY = scale; translationX = offset.x; translationY = offset.y
-            }.let { if (item.isBlocked || nsfwBlurred) it.blur(28.dp) else it }
+            }.let { if (item.isBlocked || nsfwBlurred) it.blur(90.dp) else it }
             if (item.isTextOnly) {
                 // Big Update #3: text-only posts get a liquid-glass card shaped
                 // like a piece of media, centered where an image would sit.

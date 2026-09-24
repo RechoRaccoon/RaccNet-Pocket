@@ -2021,7 +2021,7 @@ private fun ThumbBox(item: MediaItem, tint: Color, shape: RoundedCornerShape, mo
         // reads as fully obscured even for a low-detail thumbnail a blur
         // alone might not fully hide.
         val blurNsfw = LocalHateFunBlurNsfw.current && item.isNsfwLabeled
-        val contentModifier = Modifier.fillMaxSize().let { if (blurNsfw) it.blur(20.dp) else it }
+        val contentModifier = Modifier.fillMaxSize().let { if (blurNsfw) it.blur(80.dp) else it }
         if (item.isEmojiTextshot) {
             // Textshot with custom emoji: show the posted picture (its text
             // would lose the emoji), not the alt-text shortcodes.
@@ -2084,7 +2084,7 @@ private fun SwipeableThumbBox(
         // content, not a solid box laid on top of it, or the effect reads
         // as a flat grey dim instead of a real blur.
         val blurNsfw = LocalHateFunBlurNsfw.current && item.isNsfwLabeled
-        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize().let { if (blurNsfw) it.blur(20.dp) else it }) { page ->
+        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize().let { if (blurNsfw) it.blur(80.dp) else it }) { page ->
             val img = item.mediaGroup.getOrNull(page)
             val thumb = img?.thumbUrl?.ifBlank { img.mediaUrl }?.takeIf { it.isNotBlank() } ?: item.thumbUrl.ifBlank { item.mediaUrl }
             if (thumb.isNotBlank()) {
@@ -2607,11 +2607,11 @@ private fun TextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, o
         if (emoji) {
             TextshotEmojiImage(
                 item.textshotImageUrl, cornerRadius = 16.dp,
-                modifier = (if (blurNsfw) Modifier.blur(8.dp) else Modifier).fillMaxSize()
+                modifier = (if (blurNsfw) Modifier.blur(40.dp) else Modifier).fillMaxSize()
             )
         } else Text(
             item.text, color = Color.White.copy(0.92f), fontSize = 14.sp, lineHeight = 19.sp,
-            modifier = if (blurNsfw) Modifier.blur(8.dp) else Modifier
+            modifier = if (blurNsfw) Modifier.blur(40.dp) else Modifier
         )
         if (blurNsfw) {
             Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.25f)))
@@ -2648,11 +2648,11 @@ private fun CompactTextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: C
         if (emoji) {
             TextshotEmojiImage(
                 item.textshotImageUrl, cornerRadius = 12.dp,
-                modifier = (if (blurNsfw) Modifier.blur(6.dp) else Modifier).fillMaxSize()
+                modifier = (if (blurNsfw) Modifier.blur(36.dp) else Modifier).fillMaxSize()
             )
         } else Text(
             item.text, color = Color.White.copy(0.92f), fontSize = 9.sp, lineHeight = 12.sp,
-            modifier = if (blurNsfw) Modifier.blur(6.dp) else Modifier
+            modifier = if (blurNsfw) Modifier.blur(36.dp) else Modifier
         )
         if (blurNsfw) {
             Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.25f)))

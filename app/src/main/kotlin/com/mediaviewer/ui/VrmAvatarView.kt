@@ -30,13 +30,16 @@ import java.nio.ByteBuffer
  * `SurfaceView`" the handoff describes for this step, without hand-rolling
  * Filament's lower-level API.
  *
- * ## Scope: this step only proves the model *renders*
- * No tracking data goes anywhere near this file yet — [vrmBytes] is loaded
- * and shown exactly as exported (T-pose or whatever rest pose the avatar
- * was authored in), with `transformToUnitCube()` centering/scaling it into
- * view and a drag gesture to orbit around it, purely so a real device can
- * confirm "does my avatar file actually load and render" before step 6
- * (retargeting) makes it move. [onParsedVrmData] separately runs the same
+ * ## Scope: this step renders the model and applies bone updates
+ * [vrmBytes] is loaded and shown exactly as exported (T-pose or whatever
+ * rest pose the avatar was authored in), with `transformToUnitCube()`
+ * centering/scaling it into view and a drag gesture to orbit around it.
+ * The frame callback also calls `animator?.updateBoneMatrices()` before
+ * every render — without it, the `TransformManager.setTransform` calls
+ * [AvatarRetargeter] makes never reach the skinned meshes (verified
+ * against Filament 1.51.6's `ModelViewer.kt`: `render()` doesn't call it
+ * itself), so the avatar would stay frozen in its rest pose no matter
+ * what tracking reports. [onParsedVrmData] separately runs the same
  * bytes through [VrmParser] (step 4) and hands back the bone/expression
  * maps. [onRetargetTargetReady] hands back a [RetargetTarget] — the
  * node-index→entity bridge `AvatarRetargeter.kt` (step 6) needs to
@@ -86,7 +89,20 @@ fun VrmAvatarView(
         val frameCallback = object : Choreographer.FrameCallback {
             override fun doFrame(frameTimeNanos: Long) {
                 choreographer.postFrameCallback(this)
-                runCatching { viewerHolder[0]?.render(frameTimeNanos) }
+                runCatching {
+                    viewerHolder[0]?.let { viewer ->
+                        // Bone transforms that AvatarRetargeter writes via
+                        // TransformManager.setTransform don't reach the
+                        // skinned meshes until this runs — verified against
+                        // Filament 1.51.6's own ModelViewer.kt source:
+                        // render() never calls updateBoneMatrices() itself
+                        // (its KDoc leaves animation/bone updates to the
+                        // client), so without this the avatar stays frozen
+                        // in its rest pose no matter what tracking says.
+                        viewer.animator?.updateBoneMatrices()
+                        viewer.render(frameTimeNanos)
+                    }
+                }
                     .onFailure { Log.e(TAG, "Filament render() failed", it) }
             }
         }
@@ -188,9 +204,10 @@ private fun addThreeLightRig(engine: Engine, scene: com.google.android.filament.
         scene.addEntity(entity)
     }
 
-    directionalLight(-0.5f, -1.0f, -0.3f, 90_000f)  // key: front-upper-left, brightest
-    directionalLight(0.6f, -0.2f, -0.4f, 35_000f)   // fill: front-right, softer, keeps the key's shadow side from going pure black
-    directionalLight(0.0f, 0.3f, 1.0f, 25_000f)     // rim: from behind, separates the avatar's silhouette from the background
+    directionalLight(-0.5f, -1.0f, -0.3f, 32_000f)  // key: front-upper-left, brightest — kept well below clipping so saturated albedos (reds) don't blow out
+    directionalLight(0.6f, -0.2f, -0.4f, 14_000f)   // fill: front-right, softer, keeps the key's shadow side readable
+    directionalLight(0.0f, 0.3f, 1.0f, 10_000f)    // rim: from behind, separates the avatar's silhouette from the background
+    directionalLight(0.0f, -0.1f, -1.0f, 9_000f)    // frontal lift: dim head-on light so unlit faces fall to dark grey, not pure black
 }
 
 private const val TAG = "VrmAvatarView"

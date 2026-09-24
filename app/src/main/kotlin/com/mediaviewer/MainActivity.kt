@@ -1,9 +1,12 @@
 package com.mediaviewer
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -826,7 +829,18 @@ private fun AppRoot(viewModel: MainViewModel) {
                     // that on its own.
                     val uri = newCameraCaptureUri(context)
                     cameraCaptureUri.value = uri
-                    takePicture.launch(uri)
+                    // Two classic ways this dies: no camera app installed
+                    // at all (launch() throws ActivityNotFoundException),
+                    // or a camera app that chokes on the FileProvider Uri.
+                    // Either way, fail with a toast — never a crash.
+                    val cameraIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+                    val hasCameraApp = cameraIntent.resolveActivity(context.packageManager) != null
+                    if (!hasCameraApp) {
+                        Toast.makeText(context, "No camera app found on this device", Toast.LENGTH_SHORT).show()
+                    } else {
+                        runCatching { takePicture.launch(uri) }
+                            .onFailure { Toast.makeText(context, "Couldn't open the camera", Toast.LENGTH_SHORT).show() }
+                    }
                 },
                 onOpenVrm = viewModel::openVrmMode
             )
