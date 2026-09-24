@@ -155,12 +155,6 @@ class EmojiStore private constructor(context: Context) {
         return sb.toString()
     }
 
-    /** Which of this emoji's folders (not counting "All", which every emoji
-     *  is implicitly part of) actually contain it right now. Used only to
-     *  word the delete-confirmation prompt precisely, so it never implies a
-     *  wider effect ("every folder") than what deleting it actually does. */
-    fun foldersContaining(id: Int): List<EmojiFolder> = state.index.folders.filter { id in it.emojiIds }
-
     // ── Images ──────────────────────────────────────────────────────────
 
     fun fileFor(entry: EmojiEntry): File = File(dir, entry.file)
@@ -200,14 +194,31 @@ class EmojiStore private constructor(context: Context) {
         commit(cur.copy(folders = cur.folders.map { if (it.id == id) it.copy(name = clean) else it }))
     }
 
-    /** Removes the folder itself. The emoji that were in it are untouched —
-     *  they stay in the library (and in "All", and in any other folder they
-     *  were also added to), since a folder is just a grouping over the
-     *  shared library, not a separate copy of the emoji. */
+    /** Removes the folder itself *and* every emoji that was filed into it —
+     *  out of the master library, "All", and any other folder that also
+     *  had it (Item 6). Emoji this folder never had are untouched. */
     fun deleteFolder(id: Int) = synchronized(lock) {
         val cur = state.index
-        commit(cur.copy(folders = cur.folders.filterNot { it.id == id }))
+        val folder = cur.folders.firstOrNull { it.id == id } ?: return@synchronized
+        val toDelete = folder.emojiIds.toSet()
+        val deleted = cur.emojis.filter { it.id in toDelete }
+        commit(
+            cur.copy(
+                emojis = cur.emojis.filterNot { it.id in toDelete },
+                folders = cur.folders.filterNot { it.id == id }
+                    .map { f -> if (f.emojiIds.any { it in toDelete }) f.copy(emojiIds = f.emojiIds - toDelete) else f }
+            )
+        )
+        for (e in deleted) {
+            bitmapCache.remove(e.id)?.recycle()
+            imageBitmapCache.remove(e.id)
+            runCatching { fileFor(e).delete() }
+        }
     }
+
+    /** How many emoji deleting this folder would take down with it (Item 6) —
+     *  used to word that confirmation prompt precisely. */
+    fun emojiCountIn(folderId: Int): Int = state.index.folders.firstOrNull { it.id == folderId }?.emojiIds?.size ?: 0
 
     /** Deletes one emoji everywhere: out of the master library, out of every
      *  folder that had it, and its stored picture. Also frees its id for

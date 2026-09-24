@@ -435,6 +435,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // history (which would make the cache file grow without bound as
     // someone scrolls a big profile).
     private val PROFILE_TAB_CACHE_ITEM_LIMIT = 30
+    // Item 7: how many scrobbles each Music History page fetches/pages in
+    // at a time — matches RockskyRepository.getScrobbles' own default.
+    private val MUSIC_HISTORY_PAGE_SIZE = 30
     // Bounds the number of distinct profiles kept in the cache at all —
     // oldest (by savedAt) evicted first once this is exceeded, so visiting
     // many different profiles over time can't grow the file unboundedly.
@@ -880,10 +883,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _reviewComposeTarget.value = target
         _composePostOpen.value = true
     }
+    // Item 8: camera-notch button's "Camera" action lands here once the
+    // system camera app hands back the file it just captured — opens the
+    // composer with that file already attached, same idea as
+    // openReviewCompose seeding reviewComposeTarget above.
+    private val _initialComposeImageUri = MutableStateFlow<android.net.Uri?>(null)
+    val initialComposeImageUri: StateFlow<android.net.Uri?> = _initialComposeImageUri
+    private val _initialComposeVideoUri = MutableStateFlow<android.net.Uri?>(null)
+    val initialComposeVideoUri: StateFlow<android.net.Uri?> = _initialComposeVideoUri
+    fun openComposePostWithCapturedMedia(imageUri: android.net.Uri?, videoUri: android.net.Uri?) {
+        _initialComposeImageUri.value = imageUri
+        _initialComposeVideoUri.value = videoUri
+        _composePostOpen.value = true
+    }
+
+    // Item 8: the VRM/VTuber mode screen — see VrmModeScreen.kt. Plain
+    // open/close, same pattern as every other full-screen overlay's own
+    // Boolean flow in this ViewModel.
+    private val _vrmModeOpen = MutableStateFlow(false)
+    val vrmModeOpen: StateFlow<Boolean> = _vrmModeOpen
+    fun openVrmMode() { _vrmModeOpen.value = true }
+    fun closeVrmMode() { _vrmModeOpen.value = false }
+
     fun closeComposePost() {
         if (_composePostSubmitting.value) return
         _composePostOpen.value = false
         _reviewComposeTarget.value = null
+        _initialComposeImageUri.value = null
+        _initialComposeVideoUri.value = null
     }
 
     /** Routes a finished [com.mediaviewer.ui.ComposePostDraft] to the right
@@ -2586,11 +2613,13 @@ _bskyDid.value          = session.did
             _profileOverlay.value = updated
             persistProfileTabCache(updated)
         }
-        // Item 16: Rocksky "Music History" tab, only shown once we actually
+        // Item 16/7: Rocksky "Music History" tab, only shown once we actually
         // find any scrobbles — most accounts won't have Rocksky connected,
-        // and that's a normal empty result, not an error.
+        // and that's a normal empty result, not an error. Paged the same
+        // way Posts/Reposts/Likes are — this seeds just the first chunk;
+        // see loadMoreMusicHistory for how scrolling pages in the rest.
         viewModelScope.launch(Dispatchers.IO) {
-            val tracks = rockskyRepo.getScrobbles(author.did).getOrNull() ?: emptyList()
+            val tracks = rockskyRepo.getScrobbles(author.did, limit = MUSIC_HISTORY_PAGE_SIZE, offset = 0).getOrNull() ?: emptyList()
             val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
             if (tracks.isEmpty()) {
                 if (ProfileTab.MUSIC_HISTORY in cur.availableTabs) {
@@ -2605,9 +2634,16 @@ _bskyDid.value          = session.did
                 }
                 return@launch
             }
+            // Rocksky's actor endpoint doesn't hand back an explicit
+            // "there's more" cursor of its own (see RockskyApi's doc
+            // comment) — getting back fewer tracks than were actually
+            // asked for is what signals we've reached the end of this
+            // person's history; anything else means there's at least one
+            // more page to page in.
+            val nextCursor = if (tracks.size < MUSIC_HISTORY_PAGE_SIZE) null else MUSIC_HISTORY_PAGE_SIZE.toString()
             val updated = cur.copy(
                 availableTabs = cur.availableTabs + ProfileTab.MUSIC_HISTORY,
-                tabStates = cur.tabStates + (ProfileTab.MUSIC_HISTORY to ProfileTabState(musicHistory = tracks, loaded = true))
+                tabStates = cur.tabStates + (ProfileTab.MUSIC_HISTORY to ProfileTabState(musicHistory = tracks, cursor = nextCursor, loaded = true))
             )
             _profileOverlay.value = updated
         }
@@ -2742,12 +2778,52 @@ _bskyDid.value          = session.did
         val cur = _profileOverlay.value ?: return
         val state = cur.tabStates[cur.selectedTab] ?: return
         if (state.loading || state.cursor == null) return
-        loadProfileTab(cur.selectedTab, reset = false)
+        // Item 7: Music History pages RockskyTrack, not MediaItem, so it
+        // can't share loadProfileTab's fetchPage below (which is typed
+        // around MediaItem) — same cursor-in-ProfileTabState mechanism,
+        // just its own fetch.
+        if (cur.selectedTab == ProfileTab.MUSIC_HISTORY) loadMoreMusicHistory(cur.author.did, state.cursor)
+        else loadProfileTab(cur.selectedTab, reset = false)
+    }
+
+    /** Item 7: Music History's own "load the next chunk" — see the doc
+     *  comment on the initial-page probe in openProfile() for why
+     *  [offsetStr] (stashed in ProfileTabState.cursor, same field every
+     *  other paged tab uses for its own cursor) is really just the next
+     *  offset rather than an opaque server-issued cursor. */
+    private fun loadMoreMusicHistory(did: String, offsetStr: String?) {
+        val offset = offsetStr?.toIntOrNull() ?: return
+        val cur = _profileOverlay.value?.takeIf { it.author.did == did } ?: return
+        val existing = cur.tabStates[ProfileTab.MUSIC_HISTORY] ?: return
+        if (existing.loading) return
+        _profileOverlay.value = cur.copy(tabStates = cur.tabStates + (ProfileTab.MUSIC_HISTORY to existing.copy(loading = true)))
+        viewModelScope.launch(Dispatchers.IO) {
+            val page = rockskyRepo.getScrobbles(did, limit = MUSIC_HISTORY_PAGE_SIZE, offset = offset).getOrNull()
+            val cur2 = _profileOverlay.value?.takeIf { it.author.did == did } ?: return@launch
+            val existing2 = cur2.tabStates[ProfileTab.MUSIC_HISTORY] ?: return@launch
+            if (page == null) {
+                // A failed page: stop loading, but keep the same cursor so
+                // the next scroll-triggered attempt just retries it rather
+                // than silently giving up on the rest of the history.
+                _profileOverlay.value = cur2.copy(tabStates = cur2.tabStates + (ProfileTab.MUSIC_HISTORY to existing2.copy(loading = false)))
+                return@launch
+            }
+            val nextCursor = if (page.size < MUSIC_HISTORY_PAGE_SIZE) null else (offset + MUSIC_HISTORY_PAGE_SIZE).toString()
+            _profileOverlay.value = cur2.copy(
+                tabStates = cur2.tabStates + (ProfileTab.MUSIC_HISTORY to existing2.copy(
+                    musicHistory = existing2.musicHistory + page, cursor = nextCursor, loading = false, loaded = true
+                ))
+            )
+        }
     }
 
     private fun loadProfileTab(tab: ProfileTab, reset: Boolean) {
         // Blogs/Reviews/Backlog/Vods are fully loaded up-front by the probes
-        // in openProfile() — there's no separate paged fetch for them.
+        // in openProfile() — there's no separate paged fetch for them at
+        // all. Music History *does* page (see loadMoreMusicHistory), just
+        // never through this function — it fetches RockskyTrack, not
+        // MediaItem, so loadMoreProfileTab() routes it there instead before
+        // this is ever reached; this guard just keeps it out of here too.
         if (tab == ProfileTab.BLOGS || tab == ProfileTab.REVIEWS || tab == ProfileTab.BACKLOG || tab == ProfileTab.VODS || tab == ProfileTab.MUSIC_HISTORY) return
         val cur = _profileOverlay.value ?: return
         val did = cur.author.did

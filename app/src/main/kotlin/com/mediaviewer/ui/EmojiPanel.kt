@@ -322,27 +322,24 @@ internal fun EmojiPanel(
 
     // ── Delete confirmations ────────────────────────────────────────────
     pendingDeleteEmoji?.let { e ->
-        // Named precisely, not "every folder" — deleting only ever affects
-        // All (every emoji is implicitly part of it) plus whichever folder(s)
-        // this specific emoji is actually filed into, never folders it isn't in.
-        val ownerFolders = store.foldersContaining(e.id)
-        val message = when (ownerFolders.size) {
-            0 -> "This removes \":${e.name}:\" from All. It isn't filed into any folder."
-            1 -> "This removes \":${e.name}:\" from All and from \"${ownerFolders[0].name}\"."
-            else -> "This removes \":${e.name}:\" from All and from ${ownerFolders.size} folders it's in: ${ownerFolders.joinToString { it.name }}."
-        }
         EmojiDeleteConfirmDialog(
             title = "Delete Emoji?",
-            message = message,
+            message = "Deletes \":${e.name}:\" everywhere.",
             liquidGlass = liquidGlass, tint = tint,
             onConfirm = { store.deleteEmoji(e.id); pendingDeleteEmoji = null },
             onDismiss = { pendingDeleteEmoji = null }
         )
     }
     pendingDeleteFolder?.let { f ->
+        // Item 6: deleting a folder now takes its emoji down with it (out of
+        // All too) — the confirmation says so plainly instead of the old
+        // "emoji stay in All" wording, which described the opposite of what
+        // actually happens now.
+        val n = store.emojiCountIn(f.id)
         EmojiDeleteConfirmDialog(
             title = "Delete Folder?",
-            message = "\"${f.name}\" will be removed. Its emoji stay in All and in any other folder they're also in.",
+            message = if (n == 0) "Deletes \"${f.name}\". It's empty."
+                      else "Deletes \"${f.name}\" and its $n emoji.",
             liquidGlass = liquidGlass, tint = tint,
             onConfirm = {
                 store.deleteFolder(f.id)
@@ -356,8 +353,7 @@ internal fun EmojiPanel(
         val n = store.orphanEmojiCount()
         EmojiDeleteConfirmDialog(
             title = "Delete Emoji?",
-            message = if (n == 1) "This deletes the 1 emoji that isn't filed into any folder."
-                      else "This deletes the $n emoji that aren't filed into any folder.",
+            message = "Deletes $n emoji not in any folder.",
             liquidGlass = liquidGlass, tint = tint,
             onConfirm = { store.deleteOrphanEmoji(); pendingDeleteOrphans = false },
             onDismiss = { pendingDeleteOrphans = false }

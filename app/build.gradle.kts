@@ -83,4 +83,33 @@ dependencies {
     // Z3D-E621-Convnext tagger (see ImageTagger.kt) — no cloud calls, no
     // content-moderation layer, runs entirely on-device via NNAPI/XNNPACK.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
+
+    // Item 8 — VRM/VTuber mode: CameraX for the live front-camera preview
+    // that face/hand/body tracking runs against.
+    val cameraxVersion = "1.3.4"
+    implementation("androidx.camera:camera-core:$cameraxVersion")
+    implementation("androidx.camera:camera-camera2:$cameraxVersion")
+    implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
+    implementation("androidx.camera:camera-view:$cameraxVersion")
+
+    // Item 8, VRM pipeline step 1 — MediaPipe Tasks Vision. All three
+    // landmarkers (Face/Hand/Pose) wired up now — see
+    // util/FaceLandmarkerHelper.kt, HandLandmarkerHelper.kt,
+    // PoseLandmarkerHelper.kt. Version pinned to the latest stable at the
+    // time of this session — worth checking
+    // https://developers.google.com/mediapipe/solutions/vision/face_landmarker
+    // for anything newer before building.
+    implementation("com.google.mediapipe:tasks-vision:0.10.14")
+
+    // Item 8, VRM pipeline step 5 — Filament for rendering the VRM's glTF.
+    // filament-android is the core renderer; filament-utils-android adds
+    // `ModelViewer` (camera/manipulator/render-loop convenience wrapper)
+    // and the gltfio glTF loader `ModelViewer.loadModelGlb` uses under the
+    // hood — both from the same release train, kept on the same version.
+    // Check https://github.com/google/filament/releases for anything newer
+    // before building; Filament ships frequently.
+    val filamentVersion = "1.51.4"
+    implementation("com.google.android.filament:filament-android:$filamentVersion")
+    implementation("com.google.android.filament:filament-utils-android:$filamentVersion")
+    implementation("com.google.android.filament:gltfio-android:$filamentVersion")
 }

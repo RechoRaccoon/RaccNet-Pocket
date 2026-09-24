@@ -2466,7 +2466,7 @@ class BlueskyRepository {
                                     repostCount = post.repostCount ?: 0,
                                     text = firstAlt.removePrefix(TEXTSHOT_EMOJI_ALT_PREFIX),
                                     aspectRatio = resolvedRatio(first) ?: 1f,
-                                    textshotImageUrl = first.fullsize,
+                                    textshotImageUrl = first.fullsize ?: "",
                                     labels = nsfwLabels
                                 )
                             )

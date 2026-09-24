@@ -1,12 +1,16 @@
 package com.mediaviewer
 
 import android.content.Context
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -49,6 +53,8 @@ import com.mediaviewer.ui.DmInboxOverlay
 import com.mediaviewer.ui.ListPickerDialog
 import com.mediaviewer.ui.LiveNowPlayerOverlay
 import com.mediaviewer.ui.MainFeedScreen
+import com.mediaviewer.ui.CameraNotchButton
+import com.mediaviewer.ui.VrmModeScreen
 import com.mediaviewer.ui.PixelMatrixOverlay
 import com.mediaviewer.ui.PixelPhase
 import com.mediaviewer.ui.ProfileOverlay
@@ -77,6 +83,17 @@ import java.io.StringWriter
 // shown as plain copyable text instead of the normal UI — so a crash can be
 // diagnosed just by reopening the app and copying what's on screen.
 private const val CRASH_LOG_FILENAME = "last_crash.txt"
+
+/** Item 8: a fresh content:// Uri, under the one cache subfolder
+ *  file_paths.xml actually exposes through this app's FileProvider, for the
+ *  system camera app to save the notch button's photo/video capture into —
+ *  then handed straight back to us via the TakePicture/CaptureVideo
+ *  ActivityResultContract once the person's done. */
+private fun newCameraCaptureUri(context: Context): Uri {
+    val dir = java.io.File(context.cacheDir, "camera_capture").also { it.mkdirs() }
+    val file = java.io.File(dir, "capture_${System.currentTimeMillis()}.jpg")
+    return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+}
 
 private fun installCrashHandler(context: Context) {
     val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
@@ -206,6 +223,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun AppRoot(viewModel: MainViewModel) {
+    val context            = androidx.compose.ui.platform.LocalContext.current
     val mediaItems         by viewModel.mediaItems.collectAsState()
     val currentIndex       by viewModel.currentIndex.collectAsState()
     val currentItem        by viewModel.currentItem.collectAsState()
@@ -264,6 +282,10 @@ private fun AppRoot(viewModel: MainViewModel) {
     val composePostOpen        by viewModel.composePostOpen.collectAsState()
     val composePostSubmitting  by viewModel.composePostSubmitting.collectAsState()
     val reviewComposeTarget    by viewModel.reviewComposeTarget.collectAsState()
+    // Item 8: camera-notch button — pending capture + VRM mode.
+    val initialComposeImageUri by viewModel.initialComposeImageUri.collectAsState()
+    val initialComposeVideoUri by viewModel.initialComposeVideoUri.collectAsState()
+    val vrmModeOpen            by viewModel.vrmModeOpen.collectAsState()
     // Item 12 follow-up: DM-thread "shared posts" feed loading overlay.
     val dmFeedLoadingOverlay   by viewModel.dmFeedLoadingOverlay.collectAsState()
     // Item 8: Hub Friends/Livestreams sections.
@@ -772,8 +794,53 @@ private fun AppRoot(viewModel: MainViewModel) {
                 dominantColor  = currentDominantColor,
                 submitting     = composePostSubmitting,
                 reviewTarget   = reviewComposeTarget,
+                initialImageUri = initialComposeImageUri,
+                initialVideoUri = initialComposeVideoUri,
                 onClose        = viewModel::closeComposePost,
                 onSubmit       = viewModel::submitComposePost
+            )
+        }
+
+        // Item 8: the camera-notch bubble button — hugs the real display
+        // cutout, expands into Camera/VRM. Hidden while the composer or VRM
+        // mode is already open so it can't stack another overlay on top of
+        // one that's already covering the whole screen; every other overlay
+        // (Search, DM inbox, Profile, …) still draws on top of it as normal
+        // since this Box is composed early, right after MainFeedScreen.
+        if (!composePostOpen && !vrmModeOpen) {
+            val cameraCaptureUri = remember { mutableStateOf<android.net.Uri?>(null) }
+            val takePicture = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+                val uri = cameraCaptureUri.value
+                if (success && uri != null) viewModel.openComposePostWithCapturedMedia(imageUri = uri, videoUri = null)
+            }
+            // Item 8 follow-up: only photo capture is wired to the single
+            // "Camera" tap for now — CaptureVideo() is the identical
+            // pattern (see takePicture just above) if/when video capture
+            // gets its own control (e.g. press-and-hold).
+            CameraNotchButton(
+                liquidGlass = liquidGlass,
+                tint = currentDominantColor,
+                onOpenCamera = {
+                    // ACTION_IMAGE_CAPTURE (what TakePicture launches under
+                    // the hood) doesn't need this app to hold the CAMERA
+                    // permission itself — the system camera app handles
+                    // that on its own.
+                    val uri = newCameraCaptureUri(context)
+                    cameraCaptureUri.value = uri
+                    takePicture.launch(uri)
+                },
+                onOpenVrm = viewModel::openVrmMode
+            )
+        }
+
+        if (vrmModeOpen) {
+            VrmModeScreen(
+                liquidGlass = liquidGlass,
+                onClose = viewModel::closeVrmMode,
+                onCapture = { imageUri, videoUri ->
+                    viewModel.closeVrmMode()
+                    viewModel.openComposePostWithCapturedMedia(imageUri, videoUri)
+                }
             )
         }
 

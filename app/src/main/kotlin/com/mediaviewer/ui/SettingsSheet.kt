@@ -844,9 +844,16 @@ private fun AtProtocolPageContent(
                 ) {
                     when {
                         friend != null -> {
+                            // Item 4: this avatar's own outline is tinted
+                            // with its own picture's dominant color, not the
+                            // Hub page's shared dominantColor (the signed-in
+                            // account's own tint) — every mutual's outline
+                            // should reflect the profile icon it's actually
+                            // wrapped around.
+                            val friendTint = if (friend.avatarUrl != null) rememberDominantColor(friend.avatarUrl) else dominantColor
                             Box(
                                 Modifier.size(52.dp)
-                                    .then(if (liquidGlass) Modifier.glassPanel(true, shape = avatarShape, tint = dominantColor) else Modifier.clip(avatarShape).background(Color.White.copy(0.1f))),
+                                    .then(if (liquidGlass) Modifier.glassPanel(true, shape = avatarShape, tint = friendTint) else Modifier.clip(avatarShape).background(Color.White.copy(0.1f))),
                                 contentAlignment = Alignment.Center
                             ) {
                                 if (friend.avatarUrl != null) {

@@ -9,6 +9,13 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Item 8: the camera-notch button's "Camera" action launches the
+         system camera app via an implicit intent (no permission needed for
+         that itself), but VRM mode's own live preview needs direct camera
+         access in-app. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.front" android:required="false" />
 
     <application
         android:allowBackup="true"
@@ -61,5 +68,17 @@
                 android:resource="@xml/live_link_widget_info" />
         </receiver>
 
+        <!-- Item 8: lets the camera-notch button hand the system camera app
+             a content:// Uri (under this app's own cache dir) to save the
+             captured photo/video into, and get it back afterward. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

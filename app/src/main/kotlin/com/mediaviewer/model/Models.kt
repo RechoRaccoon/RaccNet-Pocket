@@ -109,13 +109,38 @@ data class MediaItem(
     // every other item. See isEmojiTextshot below.
     val textshotImageUrl: String = ""
 ) {
+    // Crash fix: mediaUrl/thumbUrl/textshotImageUrl/labels are all declared
+    // as non-null Kotlin types with defaults ("", "", "", emptyList()) — but
+    // those defaults only apply when *this class's own constructor* is
+    // called directly (as parseFeedItemSafe always does for anything fresh
+    // off the network). The on-disk profile-tab cache (see MainViewModel's
+    // profileTabCache/persistProfileTabCache) stores MediaItem as raw Gson
+    // JSON instead, and Gson deserializes via reflection, straight into the
+    // object's fields — it has no idea these fields have Kotlin defaults,
+    // so a cache entry written by an older version of the app, before a
+    // given field existed (textshotImageUrl is the newest one here), simply
+    // has no matching JSON key for it, and Gson leaves that field as a
+    // genuine null in memory despite the compiler treating it as
+    // guaranteed non-null. That's exactly what crashed here: an old cached
+    // Reposts/Likes entry's textshotImageUrl was real `null`, and the very
+    // next non-null-typed String method called on it (isNotBlank(), inside
+    // isEmojiTextshot below) threw a NullPointerException the moment a
+    // Pinterest-grid tile tried to size itself. Every getter below now
+    // treats these fields as if they truly were nullable (a `?.` safe call
+    // on a statically non-null type still compiles — with just a harmless
+    // "unnecessary safe call" warning — and, crucially, still performs a
+    // real null check at runtime) so a stale cache entry degrades to "not
+    // an emoji textshot"/"not NSFW-labeled" instead of crashing the app.
+    // See MainViewModel.PROFILE_TAB_CACHE_SCHEMA for the matching fix on the
+    // cache side, which drops old entries like this one instead of trusting
+    // them at all going forward.
     /** True when this post has no image/video to show — feed renders it as a
      *  standalone liquid-glass text card instead of a media tile. */
-    val isTextOnly: Boolean get() = mediaUrl.isBlank() && thumbUrl.isBlank() && !isVideo
+    val isTextOnly: Boolean get() = mediaUrl?.isBlank() != false && thumbUrl?.isBlank() != false && !isVideo
     /** A Textshot that contains custom emoji. It still counts as text-only (so it
      *  lives in the Text Posts tab), but its text can't be drawn as plain text
      *  — the emoji would vanish — so the posted picture is shown instead. */
-    val isEmojiTextshot: Boolean get() = textshotImageUrl.isNotBlank()
+    val isEmojiTextshot: Boolean get() = textshotImageUrl?.isNotBlank() == true
 
     /** A square (1:1) or wider frame counts as "horizontal"; anything
      *  taller than it is wide (including exactly-square, per the feature
@@ -134,7 +159,7 @@ data class MediaItem(
      *  by any labeler service, not just the default moderation.bsky.app
      *  one, and by self-labels), so matching on value alone already covers
      *  every labeler using Bluesky's standard sexual-content vocabulary. */
-    val isNsfwLabeled: Boolean get() = labels.any { it == "porn" || it == "sexual" || it == "nudity" }
+    val isNsfwLabeled: Boolean get() = labels?.any { it == "porn" || it == "sexual" || it == "nudity" } == true
 }
 
 data class AuthorInfo(
@@ -1118,5 +1143,13 @@ data class RockskyTrack(
     val artist: String,
     val album: String = "",
     val albumArtUrl: String? = null,
-    val playedAt: String = ""
+    val playedAt: String = "",
+    // Item 7 crash/display fix: the scrobble record's own AT-URI
+    // (at://did/app.rocksky.scrobble/rkey) — globally unique per play,
+    // unlike title+artist+playedAt (see RockskyRepository.toModel()). Used
+    // as the Music History list's item key so two different scrobbles
+    // never collide into the same key. Blank only for a cached/old entry
+    // from before this field existed; the list falls back to the old
+    // composite key for those (see profileMusicHistoryRows).
+    val uri: String = ""
 )

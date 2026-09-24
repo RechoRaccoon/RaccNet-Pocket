@@ -68,7 +68,6 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.em
 import kotlin.math.min
 import kotlin.math.roundToInt
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
@@ -164,6 +163,18 @@ data class ThreadPostDraft(
     val video: Uri? = null
 )
 
+/** Item 2: one thread post's *live editing* state — its text field value
+ *  plus whatever media has been attached to that post specifically. Each
+ *  post in a thread carries its own up-to-[MAX_IMAGES]-images-or-one-video
+ *  media, entirely independent of every other post's — this is what the
+ *  attach-image button below reads/writes into (via [activeThreadIndex])
+ *  instead of a single draft-wide media list. */
+private data class ThreadPostState(
+    val text: TextFieldValue,
+    val images: List<Uri> = emptyList(),
+    val video: Uri? = null
+)
+
 /** Everything the composer collected, handed to the caller on "Post". */
 data class ComposePostDraft(
     val mode: ComposeMode,
@@ -208,6 +219,12 @@ fun ComposePostScreen(
     // nowhere sensible to go) and shows the cover/title/rating row below
     // the author row.
     reviewTarget: TitleSearchResult? = null,
+    // Item 8: set when this composer was opened from the camera-notch
+    // button's "Camera" action — the just-captured photo/video is attached
+    // the moment the composer opens, same as if the person had picked it
+    // from the media picker themselves. At most one of these is ever set.
+    initialImageUri: Uri? = null,
+    initialVideoUri: Uri? = null,
     onClose: () -> Unit,
     onSubmit: (ComposePostDraft) -> Unit
 ) {
@@ -227,7 +244,15 @@ fun ComposePostScreen(
         ?: selfProfile?.avatarUrl?.let { rememberDominantColor(it) } ?: dominantColor
 
     // ── Core state ───────────────────────────────────────────────────────
-    var mode by remember { mutableStateOf(if (reviewTarget != null) ComposeMode.REVIEW else ComposeMode.SINGLE) }
+    var mode by remember {
+        mutableStateOf(
+            when {
+                reviewTarget != null -> ComposeMode.REVIEW
+                initialVideoUri != null -> ComposeMode.VIDEO
+                else -> ComposeMode.SINGLE
+            }
+        )
+    }
     // Item 10: Popfeed's own native 0–10 half-star scale (0 = unrated,
     // 10 = full 5 stars) — see PopfeedReview's ratingOutOf5 doc comment for
     // why /2 is always the right conversion both ways.
@@ -236,13 +261,15 @@ fun ComposePostScreen(
     // see ComposePostDraft.reviewContainsSpoilers.
     var reviewContainsSpoilers by remember { mutableStateOf(false) }
     var singleText by remember { mutableStateOf(TextFieldValue("")) }
-    var images by remember { mutableStateOf<List<Uri>>(emptyList()) }
-    var videoUri by remember { mutableStateOf<Uri?>(null) }
+    // Item 8: pre-seeded straight from the camera-notch button's "Camera"
+    // action, if that's how this composer was opened.
+    var images by remember { mutableStateOf(initialImageUri?.let { listOf(it) } ?: emptyList()) }
+    var videoUri by remember { mutableStateOf(initialVideoUri) }
     var videoThumbUri by remember { mutableStateOf<Uri?>(null) }
     var videoAspect by remember { mutableStateOf(16f / 9f) }
     var videoTitle by remember { mutableStateOf(TextFieldValue("")) }
     var videoDescription by remember { mutableStateOf(TextFieldValue("")) }
-    var threadPosts by remember { mutableStateOf(listOf(TextFieldValue(""))) }
+    var threadPosts by remember { mutableStateOf(listOf(ThreadPostState(TextFieldValue("")))) }
     var activeThreadIndex by remember { mutableStateOf(0) }
     // Item 7/9: Blog is a standalone status toggle (not a full mode with its
     // own editor — the composer keeps using the same single-field editor
@@ -319,7 +346,21 @@ fun ComposePostScreen(
     // barely-tall) text field occupies.
     val singleFocusRequester = remember { FocusRequester() }
     val videoTitleFocusRequester = remember { FocusRequester() }
-    val threadFocusRequesters = remember(threadPosts.size) { List(threadPosts.size) { FocusRequester() } }
+    // Item 2: a stable, only-ever-growing list of FocusRequesters — one per
+    // thread post, keyed by *position*, never recreated once created. The
+    // old `remember(threadPosts.size)` re-ran this constructor on every
+    // keystroke that changed the post count — which, with Auto Format on,
+    // is nearly every keystroke near a post boundary — swapping out the
+    // exact FocusRequester object that was attached to the field the person
+    // was mid-typing into. Compose treats that as the field losing its
+    // focus target entirely, which is what silently dropped the keyboard
+    // and the caret indicator and forced a second tap to resume typing.
+    // A plain (non-observable) MutableList that only ever appends new
+    // requesters — recomputed once per recomposition, before it's read
+    // below — keeps every existing post's requester identity stable across
+    // any resize.
+    val threadFocusRequesters = remember { mutableListOf<FocusRequester>() }
+    while (threadFocusRequesters.size < threadPosts.size) threadFocusRequesters.add(FocusRequester())
     fun focusActiveField() {
         try {
             when (mode) {
@@ -329,6 +370,19 @@ fun ComposePostScreen(
             }
         } catch (_: IllegalStateException) {
             // Field not attached to the composition yet — nothing to focus.
+        }
+    }
+    // Item 2: Auto Format's reflow can move the caret into a *different*
+    // post than the one that physically has keyboard focus right now (e.g.
+    // typing right up against one post's limit spills the tail of what was
+    // just typed into the next post) — activeThreadIndex updates to follow
+    // the caret, but nothing was asking the keyboard to follow it too. This
+    // keeps the two in sync so typing can continue seamlessly across a
+    // spillover instead of the keyboard staying behind on the old post.
+    LaunchedEffect(activeThreadIndex, mode) {
+        if (mode == ComposeMode.THREAD) {
+            withFrameNanos { }
+            focusActiveField()
         }
     }
 
@@ -343,8 +397,12 @@ fun ComposePostScreen(
     // the limit does — otherwise it stays off, the normal manual-add case.
     fun startThreadFromSingle() {
         val overflowing = singleText.text.length > POST_CHAR_LIMIT
+        // Whatever was already attached to the single post carries over onto
+        // the thread's first post rather than being dropped.
         threadPosts = computeThreadPosts(singleText.text, minPosts = if (overflowing) 1 else 2)
-            .map { TextFieldValue(it) }
+            .mapIndexed { i, text -> ThreadPostState(TextFieldValue(text), images = if (i == 0) images else emptyList(), video = if (i == 0) videoUri else null) }
+        images = emptyList()
+        videoUri = null
         activeThreadIndex = threadPosts.lastIndex
         mode = ComposeMode.THREAD
         isBlogMode = false
@@ -355,7 +413,7 @@ fun ComposePostScreen(
     // blank post and moves focus there, instead of re-flowing/redistributing
     // any existing text into it.
     fun addThreadPost() {
-        threadPosts = threadPosts + TextFieldValue("")
+        threadPosts = threadPosts + ThreadPostState(TextFieldValue(""))
         activeThreadIndex = threadPosts.lastIndex
     }
 
@@ -368,7 +426,10 @@ fun ComposePostScreen(
     // Auto Format on — this is always the "genuinely needs splitting" path,
     // never the manual "+" one.
     fun growTextIntoThread(fullText: String, floor: Int) {
-        threadPosts = computeThreadPosts(fullText, minPosts = floor).map { TextFieldValue(it) }
+        val oldMedia = threadPosts
+        threadPosts = computeThreadPosts(fullText, minPosts = floor).mapIndexed { i, text ->
+            ThreadPostState(TextFieldValue(text), images = oldMedia.getOrNull(i)?.images ?: emptyList(), video = oldMedia.getOrNull(i)?.video)
+        }
         activeThreadIndex = threadPosts.lastIndex
         mode = ComposeMode.THREAD
         isBlogMode = false
@@ -391,7 +452,7 @@ fun ComposePostScreen(
     // button itself leaves it null and re-seeds from whatever is current.
     fun switchToTextshot(keepValue: TextFieldValue? = null) {
         singleText = keepValue ?: run {
-            val seed = if (mode == ComposeMode.THREAD) threadPosts.joinToString("") { it.text } else singleText.text
+            val seed = if (mode == ComposeMode.THREAD) threadPosts.joinToString("") { it.text.text } else singleText.text
             TextFieldValue(seed)
         }
         isBlogMode = false
@@ -417,10 +478,13 @@ fun ComposePostScreen(
     // effectively gone. Folding every post's real text into one blob (with a
     // blank line between each, so the original post breaks are still
     // visible) keeps all of it.
+    // Item 5: unreachable for now — the Blog button itself is disabled below
+    // until Blog mode is actually finished — but left intact so re-wiring it
+    // back up later is just re-enabling that button.
     fun enableBlogMode() {
         if (mode == ComposeMode.TEXTSHOT) emojiTokensToShortcodes()
         if (mode == ComposeMode.THREAD) {
-            singleText = TextFieldValue(threadPosts.joinToString("\n\n") { it.text.trimEnd() })
+            singleText = TextFieldValue(threadPosts.joinToString("\n\n") { it.text.text.trimEnd() })
         }
         isBlogMode = true
         mode = ComposeMode.SINGLE
@@ -457,17 +521,26 @@ fun ComposePostScreen(
     ) { uris ->
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
         val videoPick = uris.firstOrNull { isVideoUri(context, it) }
-        if (videoPick != null) {
+        if (mode == ComposeMode.THREAD) {
+            // Item 2: attaches to whichever post is currently selected/being
+            // typed in — each post in a thread carries its own up-to-10-
+            // images-or-1-video media, independent of every other post's.
+            val idx = activeThreadIndex.coerceIn(0, threadPosts.lastIndex)
+            threadPosts = threadPosts.toMutableList().also { list ->
+                val post = list[idx]
+                list[idx] = if (videoPick != null) {
+                    post.copy(video = videoPick, images = emptyList())
+                } else {
+                    val room = (MAX_IMAGES - post.images.size).coerceAtLeast(0)
+                    post.copy(images = (post.images + uris.take(room)).take(MAX_IMAGES))
+                }
+            }
+        } else if (videoPick != null) {
             videoUri = videoPick
             videoThumbUri = null
             images = emptyList()
             if (mode != ComposeMode.TEXTSHOT) mode = ComposeMode.VIDEO
         } else if (mode != ComposeMode.TEXTSHOT) {
-            // NOTE: in THREAD mode this attaches to the whole draft rather
-            // than per-post — true per-post media tracking (spec: "attach
-            // button adds to whatever post the user is currently typing
-            // in") is a follow-up; activeThreadIndex is already tracked
-            // and ready for that wiring.
             val room = (MAX_IMAGES - images.size).coerceAtLeast(0)
             images = (images + uris.take(room)).take(MAX_IMAGES)
         }
@@ -485,8 +558,7 @@ fun ComposePostScreen(
     // ── Character budget for the field currently being typed in ────────
     val activeBudget: Pair<Int, Int> = when (mode) { // used -> limit
         ComposeMode.VIDEO -> (videoTitle.text.length + videoDescription.text.length) to POST_CHAR_LIMIT
-        ComposeMode.THREAD -> threadPosts.getOrNull(activeThreadIndex)?.text?.length.orZero() to
-            (POST_CHAR_LIMIT - threadSuffixLength(threadPosts.size))
+        ComposeMode.THREAD -> threadPosts.getOrNull(activeThreadIndex)?.text?.text?.length.orZero() to POST_CHAR_LIMIT
         ComposeMode.TEXTSHOT -> singleText.text.length to Int.MAX_VALUE
         // Item 10: "the character indicator shouldn't have a limit" — same
         // unlimited treatment as Textshot above.
@@ -496,8 +568,8 @@ fun ComposePostScreen(
 
     val canPost = when (mode) {
         ComposeMode.VIDEO -> videoUri != null && (videoTitle.text.length + videoDescription.text.length) <= POST_CHAR_LIMIT
-        ComposeMode.THREAD -> threadPosts.all { it.text.length <= (POST_CHAR_LIMIT - threadSuffixLength(threadPosts.size)) } &&
-            threadPosts.any { it.text.isNotBlank() }
+        ComposeMode.THREAD -> threadPosts.all { it.text.text.length <= POST_CHAR_LIMIT } &&
+            threadPosts.any { it.text.text.isNotBlank() || it.images.isNotEmpty() || it.video != null }
         ComposeMode.TEXTSHOT -> singleText.text.isNotBlank()
         // Item 10: a rating is required (the person must pick 0.5–5 stars),
         // the written review itself is optional — matches the spec ("pick
@@ -515,13 +587,12 @@ fun ComposePostScreen(
             )
             ComposeMode.THREAD -> ComposePostDraft(
                 mode = ComposeMode.THREAD,
-                posts = threadPosts.mapIndexed { i, tfv ->
-                    val suffix = if (threadPosts.size > 1) " ${i + 1}/${threadPosts.size}" else ""
-                    // trimEnd(): the lossless chunker (see computeThreadPosts)
-                    // can leave a trailing space at a post's own break point;
-                    // strip it here so the posted text doesn't end up with a
-                    // double space before the counter suffix.
-                    ThreadPostDraft(text = tfv.text.trimEnd() + suffix)
+                // Item 2: no more "x/n" counter suffix appended to the real
+                // posted text — trimEnd() still matters on its own though,
+                // since the lossless chunker (see computeThreadPosts) can
+                // leave a trailing space right at a post's own break point.
+                posts = threadPosts.map { post ->
+                    ThreadPostDraft(text = post.text.text.trimEnd(), images = post.images, video = post.video)
                 }
             )
             ComposeMode.TEXTSHOT -> ComposePostDraft(mode = ComposeMode.TEXTSHOT, textshotText = singleText.text)
@@ -709,21 +780,29 @@ fun ComposePostScreen(
                     // pulled back into post 1 the moment it could still fit
                     // there.
                     ComposeMode.THREAD -> {
-                        threadPosts.forEachIndexed { index, tfv ->
-                            HubDivider("Post ${index + 1}/${threadPosts.size}")
+                        threadPosts.forEachIndexed { index, post ->
+                            // Item 2: the "Post x/n" divider and the "x/n"
+                            // counter (both here and in the actual posted
+                            // text — see handlePost) are gone entirely now.
+                            // A plain, unlabeled divider still separates one
+                            // post from the next visually — skipped before
+                            // the very first post, same as SINGLE mode has
+                            // no divider above its own field.
+                            if (index > 0) {
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp), color = Color.White.copy(alpha = 0.12f))
+                            }
                             GrowingTextField(
-                                value = tfv,
+                                value = post.text,
                                 onValueChange = { newVal ->
                                     if (!autoFormat) {
-                                        val budget = POST_CHAR_LIMIT - threadSuffixLength(threadPosts.size)
                                         threadPosts = threadPosts.toMutableList().also {
-                                            it[index] = capBudget(newVal, budget)
+                                            it[index] = post.copy(text = capBudget(newVal, POST_CHAR_LIMIT))
                                         }
                                         activeThreadIndex = index
                                     } else {
-                                        val priorLength = threadPosts.take(index).sumOf { it.text.length }
+                                        val priorLength = threadPosts.take(index).sumOf { it.text.text.length }
                                         val absoluteCaret = priorLength + newVal.selection.end
-                                        val fullText = threadPosts.mapIndexed { i, v -> if (i == index) newVal.text else v.text }
+                                        val fullText = threadPosts.mapIndexed { i, v -> if (i == index) newVal.text else v.text.text }
                                             .joinToString("")
                                         val chunks = computeThreadPosts(fullText, minPosts = threadPosts.size)
 
@@ -736,28 +815,34 @@ fun ComposePostScreen(
                                         }
                                         remainingCaret = remainingCaret.coerceIn(0, chunks.getOrElse(caretChunk) { "" }.length)
 
+                                        // Each post keeps whatever media it already had — a
+                                        // reflow only ever moves text between posts, never media.
                                         threadPosts = chunks.mapIndexed { i, text ->
-                                            if (i == caretChunk) TextFieldValue(text, TextRange(remainingCaret)) else TextFieldValue(text)
+                                            val old = threadPosts.getOrNull(i)
+                                            val tfv = if (i == caretChunk) TextFieldValue(text, TextRange(remainingCaret)) else TextFieldValue(text)
+                                            ThreadPostState(tfv, images = old?.images ?: emptyList(), video = old?.video)
                                         }
                                         activeThreadIndex = caretChunk
                                     }
                                 },
                                 placeholder = if (index == 0) "Start a thread…" else "Continue the thread…",
                                 onFocus = { activeThreadIndex = index },
-                                focusRequester = threadFocusRequesters.getOrNull(index),
-                                // Item 4: shows the "x/n" counter as trailing,
-                                // non-editable text right inside the post
-                                // itself, matching what actually gets posted
-                                // (see handlePost's own suffix) — purely
-                                // visual, so it can't be tapped into or
-                                // accidentally deleted from the real content.
-                                // Held back until the post actually has text
-                                // in it, otherwise it overlapped the "Continue
-                                // the thread…" placeholder on every not-yet-
-                                // started post.
-                                visualTransformation = if (tfv.text.isNotEmpty())
-                                    threadSuffixTransformation(index, threadPosts.size) else VisualTransformation.None
+                                focusRequester = threadFocusRequesters.getOrNull(index)
                             )
+                            // Item 2: each post displays its own attached
+                            // media right underneath its own text field —
+                            // up to 10 images or exactly one video per post.
+                            if (post.video != null) {
+                                Spacer(Modifier.height(8.dp))
+                                ThreadVideoPreview(uri = post.video, onRemove = {
+                                    threadPosts = threadPosts.toMutableList().also { it[index] = post.copy(video = null) }
+                                })
+                            } else if (post.images.isNotEmpty()) {
+                                Spacer(Modifier.height(8.dp))
+                                ImageGrid(images = post.images, onRemove = { uri ->
+                                    threadPosts = threadPosts.toMutableList().also { it[index] = post.copy(images = post.images - uri) }
+                                })
+                            }
                             Spacer(Modifier.height(10.dp))
                         }
                     }
@@ -888,7 +973,8 @@ fun ComposePostScreen(
                             GlassCircleButton(
                                 icon = Icons.Default.Image, contentDescription = "Attach image or video",
                                 liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop, size = 40.dp,
-                                enabled = mode != ComposeMode.TEXTSHOT && mode != ComposeMode.REVIEW,
+                                enabled = mode != ComposeMode.TEXTSHOT && mode != ComposeMode.REVIEW &&
+                                    (mode != ComposeMode.THREAD || threadPosts.getOrNull(activeThreadIndex)?.let { it.video == null && it.images.size < MAX_IMAGES } != false),
                                 onClick = {
                                     mediaPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                                 }
@@ -896,18 +982,15 @@ fun ComposePostScreen(
                             // Item 2: Blog and Textshot are text buttons, not
                             // icons — dim unless the status they set is the
                             // one currently active.
+                            // Item 5: Blog isn't finished yet — temporarily
+                            // greyed out and unclickable rather than opening
+                            // a mode that doesn't have anywhere to go.
                             TextToggleButton(
                                 label = "Blog",
                                 liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
-                                enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW,
-                                selected = isBlogMode,
-                                onClick = {
-                                    if (isBlogMode) {
-                                        isBlogMode = false
-                                    } else if (mode != ComposeMode.VIDEO) {
-                                        enableBlogMode()
-                                    }
-                                }
+                                enabled = false,
+                                selected = false,
+                                onClick = {}
                             )
                             TextToggleButton(
                                 label = "Textshot",
@@ -950,9 +1033,15 @@ fun ComposePostScreen(
                                             // packs whatever's there right
                                             // now, same greedy fill as typing
                                             // normally would have produced.
-                                            val fullText = threadPosts.joinToString("") { it.text }
+                                            // Media stays with its own post
+                                            // by position; text is the only
+                                            // thing that actually re-flows.
+                                            val oldMedia = threadPosts
+                                            val fullText = threadPosts.joinToString("") { it.text.text }
                                             threadPosts = computeThreadPosts(fullText, minPosts = threadPosts.size)
-                                                .map { TextFieldValue(it) }
+                                                .mapIndexed { i, text ->
+                                                    ThreadPostState(TextFieldValue(text), images = oldMedia.getOrNull(i)?.images ?: emptyList(), video = oldMedia.getOrNull(i)?.video)
+                                                }
                                             activeThreadIndex = activeThreadIndex.coerceAtMost(threadPosts.lastIndex)
                                         }
                                     }
@@ -1068,20 +1157,36 @@ private fun ContentLabelsPopup(
             )
 
             Spacer(Modifier.height(10.dp))
-            Box(
-                Modifier.fillMaxWidth().height(38.dp).clip(RoundedCornerShape(19.dp))
-                    .background(Color(0xFF1083FE))
-                    .clickable { tap(); onDismiss() },
-                contentAlignment = Alignment.Center
-            ) {
-                Text("Done", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            // Item 3: a color-adaptive glass/outline button matching every
+            // other button in this composer (see PostButton/TextToggleButton
+            // above) instead of a flat, un-themed Bluesky-blue button that
+            // didn't fit the rest of the app's look.
+            val doneShape = RoundedCornerShape(19.dp)
+            val doneMod = Modifier.fillMaxWidth().height(38.dp).clip(doneShape).clickable { tap(); onDismiss() }
+            if (liquidGlass) {
+                LiquidGlassSurface(doneMod, shape = doneShape, tint = tint) {
+                    Box(Modifier.matchParentSize(), contentAlignment = Alignment.Center) {
+                        Text("Done", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            } else {
+                Box(
+                    doneMod.background(Color.White.copy(0.10f))
+                        .border(1.dp, Color.White.copy(alpha = 0.18f), doneShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("Done", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
             }
         }
     }
 }
 
-/** One row of [ContentLabelsPopup]: checkbox + title on the left, that
- *  option's description on the right (always visible). */
+/** One row of [ContentLabelsPopup]: a checkbox, then the option's title and
+ *  description flowing as one continuous line of text — the description
+ *  starts right after the title's own text (Item 3), instead of every
+ *  row's description being pinned to the same fixed-width column no matter
+ *  how short or long that row's title happened to be. */
 @Composable
 private fun LabelOptionRow(title: String, description: String, checked: Boolean, onClick: () -> Unit) {
     val tap = rememberHapticTap()
@@ -1091,21 +1196,26 @@ private fun LabelOptionRow(title: String, description: String, checked: Boolean,
         Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
             .clickable { tap(); onClick() }
             .padding(horizontal = 4.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment = Alignment.Top
     ) {
-        Row(Modifier.width(118.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier.size(18.dp).clip(boxShape)
-                    .background(if (checked) blue else Color.White.copy(alpha = 0.06f))
-                    .border(1.dp, if (checked) blue else Color.White.copy(alpha = 0.35f), boxShape),
-                contentAlignment = Alignment.Center
-            ) {
-                if (checked) Icon(Icons.Default.Check, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
-            }
-            Spacer(Modifier.width(7.dp))
-            Text(title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 2)
+        Box(
+            Modifier.padding(top = 2.dp).size(18.dp).clip(boxShape)
+                .background(if (checked) blue else Color.White.copy(alpha = 0.06f))
+                .border(1.dp, if (checked) blue else Color.White.copy(alpha = 0.35f), boxShape),
+            contentAlignment = Alignment.Center
+        ) {
+            if (checked) Icon(Icons.Default.Check, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
         }
-        Text(description, color = DimGray, fontSize = 11.sp, lineHeight = 14.sp, modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(7.dp))
+        Text(
+            buildAnnotatedString {
+                withStyle(SpanStyle(color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)) { append(title) }
+                append(" ")
+                withStyle(SpanStyle(color = DimGray, fontWeight = FontWeight.Normal, fontSize = 11.sp)) { append(description) }
+            },
+            lineHeight = 16.sp,
+            modifier = Modifier.weight(1f)
+        )
     }
 }
 
@@ -1479,6 +1589,22 @@ private fun ImageGrid(images: List<Uri>, onRemove: (Uri) -> Unit) {
     }
 }
 
+/** Item 2: one thread post's attached video — a small 16:9 preview with a
+ *  tap-to-remove affordance, same visual language as [ImageGrid]'s tiles. */
+@Composable
+private fun ThreadVideoPreview(uri: Uri, onRemove: () -> Unit) {
+    val tap = rememberHapticTap()
+    Box(
+        Modifier.fillMaxWidth(0.55f).aspectRatio(16f / 9f).clip(RoundedCornerShape(10.dp))
+            .background(Color.Black).clickable { tap(); onRemove() }
+    ) {
+        Icon(Icons.Default.PlayArrow, contentDescription = "Video", tint = Color.White.copy(0.7f),
+            modifier = Modifier.align(Alignment.Center).size(28.dp))
+        Icon(Icons.Default.Close, contentDescription = "Remove video", tint = Color.White.copy(0.85f),
+            modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(16.dp))
+    }
+}
+
 /** Video mode's attachment row: the picked video on the left, a same-
  *  aspect-ratio thumbnail-picker box on the right — tapping it opens the
  *  image picker to choose a custom thumbnail. Neither is cropped: both
@@ -1551,11 +1677,6 @@ private fun TextshotPreview(text: String, liquidGlass: Boolean, tint: Color, emo
 
 private fun Int?.orZero() = this ?: 0
 
-/** How many chars "x/x" (with a leading space) costs, given how many posts
- *  are currently in the thread — grows to " 12/34" etc. once the thread has
- *  10+ posts, per the general form of the spec's "three characters". */
-private fun threadSuffixLength(postCount: Int): Int = " ${postCount}/${postCount}".length
-
 private fun capBudget(value: TextFieldValue, remainingBudget: Int): TextFieldValue {
     if (remainingBudget < 0) return TextFieldValue("", value.selection)
     if (value.text.length <= remainingBudget) return value
@@ -1599,42 +1720,21 @@ private fun greedyChunks(text: String, budget: Int): List<String> {
  *  content, it never shrinks out from under whatever the person already
  *  explicitly created (there's no per-post remove affordance in this UI, so
  *  there's never a legitimate reason for the count to drop on its own). Each
- *  post's own budget accounts for its "x/n" counter suffix, and — since
- *  that suffix's own width depends on the final post count once posts reach
- *  double digits — this re-derives the post count until the budget and the
- *  count it produces agree with each other. */
+ *  post's own budget is simply [POST_CHAR_LIMIT] — there's no "x/n" counter
+ *  suffix to reserve room for any more (see Item 2: the indicator was
+ *  removed entirely, both on screen and from the actual posted text). */
 private fun computeThreadPosts(fullText: String, minPosts: Int): List<String> {
     val floor = minPosts.coerceAtLeast(1)
     if (fullText.isEmpty() && floor <= 1) return listOf("")
     var n = floor
     while (true) {
-        val budget = (POST_CHAR_LIMIT - threadSuffixLength(n)).coerceAtLeast(1)
-        val needed = maxOf(greedyChunks(fullText, budget).size, floor)
+        val needed = maxOf(greedyChunks(fullText, POST_CHAR_LIMIT).size, floor)
         if (needed <= n || n > 50) break
         n = needed
     }
-    val budget = (POST_CHAR_LIMIT - threadSuffixLength(n)).coerceAtLeast(1)
-    val chunks = greedyChunks(fullText, budget).toMutableList()
+    val chunks = greedyChunks(fullText, POST_CHAR_LIMIT).toMutableList()
     while (chunks.size < n) chunks.add("")
     return chunks
-}
-
-/** Item 4: displays " x/n" right after a thread post's real text — for
- *  preview only, so it can't be tapped into, selected, or edited, and never
- *  becomes part of the actual stored post content (the real suffix is
- *  appended separately at submit time — see handlePost). */
-private fun threadSuffixTransformation(index: Int, total: Int): VisualTransformation {
-    val suffix = if (total > 1) " ${index + 1}/$total" else ""
-    if (suffix.isEmpty()) return VisualTransformation.None
-    return VisualTransformation { text ->
-        TransformedText(
-            AnnotatedString(text.text + suffix),
-            object : OffsetMapping {
-                override fun originalToTransformed(offset: Int) = offset.coerceIn(0, text.length)
-                override fun transformedToOriginal(offset: Int) = offset.coerceIn(0, text.length)
-            }
-        )
-    }
 }
 
 private fun isVideoUri(context: android.content.Context, uri: Uri): Boolean {

@@ -56,6 +56,9 @@ object PrefKeys {
     // Phase 4 — custom app-wide font pack
     val CUSTOM_FONT_PATH      = stringPreferencesKey("custom_font_path")
     val CUSTOM_FONT_NAME      = stringPreferencesKey("custom_font_name")
+    // Item 8, VRM pipeline step 5 — persisted-permission content:// URI of
+    // the user's chosen `.vrm` avatar file.
+    val VRM_AVATAR_URI        = stringPreferencesKey("vrm_avatar_uri")
     // Item (this session): local-only "Subscribe" lists on profiles' Reviews/
     // Blogs tabs — the Hub's Reviews/Blogs sections now pull only from
     // whichever accounts are in these sets (subscribing is per-section: an
@@ -118,7 +121,21 @@ object PrefKeys {
     // a bounded number of most-recently-used profiles (see
     // MainViewModel.PROFILE_TAB_CACHE_MAX_ENTRIES) so this can't grow
     // unbounded from someone who visits hundreds of different profiles.
-    val PROFILE_TAB_CACHE_JSON = stringPreferencesKey("profile_tab_cache_json")
+    // Crash fix: bumped from "profile_tab_cache_json" to "..._v2". A cache
+    // entry written by an older build — before some MediaItem field that
+    // exists *now* was ever added (textshotImageUrl is the one that's
+    // actually crashed; the underlying risk applies to any field added
+    // after that build) — deserializes via raw Gson (see MainViewModel's
+    // profileTabCacheGson), which has no idea that field has a non-null
+    // Kotlin default and simply leaves it as a real `null` for any JSON key
+    // that didn't exist in the old cached blob. MediaItem's getters are now
+    // defensive against that too (see Models.kt's doc comment on
+    // MediaItem's getters), but changing the key here means everyone's
+    // existing on-disk cache — which could hold entries from any build
+    // going back a long way — gets rebuilt fresh from the network exactly
+    // once instead of being trusted at all. Purely a local performance
+    // cache, so there's nothing to actually migrate.
+    val PROFILE_TAB_CACHE_JSON = stringPreferencesKey("profile_tab_cache_json_v2")
 
     // Feature request #7: experimental 3-wide variant of the Pinterest-style
     // masonry used by the Posts tab's All/Images filters (default is 2
@@ -254,6 +271,11 @@ class PreferencesManager(private val context: Context) {
     // internal storage, plus its original display name for the Settings row.
     val customFontPath: Flow<String?>          = context.dataStore.data.map { it[PrefKeys.CUSTOM_FONT_PATH] }
     val customFontName: Flow<String?>          = context.dataStore.data.map { it[PrefKeys.CUSTOM_FONT_NAME] }
+    // Item 8, VRM pipeline step 5 — the user's chosen `.vrm` avatar file,
+    // as a persisted-permission content:// URI (see setVrmAvatarUri's doc
+    // comment for why it must be persisted-permission specifically, not
+    // just any Uri string).
+    val vrmAvatarUri: Flow<String?>            = context.dataStore.data.map { it[PrefKeys.VRM_AVATAR_URI] }
     val tagPostWhenLiked: Flow<Boolean>        = context.dataStore.data.map { it[PrefKeys.TAG_POST_WHEN_LIKED] ?: false }
     val tagConcurrency: Flow<Int>              = context.dataStore.data.map { (it[PrefKeys.TAG_CONCURRENCY] ?: 3).coerceIn(1, 10) }
 
@@ -336,6 +358,17 @@ class PreferencesManager(private val context: Context) {
     suspend fun setCustomFontPath(path: String?) {
         context.dataStore.edit { prefs ->
             if (path == null) prefs.remove(PrefKeys.CUSTOM_FONT_PATH) else prefs[PrefKeys.CUSTOM_FONT_PATH] = path
+        }
+    }
+
+    /** [uri] must already have had [android.content.ContentResolver.takePersistableUriPermission]
+     *  called on it (see `VrmModeScreen.kt`'s avatar picker launcher) —
+     *  a plain `OpenDocument` result Uri's permission grant doesn't
+     *  survive past this process's lifetime, so without that call the
+     *  Uri stored here would fail to open the next time the app starts. */
+    suspend fun setVrmAvatarUri(uri: String?) {
+        context.dataStore.edit { prefs ->
+            if (uri == null) prefs.remove(PrefKeys.VRM_AVATAR_URI) else prefs[PrefKeys.VRM_AVATAR_URI] = uri
         }
     }
 

@@ -1832,9 +1832,13 @@ private fun LazyListScope.profileResultsContent(
             }
         }
         MainViewModel.ProfileTab.MUSIC_HISTORY -> {
-            // Item 16: songs are list-only (the old 1/2/3-column Grid-button
-            // cycle was removed per feedback) — see profileMusicHistoryRows.
-            profileMusicHistoryRows(tracks = tabState?.musicHistory ?: emptyList(), liquidGlass = liquidGlass, tint = profileTint)
+            // Item 16/7: songs are list-only (the old 1/2/3-column
+            // Grid-button cycle was removed per feedback) — see
+            // profileMusicHistoryRows for the pagination/key fix.
+            profileMusicHistoryRows(
+                tracks = tabState?.musicHistory ?: emptyList(), loading = tabState?.loading ?: false,
+                liquidGlass = liquidGlass, tint = profileTint, onLoadMore = onLoadMore
+            )
         }
     }
 
@@ -2404,15 +2408,36 @@ private fun MultiImageCountBadge(count: Int, currentPage: Int = 0, modifier: Mod
 
 // ─── Backlog (Popfeed) ───────────────────────────────────────────────────────
 
-/** Item 16: Rocksky "Music History" tab — always a vertical list of
+/** Item 16/7: Rocksky "Music History" tab — always a vertical list of
  *  horizontal rows (cover left, info right — same shape as [VodBubble]
  *  above). Fix (per feedback): the old 1/2/3-column Grid-button cycle is
  *  gone — songs are list-only now, so there's no grid button on this tab
- *  and no columns parameter anymore. */
-private fun LazyListScope.profileMusicHistoryRows(tracks: List<RockskyTrack>, liquidGlass: Boolean, tint: Color) {
-    items(tracks, key = { "track_${it.playedAt}_${it.title}_${it.artist}" }) { track ->
+ *  and no columns parameter anymore.
+ *
+ *  Bug fix (Item 7): the list's key used to be
+ *  "track_${playedAt}_${title}_${artist}" — if two scrobbles ever shared
+ *  that combination (repeat plays logged with the same timestamp
+ *  granularity, or a track missing playedAt entirely), Compose's
+ *  LazyColumn silently keeps only one row per duplicate key, which is
+ *  exactly what "shows the most recent, then one random one at the
+ *  bottom" was: most rows have unique timestamps and rendered fine, a
+ *  cluster of collisions among the rest collapsed down to whichever one
+ *  survived. Every scrobble's own AT-URI (see RockskyTrack.uri) is
+ *  actually unique per play, so that's the real key now — falling back to
+ *  the old composite only for a track with no uri at all. */
+private fun LazyListScope.profileMusicHistoryRows(tracks: List<RockskyTrack>, loading: Boolean, liquidGlass: Boolean, tint: Color, onLoadMore: () -> Unit) {
+    items(tracks, key = { it.uri.ifBlank { "track_${it.playedAt}_${it.title}_${it.artist}" } }) { track ->
         MusicHistoryRow(track = track, liquidGlass = liquidGlass, tint = tint,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp))
+    }
+    // Item 7: pages in the next chunk once the person's actually scrolled
+    // near the bottom of what's loaded so far — same "fire once the list
+    // grows" trigger every other paged tab already uses (see
+    // emptyAfterFilterLoadMore above for the equivalent on Posts/Reposts/
+    // Likes). Guarded on tracks being non-empty so it doesn't fire while
+    // the very first page is still loading.
+    if (tracks.isNotEmpty()) {
+        item(key = "music_history_loadmore") { LaunchedEffect(tracks.size, loading) { if (!loading) onLoadMore() } }
     }
 }
 

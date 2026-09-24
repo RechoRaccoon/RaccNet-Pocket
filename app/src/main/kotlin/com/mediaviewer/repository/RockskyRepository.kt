@@ -29,7 +29,8 @@ class RockskyRepository {
             artist = artist,
             album = album ?: track?.album ?: "",
             albumArtUrl = albumArt ?: cover ?: track?.albumArt,
-            playedAt = date ?: createdAt ?: ""
+            playedAt = date ?: createdAt ?: "",
+            uri = uri ?: ""
         )
     }
 
