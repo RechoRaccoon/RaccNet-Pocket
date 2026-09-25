@@ -819,80 +819,6 @@ private fun AppRoot(viewModel: MainViewModel) {
             )
         }
 
-        // Item 8: the camera-notch bubble button — hugs the real display
-        // cutout, expands into Camera/VRM. Hidden while the composer or VRM
-        // mode is already open so it can't stack another overlay on top of
-        // one that's already covering the whole screen; every other overlay
-        // (Search, DM inbox, Profile, …) still draws on top of it as normal
-        // since this Box is composed early, right after MainFeedScreen.
-        if (!composePostOpen && !vrmModeOpen) {
-            val cameraCaptureUri = remember { mutableStateOf<android.net.Uri?>(null) }
-            // Photo capture via StartActivityForResult with an EXPLICITLY
-            // resolved camera component, not ActivityResultContracts.TakePicture().
-            // TakePicture() was throwing ActivityNotFoundException on a device
-            // that demonstrably has a camera app — its internally-built intent
-            // wasn't resolving there. Resolving ACTION_IMAGE_CAPTURE against
-            // the PackageManager ourselves (the manifest's <queries> block
-            // makes this definitive on API 30+) and launching that exact
-            // component removes the contract's intent-building from the path
-            // entirely. If the platform truly has no IMAGE_CAPTURE handler,
-            // resolveActivity returns null and we say so instead of crashing.
-            val capturePhoto = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-                val uri = cameraCaptureUri.value
-                if (result.resultCode == android.app.Activity.RESULT_OK && uri != null) {
-                    viewModel.openComposePostWithCapturedMedia(imageUri = uri, videoUri = null)
-                }
-            }
-            // Item 8 follow-up: only photo capture is wired to the single
-            // "Camera" tap for now — CaptureVideo() is the identical
-            // pattern (see capturePhoto just above) if/when video capture
-            // gets its own control (e.g. press-and-hold).
-            // The notch button wears the feed's current dominant color — except
-            // while the Hub (SettingsSheet) is open, where every other piece
-            // of hub UI tints itself with the logged-in user's OWN profile
-            // color instead (see SettingsSheet's dominantColor shadowing).
-            // The button follows the same rule so it doesn't stick out in
-            // the wrong color over the hub.
-            val notchTint = if (screenState == ScreenState.SETTINGS) {
-                val selfAvatar = selfProfile?.author?.avatarUrl
-                if (!selfAvatar.isNullOrBlank()) rememberDominantColor(selfAvatar) else currentDominantColor
-            } else {
-                currentDominantColor
-            }
-            CameraNotchButton(
-                liquidGlass = liquidGlass,
-                tint = notchTint,
-                onOpenCamera = {
-                    // ACTION_IMAGE_CAPTURE doesn't need this app to hold the
-                    // CAMERA permission itself — the system camera app handles
-                    // that on its own.
-                    //
-                    // No resolveActivity() pre-check that gates on a boolean
-                    // and toasts: we resolve the handler and, if one exists,
-                    // launch THAT component directly. The whole thing (Uri
-                    // creation included) is inside the runCatching so a
-                    // FileProvider failure toasts instead of crashing the tap.
-                    runCatching {
-                        val uri = newCameraCaptureUri(context)
-                        cameraCaptureUri.value = uri
-                        val intent = android.content.Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE)
-                            .putExtra(android.provider.MediaStore.EXTRA_OUTPUT, uri)
-                        val component = intent.resolveActivity(context.packageManager)
-                            ?: throw android.content.ActivityNotFoundException("no IMAGE_CAPTURE handler")
-                        intent.component = component
-                        capturePhoto.launch(intent)
-                    }.onFailure { e ->
-                            if (e is android.content.ActivityNotFoundException) {
-                                Toast.makeText(context, "No camera app found on this device", Toast.LENGTH_SHORT).show()
-                            } else {
-                                Toast.makeText(context, "Couldn't open the camera", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                },
-                onOpenVrm = viewModel::openVrmMode
-            )
-        }
-
         if (vrmModeOpen) {
             // VRM UI wears the user's own profile color (same rule as the
             // notch button over the Hub) so the debug text, X button, and
@@ -1107,19 +1033,101 @@ private fun AppRoot(viewModel: MainViewModel) {
             )
         }
 
+        // Item 8: the camera-notch ring — hugs the real display cutout and
+        // is ALWAYS visible: composed unconditionally, after every other
+        // in-app layer (feed, Hub, profiles, Search, DMs, composer, VRM
+        // mode), with a zIndex above the DM-feed loading screen. Only the
+        // cold-launch cover and the pixel transition draw over it.
+        // Tapping (expanding into Camera/VRM) only works on the Hub and on
+        // a visible profile page; everywhere else it's a passive ring that
+        // lets touches fall through to whatever is underneath.
+        run {
+            val cameraCaptureUri = remember { mutableStateOf<android.net.Uri?>(null) }
+            // Photo capture via StartActivityForResult with an EXPLICITLY
+            // resolved camera component, not ActivityResultContracts.TakePicture().
+            // TakePicture() was throwing ActivityNotFoundException on a device
+            // that demonstrably has a camera app — its internally-built intent
+            // wasn't resolving there. Resolving ACTION_IMAGE_CAPTURE against
+            // the PackageManager ourselves (the manifest's <queries> block
+            // makes this definitive on API 30+) and launching that exact
+            // component removes the contract's intent-building from the path
+            // entirely. If the platform truly has no IMAGE_CAPTURE handler,
+            // resolveActivity returns null and we say so instead of crashing.
+            val capturePhoto = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+                val uri = cameraCaptureUri.value
+                if (result.resultCode == android.app.Activity.RESULT_OK && uri != null) {
+                    viewModel.openComposePostWithCapturedMedia(imageUri = uri, videoUri = null)
+                }
+            }
+            // Item 8 follow-up: only photo capture is wired to the single
+            // "Camera" tap for now — CaptureVideo() is the identical
+            // pattern (see capturePhoto just above) if/when video capture
+            // gets its own control (e.g. press-and-hold).
+            // The notch button wears the feed's current dominant color — except
+            // while the Hub (SettingsSheet) is open, where every other piece
+            // of hub UI tints itself with the logged-in user's OWN profile
+            // color instead (see SettingsSheet's dominantColor shadowing).
+            // The button follows the same rule so it doesn't stick out in
+            // the wrong color over the hub.
+            val profileVisible = profileOverlay?.let { !it.hidden && profileRevealArmed } == true
+            val notchInteractive = !vrmModeOpen && !composePostOpen && !searchOpen && !dmInboxOpen &&
+                !taggingOverlayOpen && playingLive == null &&
+                (profileVisible || screenState == ScreenState.SETTINGS)
+            val notchTint = if (screenState == ScreenState.SETTINGS || vrmModeOpen) {
+                val selfAvatar = selfProfile?.author?.avatarUrl
+                if (!selfAvatar.isNullOrBlank()) rememberDominantColor(selfAvatar) else currentDominantColor
+            } else {
+                currentDominantColor
+            }
+            CameraNotchButton(
+                liquidGlass = liquidGlass,
+                tint = notchTint,
+                interactive = notchInteractive,
+                modifier = Modifier.zIndex(11f),
+                onOpenCamera = {
+                    // ACTION_IMAGE_CAPTURE doesn't need this app to hold the
+                    // CAMERA permission itself — the system camera app handles
+                    // that on its own.
+                    //
+                    // No resolveActivity() pre-check that gates on a boolean
+                    // and toasts: we resolve the handler and, if one exists,
+                    // launch THAT component directly. The whole thing (Uri
+                    // creation included) is inside the runCatching so a
+                    // FileProvider failure toasts instead of crashing the tap.
+                    runCatching {
+                        val uri = newCameraCaptureUri(context)
+                        cameraCaptureUri.value = uri
+                        val intent = android.content.Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE)
+                            .putExtra(android.provider.MediaStore.EXTRA_OUTPUT, uri)
+                        val component = intent.resolveActivity(context.packageManager)
+                            ?: throw android.content.ActivityNotFoundException("no IMAGE_CAPTURE handler")
+                        intent.component = component
+                        capturePhoto.launch(intent)
+                    }.onFailure { e ->
+                            if (e is android.content.ActivityNotFoundException) {
+                                Toast.makeText(context, "No camera app found on this device", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Couldn't open the camera", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                },
+                onOpenVrm = viewModel::openVrmMode
+            )
+        }
+
         // Bug fix (item 3): unconditional opaque backing for the cold-boot
         // window described above — sits above every other layer (matching
         // PixelMatrixOverlay's own z-order) so nothing real is reachable
         // until the very first wipe-in has genuinely finished covering the
         // screen, regardless of how many frames that takes to kick off.
         if (coldLaunchCovered) {
-            Box(Modifier.fillMaxSize().background(Color.Black))
+            Box(Modifier.fillMaxSize().background(Color.Black).zIndex(12f))
         }
 
         // Retro pixel-matrix transition overlay — last child so it draws
         // above every other layer (feed, Hub, profile, dialogs) while a
         // transition is in progress; renders nothing once HIDDEN.
-        PixelMatrixOverlay(controller = pixelController, modifier = Modifier.fillMaxSize())
+        PixelMatrixOverlay(controller = pixelController, modifier = Modifier.fillMaxSize().zIndex(13f))
     }
     }
 

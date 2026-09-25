@@ -17,7 +17,7 @@ import kotlin.math.sqrt
  * opengl.Matrix`/OpenGL/Filament's own convention: column `c`, row `r`
  * lives at index `c*4+r`, and translation is indices 12–14. This matches
  * what `TransformManager.getTransform`/`setTransform` are documented to
- * use — see `AvatarRetargeter.applyHeadRotation`'s doc comment for the one
+ * use — see `AvatarRetargeter.applyPose`'s doc comment for the one
  * place this convention is actually load-bearing (MediaPipe's own
  * flattening order isn't confirmed against the pinned `tasks-vision`
  * release).
@@ -141,7 +141,7 @@ fun multiplyColumnMajor4x4(a: FloatArray, b: FloatArray): FloatArray {
 
 // ---- Plain 3-float vector helpers, for limb (arm/leg) rotation --------
 // Everything above works with rotations directly (a matrix, a quaternion);
-// limb rotation (AvatarRetargeter.applyArmRotation) instead starts from
+// limb rotation (AvatarRetargeter.applyPose) instead starts from
 // two tracked *positions* (e.g. a shoulder and an elbow) and needs to turn
 // the direction between them into a rotation — these are the small,
 // dependency-free building blocks for that. Every vector here is a plain

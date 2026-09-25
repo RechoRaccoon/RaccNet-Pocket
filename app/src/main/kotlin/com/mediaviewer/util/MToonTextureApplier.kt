@@ -70,6 +70,12 @@ object MToonTextureApplier {
      *  it later. */
     private const val MAX_TEXTURE_DIMENSION = 1024
 
+    private val SAMPLER = TextureSampler(
+        TextureSampler.MinFilter.LINEAR,
+        TextureSampler.MagFilter.LINEAR,
+        TextureSampler.WrapMode.REPEAT
+    )
+
     /** One texture's CPU-decoded pixels, ready to hand straight to
      *  Filament -- no further per-pixel work needed on the main thread. */
     class DecodedTexture(val width: Int, val height: Int, val pixels: ByteBuffer)
@@ -220,7 +226,18 @@ object MToonTextureApplier {
                 val texture = createFilamentTexture(engine, decoded) ?: continue
                 try {
                     for (materialInstance in targets) {
-                        materialInstance.setParameter("baseColorMap", texture, TextureSampler())
+                        materialInstance.setParameter("baseColorMap", texture, SAMPLER)
+                        // gltfio's ubershaders only sample baseColorMap when
+                        // baseColorIndex (the UV set) is >= 0; a material that
+                        // had no plain-glTF texture was created with -1, so
+                        // without this the bound texture is silently ignored.
+                        runCatching { materialInstance.setParameter("baseColorIndex", 0) }
+                        runCatching {
+                            materialInstance.setParameter(
+                                "baseColorUvMatrix", com.google.android.filament.MaterialInstance.FloatElement.MAT3,
+                                floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f), 0, 1
+                            )
+                        }
                         if (!matInfo.baseColorFactor.contentEquals(floatArrayOf(1f, 1f, 1f, 1f))) {
                             materialInstance.setParameter("baseColorFactor",
                                 matInfo.baseColorFactor[0], matInfo.baseColorFactor[1],
@@ -247,7 +264,9 @@ object MToonTextureApplier {
                 .width(decoded.width)
                 .height(decoded.height)
                 .levels(1)
-                .format(Texture.InternalFormat.RGBA8)
+                // Base colour is sRGB-encoded; RGBA8 made manually bound
+                // textures look washed out next to gltfio's own.
+                .format(Texture.InternalFormat.SRGB8_A8)
                 .sampler(Texture.Sampler.SAMPLER_2D)
                 .build(engine)
 

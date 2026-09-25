@@ -112,13 +112,13 @@ import kotlinx.coroutines.withContext
  *    drive the morph-target binds step 3 found
  *    ([AvatarRetargeter.applyExpressions], via a hand-tuned ARKit→VRM
  *    heuristic — see its own doc comment) live, every frame. Head/neck
- *    rotation: [AvatarRetargeter.applyHeadRotation] turns MediaPipe's
+ *    rotation: [AvatarRetargeter.applyPose] turns MediaPipe's
  *    per-frame face transformation matrix into a head (and, split
  *    proportionally, neck) bone rotation. Arm rotation:
- *    [AvatarRetargeter.applyArmRotation] turns `PoseLandmarker`'s
+ *    [AvatarRetargeter.applyPose] turns `PoseLandmarker`'s
  *    world-space shoulder/elbow/wrist points into upper-arm + forearm
  *    rotation on both sides, gated on [trackUpperBody]. Leg rotation:
- *    [AvatarRetargeter.applyLegRotation] does the identical thing with
+ *    [AvatarRetargeter.applyPose] does the identical thing with
  *    hip/knee/ankle points, gated on [trackFullBody] (which the Settings
  *    sheet already keeps off unless [trackUpperBody] is also on). The
  *    avatar now visibly turns its head, raises/moves its arms, and moves
@@ -167,6 +167,9 @@ fun VrmModeScreen(
     // toggle turns it on when the user actually wants it.
     var trackUpperBody by remember { mutableStateOf(false) }
     var trackFullBody by remember { mutableStateOf(false) }
+    // Video-call / filter framing: the avatar's head sits where yours is in
+    // the (mirrored) camera frame instead of being locked to the centre.
+    var followHead by remember { mutableStateOf(true) }
 
     // Step 1 verification state (see doc comment above): the latest result
     // from each landmarker, updated from VrmCameraTracking's ImageAnalysis
@@ -294,6 +297,7 @@ fun VrmModeScreen(
     // Diagnostic: how many MToon textures were actually bound during load.
     // Distinguishes "model has no textures" from "binding failed".
     var texturesApplied by remember { mutableStateOf(-1) }
+    var materialsPatched by remember { mutableStateOf("") }
 
     // Shared once here (not duplicated inside VrmTrackingOverlay) so the
     // debug overlay's five-blendshape subset and step 6's full-52
@@ -304,10 +308,8 @@ fun VrmModeScreen(
     val smoothedBlendshapes = remember(latestFaceResult) { smoothedFaceBlendshapes(latestFaceResult, blendshapeFilters) }
     // Item 8, VRM pipeline step 6 (bone-rotation half) — MediaPipe's raw
     // per-frame head-pose matrix, unsmoothed (unlike the blendshapes
-    // above): AvatarRetargeter.applyHeadRotation calibrates against the
-    // first frame it sees rather than a fixed rest value, so this doesn't
-    // need the same jitter treatment to look stable — see that function's
-    // own doc comment.
+    // above): AvatarRetargeter.applyPose applies it as an absolute,
+    // mirrored head rotation and smooths it over time itself.
     val headMatrix = remember(latestFaceResult) { headTransformationMatrix(latestFaceResult) }
     // Item 8, VRM pipeline step 6 (arm rotation) — unlike the head's face
     // matrix, raw pose landmarks are noisy enough that calibration alone
@@ -317,6 +319,20 @@ fun VrmModeScreen(
     // diverge, and a bank is cheap).
     val poseFilters = remember { OneEuroFilterBank(minCutoff = 1.0, beta = 0.3, dCutoff = 1.0) }
     val smoothedBodyLandmarks = remember(latestPoseResult) { smoothedBodyWorldLandmarks(latestPoseResult, poseFilters) }
+    // Finger curls, keyed by the AVATAR's side (mirroring already applied).
+    val handFilters = remember { OneEuroFilterBank(minCutoff = 1.5, beta = 0.5, dCutoff = 1.0) }
+    val fingerCurls = remember(latestHandResult, latestPoseResult, trackUpperBody) {
+        avatarFingerCurls(latestHandResult, if (trackUpperBody) latestPoseResult else null, handFilters)
+    }
+    // Where your eyes are in the camera frame (mirrored like the preview) —
+    // drives "follow my head". The last known placement is held while the
+    // face is briefly lost, so the avatar doesn't snap back to the centre.
+    val framingFilters = remember { OneEuroFilterBank(minCutoff = 1.2, beta = 0.8, dCutoff = 1.0) }
+    val lastFraming = remember { arrayOfNulls<AvatarFraming>(1) }
+    val framing = remember(latestFaceResult, trackingFrameWidth, trackingFrameHeight) {
+        faceFraming(latestFaceResult, trackingFrameWidth, trackingFrameHeight, framingFilters)
+            ?.also { lastFraming[0] = it } ?: lastFraming[0]
+    }
 
     androidx.compose.runtime.LaunchedEffect(Unit) {
         prefsManager.vrmAvatarUri.firstOrNull()?.let { pickedVrmUri = Uri.parse(it) }
@@ -374,18 +390,19 @@ fun VrmModeScreen(
         val vrmData = parsedVrmData
         if (target != null && vrmData != null) {
             AvatarRetargeter.applyExpressions(target, vrmData, smoothedBlendshapes)
-            AvatarRetargeter.applyHeadRotation(target, vrmData, headMatrix)
-            // Gated on the same toggle that turns PoseLandmarker itself on
-            // (see VrmCameraTracking's trackPose param) — otherwise
-            // latestPoseResult/smoothedBodyLandmarks would just be stale
-            // data from before the toggle was switched off, not "no arms."
-            if (trackUpperBody) AvatarRetargeter.applyArmRotation(target, vrmData, smoothedBodyLandmarks)
-            // Legs additionally require "Full Body" — same rationale as
-            // arms above, plus legs are the heavier, less-often-visible
-            // half of body tracking (see applyLegRotation's own doc
-            // comment) — the Settings sheet already gates "Full Body" on
-            // "Upper Body" being on, so this doesn't need to also check that.
-            if (trackFullBody) AvatarRetargeter.applyLegRotation(target, vrmData, smoothedBodyLandmarks)
+            // One call poses the whole skeleton (hips → spine → head → arms
+            // → hands → fingers → legs), mirrored like the preview. Body
+            // data is only passed while "Upper Body" is on (otherwise it'd be
+            // stale); without it the arms rest in a relaxed arms-down pose.
+            AvatarRetargeter.applyPose(
+                target,
+                TrackingFrame(
+                    faceMatrix = headMatrix,
+                    body = if (trackUpperBody) smoothedBodyLandmarks else null,
+                    trackLegs = trackFullBody,
+                    fingerCurls = fingerCurls
+                )
+            )
         }
     }
 
@@ -440,7 +457,10 @@ fun VrmModeScreen(
                     // bottom bar already wear.
                     backgroundTint = tint,
                     onRetargetTargetReady = { retargetTarget = it },
-                    onTexturesApplied = { texturesApplied = it }
+                    onTexturesApplied = { texturesApplied = it },
+                    onMaterialsPatched = { materialsPatched = it },
+                    framing = framing,
+                    followTracking = followHead
                 )
             } else {
                 // Prominent, not a 12sp hint: a dead/missing avatar file is
@@ -479,6 +499,7 @@ fun VrmModeScreen(
                 faceHelperError = faceHelperError,
                 faceResultCount = faceResultCount,
                 texturesApplied = texturesApplied,
+                materialsPatched = materialsPatched,
                 cameraError = cameraError,
                 cameraFrameCount = cameraFrameCount,
                 handResult = latestHandResult,
@@ -571,6 +592,7 @@ fun VrmModeScreen(
                 liquidGlass = liquidGlass,
                 trackUpperBody = trackUpperBody, onToggleUpperBody = { trackUpperBody = it },
                 trackFullBody = trackFullBody, onToggleFullBody = { trackFullBody = it },
+                followHead = followHead, onToggleFollowHead = { followHead = it },
                 hasAvatar = vrmBytes != null,
                 onPickAvatar = { vrmAvatarPickerLauncher.launch(arrayOf("*/*")) },
                 onDismiss = { settingsOpen = false }
@@ -804,56 +826,133 @@ private fun smoothedFaceBlendshapes(faceResult: FaceLandmarkerResult?, filters: 
  *  pinned tasks-vision AAR" caveat as everywhere else in this file — see
  *  FaceLandmarkerHelper's doc comment). No smoothing here (unlike
  *  [smoothedFaceBlendshapes]) — see the call site's own comment for why
- *  [AvatarRetargeter.applyHeadRotation] doesn't need it. */
+ *  [AvatarRetargeter.applyPose] smooths it itself. */
 private fun headTransformationMatrix(faceResult: FaceLandmarkerResult?): FloatArray? =
     faceResult?.facialTransformationMatrixes()?.orElse(null)?.firstOrNull()
 
-// Shoulders, elbows, wrists, hips, knees, ankles — BlazePose's 33-point
-// topology, the ten indices bone rotation needs beyond the face. Smoothing
-// just these ten (not all 33 — no hand/foot/facial landmarks from pose are
-// used anywhere in this pipeline) keeps poseFilters' map small.
-private val BODY_LANDMARK_INDICES = intArrayOf(11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28)
+// Shoulders, elbows, wrists, hand points (pinky/index knuckles, for wrist
+// orientation), hips, knees, ankles — BlazePose's 33-point topology.
+private val BODY_LANDMARK_INDICES = intArrayOf(11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 23, 24, 25, 26, 27, 28)
 
-/** VRM pipeline step 6 (arm + leg rotation): [BODY_LANDMARK_INDICES]'
- *  world-space positions (meters, hip-centered — MediaPipe's
- *  `worldLandmarks()`, not the normalized image-space `landmarks()`),
- *  each smoothed through [filters] and keyed by landmark index.
- *  `worldLandmarks()` returns `List<List<Landmark>>` (one list per
- *  detected pose — verified against the tasks-vision 0.10.14 AAR, not an
- *  Optional), and `Landmark` exposes `x()/y()/z()` accessors.
- *  Returns an empty map (and resets `"pose."`-prefixed filter
- *  history, so a later reacquisition isn't smoothed across the gap) when
- *  no pose is currently detected, same shape as [smoothedFaceBlendshapes].
- *  One shared function for both arms and legs (not two near-duplicates) —
- *  the "which indices actually get used this frame" decision belongs to
- *  the caller (arm rotation always applies if pose tracking is on at all;
- *  leg rotation is additionally gated on "Full Body" — see the call
- *  site), not to how the landmarks get smoothed. */
-private fun smoothedBodyWorldLandmarks(poseResult: PoseLandmarkerResult?, filters: OneEuroFilterBank): Map<Int, FloatArray> {
+/** Pose world landmarks (meters, hip-centred) for [BODY_LANDMARK_INDICES],
+ *  position One-Euro smoothed, plus each point's visibility so the
+ *  retargeter can ignore joints MediaPipe is only guessing at (off-frame
+ *  elbows/wrists are the common case in a selfie). Empty when no pose. */
+private fun smoothedBodyWorldLandmarks(poseResult: PoseLandmarkerResult?, filters: OneEuroFilterBank): Map<Int, BodyPoint> {
     val result = poseResult ?: run {
         filters.resetPrefixed("pose.")
         return emptyMap()
     }
-    // Verified against the tasks-vision 0.10.14 AAR: worldLandmarks() is a
-    // plain List<List<Landmark>> (one list per detected pose) — NOT a
-    // java.util.Optional — and Landmark exposes x()/y()/z() accessors
-    // (verified against the tasks-vision 0.10.14 AAR).
     val worldLandmarks = result.worldLandmarks().firstOrNull()
     if (worldLandmarks == null) {
         filters.resetPrefixed("pose.")
         return emptyMap()
     }
+    val imageLandmarks = result.landmarks().firstOrNull()
     val timestampSeconds = result.timestampMs() / 1000.0
-    val smoothed = mutableMapOf<Int, FloatArray>()
+    val smoothed = mutableMapOf<Int, BodyPoint>()
     for (index in BODY_LANDMARK_INDICES) {
         val landmark = worldLandmarks.getOrNull(index) ?: continue
-        smoothed[index] = floatArrayOf(
+        val visibility = imageLandmarks?.getOrNull(index)?.visibility()?.orElse(null)
+            ?: landmark.visibility().orElse(1f)
+        smoothed[index] = BodyPoint(
             filters.filter("pose.$index.x", landmark.x(), timestampSeconds),
             filters.filter("pose.$index.y", landmark.y(), timestampSeconds),
-            filters.filter("pose.$index.z", landmark.z(), timestampSeconds)
+            filters.filter("pose.$index.z", landmark.z(), timestampSeconds),
+            visibility
         )
     }
     return smoothed
+}
+
+/**
+ * Finger curls per AVATAR side from HandLandmarker's world landmarks.
+ *
+ * Which physical hand is which: when the pose is tracked, each hand goes to
+ * whichever pose wrist it's closest to (robust). Otherwise MediaPipe's
+ * handedness label is used — it's documented as assuming a mirrored selfie
+ * image, and our frames are NOT mirrored, so its "Left" is the person's
+ * right hand. Then, mirrored, the person's right hand drives the avatar's
+ * left (see AvatarRetargeter.MIRROR).
+ */
+private fun avatarFingerCurls(
+    hands: HandLandmarkerResult?,
+    pose: PoseLandmarkerResult?,
+    filters: OneEuroFilterBank
+): Map<String, FloatArray> {
+    if (hands == null) {
+        filters.resetPrefixed("finger.")
+        return emptyMap()
+    }
+    val world = hands.worldLandmarks()
+    val image = hands.landmarks()
+    val handedness = hands.handednesses()
+    val poseImage = pose?.landmarks()?.firstOrNull()?.takeIf { it.size > 16 }
+    val timestampSeconds = hands.timestampMs() / 1000.0
+    val out = HashMap<String, FloatArray>()
+    for (i in world.indices) {
+        val wrist = image.getOrNull(i)?.getOrNull(0)
+        val personSide = if (poseImage != null && wrist != null) {
+            val l = poseImage[15]; val r = poseImage[16]
+            val dl = (wrist.x() - l.x()) * (wrist.x() - l.x()) + (wrist.y() - l.y()) * (wrist.y() - l.y())
+            val dr = (wrist.x() - r.x()) * (wrist.x() - r.x()) + (wrist.y() - r.y()) * (wrist.y() - r.y())
+            if (dl <= dr) "left" else "right"
+        } else {
+            personSideFromLabel(handedness.getOrNull(i)?.firstOrNull()?.categoryName())
+        } ?: continue
+        val avatarSide = if (AvatarRetargeter.MIRROR) (if (personSide == "left") "right" else "left") else personSide
+        if (out.containsKey(avatarSide)) continue
+        val curls = AvatarRetargeter.fingerCurls(world[i].map { floatArrayOf(it.x(), it.y(), it.z()) }) ?: continue
+        out[avatarSide] = FloatArray(curls.size) { k -> filters.filter("finger.$avatarSide.$k", curls[k], timestampSeconds) }
+    }
+    for (side in listOf("left", "right")) if (!out.containsKey(side)) filters.resetPrefixed("finger.$side.")
+    return out
+}
+
+/** MediaPipe's handedness label → the person's actual hand, for our
+ *  un-mirrored camera frames (see [avatarFingerCurls]). */
+private fun personSideFromLabel(label: String?): String? = when (label) {
+    "Left" -> "right"
+    "Right" -> "left"
+    else -> null
+}
+
+/** Eye position/spacing for "follow my head": centre of each eye from its
+ *  two corners (33/133 and 362/263), mirrored like the preview, and the
+ *  3-D spacing in frame pixels (3-D so turning your head doesn't shrink
+ *  the avatar). One-Euro smoothed. Null when no face. */
+private fun faceFraming(
+    faceResult: FaceLandmarkerResult?,
+    frameWidth: Int,
+    frameHeight: Int,
+    filters: OneEuroFilterBank
+): AvatarFraming? {
+    val points = faceResult?.faceLandmarks()?.firstOrNull()
+    if (points == null || points.size <= 362 || frameWidth <= 0 || frameHeight <= 0) {
+        filters.resetPrefixed("frame.")
+        return null
+    }
+    fun eye(a: Int, b: Int) = floatArrayOf(
+        (points[a].x() + points[b].x()) / 2f, (points[a].y() + points[b].y()) / 2f, (points[a].z() + points[b].z()) / 2f
+    )
+    val e1 = eye(33, 133)
+    val e2 = eye(362, 263)
+    val w = frameWidth.toFloat()
+    val h = frameHeight.toFloat()
+    val dx = (e1[0] - e2[0]) * w
+    val dy = (e1[1] - e2[1]) * h
+    val dz = (e1[2] - e2[2]) * w // MediaPipe's z is on roughly the same scale as x
+    val spacing = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
+    val cx = (e1[0] + e2[0]) / 2f
+    val cy = (e1[1] + e2[1]) / 2f
+    val t = faceResult.timestampMs() / 1000.0
+    return AvatarFraming(
+        anchorX = filters.filter("frame.x", if (AvatarRetargeter.MIRROR) 1f - cx else cx, t),
+        anchorY = filters.filter("frame.y", cy, t),
+        eyeDistancePx = filters.filter("frame.d", spacing, t),
+        frameWidth = frameWidth,
+        frameHeight = frameHeight
+    )
 }
 
 /**
@@ -887,6 +986,7 @@ private fun VrmTrackingOverlay(
     faceHelperError: String?,
     faceResultCount: Int,
     texturesApplied: Int,
+    materialsPatched: String,
     cameraError: String?,
     cameraFrameCount: Int,
     handResult: HandLandmarkerResult?,
@@ -925,7 +1025,7 @@ private fun VrmTrackingOverlay(
         texturesApplied < 0 -> "textures: loading…"
         texturesApplied == 0 -> "textures: loaded by glTF loader"
         else -> "textures: glTF loader + $texturesApplied MToon-only"
-    }
+    } + if (materialsPatched.isNotBlank()) "\nmaterials: $materialsPatched" else ""
 
     // Hands: just a live count, plus which side(s) — full 21-point dump per
     // hand isn't useful as on-screen debug text, this is just confirming
@@ -934,7 +1034,11 @@ private fun VrmTrackingOverlay(
     val handLine = when {
         handResult == null -> "hands: no landmarker output yet\n(check hand_landmarker.task in assets/)"
         handednesses.isEmpty() -> "hands: none detected"
-        else -> "hands: " + handednesses.joinToString(", ") { it.firstOrNull()?.categoryName() ?: "?" }
+        // MediaPipe's label assumes a mirrored image and ours isn't, so it's
+        // swapped here to name the hand you actually raised.
+        else -> "hands: " + handednesses.joinToString(", ") { c ->
+            when (personSideFromLabel(c.firstOrNull()?.categoryName())) { "left" -> "Left"; "right" -> "Right"; else -> "?" }
+        }
     }
 
     // Pose: only running while "Upper Body" is on. Nose landmark's presence
@@ -1005,6 +1109,7 @@ private fun VrmSettingsSheet(
     liquidGlass: Boolean,
     trackUpperBody: Boolean, onToggleUpperBody: (Boolean) -> Unit,
     trackFullBody: Boolean, onToggleFullBody: (Boolean) -> Unit,
+    followHead: Boolean, onToggleFollowHead: (Boolean) -> Unit,
     hasAvatar: Boolean,
     onPickAvatar: () -> Unit,
     onDismiss: () -> Unit
@@ -1027,6 +1132,7 @@ private fun VrmSettingsSheet(
             Spacer(Modifier.height(14.dp))
             VrmSettingsToggleRow("Upper Body", trackUpperBody) { onToggleUpperBody(it); if (!it) onToggleFullBody(false) }
             VrmSettingsToggleRow("Full Body", trackFullBody, enabled = trackUpperBody) { onToggleFullBody(it) }
+            VrmSettingsToggleRow("Follow my head", followHead) { onToggleFollowHead(it) }
             Spacer(Modifier.height(10.dp))
             // Item 8, step 5 — no bundled default avatar (that'd mean
             // shipping someone's VRM model in the app), so the only way to

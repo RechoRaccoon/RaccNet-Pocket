@@ -74,11 +74,16 @@ fun CameraNotchButton(
     liquidGlass: Boolean,
     tint: Color,
     modifier: Modifier = Modifier,
+    /** False = a passive ring: drawn, but untappable, and touches pass
+     *  straight through to whatever is underneath. */
+    interactive: Boolean = true,
     onOpenCamera: () -> Unit,
     onOpenVrm: () -> Unit
 ) {
     val tap = rememberHapticTap()
     var expanded by remember { mutableStateOf(false) }
+    // Leaving the Hub/profile while expanded collapses it.
+    androidx.compose.runtime.LaunchedEffect(interactive) { if (!interactive) expanded = false }
     val density = LocalDensity.current
 
     val view = LocalView.current
@@ -120,7 +125,12 @@ fun CameraNotchButton(
             // Smallest rect hugs a punch-hole best on multi-rect devices.
             rects.minByOrNull { it.width() * it.height() }?.let { bounds = android.graphics.RectF(it) }
         }
-        val b = bounds
+        val b = bounds?.takeIf { r ->
+            // Reject nonsense (off-screen or a path in another coordinate
+            // space): the ring would then be drawn where nobody can see it.
+            val w = view.rootView.width.toFloat(); val h = view.rootView.height.toFloat()
+            (w <= 0f || h <= 0f) || (r.centerX() in 0f..w && r.centerY() in 0f..h && r.width() < w / 2f)
+        } ?: rects.minByOrNull { it.width() * it.height() }?.let { android.graphics.RectF(it) }
         if (b != null) {
             cutoutCenterPx = androidx.compose.ui.geometry.Offset(b.centerX(), b.centerY())
             cutoutDiameterPx = minOf(b.width(), b.height())
@@ -135,8 +145,9 @@ fun CameraNotchButton(
         readCutout()
     }
 
-    // Collapsed: a circle hugging the lens, 1dp of outline around it.
-    val outlinePadding = 1.dp
+    // Collapsed: a circle hugging the lens, 2dp of outline outside the hole
+    // (the hole itself hides anything drawn over it).
+    val outlinePadding = 2.dp
     val sideWidth = 56.dp
     val outlinePaddingPx = with(density) { outlinePadding.toPx() }
     val maxRingPx = with(density) { 28.dp.toPx() }
@@ -203,20 +214,24 @@ fun CameraNotchButton(
                 .width(width).height(ringSize).clip(shape)
                 .then(
                     if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
-                    // Flat mode: a translucent tinted fill under a thin
-                    // (1dp) tinted ring — the ring is the whole visual in
-                    // the collapsed state, so it stays hairline rather than
-                    // chunky.
-                    else Modifier.background(tint.copy(alpha = 0.28f)).border(1.dp, tint.copy(alpha = 0.8f), shape)
+                    // Flat mode: a translucent tinted fill.
+                    else Modifier.background(tint.copy(alpha = 0.28f))
                 )
+                // The ring itself — drawn in BOTH modes, independent of the
+                // glass intensity/rim settings, so the collapsed notch is
+                // always visible (a faint glass rim alone vanished over dark
+                // screens like VRM mode). A light hairline under the tinted
+                // one keeps it readable when the tint is itself very dark.
+                .border(1.5.dp, Color.White.copy(alpha = 0.35f), shape)
+                .border(1.dp, tint.copy(alpha = 0.9f), shape)
         ) {
-            if (!expanded) {
+            if (!expanded && interactive) {
                 // Bare ring — the tappable area is the whole bubble, no
                 // inner icon (see outlinePadding's comment).
                 Box(
                     Modifier.matchParentSize().clickable { tap(); expanded = true }
                 )
-            } else {
+            } else if (expanded) {
                 Row(Modifier.matchParentSize()) {
                     Box(
                         Modifier.width(sideWidth).fillMaxHeight()

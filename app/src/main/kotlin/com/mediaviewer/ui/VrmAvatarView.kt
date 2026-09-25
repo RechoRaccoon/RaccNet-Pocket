@@ -12,6 +12,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -29,19 +30,24 @@ import com.google.android.filament.EntityManager
 import com.google.android.filament.IndirectLight
 import com.google.android.filament.LightManager
 import com.google.android.filament.Skybox
+import com.google.android.filament.ColorGrading
+import com.google.android.filament.ToneMapper
 import com.google.android.filament.utils.ModelViewer
 import com.google.android.filament.utils.Utils
 import com.mediaviewer.util.MToonMaterialParser
 import com.mediaviewer.util.MToonTextureApplier
 import com.mediaviewer.util.Quaternion
 import com.mediaviewer.util.VrmData
+import com.mediaviewer.util.VrmGlbPatcher
 import com.mediaviewer.util.VrmSpecVersion
 import com.mediaviewer.util.multiplyColumnMajor4x4
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.nio.ByteBuffer
 import kotlin.math.cos
+import kotlin.math.exp
+import kotlin.math.max
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * Renders the picked `.vrm` (a binary glTF) with Filament's `ModelViewer`.
@@ -78,6 +84,14 @@ import kotlin.math.sin
  * the screen center as you zoom in — so zooming frames the face/upper body
  * instead of pushing it off the top of the screen. [DEFAULT_ZOOM] starts it
  * closer than the old whole-body framing.
+ *
+ * ## Follow mode (video-call / filter framing)
+ * With [followTracking] on and a [framing] from face tracking, the model's
+ * root is moved and scaled every frame so the avatar's eyes land exactly
+ * where the user's eyes are in the (mirrored, fill-cropped) camera frame,
+ * at the same eye spacing — see [solveFollow]. Pinch then scales relative
+ * to that and drag still spins. Without a face it holds the last
+ * placement; with follow off it's the old centered framing.
  */
 @Composable
 fun VrmAvatarView(
@@ -89,7 +103,12 @@ fun VrmAvatarView(
      *  visible. */
     backgroundTint: Color = Color.Black,
     onRetargetTargetReady: (RetargetTarget?) -> Unit = {},
-    onTexturesApplied: (Int) -> Unit = {}
+    onTexturesApplied: (Int) -> Unit = {},
+    /** What [VrmGlbPatcher] changed on load, for the debug overlay. */
+    onMaterialsPatched: (String) -> Unit = {},
+    /** Latest face placement from tracking, or null if none seen yet. */
+    framing: AvatarFraming? = null,
+    followTracking: Boolean = true
 ) {
     var session by remember { mutableStateOf<ViewerSession?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
@@ -98,6 +117,7 @@ fun VrmAvatarView(
     var zoom by remember { mutableStateOf(DEFAULT_ZOOM) }
     val currentOnRetarget by rememberUpdatedState(onRetargetTargetReady)
     val currentOnTextures by rememberUpdatedState(onTexturesApplied)
+    val currentOnPatched by rememberUpdatedState(onMaterialsPatched)
 
     // Load (or unload) whenever the viewer or the file changes.
     LaunchedEffect(session, vrmBytes) {
@@ -107,7 +127,7 @@ fun VrmAvatarView(
         // bone transforms into freed entities.
         currentOnRetarget(null)
         if (vrmBytes == null) {
-            s.onMain { it.destroyModel(); s.baseTransform = null }
+            s.onMain { it.destroyModel(); s.baseTransform = null; s.anchor = null }
             loadError = null
             return@LaunchedEffect
         }
@@ -118,15 +138,21 @@ fun VrmAvatarView(
         if (result == null) return@LaunchedEffect // released/cancelled mid-load
         loadError = result.error
         currentOnTextures(result.texturesApplied)
-        // Pose the model (facing fix + zoom) now that the base transform exists.
-        s.onMain { applyModelTransform(it, s, userYawDegrees, zoom) }
+        currentOnPatched(result.patchSummary)
+        // The frame loop places the root from here on
+        // (updateRootTransform); start without easing.
+        s.snapFraming = true
         currentOnRetarget(result.target)
     }
 
-    // Cheap: one small matrix product + one setTransform on the root.
-    LaunchedEffect(session, userYawDegrees, zoom) {
-        val s = session ?: return@LaunchedEffect
-        s.onMain { applyModelTransform(it, s, userYawDegrees, zoom) }
+    // Plain field writes on the main thread; the frame loop reads them.
+    SideEffect {
+        session?.let { s ->
+            s.userYawDegrees = userYawDegrees
+            s.zoom = zoom
+            s.framing = framing
+            s.followTracking = followTracking
+        }
     }
 
     LaunchedEffect(session, backgroundTint) {
@@ -167,6 +193,7 @@ fun VrmAvatarView(
                 newSession.viewer = viewer
                 newSession.lightEntities = addThreeLightRig(viewer.engine, viewer.scene)
                 newSession.indirectLight = addFlatAmbientLight(viewer.engine, viewer.scene)
+                newSession.colorGrading = applyLinearToneMapping(viewer)
                 applyBackgroundColor(viewer, newSession, backgroundTint)
                 newSession.startFrameLoop()
                 session = newSession
@@ -226,7 +253,24 @@ private class ViewerSession {
     var baseYawDegrees = 0f
     var skybox: Skybox? = null
     var indirectLight: IndirectLight? = null
+    var colorGrading: ColorGrading? = null
     var lightEntities: IntArray = IntArray(0)
+
+    // Written by the composable (SideEffect), read by the frame loop.
+    var userYawDegrees = 0f
+    var zoom = DEFAULT_ZOOM
+    var framing: AvatarFraming? = null
+    var followTracking = true
+    /** Bones the follow framing anchors on; set when a model loads. */
+    var anchor: FramingAnchor? = null
+    /** Jump straight to the target placement next frame (fresh load). */
+    var snapFraming = true
+
+    // Root placement actually applied last frame — see updateRootTransform.
+    val appliedT = FloatArray(3)
+    var appliedS = DEFAULT_ZOOM
+    var appliedYawDegrees = 0f
+    private var lastFrameNanos = 0L
 
     private val choreographer = Choreographer.getInstance()
     private val frameCallback = object : Choreographer.FrameCallback {
@@ -234,6 +278,10 @@ private class ViewerSession {
             if (released) return
             choreographer.postFrameCallback(this)
             val v = viewer ?: return
+            val dt = if (lastFrameNanos == 0L) 0f else ((frameTimeNanos - lastFrameNanos) / 1e9f).coerceIn(0f, 0.25f)
+            lastFrameNanos = frameTimeNanos
+            runCatching { updateRootTransform(v, dt) }
+                .onFailure { Log.e(TAG, "Placing the model failed", it) }
             runCatching {
                 // render() doesn't push bone transforms to skinned meshes
                 // itself; without this the avatar stays frozen in rest pose.
@@ -262,6 +310,7 @@ private class ViewerSession {
             val engine = v.engine
             skybox?.let { v.scene.skybox = null; engine.destroySkybox(it) }
             indirectLight?.let { v.scene.indirectLight = null; engine.destroyIndirectLight(it) }
+            colorGrading?.let { v.view.colorGrading = null; engine.destroyColorGrading(it) }
             for (e in lightEntities) {
                 v.scene.removeEntity(e)
                 engine.destroyEntity(e)
@@ -270,6 +319,7 @@ private class ViewerSession {
         }.onFailure { Log.e(TAG, "Freeing VRM scene objects failed", it) }
         skybox = null
         indirectLight = null
+        colorGrading = null
         lightEntities = IntArray(0)
         viewer = null
     }
@@ -285,16 +335,21 @@ private class ViewerSession {
 private class VrmLoadResult(
     val error: String?,
     val texturesApplied: Int,
-    val target: RetargetTarget?
+    val target: RetargetTarget?,
+    val patchSummary: String = ""
 )
 
 /** Returns null if the session was released (screen closed) mid-load. */
 private suspend fun loadVrm(session: ViewerSession, bytes: ByteArray, parsedVrmData: VrmData?): VrmLoadResult? {
+    var patchSummary = ""
     // ── CPU-only prep, off the main thread ──
     val prepared = withContext(Dispatchers.Default) {
-        val direct = ByteBuffer.allocateDirect(bytes.size).order(java.nio.ByteOrder.nativeOrder())
-        direct.put(bytes)
-        direct.flip()
+        // The glTF JSON is rewritten so gltfio renders VRM materials the way
+        // VRM viewers do — without this the avatar is a black silhouette
+        // (vertex-colour masks, default metallic = 1, MToon). See VrmGlbPatcher.
+        val patched = VrmGlbPatcher.patchToDirectBuffer(bytes)
+        patchSummary = patched.stats.toString()
+        val direct = patched.buffer
         val mtoon = MToonMaterialParser.parse(bytes)
         val decoded = if (mtoon != null) {
             runCatching { MToonTextureApplier.decodeTextures(mtoon) }
@@ -322,24 +377,26 @@ private suspend fun loadVrm(session: ViewerSession, bytes: ByteArray, parsedVrmD
         when {
             failure != null -> {
                 Log.e(TAG, "Filament failed to load VRM file as glTF", failure)
-                VrmLoadResult("Couldn't load that .vrm file (${failure::class.simpleName})", texturesApplied, null)
+                VrmLoadResult("Couldn't load that .vrm file (${failure::class.simpleName})", texturesApplied, null, patchSummary)
             }
-            asset == null -> VrmLoadResult("Couldn't parse that .vrm file (not valid glTF?)", texturesApplied, null)
-            asset.entities.isEmpty() -> VrmLoadResult("That .vrm file loaded empty (no visible geometry?)", texturesApplied, null)
+            asset == null -> VrmLoadResult("Couldn't parse that .vrm file (not valid glTF?)", texturesApplied, null, patchSummary)
+            asset.entities.isEmpty() -> VrmLoadResult("That .vrm file loaded empty (no visible geometry?)", texturesApplied, null, patchSummary)
             else -> {
                 session.baseTransform = captureRootTransform(viewer)
-                // VRM 0.x models face +Z (backwards for a glTF viewer).
-                session.baseYawDegrees = if (parsedVrmData?.specVersion == VrmSpecVersion.VRM_0) 180f else 0f
-                // Built HERE, on the main thread, before the facing/zoom
-                // transform is applied — same rest-pose capture the head
-                // tracking was tuned against. (It used to run on a
-                // background thread while the main thread was rendering.)
+                // Built HERE, on the main thread, while the root still holds
+                // only the unit-cube fit — so every rest pose is captured in
+                // the "model space" the retargeter solves in.
                 val target = if (parsedVrmData != null) {
                     runCatching { AvatarRetargeter.buildTarget(viewer.engine, asset, parsedVrmData) }
                         .onFailure { Log.e(TAG, "Could not build retarget target", it) }
                         .getOrNull()
                 } else null
-                VrmLoadResult(null, texturesApplied, target)
+                // Turn the model to face the camera. The skeleton says which
+                // way it faces; the spec version is only a fallback.
+                val facesNegativeZ = target?.facesNegativeZ ?: (parsedVrmData?.specVersion == VrmSpecVersion.VRM_0)
+                session.baseYawDegrees = if (facesNegativeZ) 180f else 0f
+                session.anchor = target?.let { FramingAnchor.from(it) }
+                VrmLoadResult(null, texturesApplied, target, patchSummary)
             }
         }
     }
@@ -357,41 +414,217 @@ private fun captureRootTransform(viewer: ModelViewer): FloatArray? {
     return FloatArray(16).also { tm.getTransform(instance, it) }
 }
 
+/** Where the user's eyes are in the upright tracking frame. [anchorX] and
+ *  [anchorY] are 0..1 of the frame, ALREADY mirrored the same way as the
+ *  tracking preview box; [eyeDistancePx] is the spacing between the two
+ *  eye centres in frame pixels. */
+class AvatarFraming(
+    val anchorX: Float,
+    val anchorY: Float,
+    val eyeDistancePx: Float,
+    val frameWidth: Int,
+    val frameHeight: Int
+)
+
+/** Which avatar bones stand in for the user's eyes when following. */
+class FramingAnchor(
+    val leftEye: Int?,
+    val rightEye: Int?,
+    val head: Int?,
+    /** Model-space eye spacing to assume for rigs without eye bones. */
+    val fallbackEyeDistance: Float
+) {
+    companion object {
+        fun from(target: RetargetTarget): FramingAnchor {
+            val b = target.bones
+            val head = b["head"]
+            val footY = listOfNotNull(b["leftFoot"], b["rightFoot"]).minOfOrNull { it.restWorldPosition[1] }
+            val eyeHeight = if (head != null && footY != null) head.restWorldPosition[1] - footY else 0f
+            return FramingAnchor(
+                leftEye = b["leftEye"]?.entity,
+                rightEye = b["rightEye"]?.entity,
+                head = head?.entity,
+                fallbackEyeDistance = if (eyeHeight > 1e-3f) eyeHeight * 0.042f else 0.06f
+            )
+        }
+    }
+}
+
+/** Rigs without eye bones anchor on the head bone, which sits roughly this
+ *  many eye-spacings below the eye line. */
+private const val HEAD_BONE_BELOW_EYES = 0.8f
+private const val FOLLOW_TAU_SECONDS = 0.08f
+private const val MIN_ROOT_SCALE = 0.15f
+private const val MAX_ROOT_SCALE = 25f
+
 /**
- * root = Zoom * Yaw * base, always rebuilt from the load-time [base] so
- * repeated calls never accumulate.
+ * Applies the model's root transform, every frame:
  *
- *  - Yaw spins the model about the vertical axis through its own center.
- *  - Zoom scales by `s` about a focus point F (upper chest), then moves F
- *    to `C + (F - C) / s` — at s = 1 nothing moves; as s grows, F slides
- *    toward screen center C, so zooming in frames the upper body.
- *    Combined: p' = s * (p - F) + C + (F - C) / s.
+ *     root = T(C + t) · S(s) · Yaw · T(-C) · base
+ *
+ * C is the unit-cube centre, `base` the load-time unit-cube fit, Yaw the
+ * facing fix + the user's drag. Centered mode uses t = (0, F·(1/s − s), 0),
+ * s = zoom — algebraically the same "zoom toward the upper chest" framing
+ * as before. Follow mode gets t and s from [solveFollow]. Either way t/s
+ * ease towards their target, so tracking at ~15 Hz still moves smoothly at
+ * the display's frame rate.
  */
-private fun applyModelTransform(viewer: ModelViewer, session: ViewerSession, userYawDegrees: Float, zoom: Float) {
-    val base = session.baseTransform ?: return
+private fun ViewerSession.updateRootTransform(viewer: ModelViewer, dt: Float) {
+    val base = baseTransform ?: return
     val asset = viewer.asset ?: return
     val tm = viewer.engine.transformManager
     val instance = tm.getInstance(asset.root)
     if (instance == 0) return
+    val yaw = baseYawDegrees + userYawDegrees
 
-    val cx = UNIT_CUBE_CENTER[0]; val cy = UNIT_CUBE_CENTER[1]; val cz = UNIT_CUBE_CENTER[2]
-    val half = Math.toRadians((session.baseYawDegrees + userYawDegrees).toDouble()) / 2.0
-    val yaw = Quaternion(0f, sin(half).toFloat(), 0f, cos(half).toFloat()).toColumnMajorMatrix()
+    var targetS = zoom
+    var targetT = floatArrayOf(0f, ZOOM_FOCUS_Y * (1f / zoom - zoom), 0f)
+    if (followTracking) {
+        solveFollow(viewer, yaw)?.let { (t, s) -> targetT = t; targetS = s }
+    }
 
-    var m = multiplyColumnMajor4x4(translationMatrix(-cx, -cy, -cz), base)
-    m = multiplyColumnMajor4x4(yaw, m)
-    m = multiplyColumnMajor4x4(translationMatrix(cx, cy, cz), m)
+    if (snapFraming) {
+        targetT.copyInto(appliedT)
+        appliedS = targetS
+        snapFraming = false
+    } else {
+        val a = 1f - exp(-dt / FOLLOW_TAU_SECONDS)
+        for (i in 0 until 3) appliedT[i] += (targetT[i] - appliedT[i]) * a
+        // Ease scale in log space so growing and shrinking feel the same.
+        appliedS = exp(kotlin.math.ln(appliedS) + (kotlin.math.ln(targetS) - kotlin.math.ln(appliedS)) * a)
+    }
+    appliedYawDegrees = yaw
 
-    val s = zoom
-    val fx = cx; val fy = cy + ZOOM_FOCUS_Y; val fz = cz
-    m = multiplyColumnMajor4x4(translationMatrix(-fx, -fy, -fz), m)
-    m = multiplyColumnMajor4x4(scaleMatrix(s), m)
-    m = multiplyColumnMajor4x4(
-        translationMatrix(cx + (fx - cx) / s, cy + (fy - cy) / s, cz + (fz - cz) / s), m
-    )
-    runCatching { tm.setTransform(instance, m) }
-        .onFailure { Log.e(TAG, "setTransform failed while posing model", it) }
+    val c = UNIT_CUBE_CENTER
+    val half = Math.toRadians(yaw.toDouble()) / 2.0
+    val yawMatrix = Quaternion(0f, sin(half).toFloat(), 0f, cos(half).toFloat()).toColumnMajorMatrix()
+    var m = multiplyColumnMajor4x4(translationMatrix(-c[0], -c[1], -c[2]), base)
+    m = multiplyColumnMajor4x4(yawMatrix, m)
+    m = multiplyColumnMajor4x4(scaleMatrix(appliedS), m)
+    m = multiplyColumnMajor4x4(translationMatrix(c[0] + appliedT[0], c[1] + appliedT[1], c[2] + appliedT[2]), m)
+    tm.setTransform(instance, m)
 }
+
+/**
+ * Follow mode: the root translation/scale that puts the avatar's eyes on
+ * the user's eyes as they appear full-screen.
+ *
+ * The camera frame is mapped to the screen like a video call — scaled to
+ * cover it and centre-cropped — and mirrored (the framing's x already is).
+ * Scale: the avatar's eye spacing, projected at its depth, must equal the
+ * user's eye spacing on screen. Translation: moves the eye point sideways
+ * in camera space (no depth change) until it projects onto the user's eye
+ * point. Both come straight from Filament's own camera matrices, so they
+ * stay right whatever FOV/viewport ModelViewer picked.
+ */
+private fun ViewerSession.solveFollow(viewer: ModelViewer, yawDegrees: Float): Pair<FloatArray, Float>? {
+    val f = framing ?: return null
+    val a = anchor ?: return null
+    if (f.frameWidth <= 0 || f.frameHeight <= 0 || f.eyeDistancePx <= 0f) return null
+    val tm = viewer.engine.transformManager
+    val scratch = FloatArray(16)
+    fun modelPos(entity: Int?): FloatArray? {
+        if (entity == null) return null
+        val instance = tm.getInstance(entity)
+        if (instance == 0) return null
+        tm.getWorldTransform(instance, scratch)
+        return worldToModel(scratch[12], scratch[13], scratch[14])
+    }
+    val leftEye = modelPos(a.leftEye)
+    val rightEye = modelPos(a.rightEye)
+    val eyeSpacing = if (leftEye != null && rightEye != null) distance(leftEye, rightEye) else 0f
+    val usingEyes = eyeSpacing > 1e-5f
+    val anchorModel = if (usingEyes) midpoint(leftEye!!, rightEye!!) else modelPos(a.head) ?: return null
+    val avatarEyeDistance = if (usingEyes) eyeSpacing else a.fallbackEyeDistance
+
+    val viewport = viewer.view.viewport
+    val w = viewport.width.toFloat()
+    val h = viewport.height.toFloat()
+    if (w <= 0f || h <= 0f) return null
+    val fw = f.frameWidth.toFloat()
+    val fh = f.frameHeight.toFloat()
+    val fill = max(w / fw, h / fh)
+    val eyePx = f.eyeDistancePx * fill
+    val px = f.anchorX * fw * fill - (fw * fill - w) / 2f
+    var py = f.anchorY * fh * fill - (fh * fill - h) / 2f
+    if (!usingEyes) py += HEAD_BONE_BELOW_EYES * eyePx
+    val ndcX = 2f * px / w - 1f
+    val ndcY = 1f - 2f * py / h
+
+    val view = viewer.camera.getViewMatrix(FloatArray(16))
+    val proj = viewer.camera.getProjectionMatrix(DoubleArray(16))
+    val p00 = proj[0].toFloat()
+    val p11 = proj[5].toFloat()
+    val p20 = proj[8].toFloat()
+    val p21 = proj[9].toFloat()
+    if (kotlin.math.abs(p00) < 1e-6f || kotlin.math.abs(p11) < 1e-6f) return null
+
+    val c = UNIT_CUBE_CENTER
+    val rel = rotateAboutY(floatArrayOf(anchorModel[0] - c[0], anchorModel[1] - c[1], anchorModel[2] - c[2]), yawDegrees)
+    fun cameraPoint(s: Float) = transformPoint(view, c[0] + s * rel[0], c[1] + s * rel[1], c[2] + s * rel[2])
+
+    var s = appliedS.coerceIn(MIN_ROOT_SCALE, MAX_ROOT_SCALE)
+    repeat(3) { // depth depends (weakly) on scale; converges in a couple of steps
+        val depth = -cameraPoint(s)[2]
+        if (depth <= 1e-3f) return null
+        s = (eyePx * 2f * depth / (avatarEyeDistance * p00 * w)).coerceIn(MIN_ROOT_SCALE, MAX_ROOT_SCALE)
+    }
+    // Pinch still works in follow mode, as a multiplier on the matched size.
+    s = (s * (zoom / DEFAULT_ZOOM)).coerceIn(MIN_ROOT_SCALE, MAX_ROOT_SCALE)
+
+    val q = cameraPoint(s)
+    val depth = -q[2]
+    if (depth <= 1e-3f) return null
+    val dx = depth * (ndcX + p20) / p00 - q[0]
+    val dy = depth * (ndcY + p21) / p11 - q[1]
+    // Camera-space offset -> world. The view rotation is orthonormal, so its
+    // inverse is its transpose.
+    val t = floatArrayOf(
+        view[0] * dx + view[1] * dy,
+        view[4] * dx + view[5] * dy,
+        view[8] * dx + view[9] * dy
+    )
+    return t to s
+}
+
+/** Inverse of the root placement last applied: world -> model space. */
+private fun ViewerSession.worldToModel(x: Float, y: Float, z: Float): FloatArray {
+    val c = UNIT_CUBE_CENTER
+    val s = if (appliedS > 1e-6f) appliedS else 1f
+    val local = floatArrayOf((x - c[0] - appliedT[0]) / s, (y - c[1] - appliedT[1]) / s, (z - c[2] - appliedT[2]) / s)
+    val back = rotateAboutY(local, -appliedYawDegrees)
+    return floatArrayOf(c[0] + back[0], c[1] + back[1], c[2] + back[2])
+}
+
+private fun rotateAboutY(v: FloatArray, degrees: Float): FloatArray {
+    val a = Math.toRadians(degrees.toDouble())
+    val cs = cos(a).toFloat()
+    val sn = sin(a).toFloat()
+    return floatArrayOf(cs * v[0] + sn * v[2], v[1], -sn * v[0] + cs * v[2])
+}
+
+private fun transformPoint(m: FloatArray, x: Float, y: Float, z: Float) = floatArrayOf(
+    m[0] * x + m[4] * y + m[8] * z + m[12],
+    m[1] * x + m[5] * y + m[9] * z + m[13],
+    m[2] * x + m[6] * y + m[10] * z + m[14]
+)
+
+private fun distance(a: FloatArray, b: FloatArray): Float {
+    val dx = a[0] - b[0]; val dy = a[1] - b[1]; val dz = a[2] - b[2]
+    return sqrt(dx * dx + dy * dy + dz * dz)
+}
+
+private fun midpoint(a: FloatArray, b: FloatArray) =
+    floatArrayOf((a[0] + b[0]) / 2f, (a[1] + b[1]) / 2f, (a[2] + b[2]) / 2f)
+
+/** Toon (MToon → unlit) materials should show their texture colours as
+ *  authored; the default ACES-style curve darkens and shifts them. */
+private fun applyLinearToneMapping(viewer: ModelViewer): ColorGrading? = runCatching {
+    ColorGrading.Builder()
+        .toneMapper(ToneMapper.Linear())
+        .build(viewer.engine)
+        .also { viewer.view.colorGrading = it }
+}.onFailure { Log.e(TAG, "Could not set linear tone mapping", it) }.getOrNull()
 
 private fun translationMatrix(x: Float, y: Float, z: Float): FloatArray = floatArrayOf(
     1f, 0f, 0f, 0f,

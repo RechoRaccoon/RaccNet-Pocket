@@ -1,216 +1,465 @@
 package com.mediaviewer.ui
 
+import android.os.SystemClock
 import android.util.Log
 import com.google.android.filament.Engine
-import com.google.android.filament.TransformManager
 import com.google.android.filament.gltfio.FilamentAsset
 import com.mediaviewer.util.Quaternion
 import com.mediaviewer.util.VrmData
-import com.mediaviewer.util.directionBetween
 import com.mediaviewer.util.multiplyColumnMajor4x4
 import com.mediaviewer.util.quaternionBetweenDirections
+import kotlin.math.abs
+import kotlin.math.acos
+import kotlin.math.cos
+import kotlin.math.exp
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
- * VRM pipeline step 6 (see VrmModeScreen.kt's doc comment / the handoff's
- * "VRM: what's next" section): retargeting — the step that turns
- * [VrmAvatarView]'s static T-pose render into an avatar actually driven by
- * tracking data.
+ * Drives the loaded VRM from MediaPipe tracking so it behaves like a
+ * mirror (or a video-call filter): whatever the user does, the avatar does
+ * on the same side of the screen that the mirrored tracking preview shows.
  *
- * ## Scope of what's actually implemented here
- * **Everything**: expressions, head/neck rotation, arm rotation, and leg
- * rotation. [applyExpressions] drives the VRM's morph targets (blinks,
- * mouth shapes, ...) from MediaPipe's 52 ARKit-style blendshape scores,
- * live, every frame. [applyHeadRotation] turns MediaPipe's per-frame face
- * transformation matrix into head/neck bone rotation. [applyArmRotation]
- * and [applyLegRotation] turn `PoseLandmarker`'s world-space joint
- * positions into rotation on the remaining eight humanoid limb bones —
- * the same calibrate-then-delta pattern as the head, just built from two
- * tracked *positions* (a direction) instead of one tracked *orientation*
- * (a matrix), and reused verbatim between arms and legs via the shared
- * [applyLimb] helper. This was built in exactly that order — head first
- * (cheapest to verify: "does it turn when I turn my head?"), then arms,
- * then legs — each verified on a real device before the next reused its
- * pattern, per the handoff's own build order. With legs done, retargeting
- * — and the VRM pipeline as originally scoped — is complete; only item 1
- * (the unrelated media3 thumbnail-stitching migration) remains open
- * project-wide. See [applyHeadRotation]/[applyArmRotation]/
- * [applyLegRotation]'s own doc comments for what's still flagged as
- * needing real-device verification (axis-remap signs, matrix/landmark
- * coordinate-space assumptions, left/right mirroring) — "implemented"
- * here means "the pipeline exists end to end," not "confirmed correct on
- * a device," which this sandbox has never been able to do for any of it.
+ * ## Why the old version was inverted / on the wrong arm
+ * Three separate problems, all fixed here rather than patched with sign
+ * flips:
+ *  1. **No mirror.** The preview box draws landmarks as `1 - x` (a mirror),
+ *     but the avatar was driven un-mirrored: the user's LEFT arm drove the
+ *     avatar's LEFT arm, which — the avatar facing you — sits on the
+ *     opposite side of the screen. Mirroring a pose means reflecting every
+ *     position across the screen's vertical axis AND swapping left/right
+ *     bones; doing only one of the two can't work.
+ *  2. **Frames mixed up.** Tracking deltas were computed in camera space
+ *     but applied in the model's own space. A VRM 0.x model faces -Z and is
+ *     spun 180° to face the camera, so X and Z (i.e. roll, and vertical
+ *     arm swings) came out inverted while yaw/pitch happened to look right
+ *     — exactly the symptom reported.
+ *  3. **Calibration against the first frame.** Everything was "change
+ *     since tracking started", so an arm that happened to be down when
+ *     tracking began was treated as a T-pose.
  *
- * ## The node-index → entity bridge, and how confident it is
- * [VrmData.humanBones] and every [com.mediaviewer.util.MorphTargetBind]
- * (both from step 4's [com.mediaviewer.util.VrmParser]) identify things
- * by **glTF node index** — that's what the VRM spec's JSON itself uses.
- * Filament's `gltfio` loader (step 5) instead works in terms of
- * **entities** (`RenderableManager`/`TransformManager` instances). The
- * bridge used here is: node index → that node's own glTF `name` string
- * (captured in [VrmData.nodeNames], the plain glTF `nodes` array, not a
- * VRM-specific field) → `FilamentAsset.getFirstEntityByName(name)`. This
- * is the least-certain piece of this whole VRM pipeline so far: it
- * depends on (a) `getFirstEntityByName` existing on `FilamentAsset` with
- * that exact name and behavior, and (b) the avatar's glTF nodes actually
- * having unique, non-blank names (true for every VRM export pipeline I'm
- * aware of — Unity's VRM exporters name nodes after their bones — but not
- * guaranteed by the spec itself). [buildTarget] logs a warning, not a
- * crash, if some/all names fail to resolve, and everything downstream
- * (both [applyExpressions] here and bone rotation whenever it's added)
- * degrades to "that bone/expression's binds are silently skipped" rather
- * than failing — same shape as [com.mediaviewer.util.VrmParser]'s own
- * "missing field → null, not a crash" philosophy. If this turns out not
- * to resolve anything on a real device, check `FilamentAsset`'s actual
- * Java/Kotlin API surface for whatever the real by-name (or by-node-
- * index, if one exists directly and this whole bridge turns out to be
- * unnecessary) lookup is called in the pinned Filament version first.
+ * ## How it works now
+ * Everything is solved in **model space** (the scene after the load-time
+ * unit-cube fit, before the facing/zoom/follow transform) and is
+ * **absolute**, not relative to a calibration frame:
+ *  - Landmark positions are mirrored into screen space, then converted to
+ *    model space with the model's own facing (worked out from its skeleton:
+ *    which side its left arm is on), so VRM 0.x and 1.0 need no special
+ *    cases.
+ *  - Each bone gets a world-space *delta* `D` (its world rotation = D · rest).
+ *    [PoseContext.drive] turns that into the local transform Filament wants,
+ *    accounting for whatever its parents were already rotated by this frame
+ *    — so arms stay correct when the torso leans, fingers when the hand
+ *    turns, and so on.
+ *  - Limbs use the rest skeleton's real bone directions (shoulder→elbow on
+ *    the model) and rotate them onto the tracked directions, so any rest
+ *    pose works. Joints MediaPipe can't see (off-frame, low visibility) fall
+ *    back to a relaxed arms-down pose instead of snapping to a T-pose.
+ *  - The head uses MediaPipe's face transformation matrix directly (it's
+ *    identity when you face the camera), mirrored into model space.
  *
- * `RenderableManager.getMorphTargetCount`/`setMorphWeights` (used in
- * [applyExpressions]) carry the same "reconstructed from documented
- * shape, not checked against the pinned AAR" caveat as everywhere else in
- * this pipeline.
+ * If a device ever shows the whole thing mirrored the "wrong" way, flip
+ * [MIRROR] — it switches positions, bone sides, the head and the face
+ * blendshapes together, so nothing ends up half-mirrored.
  */
-data class RetargetTarget(
+class BoneRest(
+    val name: String,
+    val entity: Int,
+    /** Parent-relative rest transform, column-major 4x4. */
+    val restLocal: FloatArray,
+    /** Rest rotation in model space. */
+    val restWorldRotation: Quaternion,
+    /** Rest position in model space (x, y, z). */
+    val restWorldPosition: FloatArray,
+    /** Nearest ancestor that is itself a humanoid bone, or null. */
+    val parentBone: String?
+)
+
+/** One pose landmark in MediaPipe world space (meters, hip-centred:
+ *  +x image-right, +y down, +z away from the camera), plus its visibility. */
+class BodyPoint(val x: Float, val y: Float, val z: Float, val visibility: Float)
+
+/** Everything [AvatarRetargeter.applyPose] needs for one update. */
+class TrackingFrame(
+    /** MediaPipe facial transformation matrix (column-major 4x4), or null. */
+    val faceMatrix: FloatArray?,
+    /** Smoothed pose world landmarks by BlazePose index; null = pose tracking off. */
+    val body: Map<Int, BodyPoint>?,
+    /** "Full Body" toggle — legs/hips only move when this is on. */
+    val trackLegs: Boolean,
+    /** Finger curl angles (radians) keyed by AVATAR side ("left"/"right"):
+     *  5 fingers x 3 joints, thumb first — see [AvatarRetargeter.fingerCurls]. */
+    val fingerCurls: Map<String, FloatArray>
+)
+
+class RetargetTarget(
     val engine: Engine,
     val asset: FilamentAsset,
-    /** glTF node index → Filament entity, resolved once per model load —
-     *  see this file's top doc comment for how and how confident it is. */
+    /** glTF node index -> Filament entity (resolved by node name). */
     val nodeIndexToEntity: Map<Int, Int>,
-    /** Each humanoid bone node's own **local** (parent-relative) rest-pose
-     *  transform — column-major 16-float, [Quaternion]'s convention —
-     *  captured once right after load, before anything has rotated it.
-     *  [applyHeadRotation] composes a tracked delta rotation on top of
-     *  *this* every frame, never on top of whatever the transform happens
-     *  to already be, so per-frame deltas don't compound onto each other.
-     *  Only populated for nodes in [VrmData.humanBones] — that's the only
-     *  set bone rotation (current or future) ever touches. */
-    val restLocalTransforms: Map<Int, FloatArray>,
-    /** Each humanoid bone node's own rest-pose rotation **in world space**
-     *  (i.e. composed with every ancestor's rest transform, not just its
-     *  own parent-relative one) — captured once at [buildTarget] time via
-     *  `TransformManager.getWorldTransform`, same moment as
-     *  [restLocalTransforms]. This is what [applyDeltaToBone] conjugates a
-     *  tracked delta through before composing it onto [restLocalTransforms]:
-     *  a delta computed from tracking is expressed in *world* axes
-     *  (MediaPipe's camera space, or the pose landmarks' world space), but
-     *  `TransformManager.setTransform` sets a bone's *local* (parent-
-     *  relative) transform — and a bone's local axes only line up with
-     *  world axes if its rest pose happens to be unrotated relative to the
-     *  world, which is true-ish for a head bone in a roughly-upright T-pose
-     *  rig but very much *not* true for, say, an upper-arm bone, whose
-     *  T-pose rest orientation points sideways (~90° rotated from the
-     *  world axes a camera-space tracked delta is expressed in). Applying
-     *  a world-space delta directly as if it were already local (as this
-     *  pipeline used to do) makes a limb's motion look like the wrong
-     *  *shape* entirely — not just mirrored, but axes visibly swapped
-     *  (e.g. raising a tracked arm rotating the bone around what ends up
-     *  looking like the wrong axis) — exactly the failure mode this field
-     *  exists to fix. */
-    val restWorldRotations: Map<Int, Quaternion>,
-    /** Head-turn calibration baseline: the (axis-remapped) rotation
-     *  [applyHeadRotation] saw on the first usable frame after a model
-     *  loads, or after a face was lost and reacquired. MediaPipe's matrix
-     *  is an *absolute* camera-space rotation, and nothing documents that
-     *  its identity orientation lines up with "this person is looking
-     *  straight at the camera" for every device — calibrating against
-     *  whatever the first frame reports sidesteps needing that guarantee,
-     *  at the cost of assuming the person is roughly facing the camera
-     *  when tracking starts (true for VTuber setups in practice). A `var`
-     *  — not part of the `data class`'s equality/copy semantics in any
-     *  way that matters here — because it's the one field of
-     *  [RetargetTarget] that legitimately changes after [buildTarget]. */
-    var headCalibration: Quaternion? = null,
-    /** Per-limb calibration baseline — same idea as [headCalibration] but
-     *  a plain tracked *direction* (unit 3-float vector, proximal→distal
-     *  joint — e.g. shoulder→elbow) rather than a full rotation, keyed by
-     *  VRM bone name (`"leftUpperArm"`, `"rightLowerArm"`, ...). See
-     *  [AvatarRetargeter.applyArmRotation]'s doc comment for why
-     *  direction-only calibration is what limbs use instead of a true
-     *  rest-pose world direction. A `MutableMap` held in a `val` (the map
-     *  itself is mutated in place; the reference never changes), same
-     *  reasoning as [headCalibration] being the one part of this class
-     *  that isn't fixed at [buildTarget] time. */
-    val limbCalibrationDirections: MutableMap<String, FloatArray> = mutableMapOf()
-)
+    /** Rest data for every humanoid bone that resolved, by VRM bone name. */
+    val bones: Map<String, BoneRest>,
+    /** True when the model faces -Z in its own space (normally VRM 0.x) and
+     *  therefore needs a 180° turn to face the camera. Derived from the
+     *  skeleton, with the spec version only as a fallback. */
+    val facesNegativeZ: Boolean
+) {
+    internal val smoothed = HashMap<String, Quaternion>()
+    internal var lastHead: Quaternion? = null
+    internal var lastUpdateNanos = 0L
+}
 
 object AvatarRetargeter {
     private const val TAG = "AvatarRetargeter"
 
-    /** Called once right after [VrmAvatarView] loads a model — not every
-     *  frame, since it's a name lookup per glTF node, not something worth
-     *  redoing 60 times a second for a model that isn't changing. */
+    /** Mirror mode — see the file doc. Positions, bone sides, head rotation
+     *  and left/right face blendshapes all follow this one flag. */
+    const val MIRROR = true
+
+    /** Pose landmarks below this visibility are treated as untracked. */
+    private const val MIN_VISIBILITY = 0.5f
+
+    // Temporal smoothing time constants (seconds). Landmarks are already
+    // One-Euro filtered; this mainly softens tracked <-> fallback switches
+    // and the unfiltered head matrix.
+    private const val TAU_HEAD = 0.05f
+    private const val TAU_TORSO = 0.08f
+    private const val TAU_LIMB = 0.07f
+    private const val TAU_FINGER = 0.06f
+
+    /** Share of the head turn taken by the neck (when the rig has one). */
+    private const val NECK_SHARE = 0.4f
+    /** Wrist can't bend further than this from the forearm (radians). */
+    private const val MAX_WRIST_BEND = 1.3f
+
     fun buildTarget(engine: Engine, asset: FilamentAsset, vrmData: VrmData): RetargetTarget {
         val nodeIndexToEntity = mutableMapOf<Int, Int>()
         vrmData.nodeNames.forEach { (nodeIndex, name) ->
             val entity = runCatching { asset.getFirstEntityByName(name) }.getOrNull()
             if (entity != null && entity != 0) nodeIndexToEntity[nodeIndex] = entity
         }
-        if (vrmData.nodeNames.isNotEmpty() && nodeIndexToEntity.size < vrmData.nodeNames.size) {
-            Log.w(
-                TAG,
-                "Resolved ${nodeIndexToEntity.size}/${vrmData.nodeNames.size} glTF nodes to Filament " +
-                    "entities by name — see AvatarRetargeter.kt's doc comment if this is 0 or unexpectedly low."
+        if (nodeIndexToEntity.size < vrmData.nodeNames.size) {
+            Log.w(TAG, "Resolved ${nodeIndexToEntity.size}/${vrmData.nodeNames.size} glTF nodes to entities by name")
+        }
+
+        val tm = engine.transformManager
+        class Raw(val entity: Int, val local: FloatArray, val world: FloatArray)
+        val raw = HashMap<String, Raw>()
+        val entityToBone = HashMap<Int, String>()
+        for ((boneName, nodeIndex) in vrmData.humanBones) {
+            val entity = nodeIndexToEntity[nodeIndex] ?: continue
+            runCatching {
+                val instance = tm.getInstance(entity)
+                if (instance != 0) {
+                    val local = FloatArray(16).also { tm.getTransform(instance, it) }
+                    val world = FloatArray(16).also { tm.getWorldTransform(instance, it) }
+                    raw[boneName] = Raw(entity, local, world)
+                    entityToBone[entity] = boneName
+                }
+            }.onFailure { Log.e(TAG, "Could not read rest transform for $boneName", it) }
+        }
+
+        // Nearest humanoid ancestor, walking Filament's own hierarchy (there
+        // can be non-humanoid nodes in between, e.g. twist or armature nodes).
+        fun humanoidParent(entity: Int): String? {
+            var current = entity
+            repeat(256) {
+                val instance = tm.getInstance(current)
+                if (instance == 0) return null
+                val parent = runCatching { tm.getParent(instance) }.getOrDefault(0)
+                if (parent == 0) return null
+                entityToBone[parent]?.let { return it }
+                current = parent
+            }
+            return null
+        }
+
+        val bones = HashMap<String, BoneRest>()
+        for ((name, r) in raw) {
+            bones[name] = BoneRest(
+                name = name,
+                entity = r.entity,
+                restLocal = r.local,
+                restWorldRotation = rotationOf(r.world),
+                restWorldPosition = floatArrayOf(r.world[12], r.world[13], r.world[14]),
+                parentBone = humanoidParent(r.entity)
             )
         }
 
-        // Bone-rotation rest poses (see RetargetTarget.restLocalTransforms's
-        // own doc comment) — only for humanoid bones, captured once here
-        // rather than re-read every frame. Both the local (parent-relative)
-        // and world rest transforms are captured from the same instance at
-        // the same moment, before anything has rotated it — see
-        // RetargetTarget.restWorldRotations's doc comment for why both are
-        // needed, not just local.
-        val restLocalTransforms = mutableMapOf<Int, FloatArray>()
-        val restWorldRotations = mutableMapOf<Int, Quaternion>()
-        val transformManager = engine.transformManager
-        vrmData.humanBones.values.forEach { nodeIndex ->
-            val entity = nodeIndexToEntity[nodeIndex] ?: return@forEach
-            runCatching {
-                val instance = transformManager.getInstance(entity)
-                if (instance != 0) {
-                    val local = FloatArray(16)
-                    transformManager.getTransform(instance, local)
-                    restLocalTransforms[nodeIndex] = local
-
-                    val world = FloatArray(16)
-                    transformManager.getWorldTransform(instance, world)
-                    restWorldRotations[nodeIndex] = Quaternion.fromRotationColumnMajorMatrix(world)
-                }
-            }.onFailure { Log.e(TAG, "Could not read rest-pose transform for node $nodeIndex", it) }
+        val leftArm = bones["leftUpperArm"]?.restWorldPosition
+        val rightArm = bones["rightUpperArm"]?.restWorldPosition
+        val facesNegativeZ = if (leftArm != null && rightArm != null && abs(leftArm[0] - rightArm[0]) > 1e-4f) {
+            // Facing +Z, the avatar's left is +X; facing -Z it's -X.
+            leftArm[0] < rightArm[0]
+        } else {
+            vrmData.specVersion == com.mediaviewer.util.VrmSpecVersion.VRM_0
         }
-
-        return RetargetTarget(engine, asset, nodeIndexToEntity, restLocalTransforms, restWorldRotations)
+        return RetargetTarget(engine, asset, nodeIndexToEntity, bones, facesNegativeZ)
     }
 
-    /** Drives every VRM expression [target]'s file defines from
-     *  [arkitBlendshapeScores] (MediaPipe's smoothed 0.0–1.0 ARKit-style
-     *  scores, keyed by ARKit blendshape name — see
-     *  [VrmModeScreen]'s smoothing code for where these come from). Safe
-     *  to call every frame; does nothing (cheaply) if either map is empty,
-     *  e.g. no face currently detected or the file had no expressions. */
+    // ---------------------------------------------------------------- pose
+
+    private class Side(
+        val shoulder: Int, val elbow: Int, val wrist: Int, val pinky: Int, val index: Int,
+        val hip: Int, val knee: Int, val ankle: Int
+    )
+    // BlazePose indices from the TRACKED PERSON's own point of view.
+    private val PERSON_LEFT = Side(11, 13, 15, 17, 19, 23, 25, 27)
+    private val PERSON_RIGHT = Side(12, 14, 16, 18, 20, 24, 26, 28)
+
+    /** Which of the person's sides drives the avatar's [avatarSide]. In a
+     *  mirror, your right hand is on the right of the screen — where the
+     *  (camera-facing) avatar's LEFT hand is. */
+    private fun sourceFor(avatarSide: String): Side = if (MIRROR) {
+        if (avatarSide == "left") PERSON_RIGHT else PERSON_LEFT
+    } else {
+        if (avatarSide == "left") PERSON_LEFT else PERSON_RIGHT
+    }
+
+    fun applyPose(target: RetargetTarget, frame: TrackingFrame) {
+        val now = SystemClock.elapsedRealtimeNanos()
+        val dt = if (target.lastUpdateNanos == 0L) 1f else ((now - target.lastUpdateNanos) / 1e9f).coerceIn(0f, 1f)
+        target.lastUpdateNanos = now
+        val ctx = PoseContext(target, dt)
+        val body = frame.body
+        val bones = target.bones
+        val flip = target.facesNegativeZ
+        fun point(i: Int): FloatArray? = body?.get(i)?.takeIf { it.visibility >= MIN_VISIBILITY }?.let { modelPoint(it, flip) }
+
+        // ── Hips (only with Full Body: turning/tilting the pelvis) ──
+        val hipsDelta = if (frame.trackLegs) run {
+            val l = point(sourceFor("left").hip); val r = point(sourceFor("right").hip)
+            val restL = bones["leftUpperLeg"]?.restWorldPosition; val restR = bones["rightUpperLeg"]?.restWorldPosition
+            if (l == null || r == null || restL == null || restR == null) null
+            else frameRotation(sub(restL, restR), UP, sub(l, r), UP)
+        } else null
+        ctx.drive("hips", hipsDelta ?: Quaternion.IDENTITY, TAU_TORSO)
+
+        // ── Torso lean/twist from the shoulder line (spine; chest etc. follow) ──
+        val spineBone = if (bones.containsKey("spine")) "spine" else "chest"
+        val torso = run {
+            val ls = point(sourceFor("left").shoulder); val rs = point(sourceFor("right").shoulder)
+            val restL = bones["leftUpperArm"]?.restWorldPosition; val restR = bones["rightUpperArm"]?.restWorldPosition
+            val restHips = bones["hips"]?.restWorldPosition
+            if (ls == null || rs == null || restL == null || restR == null || restHips == null) return@run null
+            val restUp = sub(mid(restL, restR), restHips)
+            val lh = point(sourceFor("left").hip); val rh = point(sourceFor("right").hip)
+            val up = if (lh != null && rh != null) sub(mid(ls, rs), mid(lh, rh)) else restUp
+            frameRotation(sub(restL, restR), restUp, sub(ls, rs), up)
+        }
+        ctx.drive(spineBone, torso ?: ctx.parentDelta(spineBone), TAU_TORSO)
+
+        // ── Head / neck ──
+        frame.faceMatrix?.takeIf { it.size == 16 }?.let { m ->
+            val r = rotationOf(m)
+            val view = if (MIRROR) Quaternion(r.x, -r.y, -r.z, r.w) else r
+            target.lastHead = viewToModel(view, flip)
+        }
+        if (bones.containsKey("neck")) {
+            val parent = ctx.parentDelta("neck")
+            val head = target.lastHead ?: parent
+            ctx.drive("neck", Quaternion.slerp(parent, head, NECK_SHARE), TAU_HEAD)
+        }
+        ctx.drive("head", target.lastHead ?: ctx.parentDelta("head"), TAU_HEAD)
+
+        // ── Arms, hands, fingers ──
+        for (side in SIDES) driveArm(ctx, side, ::point, frame.fingerCurls[side])
+
+        // ── Legs (rest pose unless Full Body is on and they're visible) ──
+        for (side in SIDES) {
+            val s = sourceFor(side)
+            val hip = if (frame.trackLegs) point(s.hip) else null
+            val knee = if (frame.trackLegs) point(s.knee) else null
+            val ankle = if (frame.trackLegs) point(s.ankle) else null
+            driveSegment(ctx, "${side}UpperLeg", "${side}LowerLeg", if (hip != null && knee != null) direction(hip, knee) else null, TAU_LIMB)
+            driveSegment(ctx, "${side}LowerLeg", "${side}Foot", if (knee != null && ankle != null) direction(knee, ankle) else null, TAU_LIMB)
+        }
+    }
+
+    /** Rotates [bone] so its rest direction (towards [childBone]) points
+     *  along [targetDirection]; null keeps it at rest relative to its parent. */
+    private fun driveSegment(ctx: PoseContext, bone: String, childBone: String, targetDirection: FloatArray?, tau: Float) {
+        val info = ctx.target.bones[bone] ?: return
+        val parent = ctx.parentDelta(bone)
+        val child = ctx.target.bones[childBone]
+        if (targetDirection == null || child == null) {
+            ctx.drive(bone, parent, tau)
+            return
+        }
+        val restDir = direction(info.restWorldPosition, child.restWorldPosition)
+        val current = rotate(parent, restDir)
+        ctx.drive(bone, quaternionBetweenDirections(current, targetDirection) * parent, tau)
+    }
+
+    private fun driveArm(ctx: PoseContext, side: String, point: (Int) -> FloatArray?, curls: FloatArray?) {
+        val bones = ctx.target.bones
+        val flip = ctx.target.facesNegativeZ
+        val s = sourceFor(side)
+        val shoulder = point(s.shoulder); val elbow = point(s.elbow); val wrist = point(s.wrist)
+        // Screen-right (+X in view space) is the avatar's left, because it faces you.
+        val sx = if (side == "left") 1f else -1f
+        val relaxedUpper = viewDirToModel(normalize(floatArrayOf(0.30f * sx, -1f, 0.05f)), flip)
+        val relaxedLower = viewDirToModel(normalize(floatArrayOf(0.12f * sx, -1f, 0.30f)), flip)
+
+        val upper = "${side}UpperArm"; val lower = "${side}LowerArm"; val hand = "${side}Hand"
+        driveSegment(ctx, upper, lower,
+            if (shoulder != null && elbow != null) direction(shoulder, elbow) else relaxedUpper, TAU_LIMB)
+        driveSegment(ctx, lower, hand,
+            if (elbow != null && wrist != null) direction(elbow, wrist) else relaxedLower, TAU_LIMB)
+
+        // Hand: full orientation from the pose's wrist/index/pinky points.
+        val handInfo = bones[hand] ?: return
+        val forearm = ctx.parentDelta(hand)
+        val indexBase = bones["${side}IndexProximal"]; val littleBase = bones["${side}LittleProximal"]
+        var handDelta = forearm
+        val idx = point(s.index); val pinky = point(s.pinky)
+        if (wrist != null && idx != null && pinky != null && indexBase != null && littleBase != null) {
+            val restDir = sub(mid(indexBase.restWorldPosition, littleBase.restWorldPosition), handInfo.restWorldPosition)
+            val restAcross = sub(indexBase.restWorldPosition, littleBase.restWorldPosition)
+            frameRotation(restDir, restAcross, sub(mid(idx, pinky), wrist), sub(idx, pinky))?.let {
+                handDelta = clampRelative(forearm, it, MAX_WRIST_BEND)
+            }
+        }
+        ctx.drive(hand, handDelta, TAU_LIMB)
+        driveFingers(ctx, side, curls)
+    }
+
+    private val FINGERS = listOf("Thumb", "Index", "Middle", "Ring", "Little")
+    private val RELAXED_CURL = floatArrayOf(
+        0.10f, 0.15f, 0.10f,   // thumb
+        0.20f, 0.30f, 0.20f,   // index
+        0.25f, 0.35f, 0.20f,   // middle
+        0.30f, 0.40f, 0.25f,   // ring
+        0.35f, 0.45f, 0.25f    // little
+    )
+
+    private fun driveFingers(ctx: PoseContext, side: String, curls: FloatArray?) {
+        val bones = ctx.target.bones
+        val hand = bones["${side}Hand"] ?: return
+        val indexBase = bones["${side}IndexProximal"]; val littleBase = bones["${side}LittleProximal"]
+        // Palm normal (pointing out of the palm) from the rest skeleton; the
+        // cross-product order differs per side because the hands are mirror
+        // images of each other.
+        val palmNormal = if (indexBase != null && littleBase != null) {
+            val dir = sub(mid(indexBase.restWorldPosition, littleBase.restWorldPosition), hand.restWorldPosition)
+            val across = sub(indexBase.restWorldPosition, littleBase.restWorldPosition)
+            normalize(if (side == "left") cross(dir, across) else cross(across, dir))
+        } else floatArrayOf(0f, -1f, 0f)
+        val handDir = if (indexBase != null && littleBase != null)
+            direction(hand.restWorldPosition, mid(indexBase.restWorldPosition, littleBase.restWorldPosition))
+        else floatArrayOf(1f, 0f, 0f)
+
+        for ((fi, finger) in FINGERS.withIndex()) {
+            val segments = if (finger == "Thumb" && bones.containsKey("${side}ThumbMetacarpal"))
+                listOf("Metacarpal", "Proximal", "Distal") else listOf("Proximal", "Intermediate", "Distal")
+            val names = segments.map { "$side$finger$it" }
+            var parent = ctx.parentDelta(names[0])
+            var previousDir = handDir
+            for (k in 0 until 3) {
+                val info = bones[names[k]] ?: break
+                val next = bones.getOrNull(names.getOrNull(k + 1))
+                val segDir = if (next != null) direction(info.restWorldPosition, next.restWorldPosition) else previousDir
+                val axis = normalize(cross(segDir, palmNormal))
+                var angle = curls?.getOrNull(fi * 3 + k) ?: RELAXED_CURL[fi * 3 + k]
+                if (finger == "Thumb") angle *= 0.7f
+                parent = ctx.drive(names[k], parent * axisAngle(axis, angle), TAU_FINGER)
+                previousDir = segDir
+            }
+        }
+    }
+
+    private fun Map<String, BoneRest>.getOrNull(key: String?): BoneRest? = key?.let { this[it] }
+
+    /**
+     * Finger curls from one hand's 21 MediaPipe world landmarks (x, y, z):
+     * 15 bend angles (5 fingers x 3 joints, thumb first), 0 = straight.
+     * Angles between consecutive segments don't change under mirroring, so
+     * only the side assignment has to care about the mirror.
+     */
+    fun fingerCurls(points: List<FloatArray>): FloatArray? {
+        if (points.size < 21) return null
+        fun bend(a: Int, b: Int, c: Int): Float {
+            val u = direction(points[a], points[b]); val v = direction(points[b], points[c])
+            return acos(dot(u, v).coerceIn(-1f, 1f))
+        }
+        val out = FloatArray(15)
+        // Thumb: 0-1-2-3-4. The CMC joint sits ~0.45 rad bent even with an
+        // open hand, so that much is treated as "straight".
+        out[0] = (bend(0, 1, 2) - 0.45f).coerceIn(0f, 1.2f)
+        out[1] = bend(1, 2, 3).coerceIn(0f, 1.4f)
+        out[2] = bend(2, 3, 4).coerceIn(0f, 1.4f)
+        val bases = intArrayOf(5, 9, 13, 17)
+        for ((i, m) in bases.withIndex()) {
+            out[3 + i * 3] = bend(0, m, m + 1).coerceIn(0f, 1.6f)
+            out[4 + i * 3] = bend(m, m + 1, m + 2).coerceIn(0f, 1.7f)
+            out[5 + i * 3] = bend(m + 1, m + 2, m + 3).coerceIn(0f, 1.4f)
+        }
+        return out
+    }
+
+    private val SIDES = listOf("left", "right")
+    private val UP = floatArrayOf(0f, 1f, 0f)
+
+    /** Per-update bone state: which world deltas have been applied so far,
+     *  so children can account for their already-rotated parents. */
+    private class PoseContext(val target: RetargetTarget, val dt: Float) {
+        private val deltas = HashMap<String, Quaternion>()
+        private val tm = target.engine.transformManager
+
+        /** World delta currently carried by [bone]'s parent chain. */
+        fun parentDelta(bone: String): Quaternion {
+            var p = target.bones[bone]?.parentBone
+            var guard = 0
+            while (p != null && guard++ < 64) {
+                deltas[p]?.let { return it }
+                p = target.bones[p]?.parentBone
+            }
+            return Quaternion.IDENTITY
+        }
+
+        /** Makes [bone]'s model-space rotation `desired · rest`, smoothed. */
+        fun drive(bone: String, desired: Quaternion, tau: Float): Quaternion {
+            val info = target.bones[bone] ?: return desired
+            val previous = target.smoothed[bone]
+            val d = if (previous == null) desired
+            else Quaternion.slerp(previous, desired, 1f - exp(-dt / tau))
+            target.smoothed[bone] = d
+            deltas[bone] = d
+            // world = P·Wparent_rest·L_rest·X = P·W_rest·X  ⇒  X = W⁻¹·P⁻¹·D·W
+            val wr = info.restWorldRotation
+            val x = (wr.conjugate() * (parentDelta(bone).conjugate() * d) * wr).normalized()
+            val local = multiplyColumnMajor4x4(info.restLocal, x.toColumnMajorMatrix())
+            runCatching {
+                val instance = tm.getInstance(info.entity)
+                if (instance != 0) tm.setTransform(instance, local)
+            }.onFailure { Log.e(TAG, "setTransform failed for $bone", it) }
+            return d
+        }
+    }
+
+    // ---------------------------------------------------------- expressions
+
+    /** Drives the VRM's expressions from MediaPipe's ARKit-style scores.
+     *  With [MIRROR], left/right blendshapes are swapped so winking your
+     *  left eye closes the avatar eye on the same side of the screen. */
     fun applyExpressions(target: RetargetTarget, vrmData: VrmData, arkitBlendshapeScores: Map<String, Float>) {
         if (arkitBlendshapeScores.isEmpty() || vrmData.expressions.isEmpty()) return
+        val scores = if (MIRROR) mirrorSides(arkitBlendshapeScores) else arkitBlendshapeScores
         val renderableManager = target.engine.renderableManager
-
-        // nodeIndex -> (morphTargetIndex -> accumulated weight). Grouped by
-        // node first because a single mesh node commonly receives binds
-        // from *multiple* expressions (e.g. a "surprised" mouth-open bind
-        // and an "aa" vowel bind can land on the same morph target), and
-        // RenderableManager.setMorphWeights sets every weight on a
-        // renderable in one call — so all of a node's contributions need
-        // to be summed before that one call, not applied as separate calls
-        // that would each stomp the previous expression's weights.
         val weightsByNode = mutableMapOf<Int, MutableMap<Int, Float>>()
         for ((expressionName, binds) in vrmData.expressions) {
-            val intensity = arkitIntensityForExpression(expressionName, arkitBlendshapeScores)
+            val intensity = arkitIntensityForExpression(expressionName, scores)
             if (intensity <= 0.001f) continue
             for (bind in binds) {
                 val nodeWeights = weightsByNode.getOrPut(bind.nodeIndex) { mutableMapOf() }
-                val contribution = intensity * bind.weight
-                nodeWeights[bind.morphTargetIndex] = (nodeWeights[bind.morphTargetIndex] ?: 0f) + contribution
+                nodeWeights[bind.morphTargetIndex] = (nodeWeights[bind.morphTargetIndex] ?: 0f) + intensity * bind.weight
             }
         }
-
+        // Nodes that had weights last time but none now must be zeroed, or a
+        // blink would stay closed once the score drops to 0.
+        for (nodeIndex in vrmData.expressions.values.flatten().map { it.nodeIndex }.toSet()) {
+            weightsByNode.getOrPut(nodeIndex) { mutableMapOf() }
+        }
         for ((nodeIndex, morphWeights) in weightsByNode) {
             val entity = target.nodeIndexToEntity[nodeIndex] ?: continue
             val instance = renderableManager.getInstance(entity)
@@ -218,308 +467,23 @@ object AvatarRetargeter {
             val morphCount = runCatching { renderableManager.getMorphTargetCount(instance) }.getOrDefault(0)
             if (morphCount <= 0) continue
             val weights = FloatArray(morphCount)
-            morphWeights.forEach { (index, weight) ->
-                if (index in weights.indices) weights[index] = weight.coerceIn(0f, 1f)
-            }
+            morphWeights.forEach { (index, weight) -> if (index in weights.indices) weights[index] = weight.coerceIn(0f, 1f) }
             runCatching { renderableManager.setMorphWeights(instance, weights, 0) }
                 .onFailure { Log.e(TAG, "setMorphWeights failed for node $nodeIndex", it) }
         }
     }
 
-    /**
-     * VRM pipeline step 6, second half: the first bone rotation in the
-     * pipeline. Turns MediaPipe's per-frame **facial transformation
-     * matrix** — a camera-space head-pose estimate, distinct from the
-     * blendshape scores [applyExpressions] uses — into a rotation on the
-     * VRM's `head` bone (and, proportionally, `neck` if the file has one),
-     * via [target]'s pre-captured rest-pose transforms and Filament's
-     * `TransformManager`. Safe to call every frame; a no-op if the head
-     * bone doesn't resolve or no face is currently tracked.
-     *
-     * [facialTransformationMatrix] is [com.google.mediapipe.tasks.vision
-     * .facelandmarker.FaceLandmarkerResult.facialTransformationMatrixes]'s
-     * per-face entry for the current frame — a 16-float flattened 4x4, or
-     * null if no face is detected this frame (in which case
-     * [RetargetTarget.headCalibration] is reset, so re-detection later
-     * recalibrates cleanly instead of snapping to a stale baseline).
-     *
-     * ## What was actually wrong before, and the fix
-     * The delta this function computes lives in MediaPipe's **camera-space
-     * world axes**. Every earlier version of this function then handed
-     * that delta straight to [applyDeltaToBone] as if it were already the
-     * head bone's *local* rotation — which only produces correct-looking
-     * motion if the bone's rest pose happens to be unrotated relative to
-     * the world. [applyDeltaToBone] now conjugates the world-space delta
-     * through [RetargetTarget.restWorldRotations] before composing it onto
-     * the bone's local rest transform — see that field's own doc comment
-     * for exactly why a world-space delta and a bone's local transform
-     * can't just be composed directly, and why that mismatch reads as
-     * axes visibly swapped (turning your head left/right moving the
-     * avatar's head up/down and vice versa), not just a mirrored sign.
-     *
-     * ## What's still a starting guess
-     * 1. **Flattening order.** [Quaternion.fromRotationColumnMajorMatrix]
-     *    assumes [facialTransformationMatrix] is **column-major**
-     *    (`android.opengl.Matrix`/OpenGL convention — matches Filament's
-     *    own `TransformManager`, which is why the rest of this function
-     *    doesn't need to convert). MediaPipe's docs describe the matrix's
-     *    *meaning* (a camera-facing coordinate space: +X right, +Y up, +Z
-     *    toward the camera) but not its flattening order explicitly. If
-     *    head rotation on a real device still looks like the wrong *shape*
-     *    of motion after the fix above (not just mirrored), try
-     *    transposing the incoming array before it reaches that function.
-     * 2. **Axis remap sign/axis choice**, just below — flips yaw (Y) and
-     *    roll (Z), keeps pitch (X), the original starting guess. (A
-     *    previous pass here also flipped pitch to chase a reported
-     *    up/down inversion; reverted back to this, since with the
-     *    world/local conjugation fix above now handling the bulk of what
-     *    was actually wrong, flipping pitch too was very likely
-     *    overcorrecting for the same underlying bug rather than a real
-     *    separate sign error.) If left/right turning is still mirrored (or
-     *    vice versa) once the structural fix above is verified on a
-     *    device, that's this remap to revisit — one axis at a time, not
-     *    several at once.
-     */
-    fun applyHeadRotation(target: RetargetTarget, vrmData: VrmData, facialTransformationMatrix: FloatArray?) {
-        if (facialTransformationMatrix == null || facialTransformationMatrix.size != 16) {
-            target.headCalibration = null // face lost — recalibrate fresh next time one's found, don't snap to a stale baseline
-            return
+    private fun mirrorSides(scores: Map<String, Float>): Map<String, Float> {
+        val out = HashMap<String, Float>(scores.size)
+        for ((k, v) in scores) {
+            val key = when {
+                k.endsWith("Left") -> k.removeSuffix("Left") + "Right"
+                k.endsWith("Right") -> k.removeSuffix("Right") + "Left"
+                else -> k
+            }
+            out[key] = v
         }
-        val headNode = vrmData.humanBones["head"] ?: return
-        val headRest = target.restLocalTransforms[headNode] ?: return
-        val transformManager = target.engine.transformManager
-
-        val tracked = runCatching {
-            Quaternion.fromRotationColumnMajorMatrix(facialTransformationMatrix)
-        }.getOrNull() ?: return
-
-        // See this function's doc comment, point 2. Verified on-device:
-        // with Y and Z flipped, left/right turning was correct but looking
-        // UP made the avatar look DOWN — so pitch (X) is flipped too now.
-        // (Tested in landscape, the one orientation where the camera frame
-        // already reached MediaPipe upright; portrait now gets the same
-        // upright frame, so this holds in both.)
-        val remapped = Quaternion(-tracked.x, -tracked.y, -tracked.z, tracked.w)
-
-        val calibration = target.headCalibration
-        if (calibration == null) {
-            target.headCalibration = remapped.conjugate()
-            return // nothing to apply yet on the very frame a new baseline is set
-        }
-
-        // Rotation relative to the calibrated "neutral" pose — still in
-        // camera-space world axes at this point; applyDeltaToBone is what
-        // converts it into each bone's own local space (see this
-        // function's doc comment). If turning your head rotates the
-        // avatar the wrong way on a real device, swap this multiplication
-        // order (remapped * calibration) before touching the axis remap
-        // above — composition order is the other place a mirrored result
-        // can come from.
-        val delta = (calibration * remapped).normalized()
-
-        applyDeltaToBone(target, transformManager, headNode, headRest, delta, fraction = HEAD_ROTATION_FRACTION)
-
-        // Neck is optional — not every VRM humanoid rig defines one (it's
-        // not in VRM's *required* bone set) — split the same delta
-        // proportionally onto it if it exists, purely so the turn doesn't
-        // look like it hinges unnaturally at the very top of the spine.
-        // A single-bone ("head" only, fraction 1.0) version of this is a
-        // one-line simplification if the split ever looks wrong.
-        val neckNode = vrmData.humanBones["neck"]
-        val neckRest = neckNode?.let { target.restLocalTransforms[it] }
-        if (neckNode != null && neckRest != null) {
-            applyDeltaToBone(target, transformManager, neckNode, neckRest, delta, fraction = 1f - HEAD_ROTATION_FRACTION)
-        }
-    }
-
-    /** How much of the tracked head-turn delta lands on the `head` bone
-     *  itself vs. the `neck` bone (when present) — a plain fixed split,
-     *  not measured against a real rig. Adjust to taste once step 6 is
-     *  actually visible on a device. */
-    private const val HEAD_ROTATION_FRACTION = 0.6f
-
-    /** Composes a **world-space** tracked [delta] onto [nodeIndex]'s local
-     *  rest transform [restLocal], scaled by [fraction]. The one non-
-     *  obvious step: [delta] is expressed in world axes (camera space for
-     *  the head, pose-landmark world space for limbs), but
-     *  `TransformManager.setTransform` sets a bone's *local*
-     *  (parent-relative) transform — so [delta] first gets conjugated
-     *  through [RetargetTarget.restWorldRotations]' entry for this node
-     *  (`localDelta = restWorld⁻¹ · delta · restWorld`) to re-express it in
-     *  terms the bone's own rest orientation actually means. Skipping this
-     *  conjugation (as earlier versions of this pipeline did) is exactly
-     *  what made tracked motion come out as the wrong *shape* — axes
-     *  visibly swapped — for any bone whose rest pose isn't itself aligned
-     *  to world axes; see [RetargetTarget.restWorldRotations]'s doc
-     *  comment for the full derivation. Falls back to applying [delta]
-     *  unconverted if this node has no captured world rotation (shouldn't
-     *  happen for anything in [VrmData.humanBones] — see [buildTarget] —
-     *  but degrading instead of skipping the bone entirely is the safer
-     *  failure mode). */
-    private fun applyDeltaToBone(
-        target: RetargetTarget,
-        transformManager: TransformManager,
-        nodeIndex: Int,
-        restLocal: FloatArray,
-        delta: Quaternion,
-        fraction: Float
-    ) {
-        val entity = target.nodeIndexToEntity[nodeIndex] ?: return
-        val restWorld = target.restWorldRotations[nodeIndex]
-        val localDelta = if (restWorld != null) {
-            (restWorld.conjugate() * delta * restWorld).normalized()
-        } else {
-            delta
-        }
-        val scaled = if (fraction >= 0.999f) localDelta else Quaternion.slerp(Quaternion.IDENTITY, localDelta, fraction)
-        val newLocal = multiplyColumnMajor4x4(restLocal, scaled.toColumnMajorMatrix())
-        runCatching {
-            val instance = transformManager.getInstance(entity)
-            if (instance != 0) transformManager.setTransform(instance, newLocal)
-        }.onFailure { Log.e(TAG, "setTransform failed for node $nodeIndex", it) }
-    }
-
-    // ---- Arm rotation (step 6, third piece) --------------------------
-
-    // BlazePose's 33-point topology (what MediaPipe's PoseLandmarker
-    // outputs) — the six indices arm rotation needs. "left"/"right" here
-    // are the *tracked person's own* left/right, matching VRM's
-    // `left*`/`right*` bone-name convention — see applyArmRotation's doc
-    // comment for the mirror-flip uncertainty that assumption carries.
-    private const val LEFT_SHOULDER = 11
-    private const val RIGHT_SHOULDER = 12
-    private const val LEFT_ELBOW = 13
-    private const val RIGHT_ELBOW = 14
-    private const val LEFT_WRIST = 15
-    private const val RIGHT_WRIST = 16
-
-    /**
-     * VRM pipeline step 6, third piece (after expressions, head/neck):
-     * upper-arm and forearm rotation, both sides, from `PoseLandmarker`'s
-     * world-space shoulder/elbow/wrist points (meters, hip-centered —
-     * see [com.mediaviewer.ui.VrmModeScreen]'s `smoothedArmWorldLandmarks`
-     * for where [worldLandmarks] comes from and why it's smoothed, unlike
-     * the head's face matrix). Safe to call every frame; each of the four
-     * limbs (`leftUpperArm`/`leftLowerArm`/`rightUpperArm`/`rightLowerArm`)
-     * degrades independently to "not moved this frame" if its two
-     * landmarks, or the VRM bone itself, aren't available.
-     *
-     * ## Why this doesn't solve for each bone's true rest-pose world *direction*
-     * A proper retarget would rotate each bone so its direction matches
-     * the tracked shoulder→elbow / elbow→wrist vector exactly. This
-     * doesn't do that full solve — it still calibrates against whatever
-     * direction each limb reports on the first usable frame, then applies
-     * only the *change* since then ([applyLimb]/[applyDeltaToBone]), same
-     * as [applyHeadRotation]. What **has** changed: [applyDeltaToBone] now
-     * conjugates that tracked delta through the bone's rest-pose *world
-     * rotation* (see [RetargetTarget.restWorldRotations]) before composing
-     * it onto the local rest transform — which is the part that actually
-     * matters for limbs. A T-pose upper arm's rest orientation is nowhere
-     * close to the identity (it points sideways, not "forward" like a
-     * head roughly does), so applying a world-space tracked delta directly
-     * as a local delta — which is what this pipeline did before — came out
-     * as visibly the wrong *shape* of motion (e.g. a tracked vertical
-     * movement of the hand rotating the bone around what reads as the
-     * wrong axis on the avatar), not just a mirrored sign. This is honestly
-     * still a coarser approximation than a full skeleton solve (a limb's
-     * true swing range also depends on its parent bone's own *current*
-     * orientation, which this ignores, and the calibration-baseline
-     * approach means an arm frozen away from a neutral rest pose when
-     * tracking starts will look slightly off) — but it needs no
-     * full-hierarchy solve, which is the same tradeoff VSeeFace-class
-     * single-camera tools make. Verify visually before trusting it further
-     * than "does the avatar's arm move roughly where mine does, in roughly
-     * the right direction."
-     *
-     * ## What's most likely backwards on a real device
-     * Same axis-remap caveat as [applyHeadRotation] (this function reuses
-     * the identical flip-Y/Z-keep-X starting guess, in [applyLimb]) — plus
-     * one new one: whether MediaPipe's `left_shoulder`/`left_elbow`/...
-     * landmark indices (per BlazePose's own topology) actually correspond
-     * to the *avatar's* `leftUpperArm` without a mirror flip. If arms
-     * visibly drive the wrong side of the avatar on a real device, swap
-     * the `LEFT_*`/`RIGHT_*` index constants above rather than touching
-     * any of the rotation math.
-     */
-    fun applyArmRotation(target: RetargetTarget, vrmData: VrmData, worldLandmarks: Map<Int, FloatArray>) {
-        applyLimb(target, vrmData, "leftUpperArm", worldLandmarks[LEFT_SHOULDER], worldLandmarks[LEFT_ELBOW])
-        applyLimb(target, vrmData, "leftLowerArm", worldLandmarks[LEFT_ELBOW], worldLandmarks[LEFT_WRIST])
-        applyLimb(target, vrmData, "rightUpperArm", worldLandmarks[RIGHT_SHOULDER], worldLandmarks[RIGHT_ELBOW])
-        applyLimb(target, vrmData, "rightLowerArm", worldLandmarks[RIGHT_ELBOW], worldLandmarks[RIGHT_WRIST])
-    }
-
-    // BlazePose's remaining lower-body indices — hips, knees, ankles.
-    // Same "person's own left/right, matching VRM's left*/right* bone
-    // names" assumption and mirror-flip caveat as the arm indices above.
-    private const val LEFT_HIP = 23
-    private const val RIGHT_HIP = 24
-    private const val LEFT_KNEE = 25
-    private const val RIGHT_KNEE = 26
-    private const val LEFT_ANKLE = 27
-    private const val RIGHT_ANKLE = 28
-
-    /**
-     * VRM pipeline step 6, fourth and final piece: upper-leg and lower-leg
-     * rotation, both sides, from `PoseLandmarker`'s world-space hip/knee/
-     * ankle points — otherwise identical to [applyArmRotation] (same
-     * calibrate-then-delta [applyLimb] helper, same axis-remap and
-     * mirror-flip caveats, same reasoning for why this doesn't need each
-     * bone's true rest-pose world direction — see that function's own doc
-     * comment for the full detail, none of it repeated here since none of
-     * it changed for legs). Gated by the "Full Body" Settings toggle at
-     * the call site in [com.mediaviewer.ui.VrmModeScreen] — legs are the
-     * heavier, less-often-needed half of body tracking (a VTuber sitting
-     * at a desk has no visible legs to track in the first place), same
-     * reasoning the Settings sheet's own copy already gives for gating
-     * pose tracking generally.
-     *
-     * With this, **every humanoid bone this pipeline set out to retarget
-     * is implemented** — see this file's top doc comment: expressions,
-     * head/neck, arms, and now legs. What's left project-wide is item 1
-     * (the media3 thumbnail-stitching migration), which is unrelated to
-     * VRM entirely.
-     */
-    fun applyLegRotation(target: RetargetTarget, vrmData: VrmData, worldLandmarks: Map<Int, FloatArray>) {
-        applyLimb(target, vrmData, "leftUpperLeg", worldLandmarks[LEFT_HIP], worldLandmarks[LEFT_KNEE])
-        applyLimb(target, vrmData, "leftLowerLeg", worldLandmarks[LEFT_KNEE], worldLandmarks[LEFT_ANKLE])
-        applyLimb(target, vrmData, "rightUpperLeg", worldLandmarks[RIGHT_HIP], worldLandmarks[RIGHT_KNEE])
-        applyLimb(target, vrmData, "rightLowerLeg", worldLandmarks[RIGHT_KNEE], worldLandmarks[RIGHT_ANKLE])
-    }
-
-    /** Shared by every limb [applyArmRotation]/[applyLegRotation] drive:
-     *  one bone, one proximal→distal direction, calibrate-then-delta
-     *  exactly like [applyHeadRotation] but for a direction vector instead
-     *  of a full rotation matrix. [proximal]/[distal] are plain 3-float
-     *  (x, y, z) world-space points; either being null means that joint
-     *  wasn't tracked this frame. */
-    private fun applyLimb(
-        target: RetargetTarget,
-        vrmData: VrmData,
-        boneName: String,
-        proximal: FloatArray?,
-        distal: FloatArray?
-    ) {
-        if (proximal == null || distal == null) {
-            target.limbCalibrationDirections.remove(boneName) // lost tracking — recalibrate fresh, don't snap to a stale baseline
-            return
-        }
-        val boneNode = vrmData.humanBones[boneName] ?: return
-        val rest = target.restLocalTransforms[boneNode] ?: return
-
-        val tracked = directionBetween(proximal, distal)
-        // Same starting axis remap as applyHeadRotation's point 2 — flip
-        // Y/Z, keep X. See that function's doc comment for what to try
-        // first if a limb's motion looks backwards on a real device.
-        val remapped = floatArrayOf(tracked[0], -tracked[1], -tracked[2])
-
-        val calibration = target.limbCalibrationDirections[boneName]
-        if (calibration == null) {
-            target.limbCalibrationDirections[boneName] = remapped
-            return // nothing to apply yet on the very frame a new baseline is set
-        }
-
-        val delta = quaternionBetweenDirections(calibration, remapped)
-        applyDeltaToBone(target, target.engine.transformManager, boneNode, rest, delta, fraction = 1f)
+        return out
     }
 
     /**
@@ -574,4 +538,84 @@ object AvatarRetargeter {
         }
         return intensity.coerceIn(0f, 1f)
     }
+
+    // ---------------------------------------------------------------- math
+
+    /** Mirrored (if [MIRROR]) screen-space position → model space. */
+    private fun modelPoint(p: BodyPoint, flip: Boolean): FloatArray {
+        // Camera view space: +X right, +Y up, +Z towards the viewer.
+        val vx = if (MIRROR) -p.x else p.x
+        return viewDirToModel(floatArrayOf(vx, -p.y, -p.z), flip)
+    }
+
+    private fun viewDirToModel(v: FloatArray, flip: Boolean): FloatArray =
+        if (flip) floatArrayOf(-v[0], v[1], -v[2]) else v
+
+    private fun viewToModel(q: Quaternion, flip: Boolean): Quaternion =
+        if (flip) Quaternion(-q.x, q.y, -q.z, q.w) else q
+
+    /** Rotation part of a (possibly uniformly scaled) column-major 4x4. */
+    fun rotationOf(m: FloatArray): Quaternion {
+        val n = m.copyOf()
+        for (c in 0 until 3) {
+            val len = sqrt(n[c * 4] * n[c * 4] + n[c * 4 + 1] * n[c * 4 + 1] + n[c * 4 + 2] * n[c * 4 + 2])
+            if (len > 1e-8f) for (r in 0 until 3) n[c * 4 + r] /= len
+        }
+        return Quaternion.fromRotationColumnMajorMatrix(n)
+    }
+
+    /** Rotation taking the frame (across1, up1) onto (across2, up2). */
+    private fun frameRotation(across1: FloatArray, up1: FloatArray, across2: FloatArray, up2: FloatArray): Quaternion? {
+        val a = basis(across1, up1) ?: return null
+        val b = basis(across2, up2) ?: return null
+        val m = FloatArray(16)
+        for (r in 0 until 3) for (c in 0 until 3) {
+            var sum = 0f
+            for (k in 0 until 3) sum += b[k][r] * a[k][c]
+            m[c * 4 + r] = sum
+        }
+        m[15] = 1f
+        return Quaternion.fromRotationColumnMajorMatrix(m)
+    }
+
+    private fun basis(across: FloatArray, up: FloatArray): Array<FloatArray>? {
+        if (length(across) < 1e-6f) return null
+        val x = normalize(across)
+        val zRaw = cross(x, up)
+        if (length(zRaw) < 1e-6f) return null
+        val z = normalize(zRaw)
+        return arrayOf(x, cross(z, x), z)
+    }
+
+    /** Limits how far [q] may rotate away from [reference]. */
+    private fun clampRelative(reference: Quaternion, q: Quaternion, maxAngle: Float): Quaternion {
+        val rel = (reference.conjugate() * q).normalized()
+        val angle = 2f * acos(abs(rel.w).coerceIn(0f, 1f))
+        return if (angle <= maxAngle) q else Quaternion.slerp(reference, q, maxAngle / angle)
+    }
+
+    private fun axisAngle(axis: FloatArray, angle: Float): Quaternion {
+        val h = angle / 2f; val s = sin(h)
+        return Quaternion(axis[0] * s, axis[1] * s, axis[2] * s, cos(h)).normalized()
+    }
+
+    private fun rotate(q: Quaternion, v: FloatArray): FloatArray {
+        val u = floatArrayOf(q.x, q.y, q.z)
+        val t = cross(u, v).map { it * 2f }.toFloatArray()
+        val c = cross(u, t)
+        return floatArrayOf(v[0] + q.w * t[0] + c[0], v[1] + q.w * t[1] + c[1], v[2] + q.w * t[2] + c[2])
+    }
+
+    private fun sub(a: FloatArray, b: FloatArray) = floatArrayOf(a[0] - b[0], a[1] - b[1], a[2] - b[2])
+    private fun mid(a: FloatArray, b: FloatArray) = floatArrayOf((a[0] + b[0]) / 2f, (a[1] + b[1]) / 2f, (a[2] + b[2]) / 2f)
+    private fun dot(a: FloatArray, b: FloatArray) = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    private fun length(a: FloatArray) = sqrt(dot(a, a))
+    private fun cross(a: FloatArray, b: FloatArray) = floatArrayOf(
+        a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]
+    )
+    private fun normalize(a: FloatArray): FloatArray {
+        val l = length(a)
+        return if (l < 1e-8f) a else floatArrayOf(a[0] / l, a[1] / l, a[2] / l)
+    }
+    private fun direction(from: FloatArray, to: FloatArray) = normalize(sub(to, from))
 }
