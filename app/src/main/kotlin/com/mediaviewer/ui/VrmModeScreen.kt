@@ -208,6 +208,8 @@ fun VrmModeScreen(
     var handHelper by remember { mutableStateOf<HandLandmarkerHelper?>(null) }
     var poseHelper by remember { mutableStateOf<PoseLandmarkerHelper?>(null) }
     var faceHelperError by remember { mutableStateOf<String?>(null) }
+    var cameraError by remember { mutableStateOf<String?>(null) }
+    var cameraFrameCount by remember { mutableStateOf(0) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
         runCatching {
             val ctx = context.applicationContext
@@ -353,7 +355,9 @@ fun VrmModeScreen(
                     faceHelper = faceHelper,
                     handHelper = handHelper,
                     poseHelper = poseHelper,
-                    trackPose = trackUpperBody
+                    trackPose = trackUpperBody,
+                    onFrame = { cameraFrameCount++ },
+                    onCameraError = { cameraError = it }
                 )
             } else {
                 Box(Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.navigationBars).padding(top = 72.dp)) {
@@ -412,6 +416,8 @@ fun VrmModeScreen(
                 trackFullBody = trackFullBody,
                 smoothedFaceBlendshapes = smoothedBlendshapes,
                 faceHelperError = faceHelperError,
+                cameraError = cameraError,
+                cameraFrameCount = cameraFrameCount,
                 handResult = latestHandResult,
                 poseResult = latestPoseResult,
                 parsedVrmData = parsedVrmData,
@@ -522,7 +528,9 @@ private fun VrmCameraTracking(
     faceHelper: FaceLandmarkerHelper?,
     handHelper: HandLandmarkerHelper?,
     poseHelper: PoseLandmarkerHelper?,
-    trackPose: Boolean
+    trackPose: Boolean,
+    onFrame: () -> Unit = {},
+    onCameraError: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -579,12 +587,16 @@ private fun VrmCameraTracking(
                     faceHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
                     handHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
                     if (trackPose) poseHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
+                    onFrame()
                 }
             }
         runCatching {
             provider.unbindAll()
             provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, analysis)
-        }.onFailure { android.util.Log.e("VrmModeScreen", "Could not bind CameraX ImageAnalysis", it) }
+        }.onFailure {
+            android.util.Log.e("VrmModeScreen", "Could not bind CameraX ImageAnalysis", it)
+            onCameraError("Camera bind failed: ${it.message}")
+        }
     }
 }
 
@@ -707,6 +719,8 @@ private fun VrmTrackingOverlay(
     trackFullBody: Boolean,
     smoothedFaceBlendshapes: Map<String, Float>,
     faceHelperError: String?,
+    cameraError: String?,
+    cameraFrameCount: Int,
     handResult: HandLandmarkerResult?,
     poseResult: PoseLandmarkerResult?,
     parsedVrmData: VrmData?,
@@ -719,6 +733,11 @@ private fun VrmTrackingOverlay(
     // Just a handful of representative blendshapes — enough to see live
     // movement (blink, jaw, smile) without dumping all 52 scores on screen.
     val debugBlendshapeNames = listOf("jawOpen", "eyeBlinkLeft", "eyeBlinkRight", "mouthSmileLeft", "mouthSmileRight")
+    val cameraLine = when {
+        cameraError != null -> "camera: FAILED\n$cameraError"
+        cameraFrameCount > 0 -> "camera: streaming ($cameraFrameCount frames)"
+        else -> "camera: bound, waiting for frames…"
+    }
     val faceLine = if (smoothedFaceBlendshapes.isNotEmpty()) {
         debugBlendshapeNames.joinToString("\n") { name ->
             "$name: ${"%.2f".format(smoothedFaceBlendshapes[name] ?: 0f)}"
@@ -791,7 +810,7 @@ private fun VrmTrackingOverlay(
 
     Box(modifier) {
         Text(
-            text = listOfNotNull(faceLine, handLine, poseLine, vrmDataLine, retargetLine, headRotationLine, armRotationLine, legRotationLine).joinToString("\n\n"),
+            text = listOfNotNull(cameraLine, faceLine, handLine, poseLine, vrmDataLine, retargetLine, headRotationLine, armRotationLine, legRotationLine).joinToString("\n\n"),
             color = tint,
             fontSize = 12.sp,
             modifier = Modifier
