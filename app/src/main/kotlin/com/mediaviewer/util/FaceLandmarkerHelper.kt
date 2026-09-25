@@ -103,12 +103,7 @@ class FaceLandmarkerHelper private constructor(
                     .setRunningMode(RunningMode.LIVE_STREAM)
                     .setNumFaces(1)
                     .setOutputFaceBlendshapes(true)
-                    // setOutputFacialTransformationMatrixes TEMPORARILY DISABLED:
-                    // with it on, the landmarker produces zero output on-device
-                    // (197 frames in, nothing out) while the hand landmarker
-                    // works on identical frames. Re-enable only after basic
-                    // face detection is confirmed working.
-                    // .setOutputFacialTransformationMatrixes(true)
+                    .setOutputFacialTransformationMatrixes(true)
                     .setMinFaceDetectionConfidence(0.5f)
                     .setMinFacePresenceConfidence(0.5f)
                     .setMinTrackingConfidence(0.5f)

@@ -212,14 +212,18 @@ fun VrmModeScreen(
     var cameraFrameCount by remember { mutableStateOf(0) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
         runCatching {
-            val ctx = context.applicationContext
+            // Use the Activity context, NOT applicationContext — the old
+            // working version passed the Activity context directly, and
+            // MediaPipe's GPU delegate init may need it. The application
+            // context was introduced with the background-loading refactor
+            // and correlates with face tracking dying.
             val face = FaceLandmarkerHelper.create(
-                ctx,
+                context,
                 onResult = { latestFaceResult = it },
                 onError = { faceHelperError = it }
             )
-            val hand = HandLandmarkerHelper.create(ctx, onResult = { latestHandResult = it })
-            val pose = PoseLandmarkerHelper.create(ctx, onResult = { latestPoseResult = it })
+            val hand = HandLandmarkerHelper.create(context, onResult = { latestHandResult = it })
+            val pose = PoseLandmarkerHelper.create(context, onResult = { latestPoseResult = it })
             faceHelper = face
             handHelper = hand
             poseHelper = pose
