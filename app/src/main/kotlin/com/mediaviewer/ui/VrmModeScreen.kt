@@ -17,6 +17,7 @@ import com.mediaviewer.util.OneEuroFilterBank
 import com.mediaviewer.util.PoseLandmarkerHelper
 import java.util.concurrent.Executors
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
