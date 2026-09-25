@@ -253,17 +253,6 @@ private fun loadVrmInto(viewer: ModelViewer, bytes: ByteArray, parsedVrmData: Vr
         if (parsedVrmData?.specVersion == VrmSpecVersion.VRM_0) {
             fixVrm0Facing(viewer)
         }
-        // Frame the model: transformToUnitCube centers it at the origin,
-        // but the camera doesn't auto-frame. Position it to look at the
-        // model head-on from a distance that fits the unit cube.
-        val camera = viewer.scene?.view?.camera
-        if (camera != null) {
-            camera.lookAt(
-                0.0, 0.1, 2.5,  // eye
-                0.0, 0.0, 0.0,  // center (look at origin)
-                0.0, 1.0, 0.0   // up
-            )
-        }
     }.exceptionOrNull()
     if (failure != null) {
         Log.e(TAG, "Filament failed to load VRM file as glTF", failure)
