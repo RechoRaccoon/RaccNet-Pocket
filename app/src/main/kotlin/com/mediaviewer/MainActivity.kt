@@ -810,13 +810,25 @@ private fun AppRoot(viewModel: MainViewModel) {
         // since this Box is composed early, right after MainFeedScreen.
         if (!composePostOpen && !vrmModeOpen) {
             val cameraCaptureUri = remember { mutableStateOf<android.net.Uri?>(null) }
-            val takePicture = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+            // Photo capture via StartActivityForResult with an EXPLICITLY
+            // resolved camera component, not ActivityResultContracts.TakePicture().
+            // TakePicture() was throwing ActivityNotFoundException on a device
+            // that demonstrably has a camera app — its internally-built intent
+            // wasn't resolving there. Resolving ACTION_IMAGE_CAPTURE against
+            // the PackageManager ourselves (the manifest's <queries> block
+            // makes this definitive on API 30+) and launching that exact
+            // component removes the contract's intent-building from the path
+            // entirely. If the platform truly has no IMAGE_CAPTURE handler,
+            // resolveActivity returns null and we say so instead of crashing.
+            val capturePhoto = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
                 val uri = cameraCaptureUri.value
-                if (success && uri != null) viewModel.openComposePostWithCapturedMedia(imageUri = uri, videoUri = null)
+                if (result.resultCode == android.app.Activity.RESULT_OK && uri != null) {
+                    viewModel.openComposePostWithCapturedMedia(imageUri = uri, videoUri = null)
+                }
             }
             // Item 8 follow-up: only photo capture is wired to the single
             // "Camera" tap for now — CaptureVideo() is the identical
-            // pattern (see takePicture just above) if/when video capture
+            // pattern (see capturePhoto just above) if/when video capture
             // gets its own control (e.g. press-and-hold).
             // The notch button wears the feed's current dominant color — except
             // while the Hub (SettingsSheet) is open, where every other piece
@@ -834,30 +846,24 @@ private fun AppRoot(viewModel: MainViewModel) {
                 liquidGlass = liquidGlass,
                 tint = notchTint,
                 onOpenCamera = {
-                    // ACTION_IMAGE_CAPTURE (what TakePicture launches under
-                    // the hood) doesn't need this app to hold the CAMERA
-                    // permission itself — the system camera app handles
+                    // ACTION_IMAGE_CAPTURE doesn't need this app to hold the
+                    // CAMERA permission itself — the system camera app handles
                     // that on its own.
                     //
-                    // No resolveActivity() pre-check here on purpose: on
-                    // API 30+ package-visibility rules make that query
-                    // return null even when a camera app IS installed
-                    // (unless a <queries> block declares the intent), so
-                    // the check itself was the bug — it showed "No camera
-                    // app found" on devices that have a camera. Just launch
-                    // and catch ActivityNotFoundException instead, which is
-                    // the only case that genuinely means "no camera app".
-                    // (The manifest keeps a <queries> block for
-                    // IMAGE_CAPTURE anyway — harmless, and it helps any
-                    // future explicit query.)
-                    //
-                    // The whole thing (Uri creation included) is inside the
-                    // runCatching: a FileProvider failure used to crash the
-                    // tap outright instead of saying anything.
+                    // No resolveActivity() pre-check that gates on a boolean
+                    // and toasts: we resolve the handler and, if one exists,
+                    // launch THAT component directly. The whole thing (Uri
+                    // creation included) is inside the runCatching so a
+                    // FileProvider failure toasts instead of crashing the tap.
                     runCatching {
                         val uri = newCameraCaptureUri(context)
                         cameraCaptureUri.value = uri
-                        takePicture.launch(uri)
+                        val intent = android.content.Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE)
+                            .putExtra(android.provider.MediaStore.EXTRA_OUTPUT, uri)
+                        val component = intent.resolveActivity(context.packageManager)
+                            ?: throw android.content.ActivityNotFoundException("no IMAGE_CAPTURE handler")
+                        intent.component = component
+                        capturePhoto.launch(intent)
                     }.onFailure { e ->
                             if (e is android.content.ActivityNotFoundException) {
                                 Toast.makeText(context, "No camera app found on this device", Toast.LENGTH_SHORT).show()

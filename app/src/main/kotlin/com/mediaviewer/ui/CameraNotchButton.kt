@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -139,16 +140,15 @@ fun CameraNotchButton(
         onDispose { ViewCompat.setOnApplyWindowInsetsListener(view, null) }
     }
 
-    // Collapsed, this is a bare outline ring. Some phones report a loose
-    // cutout rect (much bigger than the physical camera hole), so the
-    // collapsed ring is hard-capped at a small size — it stays centered
-    // on the real cutout position but can never grow into a big pill.
-    // Tight rects still get a tight ring (rect + 2dp per side); loose
-    // rects get the cap instead of a giant outline.
+    // Collapsed, this is a bare outline ring. It's always a CIRCLE (never
+    // an oval): diameter = the larger cutout dimension + 2dp per side,
+    // hard-capped at 36dp so a loose platform rect can never blow it up
+    // into a big pill. Tight rects still get a tight ring; loose rects get
+    // the cap. Centered on the real cutout position.
     val outlinePadding = 2.dp
     val sideWidth = 56.dp
-    val bubbleHeight = minOf(cutoutHeight + outlinePadding * 2, 30.dp)
-    val collapsedWidth = minOf(cutoutWidth + outlinePadding * 2, 40.dp)
+    val ringSize = minOf(maxOf(cutoutWidth, cutoutHeight) + outlinePadding * 2, 36.dp)
+    val collapsedWidth = ringSize
     val expandedWidth = collapsedWidth + sideWidth * 2
     // "Smooth but snappy": a fast, slightly-overshooting spring rather than
     // a slow linear/eased width tween.
@@ -157,22 +157,31 @@ fun CameraNotchButton(
         animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessHigh),
         label = "notchBubbleWidth"
     )
-    val shape = RoundedCornerShape(bubbleHeight / 2)
+    // Collapsed the ring is a circle; expanded it stretches into a pill.
+    // CircleShape keeps the collapsed state perfectly round regardless of
+    // the cap — no oval.
+    val collapsedShape = CircleShape
+    val expandedShape = RoundedCornerShape(50)
+    val shape = if (expanded) expandedShape else collapsedShape
 
-    // Offset from top-center so the bubble's center lands on the cutout's
-    // own center — the cutout is rarely at the exact horizontal middle on
-    // real phones, and never at y=0 vertically. No-cutout fallback keeps
-    // the old top-center spot with a small top margin.
+    // Absolute positioning from the screen's top-left corner — NOT relative
+    // to a centered parent. The cutout rect is already in screen/pixel
+    // coordinates (edge-to-edge window, so window == screen), and this
+    // container is always fillMaxSize with TopStart alignment, so
+    // offset(x, y) lands the ring's center exactly on the cutout's center.
+    // No other UI element's position, padding, or alignment can push it.
     val screenWidth = LocalConfiguration.current.screenWidthDp.dp
-    val xOffset = cutoutCenterX?.let { it - screenWidth / 2 } ?: 0.dp
-    val yOffset = cutoutCenterY?.let { it - bubbleHeight / 2 } ?: 12.dp
+    val xAbsolute = cutoutCenterX?.let { it - ringSize / 2 } ?: (screenWidth - ringSize) / 2
+    val yAbsolute = cutoutCenterY?.let { it - ringSize / 2 } ?: 12.dp
+    // Expanded, the pill grows symmetrically from the ring's center so it
+    // stays anchored on the cutout instead of sliding sideways.
+    val expandedXAbsolute = cutoutCenterX?.let { it - expandedWidth / 2 } ?: (screenWidth - expandedWidth) / 2
 
-    // Expanded, this container takes the whole screen so the tap-away
-    // catcher below genuinely covers everything; collapsed it's just the
-    // bubble's own strip.
+    // Always fillMaxSize so the coordinate system is the whole screen and
+    // the tap-away catcher (expanded) genuinely covers everything.
     Box(
-        modifier.then(if (expanded) Modifier.fillMaxSize() else Modifier.fillMaxWidth()),
-        contentAlignment = Alignment.TopCenter
+        modifier.then(Modifier.fillMaxSize()),
+        contentAlignment = Alignment.TopStart
     ) {
         // Tap-away catcher: only present while expanded. Claims the whole
         // screen's pointer input so a tap anywhere else closes the menu
@@ -185,7 +194,10 @@ fun CameraNotchButton(
         }
 
         Box(
-            Modifier.offset(x = xOffset, y = yOffset).width(width).height(bubbleHeight).clip(shape)
+            Modifier.offset(
+                x = if (expanded) expandedXAbsolute else xAbsolute,
+                y = yAbsolute
+            ).width(width).height(ringSize).clip(shape)
                 .then(
                     if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
                     // Flat mode: a translucent tinted fill under a thin
