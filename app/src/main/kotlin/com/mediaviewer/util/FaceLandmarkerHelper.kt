@@ -74,17 +74,12 @@ class FaceLandmarkerHelper private constructor(
             onResult: (FaceLandmarkerResult) -> Unit,
             onError: (String) -> Unit = {}
         ): FaceLandmarkerHelper? {
-            // Try GPU first, fall back to CPU. The GPU delegate can fail
-            // on specific devices/models even when the task file is fine —
-            // without this fallback, face tracking silently never starts
-            // ("no landmarker output yet") while hand tracking works.
-            var lastError: String? = null
-            val helper = tryCreate(context, Delegate.GPU, onResult, onError = { lastError = it })
-                ?: tryCreate(context, Delegate.CPU, onResult, onError = { lastError = it }).also {
-                    if (it != null) Log.w(TAG, "FaceLandmarker GPU failed, using CPU")
-                }
-            if (helper == null && lastError != null) onError(lastError!!)
-            return helper
+            // GPU only — matches the old working version exactly. The
+            // GPU→CPU fallback was added as a robustness improvement, but
+            // if the GPU delegate fails to init properly, the CPU fallback
+            // may create a non-functional landmarker that silently produces
+            // no output. Revert to GPU-only until the root cause is found.
+            return tryCreate(context, Delegate.GPU, onResult, onError)
         }
 
         private fun tryCreate(

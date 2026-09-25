@@ -253,6 +253,16 @@ private fun loadVrmInto(viewer: ModelViewer, bytes: ByteArray, parsedVrmData: Vr
         if (parsedVrmData?.specVersion == VrmSpecVersion.VRM_0) {
             fixVrm0Facing(viewer)
         }
+        // Frame the model: transformToUnitCube centers it at the origin,
+        // but the camera doesn't auto-frame. Position it to look at the
+        // model head-on from a distance that fits the unit cube.
+        val camera = viewer.scene?.view?.camera
+        if (camera != null) {
+            val eye = com.google.android.filament.math.Vector3(0f, 0.1f, 2.5f)
+            val target = com.google.android.filament.math.Vector3(0f, 0f, 0f)
+            val up = com.google.android.filament.math.Vector3(0f, 1f, 0f)
+            camera.lookAt(eye, target, up)
+        }
     }.exceptionOrNull()
     if (failure != null) {
         Log.e(TAG, "Filament failed to load VRM file as glTF", failure)
