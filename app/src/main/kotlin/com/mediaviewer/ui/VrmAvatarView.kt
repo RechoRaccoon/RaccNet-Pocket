@@ -182,7 +182,15 @@ fun VrmAvatarView(
         modifier = modifier,
         factory = { ctx ->
             runCatching { Utils.init() }.onFailure { Log.e(TAG, "Filament Utils.init() failed", it) }
-            val surfaceView = SurfaceView(ctx)
+            val surfaceView = SurfaceView(ctx).apply {
+                // Explicitly opaque: this view used to sit transparent over
+                // a live camera preview (removed for privacy — the user
+                // didn't want VRM mode showing their IRL face). A leftover
+                // translucent surface with no video underneath renders as
+                // black and can swallow the avatar entirely. Opaque forces
+                // Filament to composite normally over the black Box behind.
+                holder.setFormat(android.graphics.PixelFormat.OPAQUE)
+            }
             val viewer = ModelViewer(surfaceView)
             surfaceView.setOnTouchListener(viewer) // drag-to-orbit, ModelViewer's own manipulator
             addThreeLightRig(viewer.engine, viewer.scene)
@@ -242,12 +250,9 @@ private fun loadVrmInto(viewer: ModelViewer, bytes: ByteArray, parsedVrmData: Vr
         viewer.destroyModel()
         viewer.loadModelGlb(direct)
         viewer.transformToUnitCube()
-        // fixVrm0Facing is intentionally NOT called: it was added after
-        // the Sept 24 build that provably rendered on-device, and the
-        // black-screen regression correlates with its introduction. The
-        // model may face away from the camera without it — that's a
-        // visible, diagnosable state, unlike a black screen. Reintroduce
-        // only with a verified-correct rotation once the avatar is seen.
+        if (parsedVrmData?.specVersion == VrmSpecVersion.VRM_0) {
+            fixVrm0Facing(viewer)
+        }
     }.exceptionOrNull()
     if (failure != null) {
         Log.e(TAG, "Filament failed to load VRM file as glTF", failure)
