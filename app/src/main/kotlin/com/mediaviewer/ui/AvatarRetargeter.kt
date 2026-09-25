@@ -85,6 +85,28 @@ data class RetargetTarget(
      *  Only populated for nodes in [VrmData.humanBones] — that's the only
      *  set bone rotation (current or future) ever touches. */
     val restLocalTransforms: Map<Int, FloatArray>,
+    /** Each humanoid bone node's own rest-pose rotation **in world space**
+     *  (i.e. composed with every ancestor's rest transform, not just its
+     *  own parent-relative one) — captured once at [buildTarget] time via
+     *  `TransformManager.getWorldTransform`, same moment as
+     *  [restLocalTransforms]. This is what [applyDeltaToBone] conjugates a
+     *  tracked delta through before composing it onto [restLocalTransforms]:
+     *  a delta computed from tracking is expressed in *world* axes
+     *  (MediaPipe's camera space, or the pose landmarks' world space), but
+     *  `TransformManager.setTransform` sets a bone's *local* (parent-
+     *  relative) transform — and a bone's local axes only line up with
+     *  world axes if its rest pose happens to be unrotated relative to the
+     *  world, which is true-ish for a head bone in a roughly-upright T-pose
+     *  rig but very much *not* true for, say, an upper-arm bone, whose
+     *  T-pose rest orientation points sideways (~90° rotated from the
+     *  world axes a camera-space tracked delta is expressed in). Applying
+     *  a world-space delta directly as if it were already local (as this
+     *  pipeline used to do) makes a limb's motion look like the wrong
+     *  *shape* entirely — not just mirrored, but axes visibly swapped
+     *  (e.g. raising a tracked arm rotating the bone around what ends up
+     *  looking like the wrong axis) — exactly the failure mode this field
+     *  exists to fix. */
+    val restWorldRotations: Map<Int, Quaternion>,
     /** Head-turn calibration baseline: the (axis-remapped) rotation
      *  [applyHeadRotation] saw on the first usable frame after a model
      *  loads, or after a face was lost and reacquired. MediaPipe's matrix
@@ -133,8 +155,13 @@ object AvatarRetargeter {
 
         // Bone-rotation rest poses (see RetargetTarget.restLocalTransforms's
         // own doc comment) — only for humanoid bones, captured once here
-        // rather than re-read every frame.
+        // rather than re-read every frame. Both the local (parent-relative)
+        // and world rest transforms are captured from the same instance at
+        // the same moment, before anything has rotated it — see
+        // RetargetTarget.restWorldRotations's doc comment for why both are
+        // needed, not just local.
         val restLocalTransforms = mutableMapOf<Int, FloatArray>()
+        val restWorldRotations = mutableMapOf<Int, Quaternion>()
         val transformManager = engine.transformManager
         vrmData.humanBones.values.forEach { nodeIndex ->
             val entity = nodeIndexToEntity[nodeIndex] ?: return@forEach
@@ -144,11 +171,15 @@ object AvatarRetargeter {
                     val local = FloatArray(16)
                     transformManager.getTransform(instance, local)
                     restLocalTransforms[nodeIndex] = local
+
+                    val world = FloatArray(16)
+                    transformManager.getWorldTransform(instance, world)
+                    restWorldRotations[nodeIndex] = Quaternion.fromRotationColumnMajorMatrix(world)
                 }
             }.onFailure { Log.e(TAG, "Could not read rest-pose transform for node $nodeIndex", it) }
         }
 
-        return RetargetTarget(engine, asset, nodeIndexToEntity, restLocalTransforms)
+        return RetargetTarget(engine, asset, nodeIndexToEntity, restLocalTransforms, restWorldRotations)
     }
 
     /** Drives every VRM expression [target]'s file defines from
@@ -212,7 +243,21 @@ object AvatarRetargeter {
      * [RetargetTarget.headCalibration] is reset, so re-detection later
      * recalibrates cleanly instead of snapping to a stale baseline).
      *
-     * ## The two things most likely to be backwards on a real device
+     * ## What was actually wrong before, and the fix
+     * The delta this function computes lives in MediaPipe's **camera-space
+     * world axes**. Every earlier version of this function then handed
+     * that delta straight to [applyDeltaToBone] as if it were already the
+     * head bone's *local* rotation — which only produces correct-looking
+     * motion if the bone's rest pose happens to be unrotated relative to
+     * the world. [applyDeltaToBone] now conjugates the world-space delta
+     * through [RetargetTarget.restWorldRotations] before composing it onto
+     * the bone's local rest transform — see that field's own doc comment
+     * for exactly why a world-space delta and a bone's local transform
+     * can't just be composed directly, and why that mismatch reads as
+     * axes visibly swapped (turning your head left/right moving the
+     * avatar's head up/down and vice versa), not just a mirrored sign.
+     *
+     * ## What's still a starting guess
      * 1. **Flattening order.** [Quaternion.fromRotationColumnMajorMatrix]
      *    assumes [facialTransformationMatrix] is **column-major**
      *    (`android.opengl.Matrix`/OpenGL convention — matches Filament's
@@ -220,22 +265,20 @@ object AvatarRetargeter {
      *    doesn't need to convert). MediaPipe's docs describe the matrix's
      *    *meaning* (a camera-facing coordinate space: +X right, +Y up, +Z
      *    toward the camera) but not its flattening order explicitly. If
-     *    head rotation on a real device looks like nonsense (not just
-     *    mirrored, but genuinely wrong shapes of motion), try transposing
-     *    the incoming array before it reaches that function first.
-     * 2. **Axis remap sign/axis choice**, just below — MediaPipe's
-     *    camera-facing space and VRM's bone-local space are two
-     *    conventions that were never designed against each other, same
-     *    situation as the ARKit→VRM expression table above. Flip yaw,
-     *    pitch, and roll (all three axes) — confirmed on-device that
-     *    keeping pitch's sign as-is made nodding up/down come out
-     *    backwards on the avatar, so pitch gets flipped here too now. If
-     *    a real device shows left/right turning mirrored (or vice versa),
-     *    that's this remap, not the calibration or slerp logic beneath it.
-     *
-     * Both are exactly the kind of thing this whole pipeline has been
-     * honest about needing a real device to confirm — see this file's top
-     * doc comment.
+     *    head rotation on a real device still looks like the wrong *shape*
+     *    of motion after the fix above (not just mirrored), try
+     *    transposing the incoming array before it reaches that function.
+     * 2. **Axis remap sign/axis choice**, just below — flips yaw (Y) and
+     *    roll (Z), keeps pitch (X), the original starting guess. (A
+     *    previous pass here also flipped pitch to chase a reported
+     *    up/down inversion; reverted back to this, since with the
+     *    world/local conjugation fix above now handling the bulk of what
+     *    was actually wrong, flipping pitch too was very likely
+     *    overcorrecting for the same underlying bug rather than a real
+     *    separate sign error.) If left/right turning is still mirrored (or
+     *    vice versa) once the structural fix above is verified on a
+     *    device, that's this remap to revisit — one axis at a time, not
+     *    several at once.
      */
     fun applyHeadRotation(target: RetargetTarget, vrmData: VrmData, facialTransformationMatrix: FloatArray?) {
         if (facialTransformationMatrix == null || facialTransformationMatrix.size != 16) {
@@ -250,11 +293,9 @@ object AvatarRetargeter {
             Quaternion.fromRotationColumnMajorMatrix(facialTransformationMatrix)
         }.getOrNull() ?: return
 
-        // See this function's doc comment, point 2 — flip yaw (Y), roll
-        // (Z), and pitch (X): keeping pitch's sign unflipped made looking
-        // up/down come out inverted on the avatar (nod up → avatar looks
-        // down), so it's flipped along with the other two axes now.
-        val remapped = Quaternion(-tracked.x, -tracked.y, -tracked.z, tracked.w)
+        // See this function's doc comment, point 2 — flip yaw (Y) and
+        // roll (Z), keep pitch (X), the original starting-guess remap.
+        val remapped = Quaternion(tracked.x, -tracked.y, -tracked.z, tracked.w)
 
         val calibration = target.headCalibration
         if (calibration == null) {
@@ -262,11 +303,14 @@ object AvatarRetargeter {
             return // nothing to apply yet on the very frame a new baseline is set
         }
 
-        // Rotation relative to the calibrated "neutral" pose. If turning
-        // your head rotates the avatar the wrong way on a real device,
-        // swap this multiplication order (remapped * calibration) before
-        // touching the axis remap above — composition order is the other
-        // place a mirrored result can come from.
+        // Rotation relative to the calibrated "neutral" pose — still in
+        // camera-space world axes at this point; applyDeltaToBone is what
+        // converts it into each bone's own local space (see this
+        // function's doc comment). If turning your head rotates the
+        // avatar the wrong way on a real device, swap this multiplication
+        // order (remapped * calibration) before touching the axis remap
+        // above — composition order is the other place a mirrored result
+        // can come from.
         val delta = (calibration * remapped).normalized()
 
         applyDeltaToBone(target, transformManager, headNode, headRest, delta, fraction = HEAD_ROTATION_FRACTION)
@@ -290,6 +334,24 @@ object AvatarRetargeter {
      *  actually visible on a device. */
     private const val HEAD_ROTATION_FRACTION = 0.6f
 
+    /** Composes a **world-space** tracked [delta] onto [nodeIndex]'s local
+     *  rest transform [restLocal], scaled by [fraction]. The one non-
+     *  obvious step: [delta] is expressed in world axes (camera space for
+     *  the head, pose-landmark world space for limbs), but
+     *  `TransformManager.setTransform` sets a bone's *local*
+     *  (parent-relative) transform — so [delta] first gets conjugated
+     *  through [RetargetTarget.restWorldRotations]' entry for this node
+     *  (`localDelta = restWorld⁻¹ · delta · restWorld`) to re-express it in
+     *  terms the bone's own rest orientation actually means. Skipping this
+     *  conjugation (as earlier versions of this pipeline did) is exactly
+     *  what made tracked motion come out as the wrong *shape* — axes
+     *  visibly swapped — for any bone whose rest pose isn't itself aligned
+     *  to world axes; see [RetargetTarget.restWorldRotations]'s doc
+     *  comment for the full derivation. Falls back to applying [delta]
+     *  unconverted if this node has no captured world rotation (shouldn't
+     *  happen for anything in [VrmData.humanBones] — see [buildTarget] —
+     *  but degrading instead of skipping the bone entirely is the safer
+     *  failure mode). */
     private fun applyDeltaToBone(
         target: RetargetTarget,
         transformManager: TransformManager,
@@ -299,7 +361,13 @@ object AvatarRetargeter {
         fraction: Float
     ) {
         val entity = target.nodeIndexToEntity[nodeIndex] ?: return
-        val scaled = if (fraction >= 0.999f) delta else Quaternion.slerp(Quaternion.IDENTITY, delta, fraction)
+        val restWorld = target.restWorldRotations[nodeIndex]
+        val localDelta = if (restWorld != null) {
+            (restWorld.conjugate() * delta * restWorld).normalized()
+        } else {
+            delta
+        }
+        val scaled = if (fraction >= 0.999f) localDelta else Quaternion.slerp(Quaternion.IDENTITY, localDelta, fraction)
         val newLocal = multiplyColumnMajor4x4(restLocal, scaled.toColumnMajorMatrix())
         runCatching {
             val instance = transformManager.getInstance(entity)
@@ -332,26 +400,32 @@ object AvatarRetargeter {
      * degrades independently to "not moved this frame" if its two
      * landmarks, or the VRM bone itself, aren't available.
      *
-     * ## Why this doesn't need each bone's true rest-pose *world* direction
+     * ## Why this doesn't solve for each bone's true rest-pose world *direction*
      * A proper retarget would rotate each bone so its direction matches
-     * the tracked shoulder→elbow / elbow→wrist vector exactly. Computing a
-     * bone's true rest-pose **world** direction needs walking its full
-     * parent chain (`hips` → `spine` → ... → `upperArm`), composing every
-     * ancestor's local transform — this pipeline has never needed to do
-     * that (everything else here works in local space alone), and
-     * building it just for this would be a third mostly-independent piece
-     * of uncertain math stacked on top of the two this function already
-     * has (landmark→direction, direction→rotation). Instead, same as
-     * [applyHeadRotation]: calibrate against whatever direction each limb
-     * reports on the first usable frame, then apply only the *change*
-     * since then on top of the bone's local rest pose
-     * ([applyLimb]/[applyDeltaToBone]). This is honestly a coarser
-     * approximation for limbs than for the head (a limb's true swing
-     * range also depends on its parent bone's own current orientation,
-     * which this ignores) — but it needs no skeleton solve, which is the
-     * same tradeoff VSeeFace-class single-camera tools make. Verify
-     * visually before trusting it further than "does the avatar's arm
-     * move roughly where mine does."
+     * the tracked shoulder→elbow / elbow→wrist vector exactly. This
+     * doesn't do that full solve — it still calibrates against whatever
+     * direction each limb reports on the first usable frame, then applies
+     * only the *change* since then ([applyLimb]/[applyDeltaToBone]), same
+     * as [applyHeadRotation]. What **has** changed: [applyDeltaToBone] now
+     * conjugates that tracked delta through the bone's rest-pose *world
+     * rotation* (see [RetargetTarget.restWorldRotations]) before composing
+     * it onto the local rest transform — which is the part that actually
+     * matters for limbs. A T-pose upper arm's rest orientation is nowhere
+     * close to the identity (it points sideways, not "forward" like a
+     * head roughly does), so applying a world-space tracked delta directly
+     * as a local delta — which is what this pipeline did before — came out
+     * as visibly the wrong *shape* of motion (e.g. a tracked vertical
+     * movement of the hand rotating the bone around what reads as the
+     * wrong axis on the avatar), not just a mirrored sign. This is honestly
+     * still a coarser approximation than a full skeleton solve (a limb's
+     * true swing range also depends on its parent bone's own *current*
+     * orientation, which this ignores, and the calibration-baseline
+     * approach means an arm frozen away from a neutral rest pose when
+     * tracking starts will look slightly off) — but it needs no
+     * full-hierarchy solve, which is the same tradeoff VSeeFace-class
+     * single-camera tools make. Verify visually before trusting it further
+     * than "does the avatar's arm move roughly where mine does, in roughly
+     * the right direction."
      *
      * ## What's most likely backwards on a real device
      * Same axis-remap caveat as [applyHeadRotation] (this function reuses

@@ -12,7 +12,7 @@ import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
 
 /**
  * VRM pipeline step 1 (see VrmModeScreen.kt's doc comment): wraps MediaPipe's
- * FaceLandmarker in LIVE_STREAM mode, fed frames from VrmCameraPreview's
+ * FaceLandmarker in LIVE_STREAM mode, fed frames from VrmCameraTracking's
  * ImageAnalysis use case. Deliberately just the face landmarker for now, per
  * the handoff's build order — get this visibly working before adding
  * HandLandmarkerHelper / PoseLandmarkerHelper as siblings of this same
@@ -43,7 +43,7 @@ import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
 class FaceLandmarkerHelper private constructor(
     private val faceLandmarker: FaceLandmarker
 ) {
-    /** Runs detection on a frame [VrmCameraPreview] has already decoded once
+    /** Runs detection on a frame [VrmCameraTracking] has already decoded once
      *  (see its analyzer) and shares across all three landmarkers, rather
      *  than each helper redoing its own YUV→Bitmap→MPImage conversion on
      *  every frame. Results arrive later, asynchronously, via the
@@ -64,7 +64,7 @@ class FaceLandmarkerHelper private constructor(
         private const val MODEL_ASSET_PATH = "face_landmarker.task"
 
         /** Returns null (and logs why) instead of throwing if the model
-         *  asset above isn't bundled yet, so callers — VrmCameraPreview —
+         *  asset above isn't bundled yet, so callers — VrmCameraTracking —
          *  can fall back to "no tracking data" instead of crashing the
          *  whole VRM screen over a missing asset file. */
         fun create(context: Context, onResult: (FaceLandmarkerResult) -> Unit): FaceLandmarkerHelper? =

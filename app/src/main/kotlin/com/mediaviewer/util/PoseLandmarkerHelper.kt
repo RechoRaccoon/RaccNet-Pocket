@@ -14,7 +14,7 @@ import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
  * VRM pipeline step 1, sibling of [FaceLandmarkerHelper] — same LIVE_STREAM
  * pattern, MediaPipe's `PoseLandmarker` instead. Unlike face/hands, this
  * one is only meant to run while the "Upper Body" Settings toggle is on
- * (see `VrmModeScreen.kt`) — [VrmCameraPreview] is what enforces that by
+ * (see `VrmModeScreen.kt`) — [VrmCameraTracking] is what enforces that by
  * only calling [detectAsync] when that flag is set, not this class itself.
  * "Full Body" doesn't change which model runs — `PoseLandmarker` already
  * outputs all 33 body points including legs — it'll gate whether step 3's
@@ -34,7 +34,7 @@ import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
 class PoseLandmarkerHelper private constructor(
     private val poseLandmarker: PoseLandmarker
 ) {
-    /** Shares the [MPImage] [VrmCameraPreview] already decoded once per
+    /** Shares the [MPImage] [VrmCameraTracking] already decoded once per
      *  frame across all three landmarkers — see [FaceLandmarkerHelper]'s
      *  matching method for why. */
     fun detectAsync(mpImage: MPImage, rotationDegrees: Int, timestampMs: Long) {

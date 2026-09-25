@@ -29,7 +29,7 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 class HandLandmarkerHelper private constructor(
     private val handLandmarker: HandLandmarker
 ) {
-    /** Shares the [MPImage] [VrmCameraPreview] already decoded once per
+    /** Shares the [MPImage] [VrmCameraTracking] already decoded once per
      *  frame across all three landmarkers — see [FaceLandmarkerHelper]'s
      *  matching method for why. */
     fun detectAsync(mpImage: MPImage, rotationDegrees: Int, timestampMs: Long) {

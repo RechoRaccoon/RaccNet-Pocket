@@ -15,8 +15,11 @@ import com.google.android.filament.IndirectLight
 import com.google.android.filament.LightManager
 import com.google.android.filament.utils.ModelViewer
 import com.google.android.filament.utils.Utils
+import com.mediaviewer.util.Quaternion
 import com.mediaviewer.util.VrmData
 import com.mediaviewer.util.VrmParser
+import com.mediaviewer.util.VrmSpecVersion
+import com.mediaviewer.util.multiplyColumnMajor4x4
 import java.nio.ByteBuffer
 
 /**
@@ -62,7 +65,8 @@ import java.nio.ByteBuffer
  * ## Unverified
  * Same caveat as the rest of this pipeline, but with a specific note:
  * `ModelViewer`'s exact public surface (`engine`/`scene`/`loadModelGlb`/
- * `transformToUnitCube`/`destroyModel`/`render` — all used below) is
+ * `transformToUnitCube`/`destroyModel`/`render`/`asset.root` — all used
+ * below) is
  * reconstructed from the well-known Filament Android sample app's shape,
  * not verified against the pinned `filament-utils-android` AAR version in
  * `build.gradle.kts`. If a name has moved, Android Studio's compile error
@@ -141,7 +145,7 @@ fun VrmAvatarView(
             return@LaunchedEffect
         }
         val parsedVrmData = runCatching { VrmParser.parse(vrmBytes) }.getOrNull()
-        loadVrmInto(viewer, vrmBytes)
+        loadVrmInto(viewer, vrmBytes, parsedVrmData)
         onParsedVrmData(parsedVrmData)
         onRetargetTargetReady(buildRetargetTargetOrNull(viewer, parsedVrmData))
     }
@@ -158,7 +162,7 @@ fun VrmAvatarView(
             viewerHolder[0] = viewer
             if (vrmBytes != null) {
                 val parsedVrmData = runCatching { VrmParser.parse(vrmBytes) }.getOrNull()
-                loadVrmInto(viewer, vrmBytes)
+                loadVrmInto(viewer, vrmBytes, parsedVrmData)
                 onParsedVrmData(parsedVrmData)
                 onRetargetTargetReady(buildRetargetTargetOrNull(viewer, parsedVrmData))
             }
@@ -179,12 +183,39 @@ private fun buildRetargetTargetOrNull(viewer: ModelViewer, parsedVrmData: VrmDat
         .getOrNull()
 }
 
-private fun loadVrmInto(viewer: ModelViewer, bytes: ByteArray) {
+private fun loadVrmInto(viewer: ModelViewer, bytes: ByteArray, parsedVrmData: VrmData?) {
     runCatching {
         viewer.destroyModel()
         viewer.loadModelGlb(ByteBuffer.wrap(bytes))
         viewer.transformToUnitCube()
+        if (parsedVrmData?.specVersion == VrmSpecVersion.VRM_0) {
+            fixVrm0Facing(viewer)
+        }
     }.onFailure { Log.e(TAG, "Filament failed to load VRM file as glTF", it) }
+}
+
+/**
+ * VRM 0.x models were exported facing **+Z** — the opposite of standard
+ * glTF's own -Z-forward convention (which VRM 1.0 corrected). This is a
+ * well-known quirk of the VRM 0.x spec/UniVRM export pipeline, not a
+ * guess: every VRM 0.x viewer has to apply this same 180°-about-Y
+ * correction, or the avatar loads facing directly away from the camera.
+ * Rotates [ModelViewer.asset]'s root entity by 180° about Y *in addition
+ * to* whatever [ModelViewer.transformToUnitCube] already set (its own
+ * scale + recenter, no rotation), rather than replacing it — order here
+ * doesn't matter for a rotation about the vertical axis applied at the
+ * already-recentered origin. VRM 1.0 files are untouched — they already
+ * follow the standard -Z-forward convention [ModelViewer]/Filament expect.
+ */
+private fun fixVrm0Facing(viewer: ModelViewer) {
+    val asset = viewer.asset ?: return
+    val transformManager = viewer.engine.transformManager
+    val instance = transformManager.getInstance(asset.root)
+    if (instance == 0) return
+    val current = FloatArray(16)
+    transformManager.getTransform(instance, current)
+    val flip180AboutY = Quaternion(0f, 1f, 0f, 0f).toColumnMajorMatrix()
+    transformManager.setTransform(instance, multiplyColumnMajor4x4(flip180AboutY, current))
 }
 
 /** A plain three-point directional-light rig — see this file's top doc

@@ -6,9 +6,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
@@ -54,7 +52,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.mediaviewer.util.PreferencesManager
 import com.mediaviewer.util.VrmData
@@ -161,7 +158,7 @@ fun VrmModeScreen(
     var trackFullBody by remember { mutableStateOf(false) }
 
     // Step 1 verification state (see doc comment above): the latest result
-    // from each landmarker, updated from VrmCameraPreview's ImageAnalysis
+    // from each landmarker, updated from VrmCameraTracking's ImageAnalysis
     // callback. Read by VrmTrackingOverlay to print debug scores — these
     // fields are *only* for that on-device sanity check and go away once
     // step 2 (smoothing) and step 3 (retargeting) consume the results
@@ -247,7 +244,7 @@ fun VrmModeScreen(
             AvatarRetargeter.applyExpressions(target, vrmData, smoothedBlendshapes)
             AvatarRetargeter.applyHeadRotation(target, vrmData, headMatrix)
             // Gated on the same toggle that turns PoseLandmarker itself on
-            // (see VrmCameraPreview's trackPose param) — otherwise
+            // (see VrmCameraTracking's trackPose param) — otherwise
             // latestPoseResult/smoothedBodyLandmarks would just be stale
             // data from before the toggle was switched off, not "no arms."
             if (trackUpperBody) AvatarRetargeter.applyArmRotation(target, vrmData, smoothedBodyLandmarks)
@@ -262,19 +259,18 @@ fun VrmModeScreen(
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (hasCameraPermission) {
-            VrmCameraPreview(
-                modifier = Modifier.fillMaxSize(),
+            // Headless — see VrmCameraTracking's doc comment for why this
+            // renders nothing. Camera frames still drive tracking exactly
+            // as before; they're just never displayed.
+            VrmCameraTracking(
                 trackPose = trackUpperBody,
                 onFaceResult = { latestFaceResult = it },
                 onHandResult = { latestHandResult = it },
                 onPoseResult = { latestPoseResult = it }
             )
-            // Item 8, step 5 — Filament rendering the picked VRM avatar file
-            // itself (unposed — see VrmAvatarView's doc comment for why
-            // tracking doesn't drive it yet), drawn over the camera preview.
-            // The camera preview keeps running underneath regardless (it's
-            // still tracking's actual input), just visually covered once
-            // there's an avatar to show instead of the raw feed.
+            // Item 8, step 5 — Filament rendering the picked VRM avatar
+            // file, driven by tracking — the only visible layer in VRM
+            // mode; there's no camera feed underneath it anymore.
             if (vrmBytes != null) {
                 VrmAvatarView(
                     modifier = Modifier.fillMaxSize(),
@@ -383,20 +379,30 @@ fun VrmModeScreen(
     }
 }
 
-/** Live front-camera feed via CameraX — plus, now, step 1 of the VRM
- *  pipeline: a second `ImageAnalysis` use case bound alongside `Preview`.
- *  Each frame is decoded to a [Bitmap]/`MPImage` exactly once here, then
- *  handed to all three landmarker helpers (face + hands always; pose only
- *  while [trackPose] is on, per the "Upper Body" Settings toggle) —
- *  avoids each helper redoing the same YUV conversion three times over.
- *  Whatever each detects is forwarded back up to [VrmModeScreen] via
+/** VRM mode's camera input — deliberately **not visual**: this used to
+ *  wrap CameraX's `PreviewView` in an `AndroidView` and draw it full-
+ *  screen underneath [VrmAvatarView]'s own `SurfaceView`, on the theory
+ *  that the avatar always visually "covers" the feed once one's loaded.
+ *  Two problems with that: (1) VRM mode should never show the raw camera
+ *  feed at all — only the virtual model — and (2) two independently
+ *  hardware-composited `SurfaceView`s stacked in the same window don't
+ *  reliably z-order the way regular `View`s do, which was almost
+ *  certainly contributing to the avatar rendering incorrectly (see
+ *  [VrmAvatarView]'s doc comment). Fixed by not binding a `Preview` use
+ *  case (the one that needs a visible surface) at all — camera frames
+ *  only ever need to reach `ImageAnalysis`'s analyzer, which needs no
+ *  surface of its own, so there's nothing to display and nothing to
+ *  composite against the Filament view. Every frame is decoded to a
+ *  [Bitmap]/`MPImage` exactly once here, then handed to all three
+ *  landmarker helpers (face + hands always; pose only while [trackPose]
+ *  is on, per the "Upper Body" Settings toggle) — avoids each helper
+ *  redoing the same YUV conversion three times over. Whatever each
+ *  detects is forwarded back up to [VrmModeScreen] via
  *  [onFaceResult]/[onHandResult]/[onPoseResult]. If a model asset isn't
- *  bundled yet (see [FaceLandmarkerHelper]'s doc comment), that helper's
- *  `create` returns null and its slot is simply skipped — the other two
- *  (and the preview itself) keep working regardless. */
+ *  bundled (see [FaceLandmarkerHelper]'s doc comment), that helper's
+ *  `create` returns null and its slot is simply skipped. */
 @Composable
-private fun VrmCameraPreview(
-    modifier: Modifier = Modifier,
+private fun VrmCameraTracking(
     trackPose: Boolean,
     onFaceResult: (FaceLandmarkerResult) -> Unit,
     onHandResult: (HandLandmarkerResult) -> Unit,
@@ -418,39 +424,33 @@ private fun VrmCameraPreview(
         }
     }
 
-    AndroidView(
-        modifier = modifier,
-        factory = { ctx ->
-            val previewView = PreviewView(ctx)
-            val providerFuture = ProcessCameraProvider.getInstance(ctx)
-            providerFuture.addListener({
-                val provider = providerFuture.get()
-                val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-                val analysis = ImageAnalysis.Builder()
-                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
-                    .also { useCase ->
-                        useCase.setAnalyzer(cameraExecutor) { imageProxy ->
-                            val timestampMs = System.currentTimeMillis()
-                            val rotationDegrees = imageProxy.imageInfo.rotationDegrees
-                            val bitmapBuffer = Bitmap.createBitmap(imageProxy.width, imageProxy.height, Bitmap.Config.ARGB_8888)
-                            imageProxy.use { bitmapBuffer.copyPixelsFromBuffer(it.planes[0].buffer) }
-                            val mpImage = BitmapImageBuilder(bitmapBuffer).build()
+    // No AndroidView/PreviewView, and no Preview use case — see this
+    // function's doc comment. Binding is one-shot per composition, same
+    // trigger (Unit) as the DisposableEffect's teardown above.
+    LaunchedEffect(trackPose) {
+        val provider = ProcessCameraProvider.getInstance(context).get()
+        val analysis = ImageAnalysis.Builder()
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+            .also { useCase ->
+                useCase.setAnalyzer(cameraExecutor) { imageProxy ->
+                    val timestampMs = System.currentTimeMillis()
+                    val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+                    val bitmapBuffer = Bitmap.createBitmap(imageProxy.width, imageProxy.height, Bitmap.Config.ARGB_8888)
+                    imageProxy.use { bitmapBuffer.copyPixelsFromBuffer(it.planes[0].buffer) }
+                    val mpImage = BitmapImageBuilder(bitmapBuffer).build()
 
-                            faceLandmarkerHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
-                            handLandmarkerHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
-                            if (trackPose) poseLandmarkerHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
-                        }
-                    }
-                runCatching {
-                    provider.unbindAll()
-                    provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, preview, analysis)
+                    faceLandmarkerHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
+                    handLandmarkerHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
+                    if (trackPose) poseLandmarkerHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
                 }
-            }, ContextCompat.getMainExecutor(ctx))
-            previewView
-        }
-    )
+            }
+        runCatching {
+            provider.unbindAll()
+            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, analysis)
+        }.onFailure { android.util.Log.e("VrmModeScreen", "Could not bind CameraX ImageAnalysis", it) }
+    }
 }
 
 /** VRM pipeline step 2 (smoothing): every current ARKit blendshape score,
@@ -560,7 +560,7 @@ private fun smoothedBodyWorldLandmarks(poseResult: PoseLandmarkerResult?, filter
  *
  * [trackUpperBody]/[trackFullBody] are threaded through from Settings —
  * [trackUpperBody] actually gates whether pose tracking runs at all (see
- * [VrmCameraPreview]'s `trackPose` param); [trackFullBody] doesn't change
+ * [VrmCameraTracking]'s `trackPose` param); [trackFullBody] doesn't change
  * anything yet, it's reserved for gating whether bone-rotation
  * retargeting uses the leg landmarks PoseLandmarker already outputs.
  * Face + hand tracking always run regardless of either.

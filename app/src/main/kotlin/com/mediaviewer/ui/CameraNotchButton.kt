@@ -84,30 +84,50 @@ fun CameraNotchButton(
     val density = LocalDensity.current
 
     val view = LocalView.current
-    var cutoutWidth by remember { mutableStateOf(28.dp) }
-    var cutoutHeight by remember { mutableStateOf(28.dp) }
+    // No-cutout fallback — small and near the very top, since it should
+    // only ever be seen on a device/emulator that genuinely has no cutout
+    // to hug at all.
+    var cutoutWidth by remember { mutableStateOf(20.dp) }
+    var cutoutHeight by remember { mutableStateOf(20.dp) }
     var cutoutCenterX by remember { mutableStateOf<Dp?>(null) }
     var cutoutCenterY by remember { mutableStateOf<Dp?>(null) }
     // Was a one-shot LaunchedEffect reading ViewCompat.getRootWindowInsets
     // exactly once: on real devices the very first composition frequently
     // runs *before* the system has dispatched WindowInsets to this view at
     // all, so that single read came back null and the button was stuck on
-    // the no-cutout fallback (28.dp, screen-top-center) for the rest of the
-    // session — which is exactly "too big and misaligned" for a real
-    // cutout that's usually much smaller and rarely dead-center. A
-    // persistent OnApplyWindowInsetsListener (plus an explicit
-    // requestApplyInsets() to make sure one dispatch actually happens)
-    // instead keeps picking up the real cutout rect whenever insets do
-    // arrive/change — first layout, rotation, fold, etc. — not just once.
+    // the no-cutout fallback forever. A persistent
+    // OnApplyWindowInsetsListener (plus an explicit requestApplyInsets() to
+    // make sure one dispatch actually happens) instead keeps picking up
+    // the real cutout whenever insets do arrive/change — first layout,
+    // rotation, fold, etc. — not just once.
     DisposableEffect(view) {
         fun applyFrom(insets: WindowInsetsCompat?) {
-            val rect = insets?.displayCutout?.boundingRects?.firstOrNull()
-            if (rect != null && rect.width() > 0 && rect.height() > 0) {
+            val cutout = insets?.displayCutout ?: return
+            val rect = cutout.boundingRects.firstOrNull { it.width() > 0 && it.height() > 0 }
+            if (rect != null) {
                 with(density) {
                     cutoutWidth = rect.width().toDp()
                     cutoutHeight = rect.height().toDp()
                     cutoutCenterX = rect.centerX().toDp()
                     cutoutCenterY = rect.centerY().toDp()
+                }
+                return
+            }
+            // Some OEM skins report an empty boundingRects list for a
+            // punch-hole front camera even though the cutout genuinely
+            // exists — DisplayCutout's safe-inset fields are a second,
+            // independent way the platform exposes the same cutout and
+            // are worth trying before giving up and falling back to a
+            // guessed size/position entirely.
+            val safeTop = cutout.safeInsetTop
+            val safeLeft = cutout.safeInsetLeft
+            val safeRight = cutout.safeInsetRight
+            if (safeTop > 0 && (safeLeft > 0 || safeRight > 0)) {
+                with(density) {
+                    cutoutHeight = safeTop.toDp()
+                    cutoutWidth = safeTop.toDp() // no width signal from safe insets alone — approximate as square, closer than the generic no-cutout fallback
+                    cutoutCenterY = (safeTop / 2).toDp()
+                    cutoutCenterX = null // still unknown — stays screen-center horizontally
                 }
             }
         }
@@ -165,7 +185,13 @@ fun CameraNotchButton(
             Modifier.offset(x = xOffset, y = yOffset).width(width).height(bubbleHeight).clip(shape)
                 .then(
                     if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
-                    else Modifier.background(tint.copy(alpha = 0.22f)).border(1.dp, tint.copy(alpha = 0.55f), shape)
+                    // Bumped up from 0.22f/0.55f — at the old alphas the
+                    // tint was hard to actually see against most feed
+                    // backgrounds, which likely reads as "not reflecting
+                    // the profile color" even though the same tint value
+                    // every other adaptive-color element uses is wired
+                    // through correctly here too.
+                    else Modifier.background(tint.copy(alpha = 0.32f)).border(1.5.dp, tint.copy(alpha = 0.75f), shape)
                 )
         ) {
             if (!expanded) {
