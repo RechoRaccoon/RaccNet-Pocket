@@ -147,13 +147,16 @@ fun CameraNotchButton(
 
     // Collapsed, this is a bare outline ring. It's always a CIRCLE (never
     // an oval): diameter = the larger cutout dimension + 1dp per side,
-    // Ring diameter: fit the cutout with a little breathing room on every
-    // side, hard-capped at 28dp so it hugs the lens instead of reading as
-    // a big pill. Tight rects still get a tight ring; loose rects get the
-    // cap. Centered on the real cutout position.
+    // Ring diameter: use the SMALLER cutout dimension + padding. For a
+    // punch-hole the rect is square so it doesn't matter; for a wide
+    // notch, the height (not the width) approximates the lens diameter.
+    // Using maxOf() here made the ring huge on wide cutouts. Capped at
+    // 28dp so a pathological rect can't blow it up — the cap is a safety
+    // bound, not a device tune; the size still comes from the system's
+    // own measurement.
     val outlinePadding = 1.dp
     val sideWidth = 56.dp
-    val ringSize = minOf(maxOf(cutoutWidth, cutoutHeight) + outlinePadding * 2, 28.dp)
+    val ringSize = minOf(minOf(cutoutWidth, cutoutHeight) + outlinePadding * 2, 28.dp)
     val collapsedWidth = ringSize
     val expandedWidth = collapsedWidth + sideWidth * 2
     // Smooth but snappy, no bounce: a fast non-bouncy spring rather than
@@ -182,11 +185,13 @@ fun CameraNotchButton(
     // tuned for one phone and wrong on others — the rect is the platform's
     // own measurement of where the cutout is, so trusting it is the only
     // device-agnostic positioning.
+    // Position: center the ring on the system's cutout rect center.
+    // No manual nudge — the rect is the platform's own measurement of
+    // where the cutout is. A hardcoded dp offset would be tuned for one
+    // device and wrong on others. If the rect is slightly off, that's the
+    // system's data; trusting it is the only device-agnostic positioning.
     val screenWidth = LocalConfiguration.current.screenWidthDp.dp
-    // Nudge down 2dp — the system cutout rect sits slightly above the
-    // actual lens on this device.
-    val yNudge = 2.dp
-    val yAbsolute = cutoutCenterY?.let { it - ringSize / 2 + yNudge } ?: (12.dp + yNudge)
+    val yAbsolute = cutoutCenterY?.let { it - ringSize / 2 } ?: 12.dp
     // The bubble is ALWAYS centered on the cutout's center X, using the
     // CURRENT ANIMATED width — not a switched target. This keeps x and
     // width in sync during the animation so the pill grows symmetrically
