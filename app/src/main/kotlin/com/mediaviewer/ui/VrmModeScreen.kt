@@ -391,6 +391,13 @@ fun VrmModeScreen(
                     modifier = Modifier.fillMaxSize(),
                     vrmBytes = vrmBytes,
                     parsedVrmData = parsedVrmData,
+                    // Item: VRM background should be a flat fill of the
+                    // user's own profile color, not Filament's default
+                    // black — `tint` here is already exactly that (see
+                    // MainActivity's vrmTint: the logged-in user's own
+                    // avatar dominant color), same color the X button and
+                    // bottom bar already wear.
+                    backgroundTint = tint,
                     onRetargetTargetReady = { retargetTarget = it },
                     onTexturesApplied = { texturesApplied = it }
                 )
@@ -553,13 +560,51 @@ private fun VrmCameraTracking(
     // Written from the analyzer thread (cameraExecutor), read there too —
     // AtomicLong so the throttle check can't race.
     val lastSubmittedMs = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+    // NOT pooling/reusing this bitmap across frames, on purpose: all three
+    // helpers' detectAsync() calls below are LIVE_STREAM-mode MediaPipe
+    // calls, which return immediately and may still be reading this exact
+    // bitmap on a native thread after this function returns. Overwriting
+    // the same Bitmap object for the next frame before that finishes would
+    // race a native reader against this thread's copyPixelsFromBuffer —
+    // a fresh allocation per accepted frame (throttled to ~15fps, so this
+    // is a small, bounded rate) is the correctness-safe choice here.
+    
     // Helpers are created once by VrmModeScreen (off the UI thread — see
     // trackersReady), already wired to their result listeners; this
     // composable only owns the camera binding, so toggling trackPose
     // rebinds without rebuilding the GPU pipelines.
 
+    // Item: closing VRM mode (the X button) used to crash the app. The
+    // camera was NEVER explicitly unbound on close — only the analyzer's
+    // executor was shut down — but VRM mode closing doesn't stop the
+    // Activity (it's a Compose overlay closing, not a lifecycle
+    // transition), so ProcessCameraProvider kept the front camera bound
+    // and streaming after the screen was gone. CameraX would then try to
+    // post the next frame to an executor that had already been shut down
+    // (a RejectedExecutionException CameraX's own internal dispatch isn't
+    // guaranteed to swallow cleanly), or — worse — a frame already
+    // in-flight on the analyzer thread could call into a MediaPipe helper
+    // VrmModeScreen was concurrently closing in its own onDispose, racing
+    // a native task-graph teardown from another thread (a native crash,
+    // not a catchable JVM exception, if it lost that race).
+    //
+    // Fix, in order: (1) unbind the camera FIRST, synchronously, so no
+    // new frame is ever handed to the analyzer again; (2) only THEN shut
+    // the executor down gracefully (shutdown(), not shutdownNow()) and
+    // wait briefly for any already-in-flight analyze() call to finish —
+    // so by the time this function returns, we know for certain no more
+    // detectAsync() calls will reach the helpers VrmModeScreen is about
+    // to close right after this.
     DisposableEffect(Unit) {
-        onDispose { cameraExecutor.shutdown() }
+        onDispose {
+            runCatching {
+                ProcessCameraProvider.getInstance(context).get().unbindAll()
+            }.onFailure { android.util.Log.e("VrmModeScreen", "unbindAll() on close failed", it) }
+            cameraExecutor.shutdown()
+            runCatching {
+                cameraExecutor.awaitTermination(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+            }.onFailure { android.util.Log.e("VrmModeScreen", "cameraExecutor didn't drain cleanly", it) }
+        }
     }
 
     // No AndroidView/PreviewView, and no Preview use case — see this

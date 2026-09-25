@@ -191,15 +191,6 @@ fun CameraNotchButton(
     // device and wrong on others. If the rect is slightly off, that's the
     // system's data; trusting it is the only device-agnostic positioning.
     val screenWidth = LocalConfiguration.current.screenWidthDp.dp
-    val yAbsolute = cutoutCenterY?.let { it - ringSize / 2 } ?: 12.dp
-    // The bubble is ALWAYS centered on the cutout's center X, using the
-    // CURRENT ANIMATED width — not a switched target. This keeps x and
-    // width in sync during the animation so the pill grows symmetrically
-    // outward from the ring instead of jumping sideways. (The old code
-    // switched x instantly while width animated, which read as a
-    // different bubble sliding in from the left.)
-    val centerX = cutoutCenterX ?: screenWidth / 2
-    val xAbsolute = centerX - width / 2
 
     // Always fillMaxSize so the coordinate system is the whole screen and
     // the tap-away catcher (expanded) genuinely covers everything.
@@ -218,10 +209,33 @@ fun CameraNotchButton(
         }
 
         Box(
-            Modifier.offset(
-                x = xAbsolute,
-                y = yAbsolute
-            ).width(width).height(ringSize).clip(shape)
+            Modifier
+                // Item: on the Pixel 8a specifically, this ring sat very
+                // slightly off-center from the real cutout. Root cause —
+                // `width` and `ringSize` are Dp values that Compose rounds
+                // to whole pixels independently wherever they're each
+                // used: once inside `.width(width)`/`.height(ringSize)`
+                // below, and (with the old `Modifier.offset(x: Dp, y: Dp)`)
+                // again, SEPARATELY, for the x/y position computed from
+                // `centerX - width / 2` — two independent roundings of
+                // expressions that share the same underlying Dp value can
+                // land on different integers by up to 1px, and how often
+                // that happens (and which device shows it) depends on the
+                // screen's density scale factor. Fixed by rounding `width`/
+                // `ringSize` to pixels exactly ONCE, in this single
+                // layout-phase lambda, and deriving x/y from that SAME
+                // rounded pixel value — the offset and the size Compose
+                // actually renders can now never disagree.
+                .offset {
+                    val widthPx = width.roundToPx()
+                    val ringPx = ringSize.roundToPx()
+                    val centerXPx = (cutoutCenterX?.roundToPx()) ?: (screenWidth.roundToPx() / 2)
+                    val centerYPx = cutoutCenterY?.roundToPx()
+                    val xPx = centerXPx - widthPx / 2
+                    val yPx = centerYPx?.let { it - ringPx / 2 } ?: 12.dp.roundToPx()
+                    androidx.compose.ui.unit.IntOffset(xPx, yPx)
+                }
+                .width(width).height(ringSize).clip(shape)
                 .then(
                     if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
                     // Flat mode: a translucent tinted fill under a thin

@@ -597,6 +597,22 @@ private fun AppRoot(viewModel: MainViewModel) {
         // handing off to MainFeedScreen to actually show it (see
         // onSeedSubImageIndex below and ProfileOverlay.onSeedSubImageIndex).
         val subImageIndices = remember { mutableStateMapOf<String, Int>() }
+        // Item: VRM mode should "cut all processing from the rest of the
+        // app" while it's open, not just visually cover it. Before this,
+        // MainFeedScreen stayed composed (and therefore its image/GIF
+        // loaders, any autoplaying video, and its own recomposition loop
+        // all kept running) the entire time VrmModeScreen was drawn on
+        // top of it — competing with VRM mode's own camera + three
+        // MediaPipe landmarkers + Filament rendering for CPU, GPU, and
+        // memory the whole time, and a real contributor to the OOMs and
+        // jank VRM mode was seeing. Unmounting it entirely while VRM mode
+        // is open (rather than just hiding it) lets Compose actually
+        // cancel its in-flight image loads and dispose its players
+        // instead of leaving them running off-screen. Scroll position
+        // inside MainFeedScreen isn't preserved across this — an
+        // acceptable trade for a screen whose whole point is to run VRM
+        // tracking/rendering as smoothly as possible.
+        if (!vrmModeOpen) {
         MainFeedScreen(
             subImageIndices           = subImageIndices,
             mediaItems                = mediaItems,
@@ -787,6 +803,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             pinterestThreeColumns     = pinterestThreeColumns,
             onTogglePinterestThreeColumns = viewModel::setPinterestThreeColumns
         )
+        } // if (!vrmModeOpen) — see the comment above this call
 
         if (composePostOpen) {
             com.mediaviewer.ui.ComposePostScreen(
