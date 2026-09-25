@@ -207,10 +207,15 @@ fun VrmModeScreen(
     var faceHelper by remember { mutableStateOf<FaceLandmarkerHelper?>(null) }
     var handHelper by remember { mutableStateOf<HandLandmarkerHelper?>(null) }
     var poseHelper by remember { mutableStateOf<PoseLandmarkerHelper?>(null) }
+    var faceHelperError by remember { mutableStateOf<String?>(null) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
         runCatching {
             val ctx = context.applicationContext
-            val face = FaceLandmarkerHelper.create(ctx, onResult = { latestFaceResult = it })
+            val face = FaceLandmarkerHelper.create(
+                ctx,
+                onResult = { latestFaceResult = it },
+                onError = { faceHelperError = it }
+            )
             val hand = HandLandmarkerHelper.create(ctx, onResult = { latestHandResult = it })
             val pose = PoseLandmarkerHelper.create(ctx, onResult = { latestPoseResult = it })
             faceHelper = face
@@ -406,6 +411,7 @@ fun VrmModeScreen(
                 trackUpperBody = trackUpperBody,
                 trackFullBody = trackFullBody,
                 smoothedFaceBlendshapes = smoothedBlendshapes,
+                faceHelperError = faceHelperError,
                 handResult = latestHandResult,
                 poseResult = latestPoseResult,
                 parsedVrmData = parsedVrmData,
@@ -700,6 +706,7 @@ private fun VrmTrackingOverlay(
     trackUpperBody: Boolean,
     trackFullBody: Boolean,
     smoothedFaceBlendshapes: Map<String, Float>,
+    faceHelperError: String?,
     handResult: HandLandmarkerResult?,
     poseResult: PoseLandmarkerResult?,
     parsedVrmData: VrmData?,
@@ -716,6 +723,8 @@ private fun VrmTrackingOverlay(
         debugBlendshapeNames.joinToString("\n") { name ->
             "$name: ${"%.2f".format(smoothedFaceBlendshapes[name] ?: 0f)}"
         }
+    } else if (faceHelperError != null) {
+        "face: FAILED to start\n$faceHelperError"
     } else {
         "face: no landmarker output yet\n(check face_landmarker.task in assets/)"
     }

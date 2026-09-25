@@ -63,25 +63,35 @@ class FaceLandmarkerHelper private constructor(
         private const val TAG = "FaceLandmarkerHelper"
         private const val MODEL_ASSET_PATH = "face_landmarker.task"
 
-        /** Returns null (and logs why) instead of throwing if the model
-         *  asset above isn't bundled yet, so callers — VrmCameraTracking —
-         *  can fall back to "no tracking data" instead of crashing the
-         *  whole VRM screen over a missing asset file. */
-        fun create(context: Context, onResult: (FaceLandmarkerResult) -> Unit): FaceLandmarkerHelper? {
+        /** Returns null (and reports why via [onError]) instead of throwing if the model
+         *  asset above isn't bundled yet, so callers — VrmCameraTracking — can fall back
+         *  to "no tracking data" instead of crashing the whole VRM screen over a missing
+         *  asset file. The [onError] message is surfaced on-screen in VrmModeScreen's
+         *  debug overlay — Logcat isn't reachable from the user's phone, so a logged-
+         *  only failure reads as "tracking silently never starts" with no way to know why. */
+        fun create(
+            context: Context,
+            onResult: (FaceLandmarkerResult) -> Unit,
+            onError: (String) -> Unit = {}
+        ): FaceLandmarkerHelper? {
             // Try GPU first, fall back to CPU. The GPU delegate can fail
             // on specific devices/models even when the task file is fine —
             // without this fallback, face tracking silently never starts
             // ("no landmarker output yet") while hand tracking works.
-            return tryCreate(context, Delegate.GPU, onResult)
-                ?: tryCreate(context, Delegate.CPU, onResult).also {
+            var lastError: String? = null
+            val helper = tryCreate(context, Delegate.GPU, onResult, onError = { lastError = it })
+                ?: tryCreate(context, Delegate.CPU, onResult, onError = { lastError = it }).also {
                     if (it != null) Log.w(TAG, "FaceLandmarker GPU failed, using CPU")
                 }
+            if (helper == null && lastError != null) onError(lastError!!)
+            return helper
         }
 
         private fun tryCreate(
             context: Context,
             delegate: Delegate,
-            onResult: (FaceLandmarkerResult) -> Unit
+            onResult: (FaceLandmarkerResult) -> Unit,
+            onError: (String) -> Unit
         ): FaceLandmarkerHelper? =
             runCatching {
                 val baseOptions = BaseOptions.builder()
@@ -112,6 +122,7 @@ class FaceLandmarkerHelper private constructor(
                 FaceLandmarkerHelper(FaceLandmarker.createFromOptions(context, options))
             }.onFailure {
                 Log.e(TAG, "Could not create FaceLandmarker — is $MODEL_ASSET_PATH in app/src/main/assets/?", it)
+                onError("FaceLandmarker($delegate) failed: ${it.message}")
             }.getOrNull()
     }
 }
