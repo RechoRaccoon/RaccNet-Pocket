@@ -245,9 +245,21 @@ private fun loadVrmInto(viewer: ModelViewer, bytes: ByteArray, parsedVrmData: Vr
     val direct = ByteBuffer.allocateDirect(bytes.size).order(java.nio.ByteOrder.nativeOrder())
     direct.put(bytes)
     direct.flip()
+    // Parse MToon materials BEFORE loading — we need the texture data to
+    // manually apply after gltfio (which doesn't support MToon) loads.
+    val mtoonParseResult = com.mediaviewer.util.MToonMaterialParser.parse(bytes)
     val failure = runCatching {
         viewer.destroyModel()
         viewer.loadModelGlb(direct)
+        // Apply MToon textures: gltfio doesn't support the MToon shader,
+        // so materials load without textures. Manually wire them up.
+        val asset = viewer.asset
+        if (asset != null && mtoonParseResult != null) {
+            val applied = com.mediaviewer.util.MToonTextureApplier.applyTextures(
+                viewer.engine, asset, mtoonParseResult
+            )
+            android.util.Log.i("VrmAvatarView", "Applied MToon textures to $applied materials")
+        }
         viewer.transformToUnitCube()
         if (parsedVrmData?.specVersion == VrmSpecVersion.VRM_0) {
             fixVrm0Facing(viewer)
