@@ -191,28 +191,43 @@ object MToonTextureApplier {
                         "parsed=${parseResult.materials.size}. Attempting best-effort mapping.")
             }
 
+            // Resolve glTF material index -> the MaterialInstance(s) gltfio
+            // actually created for it, via node -> primitive. The old code
+            // indexed materialInstances by glTF material index, but that
+            // array is in creation order, not glTF order — so textures
+            // landed on the wrong materials (the wrongly-colored parts).
+            // MaterialInstance.getName() isn't usable instead: Filament
+            // returns "" for it in release builds.
+            val rm = engine.renderableManager
+            val byMaterialIndex = HashMap<Int, MutableSet<com.google.android.filament.MaterialInstance>>()
+            for (ref in parseResult.primitiveMaterials) {
+                val entity = runCatching { asset.getFirstEntityByName(ref.nodeName) }.getOrNull() ?: continue
+                if (entity == 0) continue
+                val ri = rm.getInstance(entity)
+                if (ri == 0 || ref.primitiveIndex >= rm.getPrimitiveCount(ri)) continue
+                val mi = runCatching { rm.getMaterialInstanceAt(ri, ref.primitiveIndex) }.getOrNull() ?: continue
+                byMaterialIndex.getOrPut(ref.materialIndex) { mutableSetOf() }.add(mi)
+            }
             for (matInfo in parseResult.materials) {
+                if (!matInfo.needsManualBinding) continue
                 val texIndex = matInfo.baseColorTextureIndex ?: continue
                 val decoded = decodedTextures[texIndex] ?: continue
-
-                if (matInfo.materialIndex >= materialInstances.size) continue
-                val materialInstance = materialInstances[matInfo.materialIndex]
-
+                val targets = byMaterialIndex[matInfo.materialIndex]
+                if (targets.isNullOrEmpty()) {
+                    Log.w(TAG, "No material instance found for '${matInfo.name}' — skipping rather than guessing")
+                    continue
+                }
                 val texture = createFilamentTexture(engine, decoded) ?: continue
-
                 try {
-                    // setParameter takes TextureSampler, not Texture.Sampler --
-                    // verified against Filament 1.51.6 MaterialInstance source.
-                    materialInstance.setParameter("baseColorMap", texture, TextureSampler())
-                    if (!matInfo.baseColorFactor.contentEquals(floatArrayOf(1f, 1f, 1f, 1f))) {
-                        materialInstance.setParameter("baseColorFactor",
-                            matInfo.baseColorFactor[0],
-                            matInfo.baseColorFactor[1],
-                            matInfo.baseColorFactor[2],
-                            matInfo.baseColorFactor[3])
+                    for (materialInstance in targets) {
+                        materialInstance.setParameter("baseColorMap", texture, TextureSampler())
+                        if (!matInfo.baseColorFactor.contentEquals(floatArrayOf(1f, 1f, 1f, 1f))) {
+                            materialInstance.setParameter("baseColorFactor",
+                                matInfo.baseColorFactor[0], matInfo.baseColorFactor[1],
+                                matInfo.baseColorFactor[2], matInfo.baseColorFactor[3])
+                        }
                     }
                     applied++
-                    Log.i(TAG, "Applied texture to material '${matInfo.name}' (index ${matInfo.materialIndex})")
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to set texture on material '${matInfo.name}': ${e.message}")
                     engine.destroyTexture(texture)

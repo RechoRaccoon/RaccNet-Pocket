@@ -27,6 +27,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -35,9 +38,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.view.OnApplyWindowInsetsListener
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import com.mediaviewer.util.rememberHapticTap
 
 /**
@@ -82,120 +82,99 @@ fun CameraNotchButton(
     val density = LocalDensity.current
 
     val view = LocalView.current
-    // No-cutout fallback — small and near the very top, since it should
-    // only ever be seen on a device/emulator that genuinely has no cutout
-    // to hug at all.
-    var cutoutWidth by remember { mutableStateOf(20.dp) }
-    var cutoutHeight by remember { mutableStateOf(20.dp) }
-    var cutoutCenterX by remember { mutableStateOf<Dp?>(null) }
-    var cutoutCenterY by remember { mutableStateOf<Dp?>(null) }
-    // Was a one-shot LaunchedEffect reading ViewCompat.getRootWindowInsets
-    // exactly once: on real devices the very first composition frequently
-    // runs *before* the system has dispatched WindowInsets to this view at
-    // all, so that single read came back null and the button was stuck on
-    // the no-cutout fallback forever. A persistent
-    // OnApplyWindowInsetsListener (plus an explicit requestApplyInsets() to
-    // make sure one dispatch actually happens) instead keeps picking up
-    // the real cutout whenever insets do arrive/change — first layout,
-    // rotation, fold, etc. — not just once.
-    DisposableEffect(view) {
-        fun applyFrom(insets: WindowInsetsCompat?) {
-            val cutout = insets?.displayCutout ?: return
-            // Prefer the SMALLEST non-empty rect — some devices report a
-            // loose rect that covers the whole notch area; the smallest
-            // one hugs the actual camera lens best.
-            val rect = cutout.boundingRects
-                .filter { it.width() > 0 && it.height() > 0 }
-                .minByOrNull { it.width() * it.height() }
-            if (rect != null) {
-                with(density) {
-                    cutoutWidth = rect.width().toDp()
-                    cutoutHeight = rect.height().toDp()
-                    cutoutCenterX = rect.centerX().toDp()
-                    cutoutCenterY = rect.centerY().toDp()
-                }
-                return
-            }
-            // Some OEM skins report an empty boundingRects list for a
-            // punch-hole front camera even though the cutout genuinely
-            // exists — DisplayCutout's safe-inset fields are a second,
-            // independent way the platform exposes the same cutout and
-            // are worth trying before giving up and falling back to a
-            // guessed size/position entirely.
-            val safeTop = cutout.safeInsetTop
-            val safeLeft = cutout.safeInsetLeft
-            val safeRight = cutout.safeInsetRight
-            if (safeTop > 0 && (safeLeft > 0 || safeRight > 0)) {
-                with(density) {
-                    cutoutHeight = safeTop.toDp()
-                    cutoutWidth = safeTop.toDp() // no width signal from safe insets alone — approximate as square, closer than the generic no-cutout fallback
-                    cutoutCenterY = (safeTop / 2).toDp()
-                    cutoutCenterX = null // still unknown — stays screen-center horizontally
-                }
+    val configuration = LocalConfiguration.current
+
+    // Everything in raw window pixels (floats), converted once at draw time.
+    var cutoutCenterPx by remember { mutableStateOf<androidx.compose.ui.geometry.Offset?>(null) }
+    var cutoutDiameterPx by remember { mutableStateOf<Float?>(null) }
+    // Where this composable's own top-left sits in the window. The cutout is
+    // reported in WINDOW coordinates; if anything above us in the layout is
+    // offset/padded even slightly, subtracting this cancels it out.
+    var originInWindow by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
+
+    // ── Why it was slightly off ─────────────────────────────────────────
+    // 1. It installed its OWN OnApplyWindowInsetsListener on the root
+    //    ComposeView — the same single slot Compose's WindowInsets system
+    //    uses. That silently replaced Compose's listener (and set it to
+    //    null when the button left the screen, e.g. entering VRM mode), so
+    //    inset-driven layout elsewhere could go stale. Now it only READS
+    //    rootWindowInsets; it never installs a listener.
+    // 2. It used DisplayCutout.boundingRects — integer rects that are
+    //    rounded outward and can sit a pixel or so off the actual hole.
+    //    On Android 12+ the cutout PATH (the real circle) is used instead.
+    // 3. Position/size were rounded to whole pixels separately. Now the
+    //    size is whole pixels and the leftover fraction is applied as a
+    //    sub-pixel translation, so the ring's center is exact.
+    fun readCutout() {
+        val cutout = view.rootWindowInsets?.displayCutout ?: return
+        var bounds: android.graphics.RectF? = null
+        val rects = cutout.boundingRects.filter { it.width() > 0 && it.height() > 0 }
+        if (android.os.Build.VERSION.SDK_INT >= 31 && rects.size <= 1) {
+            cutout.cutoutPath?.let { path ->
+                val r = android.graphics.RectF()
+                @Suppress("DEPRECATION") path.computeBounds(r, true)
+                if (r.width() > 0f && r.height() > 0f) bounds = r
             }
         }
-        // Covers the case insets are already available by now.
-        applyFrom(ViewCompat.getRootWindowInsets(view))
-        val listener = OnApplyWindowInsetsListener { _, insets ->
-            applyFrom(insets)
-            insets // don't consume — other views still need the real insets
+        if (bounds == null) {
+            // Smallest rect hugs a punch-hole best on multi-rect devices.
+            rects.minByOrNull { it.width() * it.height() }?.let { bounds = android.graphics.RectF(it) }
         }
-        ViewCompat.setOnApplyWindowInsetsListener(view, listener)
-        view.requestApplyInsets()
-        onDispose { ViewCompat.setOnApplyWindowInsetsListener(view, null) }
+        val b = bounds
+        if (b != null) {
+            cutoutCenterPx = androidx.compose.ui.geometry.Offset(b.centerX(), b.centerY())
+            cutoutDiameterPx = minOf(b.width(), b.height())
+        } else if (cutout.safeInsetTop > 0) {
+            // OEM skins with no rects/path: approximate from the safe inset.
+            cutoutCenterPx = null
+            cutoutDiameterPx = cutout.safeInsetTop * 0.6f
+        }
+    }
+    // Re-read on rotation / fold / resize.
+    androidx.compose.runtime.LaunchedEffect(configuration.orientation, configuration.screenWidthDp, configuration.screenHeightDp) {
+        readCutout()
     }
 
-    // Collapsed, this is a bare outline ring. It's always a CIRCLE (never
-    // an oval): diameter = the larger cutout dimension + 1dp per side,
-    // Ring diameter: use the SMALLER cutout dimension + padding. For a
-    // punch-hole the rect is square so it doesn't matter; for a wide
-    // notch, the height (not the width) approximates the lens diameter.
-    // Using maxOf() here made the ring huge on wide cutouts. Capped at
-    // 28dp so a pathological rect can't blow it up — the cap is a safety
-    // bound, not a device tune; the size still comes from the system's
-    // own measurement.
+    // Collapsed: a circle hugging the lens, 1dp of outline around it.
     val outlinePadding = 1.dp
     val sideWidth = 56.dp
-    val ringSize = minOf(minOf(cutoutWidth, cutoutHeight) + outlinePadding * 2, 28.dp)
+    val outlinePaddingPx = with(density) { outlinePadding.toPx() }
+    val maxRingPx = with(density) { 28.dp.toPx() }
+    val ringPxFloat = ((cutoutDiameterPx ?: with(density) { 18.dp.toPx() }) + outlinePaddingPx * 2).coerceAtMost(maxRingPx)
+    // Whole pixels for layout; exact centering handled by the translation below.
+    val ringPx = kotlin.math.round(ringPxFloat).toInt().coerceAtLeast(1)
+    val ringSize = with(density) { ringPx.toDp() }
     val collapsedWidth = ringSize
     val expandedWidth = collapsedWidth + sideWidth * 2
-    // Smooth but snappy, no bounce: a fast non-bouncy spring rather than
-    // the old overshooting one.
     val width by animateDpAsState(
         targetValue = if (expanded) expandedWidth else collapsedWidth,
         animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessHigh),
         label = "notchBubbleWidth"
     )
-    // Collapsed the ring is a circle; expanded it stretches into a pill.
-    // CircleShape keeps the collapsed state perfectly round regardless of
-    // the cap — no oval.
     val collapsedShape = CircleShape
     val expandedShape = RoundedCornerShape(50)
     val shape = if (expanded) expandedShape else collapsedShape
-
-    // Absolute positioning from the screen's top-left corner — NOT relative
-    // to a centered parent. The cutout rect is already in screen/pixel
-    // coordinates (edge-to-edge window, so window == screen), and this
-    // container is always fillMaxSize with TopStart alignment, so
-    // offset(x, y) lands the ring's center exactly on the cutout's center.
-    // No other UI element's position, padding, or alignment can push it.
-    //
-    // NO manual nudge: the ring centers on the system's reported cutout
-    // rect, whatever it is on this device. A hardcoded dp offset would be
-    // tuned for one phone and wrong on others — the rect is the platform's
-    // own measurement of where the cutout is, so trusting it is the only
-    // device-agnostic positioning.
-    // Position: center the ring on the system's cutout rect center.
-    // No manual nudge — the rect is the platform's own measurement of
-    // where the cutout is. A hardcoded dp offset would be tuned for one
-    // device and wrong on others. If the rect is slightly off, that's the
-    // system's data; trusting it is the only device-agnostic positioning.
     val screenWidth = LocalConfiguration.current.screenWidthDp.dp
+
+    /** Exact (float) top-left of the bubble in THIS composable's space. */
+    fun bubbleTopLeft(widthPx: Int, fallbackCenterX: Float, fallbackTop: Float): androidx.compose.ui.geometry.Offset {
+        val center = cutoutCenterPx
+        val cx = (center?.x ?: fallbackCenterX) - originInWindow.x
+        val left = cx - widthPx / 2f
+        val top = if (center != null) center.y - originInWindow.y - ringPx / 2f else fallbackTop
+        return androidx.compose.ui.geometry.Offset(left, top)
+    }
 
     // Always fillMaxSize so the coordinate system is the whole screen and
     // the tap-away catcher (expanded) genuinely covers everything.
     Box(
-        modifier.then(Modifier.fillMaxSize()),
+        modifier.then(Modifier.fillMaxSize())
+            .then(Modifier.onGloballyPositioned { coords ->
+                val pos = coords.positionInWindow()
+                if (pos != originInWindow) originInWindow = pos
+                // Cheap, and catches insets that arrived after first layout.
+                if (cutoutCenterPx == null) readCutout()
+            }),
         contentAlignment = Alignment.TopStart
     ) {
         // Tap-away catcher: only present while expanded. Claims the whole
@@ -210,30 +189,16 @@ fun CameraNotchButton(
 
         Box(
             Modifier
-                // Item: on the Pixel 8a specifically, this ring sat very
-                // slightly off-center from the real cutout. Root cause —
-                // `width` and `ringSize` are Dp values that Compose rounds
-                // to whole pixels independently wherever they're each
-                // used: once inside `.width(width)`/`.height(ringSize)`
-                // below, and (with the old `Modifier.offset(x: Dp, y: Dp)`)
-                // again, SEPARATELY, for the x/y position computed from
-                // `centerX - width / 2` — two independent roundings of
-                // expressions that share the same underlying Dp value can
-                // land on different integers by up to 1px, and how often
-                // that happens (and which device shows it) depends on the
-                // screen's density scale factor. Fixed by rounding `width`/
-                // `ringSize` to pixels exactly ONCE, in this single
-                // layout-phase lambda, and deriving x/y from that SAME
-                // rounded pixel value — the offset and the size Compose
-                // actually renders can now never disagree.
                 .offset {
-                    val widthPx = width.roundToPx()
-                    val ringPx = ringSize.roundToPx()
-                    val centerXPx = (cutoutCenterX?.roundToPx()) ?: (screenWidth.roundToPx() / 2)
-                    val centerYPx = cutoutCenterY?.roundToPx()
-                    val xPx = centerXPx - widthPx / 2
-                    val yPx = centerYPx?.let { it - ringPx / 2 } ?: 12.dp.roundToPx()
-                    androidx.compose.ui.unit.IntOffset(xPx, yPx)
+                    val tl = bubbleTopLeft(width.roundToPx(), screenWidth.toPx() / 2f, 12.dp.toPx())
+                    androidx.compose.ui.unit.IntOffset(kotlin.math.floor(tl.x).toInt(), kotlin.math.floor(tl.y).toInt())
+                }
+                .graphicsLayer {
+                    // Sub-pixel remainder, so the ring's center lands exactly
+                    // on the lens center instead of up to 1px away.
+                    val tl = bubbleTopLeft(width.roundToPx(), screenWidth.toPx() / 2f, 12.dp.toPx())
+                    translationX = tl.x - kotlin.math.floor(tl.x)
+                    translationY = tl.y - kotlin.math.floor(tl.y)
                 }
                 .width(width).height(ringSize).clip(shape)
                 .then(

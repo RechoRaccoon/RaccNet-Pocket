@@ -293,9 +293,13 @@ object AvatarRetargeter {
             Quaternion.fromRotationColumnMajorMatrix(facialTransformationMatrix)
         }.getOrNull() ?: return
 
-        // See this function's doc comment, point 2 — flip yaw (Y) and
-        // roll (Z), keep pitch (X), the original starting-guess remap.
-        val remapped = Quaternion(tracked.x, -tracked.y, -tracked.z, tracked.w)
+        // See this function's doc comment, point 2. Verified on-device:
+        // with Y and Z flipped, left/right turning was correct but looking
+        // UP made the avatar look DOWN — so pitch (X) is flipped too now.
+        // (Tested in landscape, the one orientation where the camera frame
+        // already reached MediaPipe upright; portrait now gets the same
+        // upright frame, so this holds in both.)
+        val remapped = Quaternion(-tracked.x, -tracked.y, -tracked.z, tracked.w)
 
         val calibration = target.headCalibration
         if (calibration == null) {

@@ -20,6 +20,7 @@ import java.util.concurrent.Executors
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -211,43 +212,78 @@ fun VrmModeScreen(
     var faceHelperError by remember { mutableStateOf<String?>(null) }
     var cameraError by remember { mutableStateOf<String?>(null) }
     var cameraFrameCount by remember { mutableStateOf(0) }
+    // Size of the upright (already-rotated) frame MediaPipe sees — used by
+    // the tracking preview box to draw landmarks at the right aspect ratio.
+    var trackingFrameWidth by remember { mutableStateOf(480) }
+    var trackingFrameHeight by remember { mutableStateOf(640) }
+
+    // ONE single-thread executor owns every call into the MediaPipe helpers:
+    // the camera analyzer runs on it, and the helpers are closed on it too.
+    // Because it's single-threaded, "close" is queued strictly after any
+    // frame that's already being analyzed — so a detectAsync() can never
+    // race a close() on another thread (a native crash, and one of the ways
+    // the X button used to take the app down). Nothing here ever blocks the
+    // UI thread waiting on it.
+    val trackingExecutor = remember { Executors.newSingleThreadExecutor() }
+
     androidx.compose.runtime.LaunchedEffect(Unit) {
-        runCatching {
-            // Use the Activity context, NOT applicationContext — the old
-            // working version passed the Activity context directly, and
-            // MediaPipe's GPU delegate init may need it. The application
-            // context was introduced with the background-loading refactor
-            // and correlates with face tracking dying.
-            val face = FaceLandmarkerHelper.create(
-                context,
-                onResult = { 
-                    latestFaceResult = it
-                    faceResultCount++
-                },
-                onError = { faceHelperError = it }
-            )
-            val hand = HandLandmarkerHelper.create(context, onResult = { latestHandResult = it })
-            val pose = PoseLandmarkerHelper.create(context, onResult = { latestPoseResult = it })
-            faceHelper = face
-            handHelper = hand
-            poseHelper = pose
+        // Genuinely off the UI thread this time. The old version ran inside
+        // a plain LaunchedEffect — which is the MAIN dispatcher — so building
+        // three GPU landmarker pipelines froze the UI for seconds on entry
+        // and delayed the avatar load right along with it. Activity context
+        // is still used (not applicationContext) — only the thread changed.
+        //
+        // Whatever gets created is parked in `pending` until ownership is
+        // handed to Compose state; if the screen closes mid-creation, the
+        // finally block closes them instead of leaking three GPU graphs.
+        val pending = arrayOfNulls<Any>(3)
+        var handedOff = false
+        try {
+            withContext(Dispatchers.Default) {
+                pending[0] = FaceLandmarkerHelper.create(
+                    context,
+                    onResult = {
+                        latestFaceResult = it
+                        faceResultCount++
+                    },
+                    onError = { faceHelperError = it }
+                )
+                pending[1] = HandLandmarkerHelper.create(context, onResult = { latestHandResult = it })
+                pending[2] = PoseLandmarkerHelper.create(context, onResult = { latestPoseResult = it })
+            }
+            faceHelper = pending[0] as FaceLandmarkerHelper?
+            handHelper = pending[1] as HandLandmarkerHelper?
+            poseHelper = pending[2] as PoseLandmarkerHelper?
+            handedOff = true
             trackersReady = true
-        }.onFailure { android.util.Log.e("VrmModeScreen", "Failed to create MediaPipe task helpers", it) }
+        } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException) throw t
+            android.util.Log.e("VrmModeScreen", "Failed to create MediaPipe task helpers", t)
+        } finally {
+            if (!handedOff) {
+                runCatching { (pending[0] as FaceLandmarkerHelper?)?.close() }
+                runCatching { (pending[1] as HandLandmarkerHelper?)?.close() }
+                runCatching { (pending[2] as PoseLandmarkerHelper?)?.close() }
+            }
+        }
     }
-    // Helpers are created once per screen entry and closed when the
-    // screen leaves — they survive VrmCameraTracking's bind/unbind
-    // cycles (the trackPose toggle), so toggling body tracking no longer
-    // tears down and rebuilds the GPU pipelines.
-    //
-    // Every close is individually guarded: a helper that fails to close
-    // (or was never created) must not crash the X button. Catching
-    // Throwable, not just Exception — a native MediaPipe failure can
-    // surface as an Error.
+    // Teardown order on close (see trackingExecutor's comment): the camera
+    // is unbound by VrmCameraTracking's own onDispose (it's a child, so it
+    // disposes first), then the helpers are closed ON the tracking thread,
+    // queued behind any in-flight frame, then the executor winds down.
     androidx.compose.runtime.DisposableEffect(Unit) {
         onDispose {
-            runCatching { faceHelper?.close() }.onFailure { android.util.Log.e("VrmModeScreen", "faceHelper.close() failed", it) }
-            runCatching { handHelper?.close() }.onFailure { android.util.Log.e("VrmModeScreen", "handHelper.close() failed", it) }
-            runCatching { poseHelper?.close() }.onFailure { android.util.Log.e("VrmModeScreen", "poseHelper.close() failed", it) }
+            val face = faceHelper
+            val hand = handHelper
+            val pose = poseHelper
+            runCatching {
+                trackingExecutor.execute {
+                    runCatching { face?.close() }.onFailure { android.util.Log.e("VrmModeScreen", "faceHelper.close() failed", it) }
+                    runCatching { hand?.close() }.onFailure { android.util.Log.e("VrmModeScreen", "handHelper.close() failed", it) }
+                    runCatching { pose?.close() }.onFailure { android.util.Log.e("VrmModeScreen", "poseHelper.close() failed", it) }
+                }
+            }.onFailure { android.util.Log.e("VrmModeScreen", "Couldn't queue helper close", it) }
+            trackingExecutor.shutdown()
         }
     }
     // Item 8, VRM pipeline step 6 — the node-index→entity bridge into
@@ -364,11 +400,16 @@ fun VrmModeScreen(
             // battery while the helpers still load.
             if (trackersReady && faceHelper != null && handHelper != null) {
                 VrmCameraTracking(
+                    trackingExecutor = trackingExecutor,
                     faceHelper = faceHelper,
                     handHelper = handHelper,
                     poseHelper = poseHelper,
                     trackPose = trackUpperBody,
-                    onFrame = { cameraFrameCount++ },
+                    onFrame = { w, h ->
+                        cameraFrameCount++
+                        if (w != trackingFrameWidth) trackingFrameWidth = w
+                        if (h != trackingFrameHeight) trackingFrameHeight = h
+                    },
                     onCameraError = { cameraError = it }
                 )
             } else {
@@ -448,6 +489,21 @@ fun VrmModeScreen(
                 armTrackingActive = smoothedBodyLandmarks.isNotEmpty(),
                 legTrackingActive = smoothedBodyLandmarks.isNotEmpty(),
                 modifier = Modifier.fillMaxSize()
+            )
+            // Small black "what the tracker sees" box, bottom-right: landmark
+            // dots/skeleton only — never the camera image itself (VRM mode
+            // deliberately never shows the user's real face).
+            TrackingPreview(
+                faceResult = latestFaceResult,
+                handResult = latestHandResult,
+                poseResult = if (trackUpperBody) latestPoseResult else null,
+                frameWidth = trackingFrameWidth,
+                frameHeight = trackingFrameHeight,
+                tint = tint,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .padding(end = 12.dp, bottom = 12.dp)
             )
         } else {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -547,109 +603,113 @@ fun VrmModeScreen(
  *  helper's `create` returns null and its slot is simply skipped. */
 @Composable
 private fun VrmCameraTracking(
+    trackingExecutor: java.util.concurrent.ExecutorService,
     faceHelper: FaceLandmarkerHelper?,
     handHelper: HandLandmarkerHelper?,
     poseHelper: PoseLandmarkerHelper?,
     trackPose: Boolean,
-    onFrame: () -> Unit = {},
+    onFrame: (uprightWidth: Int, uprightHeight: Int) -> Unit = { _, _ -> },
     onCameraError: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
-    // Written from the analyzer thread (cameraExecutor), read there too —
-    // AtomicLong so the throttle check can't race.
+    val view = androidx.compose.ui.platform.LocalView.current
+    // Only touched from the analyzer thread.
     val lastSubmittedMs = remember { java.util.concurrent.atomic.AtomicLong(0L) }
-    // NOT pooling/reusing this bitmap across frames, on purpose: all three
-    // helpers' detectAsync() calls below are LIVE_STREAM-mode MediaPipe
-    // calls, which return immediately and may still be reading this exact
-    // bitmap on a native thread after this function returns. Overwriting
-    // the same Bitmap object for the next frame before that finishes would
-    // race a native reader against this thread's copyPixelsFromBuffer —
-    // a fresh allocation per accepted frame (throttled to ~15fps, so this
-    // is a small, bounded rate) is the correctness-safe choice here.
-    
-    // Helpers are created once by VrmModeScreen (off the UI thread — see
-    // trackersReady), already wired to their result listeners; this
-    // composable only owns the camera binding, so toggling trackPose
-    // rebinds without rebuilding the GPU pipelines.
+    // Read on the analyzer thread, written from composition — so toggling
+    // "Upper Body" no longer tears the whole camera down and rebinds it.
+    val trackPoseFlag = remember { java.util.concurrent.atomic.AtomicBoolean(trackPose) }
+    androidx.compose.runtime.SideEffect { trackPoseFlag.set(trackPose) }
+    val analysisHolder = remember { arrayOfNulls<ImageAnalysis>(1) }
+    // Scratch buffers for de-striding camera rows (analyzer thread only).
+    val tightBufferHolder = remember { arrayOfNulls<java.nio.ByteBuffer>(1) }
+    val rowScratchHolder = remember { arrayOfNulls<ByteArray>(1) }
 
-    // Item: closing VRM mode (the X button) used to crash the app. The
-    // camera was NEVER explicitly unbound on close — only the analyzer's
-    // executor was shut down — but VRM mode closing doesn't stop the
-    // Activity (it's a Compose overlay closing, not a lifecycle
-    // transition), so ProcessCameraProvider kept the front camera bound
-    // and streaming after the screen was gone. CameraX would then try to
-    // post the next frame to an executor that had already been shut down
-    // (a RejectedExecutionException CameraX's own internal dispatch isn't
-    // guaranteed to swallow cleanly), or — worse — a frame already
-    // in-flight on the analyzer thread could call into a MediaPipe helper
-    // VrmModeScreen was concurrently closing in its own onDispose, racing
-    // a native task-graph teardown from another thread (a native crash,
-    // not a catchable JVM exception, if it lost that race).
-    //
-    // Fix, in order: (1) unbind the camera FIRST, synchronously, so no
-    // new frame is ever handed to the analyzer again; (2) only THEN shut
-    // the executor down gracefully (shutdown(), not shutdownNow()) and
-    // wait briefly for any already-in-flight analyze() call to finish —
-    // so by the time this function returns, we know for certain no more
-    // detectAsync() calls will reach the helpers VrmModeScreen is about
-    // to close right after this.
-    DisposableEffect(Unit) {
+    // ── Why portrait was broken and landscape worked ────────────────────
+    // 1. setTargetResolution(640, 480) is interpreted in the CURRENT screen
+    //    orientation. Bound in portrait, CameraX went looking for something
+    //    480x640-after-rotation and picked a much bigger sensor mode. Bound
+    //    in landscape (tilting the phone while the trackers warmed up), it
+    //    got exactly 640x480. ResolutionSelector's bound size is always in
+    //    the sensor's own frame, so it's the same small size either way.
+    // 2. copyPixelsFromBuffer assumed rows are packed (rowStride == width*4).
+    //    Those bigger modes are often row-padded, which produced a sheared,
+    //    garbage image — MediaPipe never finds a face in it, keeps running
+    //    expensive full-frame face + palm DETECTION every frame, and starves
+    //    Filament's GPU so the model's textures load slowly / halfway.
+    // 3. The rotation was handed to MediaPipe as ImageProcessingOptions and
+    //    never updated after binding. Now the frame is rotated upright here
+    //    with a plain Matrix (the same approach Google's own MediaPipe
+    //    samples use), and the rotation is kept current as the phone turns.
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        val orientationListener = object : android.view.OrientationEventListener(context) {
+            override fun onOrientationChanged(orientation: Int) {
+                if (orientation == ORIENTATION_UNKNOWN) return
+                val rotation = when (orientation) {
+                    in 45 until 135 -> android.view.Surface.ROTATION_270
+                    in 135 until 225 -> android.view.Surface.ROTATION_180
+                    in 225 until 315 -> android.view.Surface.ROTATION_90
+                    else -> android.view.Surface.ROTATION_0
+                }
+                analysisHolder[0]?.let { if (it.targetRotation != rotation) it.targetRotation = rotation }
+            }
+        }
+        if (orientationListener.canDetectOrientation()) orientationListener.enable()
         onDispose {
+            orientationListener.disable()
+            // Unbind FIRST so no new frame is ever delivered. The analyzer
+            // is cleared too, so CameraX drops its reference to our executor
+            // before VrmModeScreen shuts that executor down.
+            runCatching { analysisHolder[0]?.clearAnalyzer() }
             runCatching {
                 ProcessCameraProvider.getInstance(context).get().unbindAll()
             }.onFailure { android.util.Log.e("VrmModeScreen", "unbindAll() on close failed", it) }
-            cameraExecutor.shutdown()
-            runCatching {
-                cameraExecutor.awaitTermination(500, java.util.concurrent.TimeUnit.MILLISECONDS)
-            }.onFailure { android.util.Log.e("VrmModeScreen", "cameraExecutor didn't drain cleanly", it) }
+            analysisHolder[0] = null
         }
     }
 
-    // No AndroidView/PreviewView, and no Preview use case — see this
-    // function's doc comment. Rebinds when trackPose toggles (cheap —
-    // the helpers themselves survive, see above); torn down with the
-    // screen via the DisposableEffect above.
-    //
-    // Perf: the analyzer used to forward EVERY camera frame (usually
-    // 30fps at full sensor resolution) into all three landmarkers —
-    // allocating a fresh full-res Bitmap per frame — which is what made
-    // the phone hot. Now: analysis resolution is capped at 640x480 (more
-    // than enough for a face filling the front-camera frame), and frames
-    // are throttled to ~15fps. The OneEuroFilter smoothing downstream
-    // keeps the avatar looking smooth at that rate.
-    LaunchedEffect(trackPose) {
-        val provider = ProcessCameraProvider.getInstance(context).get()
+    // Bound exactly once per screen entry.
+    LaunchedEffect(Unit) {
+        val provider = withContext(Dispatchers.IO) { ProcessCameraProvider.getInstance(context).get() }
+        val resolutionSelector = androidx.camera.core.resolutionselector.ResolutionSelector.Builder()
+            .setAspectRatioStrategy(androidx.camera.core.resolutionselector.AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+            .setResolutionStrategy(
+                androidx.camera.core.resolutionselector.ResolutionStrategy(
+                    android.util.Size(640, 480),
+                    androidx.camera.core.resolutionselector.ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                )
+            )
+            .build()
         val analysis = ImageAnalysis.Builder()
-            .setTargetResolution(android.util.Size(640, 480))
+            .setResolutionSelector(resolutionSelector)
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setTargetRotation(view.display?.rotation ?: android.view.Surface.ROTATION_0)
             .build()
-            .also { useCase ->
-                useCase.setAnalyzer(cameraExecutor) { imageProxy ->
-                    val nowMs = SystemClock.uptimeMillis()
-                    // Throttle: skip frames that arrive sooner than ~66ms
-                    // after the last submitted one. KEEP_ONLY_LATEST already
-                    // drops backlog; this stops the landmarkers from ever
-                    // being *offered* more than ~15fps in the first place.
-                    if (nowMs - lastSubmittedMs.get() < 66L) {
-                        imageProxy.close()
-                        return@setAnalyzer
-                    }
-                    lastSubmittedMs.set(nowMs)
-                    val timestampMs = System.currentTimeMillis()
-                    val rotationDegrees = imageProxy.imageInfo.rotationDegrees
-                    val bitmapBuffer = Bitmap.createBitmap(imageProxy.width, imageProxy.height, Bitmap.Config.ARGB_8888)
-                    imageProxy.use { bitmapBuffer.copyPixelsFromBuffer(it.planes[0].buffer) }
-                    val mpImage = BitmapImageBuilder(bitmapBuffer).build()
-
-                    faceHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
-                    handHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
-                    if (trackPose) poseHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
-                    onFrame()
-                }
+        analysis.setAnalyzer(trackingExecutor) { imageProxy ->
+            val nowMs = SystemClock.uptimeMillis()
+            // ~15fps cap into the landmarkers; OneEuro smoothing covers the gaps.
+            if (nowMs - lastSubmittedMs.get() < 66L) {
+                imageProxy.close()
+                return@setAnalyzer
             }
+            lastSubmittedMs.set(nowMs)
+            val upright: Bitmap = try {
+                imageProxy.use { proxy -> proxyToUprightBitmap(proxy, tightBufferHolder, rowScratchHolder) }
+            } catch (t: Throwable) {
+                android.util.Log.e("VrmModeScreen", "Frame conversion failed", t)
+                return@setAnalyzer
+            }
+            val mpImage = BitmapImageBuilder(upright).build()
+            // Rotation 0: the bitmap is already upright (see note above).
+            // uptimeMillis, not currentTimeMillis — LIVE_STREAM mode rejects
+            // timestamps that ever go backwards, and wall-clock time can.
+            faceHelper?.detectAsync(mpImage, 0, nowMs)
+            handHelper?.detectAsync(mpImage, 0, nowMs)
+            if (trackPoseFlag.get()) poseHelper?.detectAsync(mpImage, 0, nowMs)
+            onFrame(upright.width, upright.height)
+        }
+        analysisHolder[0] = analysis
         runCatching {
             provider.unbindAll()
             provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, analysis)
@@ -658,6 +718,52 @@ private fun VrmCameraTracking(
             onCameraError("Camera bind failed: ${it.message}")
         }
     }
+}
+
+/** RGBA_8888 ImageProxy → upright ARGB_8888 Bitmap. Handles padded rows
+ *  (rowStride > width*4), which the old straight copyPixelsFromBuffer did
+ *  not, then rotates by the frame's rotationDegrees so the face is upright
+ *  before MediaPipe ever sees it. Runs on the tracking thread only. */
+private fun proxyToUprightBitmap(
+    proxy: androidx.camera.core.ImageProxy,
+    tightBufferHolder: Array<java.nio.ByteBuffer?>,
+    rowScratchHolder: Array<ByteArray?>
+): Bitmap {
+    val width = proxy.width
+    val height = proxy.height
+    val plane = proxy.planes[0]
+    val source = plane.buffer
+    source.rewind()
+    val rowBytes = width * 4
+    val raw = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    if (plane.rowStride == rowBytes && plane.pixelStride == 4) {
+        raw.copyPixelsFromBuffer(source)
+    } else {
+        var tight = tightBufferHolder[0]
+        if (tight == null || tight.capacity() != rowBytes * height) {
+            tight = java.nio.ByteBuffer.allocateDirect(rowBytes * height)
+            tightBufferHolder[0] = tight
+        }
+        var row = rowScratchHolder[0]
+        if (row == null || row.size != rowBytes) {
+            row = ByteArray(rowBytes)
+            rowScratchHolder[0] = row
+        }
+        tight!!.clear()
+        for (y in 0 until height) {
+            source.position(y * plane.rowStride)
+            source.get(row, 0, rowBytes)
+            tight.put(row, 0, rowBytes)
+        }
+        tight.rewind()
+        raw.copyPixelsFromBuffer(tight)
+    }
+    val rotation = proxy.imageInfo.rotationDegrees
+    if (rotation == 0) return raw
+    val matrix = android.graphics.Matrix().apply { postRotate(rotation.toFloat()) }
+    val rotated = Bitmap.createBitmap(raw, 0, 0, width, height, matrix, false)
+    if (rotated !== raw) raw.recycle()
+    return rotated
 }
 
 /** VRM pipeline step 2 (smoothing): every current ARKit blendshape score,
@@ -817,8 +923,8 @@ private fun VrmTrackingOverlay(
     // has no MToon textures (or they're not in the expected format).
     val textureLine = when {
         texturesApplied < 0 -> "textures: loading…"
-        texturesApplied == 0 -> "textures: 0 bound (model may have no MToon textures)"
-        else -> "textures: $texturesApplied bound"
+        texturesApplied == 0 -> "textures: loaded by glTF loader"
+        else -> "textures: glTF loader + $texturesApplied MToon-only"
     }
 
     // Hands: just a live count, plus which side(s) — full 21-point dump per
@@ -960,6 +1066,86 @@ private fun VrmSettingsToggleRow(label: String, checked: Boolean, enabled: Boole
             contentAlignment = if (checked) Alignment.CenterEnd else Alignment.CenterStart
         ) {
             Box(Modifier.padding(3.dp).size(20.dp).clip(CircleShape).background(Color.White))
+        }
+    }
+}
+
+// BlazePose / hand topology — just the connections worth drawing.
+private val HAND_CONNECTIONS = intArrayOf(
+    0, 1, 1, 2, 2, 3, 3, 4,
+    0, 5, 5, 6, 6, 7, 7, 8,
+    5, 9, 9, 10, 10, 11, 11, 12,
+    9, 13, 13, 14, 14, 15, 15, 16,
+    13, 17, 0, 17, 17, 18, 18, 19, 19, 20
+)
+private val POSE_CONNECTIONS = intArrayOf(
+    11, 12, 11, 13, 13, 15, 12, 14, 14, 16,
+    11, 23, 12, 24, 23, 24,
+    23, 25, 25, 27, 24, 26, 26, 28
+)
+
+/**
+ * Picture-in-picture debug view of what MediaPipe is tracking: a small
+ * black box drawn at the same aspect ratio as the (upright) frame the
+ * landmarkers receive, with face points, hand skeletons and (when "Upper
+ * Body" is on) the pose skeleton. Mirrored horizontally so it moves like a
+ * mirror — raise your right hand and the dots on the right move. Draws
+ * landmarks only, never camera pixels.
+ */
+@Composable
+private fun TrackingPreview(
+    faceResult: FaceLandmarkerResult?,
+    handResult: HandLandmarkerResult?,
+    poseResult: PoseLandmarkerResult?,
+    frameWidth: Int,
+    frameHeight: Int,
+    tint: Color,
+    modifier: Modifier = Modifier
+) {
+    val boxWidth = 104.dp
+    val aspect = if (frameWidth > 0 && frameHeight > 0) frameHeight.toFloat() / frameWidth else 4f / 3f
+    val faceColor = Color(0xFF7CFFB2)
+    val handColor = Color(0xFF6FD3FF)
+    val poseColor = Color(0xFFFFD166)
+    androidx.compose.foundation.Canvas(
+        modifier
+            .width(boxWidth)
+            .height(boxWidth * aspect)
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color.Black)
+            .border(1.dp, tint.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+    ) {
+        val w = size.width
+        val h = size.height
+        fun px(x: Float, y: Float) = androidx.compose.ui.geometry.Offset((1f - x) * w, y * h)
+
+        faceResult?.faceLandmarks()?.firstOrNull()?.let { points ->
+            val offsets = ArrayList<androidx.compose.ui.geometry.Offset>(points.size)
+            for (p in points) offsets.add(px(p.x(), p.y()))
+            drawPoints(
+                points = offsets,
+                pointMode = androidx.compose.ui.graphics.PointMode.Points,
+                color = faceColor,
+                strokeWidth = 1.2.dp.toPx(),
+                cap = androidx.compose.ui.graphics.StrokeCap.Round
+            )
+        }
+        handResult?.landmarks()?.forEach { hand ->
+            var i = 0
+            while (i < HAND_CONNECTIONS.size) {
+                val a = hand.getOrNull(HAND_CONNECTIONS[i]); val b = hand.getOrNull(HAND_CONNECTIONS[i + 1])
+                if (a != null && b != null) drawLine(handColor, px(a.x(), a.y()), px(b.x(), b.y()), strokeWidth = 1.dp.toPx())
+                i += 2
+            }
+            for (p in hand) drawCircle(handColor, radius = 1.6.dp.toPx(), center = px(p.x(), p.y()))
+        }
+        poseResult?.landmarks()?.firstOrNull()?.let { body ->
+            var i = 0
+            while (i < POSE_CONNECTIONS.size) {
+                val a = body.getOrNull(POSE_CONNECTIONS[i]); val b = body.getOrNull(POSE_CONNECTIONS[i + 1])
+                if (a != null && b != null) drawLine(poseColor, px(a.x(), a.y()), px(b.x(), b.y()), strokeWidth = 1.5.dp.toPx())
+                i += 2
+            }
         }
     }
 }

@@ -30,8 +30,17 @@ object MToonMaterialParser {
         /** Base color factor [r, g, b, a], defaults to white */
         val baseColorFactor: FloatArray,
         /** Whether this material uses MToon (vs standard PBR) */
-        val isMToon: Boolean
-    )
+        val isMToon: Boolean,
+        /** True if the plain glTF pbrMetallicRoughness.baseColorTexture is
+         *  set — Filament's gltfio loader already applies that one itself,
+         *  so manual binding must NOT touch these materials (doing so was
+         *  both wasted memory and, because it mapped by the wrong index,
+         *  the source of wrongly-colored body parts). */
+        val hasPbrBaseColorTexture: Boolean = false
+    ) {
+        /** Only materials whose texture gltfio can't see need manual binding. */
+        val needsManualBinding: Boolean get() = !hasPbrBaseColorTexture && baseColorTextureIndex != null
+    }
 
     data class TextureInfo(
         /** glTF image index */
@@ -136,6 +145,8 @@ object MToonMaterialParser {
                     }
                 }
 
+                val hasPbrBase = mat.optJSONObject("pbrMetallicRoughness")
+                    ?.optJSONObject("baseColorTexture")?.has("index") == true
                 // Fallback: if MToon but no texture in extension, check PBR fallback
                 if (baseColorTextureIndex == null) {
                     val pbr = mat.optJSONObject("pbrMetallicRoughness")
@@ -147,7 +158,8 @@ object MToonMaterialParser {
                     name = name,
                     baseColorTextureIndex = baseColorTextureIndex,
                     baseColorFactor = baseColorFactor,
-                    isMToon = isMToon
+                    isMToon = isMToon,
+                    hasPbrBaseColorTexture = hasPbrBase
                 ))
             }
 
@@ -170,8 +182,13 @@ object MToonMaterialParser {
 
             // Extract image bytes from BIN chunk
             val imageBytes = mutableMapOf<Int, ByteArray>()
+            // Copying every embedded image out of a multi-MB VRM was pure
+            // memory waste when gltfio loads nearly all of them itself.
+            val neededTextures = materialInfos.filter { it.needsManualBinding }
+                .mapNotNull { it.baseColorTextureIndex }.toSet()
             if (binChunkOffset >= 0 && bufferViews != null) {
                 for ((texIndex, texInfo) in textureInfos) {
+                    if (texIndex !in neededTextures) continue
                     if (texInfo.bufferViewIndex < bufferViews.length()) {
                         val bv = bufferViews.getJSONObject(texInfo.bufferViewIndex)
                         val byteOffset = bv.optInt("byteOffset", 0)
@@ -186,8 +203,25 @@ object MToonMaterialParser {
                 }
             }
 
+            val primitiveRefs = mutableListOf<PrimitiveMaterialRef>()
+            val nodes = json.optJSONArray("nodes")
+            val meshes = json.optJSONArray("meshes")
+            if (nodes != null && meshes != null) {
+                for (n in 0 until nodes.length()) {
+                    val node = nodes.optJSONObject(n) ?: continue
+                    val nodeName = node.optString("name", "")
+                    val meshIndex = node.optInt("mesh", -1)
+                    if (nodeName.isEmpty() || meshIndex < 0 || meshIndex >= meshes.length()) continue
+                    val prims = meshes.optJSONObject(meshIndex)?.optJSONArray("primitives") ?: continue
+                    for (pi in 0 until prims.length()) {
+                        val matIndex = prims.optJSONObject(pi)?.optInt("material", -1) ?: -1
+                        if (matIndex >= 0) primitiveRefs.add(PrimitiveMaterialRef(nodeName, pi, matIndex))
+                    }
+                }
+            }
+
             Log.i(TAG, "Parsed ${materialInfos.size} materials (${materialInfos.count { it.isMToon }} MToon), ${imageBytes.size} textures")
-            return ParseResult(materialInfos, imageBytes)
+            return ParseResult(materialInfos, imageBytes, primitiveRefs)
 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse MToon materials", e)
@@ -195,9 +229,15 @@ object MToonMaterialParser {
         }
     }
 
+    /** One mesh primitive's material: gltfio makes one renderable per mesh
+     *  node, with primitives in glTF order, so (node name, primitive index)
+     *  pins down exactly which MaterialInstance a glTF material became. */
+    data class PrimitiveMaterialRef(val nodeName: String, val primitiveIndex: Int, val materialIndex: Int)
+
     data class ParseResult(
         val materials: List<MToonMaterialInfo>,
         /** Map of glTF texture index -> image bytes (PNG/JPEG) */
-        val textureBytes: Map<Int, ByteArray>
+        val textureBytes: Map<Int, ByteArray>,
+        val primitiveMaterials: List<PrimitiveMaterialRef> = emptyList()
     )
 }
