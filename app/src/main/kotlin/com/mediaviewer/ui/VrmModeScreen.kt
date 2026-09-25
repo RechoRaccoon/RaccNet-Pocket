@@ -176,6 +176,7 @@ fun VrmModeScreen(
     var latestFaceResult by remember { mutableStateOf<FaceLandmarkerResult?>(null) }
     var latestHandResult by remember { mutableStateOf<HandLandmarkerResult?>(null) }
     var latestPoseResult by remember { mutableStateOf<PoseLandmarkerResult?>(null) }
+    var faceResultCount by remember { mutableStateOf(0) }
 
     // Item 8, VRM pipeline step 5 — the user's picked `.vrm` avatar file.
     // `vrmBytes` is what actually drives VrmAvatarView/VrmParser; `pickedVrmUri`
@@ -219,7 +220,10 @@ fun VrmModeScreen(
             // and correlates with face tracking dying.
             val face = FaceLandmarkerHelper.create(
                 context,
-                onResult = { latestFaceResult = it },
+                onResult = { 
+                    latestFaceResult = it
+                    faceResultCount++
+                },
                 onError = { faceHelperError = it }
             )
             val hand = HandLandmarkerHelper.create(context, onResult = { latestHandResult = it })
@@ -420,6 +424,7 @@ fun VrmModeScreen(
                 trackFullBody = trackFullBody,
                 smoothedFaceBlendshapes = smoothedBlendshapes,
                 faceHelperError = faceHelperError,
+                faceResultCount = faceResultCount,
                 cameraError = cameraError,
                 cameraFrameCount = cameraFrameCount,
                 handResult = latestHandResult,
@@ -723,6 +728,7 @@ private fun VrmTrackingOverlay(
     trackFullBody: Boolean,
     smoothedFaceBlendshapes: Map<String, Float>,
     faceHelperError: String?,
+    faceResultCount: Int,
     cameraError: String?,
     cameraFrameCount: Int,
     handResult: HandLandmarkerResult?,
@@ -748,6 +754,8 @@ private fun VrmTrackingOverlay(
         }
     } else if (faceHelperError != null) {
         "face: FAILED to start\n$faceHelperError"
+    } else if (faceResultCount > 0) {
+        "face: landmarker running ($faceResultCount results), no face detected\n(is your face in the front camera frame?)"
     } else {
         "face: no landmarker output yet\n(check face_landmarker.task in assets/)"
     }
