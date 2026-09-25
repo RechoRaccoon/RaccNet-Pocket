@@ -63,6 +63,7 @@ import androidx.compose.ui.zIndex
 import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.upstream.DefaultLoadControl
 import androidx.media3.ui.PlayerView
 import coil.ImageLoader
 import coil.compose.AsyncImage
@@ -2577,7 +2578,7 @@ private fun VideoPlayer(
     // playback after just 500ms is buffered, while keeping a reasonable
     // max buffer to avoid rebuffering mid-play.
     val loadControl = remember {
-        androidx.media3.exoplayer.upstream.DefaultLoadControl.Builder()
+        DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 10_000,  // minBufferMs: keep 10s buffered during playback
                 30_000,  // maxBufferMs: cap total buffer at 30s

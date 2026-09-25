@@ -65,8 +65,7 @@ object MToonTextureApplier {
                 // Try to set the base color map. Filament's standard PBR
                 // material uses "baseColorMap" parameter name.
                 try {
-                    val sampler = Texture.Sampler(Texture.Sampler.MinFilter.LINEAR_MIPMAP_LINEAR)
-                    materialInstance.setParameter("baseColorMap", texture, sampler)
+                    materialInstance.setParameter("baseColorMap", texture, Texture.Sampler.SAMPLER_2D)
                     // Also set base color factor if not white
                     if (!matInfo.baseColorFactor.contentEquals(floatArrayOf(1f, 1f, 1f, 1f))) {
                         materialInstance.setParameter("baseColorFactor",
@@ -79,7 +78,7 @@ object MToonTextureApplier {
                     Log.i(TAG, "Applied texture to material '${matInfo.name}' (index ${matInfo.materialIndex})")
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to set texture on material '${matInfo.name}': ${e.message}")
-                    texture.destroy(engine)
+                    engine.destroyTexture(texture)
                 }
             }
 
