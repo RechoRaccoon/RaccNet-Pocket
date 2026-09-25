@@ -103,16 +103,12 @@ class FaceLandmarkerHelper private constructor(
                     .setRunningMode(RunningMode.LIVE_STREAM)
                     .setNumFaces(1)
                     .setOutputFaceBlendshapes(true)
-                    // VRM pipeline step 6 (retargeting): head rotation needs
-                    // more than the 2D landmark positions — this asks
-                    // MediaPipe for the actual estimated 3D head pose (a
-                    // 4x4 transform per detected face, camera-space) instead
-                    // of hand-rolling a PnP-style estimate from landmark
-                    // points ourselves. Read via FaceLandmarkerResult's own
-                    // `facialTransformationMatrixes()` — see
-                    // AvatarRetargeter.kt's doc comment for exactly how
-                    // that's consumed and what's least certain about it.
-                    .setOutputFacialTransformationMatrixes(true)
+                    // setOutputFacialTransformationMatrixes TEMPORARILY DISABLED:
+                    // with it on, the landmarker produces zero output on-device
+                    // (197 frames in, nothing out) while the hand landmarker
+                    // works on identical frames. Re-enable only after basic
+                    // face detection is confirmed working.
+                    // .setOutputFacialTransformationMatrixes(true)
                     .setMinFaceDetectionConfidence(0.5f)
                     .setMinFacePresenceConfidence(0.5f)
                     .setMinTrackingConfidence(0.5f)
