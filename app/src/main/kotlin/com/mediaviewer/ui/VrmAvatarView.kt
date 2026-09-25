@@ -187,7 +187,12 @@ fun VrmAvatarView(
             val viewer = ModelViewer(surfaceView)
             surfaceView.setOnTouchListener(viewer) // drag-to-orbit, ModelViewer's own manipulator
             addThreeLightRig(viewer.engine, viewer.scene)
-            addFlatAmbientLight(viewer.engine, viewer.scene)
+            // addFlatAmbientLight is intentionally NOT called: the 4-
+            // directional rig alone provably rendered on-device (Sept 24
+            // build), while the procedural IndirectLight added after that
+            // correlates exactly with the black-screen regression — it
+            // stays out until the model is visible again, then it can be
+            // reintroduced carefully if shadowed areas need a lift.
             viewerHolder[0] = viewer
             if (vrmBytes != null) {
                 loadedBytesHolder[0] = vrmBytes
