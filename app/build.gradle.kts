@@ -34,6 +34,17 @@ android {
     packaging {
         resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
     }
+
+    // MediaPipe's native loader mmaps these asset files directly; if AAPT
+    // compresses them (its default for any extension it doesn't
+    // recognize), that mmap fails silently and FaceLandmarker/
+    // HandLandmarker/PoseLandmarker.createFromOptions() all fail — which
+    // reads as "tracking never starts, everything reports 0" with no
+    // visible crash, since VrmModeScreen's helpers catch and log that
+    // failure instead of throwing.
+    androidResources {
+        noCompress += listOf("task", "tflite")
+    }
 }
 
 dependencies {
