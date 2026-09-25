@@ -177,7 +177,10 @@ fun CameraNotchButton(
     // No other UI element's position, padding, or alignment can push it.
     val screenWidth = LocalConfiguration.current.screenWidthDp.dp
     val xAbsolute = cutoutCenterX?.let { it - ringSize / 2 } ?: (screenWidth - ringSize) / 2
-    val yAbsolute = cutoutCenterY?.let { it - ringSize / 2 } ?: 12.dp
+    // Nudge down 2dp — the system cutout rect sits slightly above the
+    // actual lens on this device.
+    val yNudge = 2.dp
+    val yAbsolute = cutoutCenterY?.let { it - ringSize / 2 + yNudge } ?: (12.dp + yNudge)
     // Expanded, the pill grows symmetrically from the ring's center so it
     // stays anchored on the cutout instead of sliding sideways.
     val expandedXAbsolute = cutoutCenterX?.let { it - expandedWidth / 2 } ?: (screenWidth - expandedWidth) / 2

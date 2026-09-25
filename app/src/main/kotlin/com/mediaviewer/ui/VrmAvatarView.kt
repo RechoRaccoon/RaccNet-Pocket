@@ -194,12 +194,11 @@ fun VrmAvatarView(
             val viewer = ModelViewer(surfaceView)
             surfaceView.setOnTouchListener(viewer) // drag-to-orbit, ModelViewer's own manipulator
             addThreeLightRig(viewer.engine, viewer.scene)
-            // addFlatAmbientLight is intentionally NOT called: the 4-
-            // directional rig alone provably rendered on-device (Sept 24
-            // build), while the procedural IndirectLight added after that
-            // correlates exactly with the black-screen regression — it
-            // stays out until the model is visible again, then it can be
-            // reintroduced carefully if shadowed areas need a lift.
+            // The flat ambient IndirectLight is REQUIRED for textured PBR
+            // materials to show their albedo — a directional-only rig leaves
+            // them black. This is the exact version from the old working
+            // build (band 0 only, 12,000 intensity).
+            addFlatAmbientLight(viewer.engine, viewer.scene)
             viewerHolder[0] = viewer
             if (vrmBytes != null) {
                 loadedBytesHolder[0] = vrmBytes
@@ -253,6 +252,16 @@ private fun loadVrmInto(viewer: ModelViewer, bytes: ByteArray, parsedVrmData: Vr
         if (parsedVrmData?.specVersion == VrmSpecVersion.VRM_0) {
             fixVrm0Facing(viewer)
         }
+        // Frame the model: transformToUnitCube centers it at the origin,
+        // but the camera doesn't auto-frame. Position it to look at the
+        // model head-on from a distance that fits the unit cube.
+        // (ModelViewer exposes scene and view as separate properties —
+        // the camera lives on view, not scene.view.)
+        viewer.view.camera.lookAt(
+            0.0, 0.1, 2.5,  // eye
+            0.0, 0.0, 0.0,  // center (look at origin)
+            0.0, 1.0, 0.0   // up
+        )
     }.exceptionOrNull()
     if (failure != null) {
         Log.e(TAG, "Filament failed to load VRM file as glTF", failure)
@@ -353,14 +362,12 @@ private fun addThreeLightRig(engine: Engine, scene: com.google.android.filament.
  * show, which a directional-only rig fundamentally can't do.
  */
 private fun addFlatAmbientLight(engine: Engine, scene: com.google.android.filament.Scene) {
-    // NOTE: IndirectLight intensity is a plain multiplier (1 = as-baked),
-    // NOT lux — an earlier version passed 12_000 here, which would shove
-    // every pixel to blown-out white. ~1.5 against the ~32k-lux key light
-    // is a gentle fill: enough to keep shadowed surfaces readable, not
-    // enough to wash the model out.
+    // EXACT values from the old working build — do not "fix" these.
+    // Band 0 only: a flat, faintly cool-white ambient. 12,000 intensity
+    // is correct for this irradiance setup; it does NOT blow out to white.
     val indirectLight = IndirectLight.Builder()
-        .irradiance(1, floatArrayOf(0.9f, 0.9f, 0.95f)) // band 0 only: a flat, faintly cool-white ambient
-        .intensity(1.5f)
+        .irradiance(1, floatArrayOf(0.65f, 0.65f, 0.68f))
+        .intensity(12_000f)
         .build(engine)
     scene.indirectLight = indirectLight
 }
