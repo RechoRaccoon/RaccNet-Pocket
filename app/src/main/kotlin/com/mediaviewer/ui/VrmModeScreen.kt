@@ -255,6 +255,10 @@ fun VrmModeScreen(
     // actually finished loading. See AvatarRetargeter.kt's doc comment.
     var retargetTarget by remember { mutableStateOf<RetargetTarget?>(null) }
 
+    // Diagnostic: how many MToon textures were actually bound during load.
+    // Distinguishes "model has no textures" from "binding failed".
+    var texturesApplied by remember { mutableStateOf(-1) }
+
     // Shared once here (not duplicated inside VrmTrackingOverlay) so the
     // debug overlay's five-blendshape subset and step 6's full-52
     // retargeting call are reading the exact same smoothed values for the
@@ -387,7 +391,8 @@ fun VrmModeScreen(
                     modifier = Modifier.fillMaxSize(),
                     vrmBytes = vrmBytes,
                     parsedVrmData = parsedVrmData,
-                    onRetargetTargetReady = { retargetTarget = it }
+                    onRetargetTargetReady = { retargetTarget = it },
+                    onTexturesApplied = { texturesApplied = it }
                 )
             } else {
                 // Prominent, not a 12sp hint: a dead/missing avatar file is
@@ -425,6 +430,7 @@ fun VrmModeScreen(
                 smoothedFaceBlendshapes = smoothedBlendshapes,
                 faceHelperError = faceHelperError,
                 faceResultCount = faceResultCount,
+                texturesApplied = texturesApplied,
                 cameraError = cameraError,
                 cameraFrameCount = cameraFrameCount,
                 handResult = latestHandResult,
@@ -729,6 +735,7 @@ private fun VrmTrackingOverlay(
     smoothedFaceBlendshapes: Map<String, Float>,
     faceHelperError: String?,
     faceResultCount: Int,
+    texturesApplied: Int,
     cameraError: String?,
     cameraFrameCount: Int,
     handResult: HandLandmarkerResult?,
@@ -758,6 +765,15 @@ private fun VrmTrackingOverlay(
         "face: landmarker running ($faceResultCount results), no face detected\n(is your face in the front camera frame?)"
     } else {
         "face: no landmarker output yet\n(check face_landmarker.task in assets/)"
+    }
+
+    // Textures: how many MToon textures were actually bound. -1 means the
+    // model hasn't finished loading yet; 0 with no error means the model
+    // has no MToon textures (or they're not in the expected format).
+    val textureLine = when {
+        texturesApplied < 0 -> "textures: loading…"
+        texturesApplied == 0 -> "textures: 0 bound (model may have no MToon textures)"
+        else -> "textures: $texturesApplied bound"
     }
 
     // Hands: just a live count, plus which side(s) — full 21-point dump per
@@ -822,7 +838,7 @@ private fun VrmTrackingOverlay(
 
     Box(modifier) {
         Text(
-            text = listOfNotNull(cameraLine, faceLine, handLine, poseLine, vrmDataLine, retargetLine, headRotationLine, armRotationLine, legRotationLine).joinToString("\n\n"),
+            text = listOfNotNull(cameraLine, faceLine, textureLine, handLine, poseLine, vrmDataLine, retargetLine, headRotationLine, armRotationLine, legRotationLine).joinToString("\n\n"),
             color = tint,
             fontSize = 12.sp,
             modifier = Modifier

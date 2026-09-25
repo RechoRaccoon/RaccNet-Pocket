@@ -23,12 +23,11 @@ import com.google.android.filament.Engine
 import com.google.android.filament.EntityManager
 import com.google.android.filament.IndirectLight
 import com.google.android.filament.LightManager
+import com.google.android.filament.math.Float3
+import com.google.android.filament.utils.Manipulator
 import com.google.android.filament.utils.ModelViewer
 import com.google.android.filament.utils.Utils
-import com.mediaviewer.util.Quaternion
 import com.mediaviewer.util.VrmData
-import com.mediaviewer.util.VrmSpecVersion
-import com.mediaviewer.util.multiplyColumnMajor4x4
 import java.nio.ByteBuffer
 
 /**
@@ -94,7 +93,11 @@ fun VrmAvatarView(
     // the UI thread itself, once in the AndroidView factory and again in
     // the LaunchedEffect, which was part of why opening VRM mode stalled.
     parsedVrmData: VrmData? = null,
-    onRetargetTargetReady: (RetargetTarget?) -> Unit = {}
+    onRetargetTargetReady: (RetargetTarget?) -> Unit = {},
+    // Diagnostic: reports how many MToon textures were actually bound.
+    // Lets us distinguish "model has no textures" (count 0) from
+    // "binding failed" (count 0 with an error) from "binding worked".
+    onTexturesApplied: (Int) -> Unit = {}
 ) {
     // Held outside the AndroidView factory so the LaunchedEffect below —
     // which reacts to vrmBytes changing — can reach the same ModelViewer
@@ -174,8 +177,18 @@ fun VrmAvatarView(
         // composition — don't load twice (see loadedBytesHolder).
         if (loadedBytesHolder[0] === vrmBytes) return@LaunchedEffect
         loadedBytesHolder[0] = vrmBytes
-        loadError = loadVrmInto(viewer, vrmBytes, parsedVrmData)
-        onRetargetTargetReady(buildRetargetTargetOrNull(viewer, parsedVrmData))
+        // Off the main thread — see the factory's comment for why.
+        // Structured concurrency: if vrmBytes changes, this whole
+        // LaunchedEffect (including the child launch) is cancelled.
+        launch(kotlinx.coroutines.Dispatchers.Default) {
+            val (error, textures) = loadVrmInto(viewer, vrmBytes, parsedVrmData)
+            val target = buildRetargetTargetOrNull(viewer, parsedVrmData)
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                loadError = error
+                onTexturesApplied(textures)
+                onRetargetTargetReady(target)
+            }
+        }
     }
 
     AndroidView(
@@ -191,7 +204,27 @@ fun VrmAvatarView(
                 // Filament to composite normally over the black Box behind.
                 holder.setFormat(android.graphics.PixelFormat.OPAQUE)
             }
-            val viewer = ModelViewer(surfaceView)
+            // Custom orbit manipulator: ModelViewer's default targets
+            // (0,0,-4) with the camera home at (0,0,1) — and render()
+            // overwrites the Filament camera from the manipulator EVERY
+            // FRAME, so calling camera.lookAt() directly is dead code. The
+            // only way to frame the model is through the manipulator:
+            // target the origin (where we center the model) and start the
+            // camera head-on at a distance that fits the unit cube.
+            val manipulator = Manipulator.Builder()
+                .targetPosition(0f, 0f, 0f)
+                .orbitHomePosition(0f, 0.1f, 2.5f)
+                .viewport(1, 1) // real size applied on layout below
+                .build(Manipulator.Mode.ORBIT)
+            val viewer = ModelViewer(surfaceView, manipulator = manipulator)
+            // The Builder ran before layout (width/height were 0) — update
+            // the viewport once the SurfaceView has real dimensions so
+            // drag-to-orbit gestures map correctly.
+            surfaceView.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+                if (v.width > 0 && v.height > 0) {
+                    runCatching { manipulator.setViewport(v.width, v.height) }
+                }
+            }
             surfaceView.setOnTouchListener(viewer) // drag-to-orbit, ModelViewer's own manipulator
             addThreeLightRig(viewer.engine, viewer.scene)
             // The flat ambient IndirectLight is REQUIRED for textured PBR
@@ -202,8 +235,20 @@ fun VrmAvatarView(
             viewerHolder[0] = viewer
             if (vrmBytes != null) {
                 loadedBytesHolder[0] = vrmBytes
-                loadError = loadVrmInto(viewer, vrmBytes, parsedVrmData)
-                onRetargetTargetReady(buildRetargetTargetOrNull(viewer, parsedVrmData))
+                // Load off the main thread: GLB parsing + MToon texture
+                // decoding of a multi-MB file chokes the UI thread long
+                // enough to starve the MediaPipe result callbacks, which is
+                // why tracking looked dead on first entry. Only the Compose
+                // state assignments happen back on main.
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).launch {
+                    val (error, textures) = loadVrmInto(viewer, vrmBytes, parsedVrmData)
+                    val target = buildRetargetTargetOrNull(viewer, parsedVrmData)
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        loadError = error
+                        onTexturesApplied(textures)
+                        onRetargetTargetReady(target)
+                    }
+                }
             }
             surfaceView
         }
@@ -237,7 +282,11 @@ private fun buildRetargetTargetOrNull(viewer: ModelViewer, parsedVrmData: VrmDat
 /** Loads [bytes] into [viewer]; returns a human-readable error when the
  *  model can't be shown, null on success. The error is what VrmAvatarView
  *  draws on screen (see loadError) so a broken file is diagnosable. */
-private fun loadVrmInto(viewer: ModelViewer, bytes: ByteArray, parsedVrmData: VrmData?): String? {
+private fun loadVrmInto(
+    viewer: ModelViewer,
+    bytes: ByteArray,
+    parsedVrmData: VrmData?
+): Pair<String?, Int> {
     // gltfio's native loader reads the buffer via GetDirectBufferAddress —
     // a heap ByteBuffer (ByteBuffer.wrap) gives it a null pointer and the
     // asset silently comes back empty. The official model-viewer sample
@@ -248,6 +297,7 @@ private fun loadVrmInto(viewer: ModelViewer, bytes: ByteArray, parsedVrmData: Vr
     // Parse MToon materials BEFORE loading — we need the texture data to
     // manually apply after gltfio (which doesn't support MToon) loads.
     val mtoonParseResult = com.mediaviewer.util.MToonMaterialParser.parse(bytes)
+    var texturesApplied = 0
     val failure = runCatching {
         viewer.destroyModel()
         viewer.loadModelGlb(direct)
@@ -255,33 +305,33 @@ private fun loadVrmInto(viewer: ModelViewer, bytes: ByteArray, parsedVrmData: Vr
         // so materials load without textures. Manually wire them up.
         val asset = viewer.asset
         if (asset != null && mtoonParseResult != null) {
-            val applied = com.mediaviewer.util.MToonTextureApplier.applyTextures(
+            texturesApplied = com.mediaviewer.util.MToonTextureApplier.applyTextures(
                 viewer.engine, asset, mtoonParseResult
             )
-            android.util.Log.i("VrmAvatarView", "Applied MToon textures to $applied materials")
+            android.util.Log.i("VrmAvatarView", "Applied MToon textures to $texturesApplied materials")
         }
-        viewer.transformToUnitCube()
-        if (parsedVrmData?.specVersion == VrmSpecVersion.VRM_0) {
-            fixVrm0Facing(viewer)
-        }
-        // Frame the model: transformToUnitCube centers it at the origin,
-        // but the camera doesn't auto-frame. Position it to look at the
-        // model head-on from a distance that fits the unit cube.
-        // (ModelViewer exposes scene and view as separate properties —
-        // the camera lives on view, not scene.view.)
-        viewer.view.camera?.lookAt(
-            0.0, 0.1, 2.5,  // eye
-            0.0, 0.0, 0.0,  // center (look at origin)
-            0.0, 1.0, 0.0   // up
-        )
+        viewer.transformToUnitCube(Float3(0f, 0f, 0f))
+        // NOTE: fixVrm0Facing() is intentionally NOT called. It rotated
+        // 180° about Y through the ORIGIN, but the model was centered at
+        // (0,0,-4) — so it flung the model to (0,0,4), behind the camera.
+        // Worse, with the camera on the +Z side, a VRM0 model facing +Z
+        // already faces the camera; the flip turned it away. If a model
+        // ever loads facing away, revisit — but don't re-add the old
+        // origin-pivot version.
+        //
+        // NOTE: no camera.lookAt() here. ModelViewer.render() overwrites
+        // the Filament camera from its orbit manipulator EVERY FRAME, so
+        // a direct lookAt is dead code. Framing is controlled through the
+        // custom Manipulator passed to ModelViewer in the factory above
+        // (target origin, home position head-on).
     }.exceptionOrNull()
     if (failure != null) {
         Log.e(TAG, "Filament failed to load VRM file as glTF", failure)
-        return "Couldn't load that .vrm file (${failure::class.simpleName})"
+        return "Couldn't load that .vrm file (${failure::class.simpleName})" to texturesApplied
     }
     if (viewer.asset == null) {
         Log.e(TAG, "Filament createAsset returned null for the VRM file")
-        return "Couldn't parse that .vrm file (not valid glTF?)"
+        return "Couldn't parse that .vrm file (not valid glTF?)" to texturesApplied
     }
     // A heap (non-direct) ByteBuffer used to make gltfio's native loader
     // silently produce an asset with zero entities — no exception, just
@@ -289,41 +339,9 @@ private fun loadVrmInto(viewer: ModelViewer, bytes: ByteArray, parsedVrmData: Vr
     // an actual message instead.
     if (viewer.asset!!.entities.isEmpty()) {
         Log.e(TAG, "Filament loaded the VRM file but it contains no entities")
-        return "That .vrm file loaded empty (no visible geometry?)"
+        return "That .vrm file loaded empty (no visible geometry?)" to texturesApplied
     }
-    return null
-}
-
-/**
- * VRM 0.x models were exported facing **+Z** — the opposite of standard
- * glTF's own -Z-forward convention (which VRM 1.0 corrected). This is a
- * well-known quirk of the VRM 0.x spec/UniVRM export pipeline, not a
- * guess: every VRM 0.x viewer has to apply this same 180°-about-Y
- * correction, or the avatar loads facing directly away from the camera.
- * Rotates [ModelViewer.asset]'s root entity by 180° about Y *in addition
- * to* whatever [ModelViewer.transformToUnitCube] already set (its own
- * scale + recenter, no rotation), rather than replacing it — order here
- * doesn't matter for a rotation about the vertical axis applied at the
- * already-recentered origin. VRM 1.0 files are untouched — they already
- * follow the standard -Z-forward convention [ModelViewer]/Filament expect.
- */
-private fun fixVrm0Facing(viewer: ModelViewer) {
-    val asset = viewer.asset ?: return
-    val transformManager = viewer.engine.transformManager
-    val instance = transformManager.getInstance(asset.root)
-    if (instance == 0) return
-    val current = FloatArray(16)
-    transformManager.getTransform(instance, current)
-    val flip180AboutY = Quaternion(0f, 1f, 0f, 0f).toColumnMajorMatrix()
-    val fixed = multiplyColumnMajor4x4(flip180AboutY, current)
-    // Never write a degenerate transform into the scene graph — a NaN or
-    // all-zero matrix here would make the whole model vanish with no
-    // error, which is worse than just leaving it facing the wrong way.
-    if (fixed.any { !it.isFinite() }) {
-        Log.e(TAG, "fixVrm0Facing produced a non-finite matrix — leaving the root transform alone")
-        return
-    }
-    transformManager.setTransform(instance, fixed)
+    return null to texturesApplied
 }
 
 /** A plain three-point directional-light rig — see this file's top doc
