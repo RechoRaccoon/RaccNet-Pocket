@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.SystemClock
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -56,6 +57,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.mediaviewer.util.PreferencesManager
 import com.mediaviewer.util.VrmData
+import com.mediaviewer.util.VrmParser
 import com.mediaviewer.util.rememberHapticTap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.firstOrNull
@@ -155,7 +157,12 @@ fun VrmModeScreen(
     // sessions is a one-line follow-up (see the handoff document) once this
     // screen actually has something to gate with them.
     var settingsOpen by remember { mutableStateOf(false) }
-    var trackUpperBody by remember { mutableStateOf(true) }
+    // Off by default: pose tracking is the most expensive of the three
+    // landmarkers (full-body BlazePose on the GPU every frame), and the
+    // phone getting hot in VRM mode traced largely to it running from
+    // the moment the screen opened. The Settings sheet's "Upper Body"
+    // toggle turns it on when the user actually wants it.
+    var trackUpperBody by remember { mutableStateOf(false) }
     var trackFullBody by remember { mutableStateOf(false) }
 
     // Step 1 verification state (see doc comment above): the latest result
@@ -179,6 +186,42 @@ fun VrmModeScreen(
     var pickedVrmUri by remember { mutableStateOf<Uri?>(null) }
     var vrmBytes by remember { mutableStateOf<ByteArray?>(null) }
     var parsedVrmData by remember { mutableStateOf<VrmData?>(null) }
+
+    // MediaPipe task files are created here, but NOT on the UI thread:
+    // FaceLandmarker.createFromOptions compiles GPU shaders and loads a
+    // multi-MB .task model — doing that on the main thread during
+    // composition (three helpers in a row, as before) froze the screen for
+    // seconds and was a big part of why entering VRM mode felt so slow.
+    // They now load in the background; the camera preview/binding only
+    // starts once they're ready, and the screen shows a small "Warming up"
+    // line meanwhile.
+    var trackersReady by remember { mutableStateOf(false) }
+    var faceHelper by remember { mutableStateOf<FaceLandmarkerHelper?>(null) }
+    var handHelper by remember { mutableStateOf<HandLandmarkerHelper?>(null) }
+    var poseHelper by remember { mutableStateOf<PoseLandmarkerHelper?>(null) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        runCatching {
+            val ctx = context.applicationContext
+            val face = FaceLandmarkerHelper.create(ctx, onResult = { latestFaceResult = it })
+            val hand = HandLandmarkerHelper.create(ctx, onResult = { latestHandResult = it })
+            val pose = PoseLandmarkerHelper.create(ctx, onResult = { latestPoseResult = it })
+            faceHelper = face
+            handHelper = hand
+            poseHelper = pose
+            trackersReady = true
+        }.onFailure { android.util.Log.e("VrmModeScreen", "Failed to create MediaPipe task helpers", it) }
+    }
+    // Helpers are created once per screen entry and closed when the
+    // screen leaves — they survive VrmCameraTracking's bind/unbind
+    // cycles (the trackPose toggle), so toggling body tracking no longer
+    // tears down and rebuilds the GPU pipelines.
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose {
+            faceHelper?.close()
+            handHelper?.close()
+            poseHelper?.close()
+        }
+    }
     // Item 8, VRM pipeline step 6 — the node-index→entity bridge into
     // whatever VrmAvatarView just rendered; null until a model has
     // actually finished loading. See AvatarRetargeter.kt's doc comment.
@@ -212,11 +255,30 @@ fun VrmModeScreen(
     }
     androidx.compose.runtime.LaunchedEffect(pickedVrmUri) {
         val uri = pickedVrmUri
-        vrmBytes = if (uri == null) null else withContext(Dispatchers.IO) {
+        if (uri == null) {
+            vrmBytes = null
+            parsedVrmData = null
+            return@LaunchedEffect
+        }
+        // Read the picked file off the UI thread, and parse it there too —
+        // VrmParser on a multi-MB .vrm is not free. Both states are
+        // assigned back-to-back AFTER the last suspension point, so no
+        // recomposition can ever observe new vrmBytes with a stale
+        // parsedVrmData (VrmAvatarView keys its load off vrmBytes and
+        // reads parsedVrmData for the VRM 0.x facing fix — a torn update
+        // there would flip the wrong way and never correct itself).
+        val bytes = withContext(Dispatchers.IO) {
             runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }
                 .onFailure { android.util.Log.e("VrmModeScreen", "Could not read picked VRM file", it) }
                 .getOrNull()
         }
+        val parsed = if (bytes != null) {
+            withContext(Dispatchers.Default) { runCatching { VrmParser.parse(bytes) }.getOrNull() }
+        } else {
+            null
+        }
+        vrmBytes = bytes
+        parsedVrmData = parsed
     }
     val vrmAvatarPickerLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
@@ -262,13 +324,30 @@ fun VrmModeScreen(
         if (hasCameraPermission) {
             // Headless — see VrmCameraTracking's doc comment for why this
             // renders nothing. Camera frames still drive tracking exactly
-            // as before; they're just never displayed.
-            VrmCameraTracking(
-                trackPose = trackUpperBody,
-                onFaceResult = { latestFaceResult = it },
-                onHandResult = { latestHandResult = it },
-                onPoseResult = { latestPoseResult = it }
-            )
+            // as before; they're just never displayed. Only bound once the
+            // MediaPipe task files have finished loading in the background
+            // (see trackersReady above) — binding earlier would run a
+            // camera with nowhere to send its frames, pointlessly burning
+            // battery while the helpers still load.
+            if (trackersReady && faceHelper != null && handHelper != null) {
+                VrmCameraTracking(
+                    faceHelper = faceHelper,
+                    handHelper = handHelper,
+                    poseHelper = poseHelper,
+                    trackPose = trackUpperBody
+                )
+            } else {
+                Box(Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.navigationBars).padding(top = 72.dp)) {
+                    Text(
+                        "Warming up trackers…",
+                        color = Color.White.copy(0.7f), fontSize = 12.sp,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.Black.copy(0.35f))
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    )
+                }
+            }
             // Item 8, step 5 — Filament rendering the picked VRM avatar
             // file, driven by tracking — the only visible layer in VRM
             // mode; there's no camera feed underneath it anymore.
@@ -276,7 +355,7 @@ fun VrmModeScreen(
                 VrmAvatarView(
                     modifier = Modifier.fillMaxSize(),
                     vrmBytes = vrmBytes,
-                    onParsedVrmData = { parsedVrmData = it },
+                    parsedVrmData = parsedVrmData,
                     onRetargetTargetReady = { retargetTarget = it }
                 )
             } else {
@@ -393,58 +472,77 @@ fun VrmModeScreen(
  *  case (the one that needs a visible surface) at all — camera frames
  *  only ever need to reach `ImageAnalysis`'s analyzer, which needs no
  *  surface of its own, so there's nothing to display and nothing to
- *  composite against the Filament view. Every frame is decoded to a
- *  [Bitmap]/`MPImage` exactly once here, then handed to all three
- *  landmarker helpers (face + hands always; pose only while [trackPose]
- *  is on, per the "Upper Body" Settings toggle) — avoids each helper
- *  redoing the same YUV conversion three times over. Whatever each
- *  detects is forwarded back up to [VrmModeScreen] via
- *  [onFaceResult]/[onHandResult]/[onPoseResult]. If a model asset isn't
- *  bundled (see [FaceLandmarkerHelper]'s doc comment), that helper's
- *  `create` returns null and its slot is simply skipped. */
+ *  composite against the Filament view. Throttled frames are decoded to a
+ *  [Bitmap]/`MPImage` exactly once here, then handed to the landmarker
+ *  helpers VrmModeScreen created (face + hands always; pose only while
+ *  [trackPose] is on, per the "Upper Body" Settings toggle) — avoids each
+ *  helper redoing the same YUV conversion three times over. Each helper
+ *  was constructed with its own result listener by VrmModeScreen, so
+ *  detections flow straight back up as Compose state. If a model asset
+ *  isn't bundled (see [FaceLandmarkerHelper]'s doc comment), that
+ *  helper's `create` returns null and its slot is simply skipped. */
 @Composable
 private fun VrmCameraTracking(
-    trackPose: Boolean,
-    onFaceResult: (FaceLandmarkerResult) -> Unit,
-    onHandResult: (HandLandmarkerResult) -> Unit,
-    onPoseResult: (PoseLandmarkerResult) -> Unit
+    faceHelper: FaceLandmarkerHelper?,
+    handHelper: HandLandmarkerHelper?,
+    poseHelper: PoseLandmarkerHelper?,
+    trackPose: Boolean
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
-    val faceLandmarkerHelper = remember { FaceLandmarkerHelper.create(context, onFaceResult) }
-    val handLandmarkerHelper = remember { HandLandmarkerHelper.create(context, onHandResult) }
-    val poseLandmarkerHelper = remember { PoseLandmarkerHelper.create(context, onPoseResult) }
+    // Written from the analyzer thread (cameraExecutor), read there too —
+    // AtomicLong so the throttle check can't race.
+    val lastSubmittedMs = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+    // Helpers are created once by VrmModeScreen (off the UI thread — see
+    // trackersReady), already wired to their result listeners; this
+    // composable only owns the camera binding, so toggling trackPose
+    // rebinds without rebuilding the GPU pipelines.
 
     DisposableEffect(Unit) {
-        onDispose {
-            faceLandmarkerHelper?.close()
-            handLandmarkerHelper?.close()
-            poseLandmarkerHelper?.close()
-            cameraExecutor.shutdown()
-        }
+        onDispose { cameraExecutor.shutdown() }
     }
 
     // No AndroidView/PreviewView, and no Preview use case — see this
-    // function's doc comment. Binding is one-shot per composition, same
-    // trigger (Unit) as the DisposableEffect's teardown above.
+    // function's doc comment. Rebinds when trackPose toggles (cheap —
+    // the helpers themselves survive, see above); torn down with the
+    // screen via the DisposableEffect above.
+    //
+    // Perf: the analyzer used to forward EVERY camera frame (usually
+    // 30fps at full sensor resolution) into all three landmarkers —
+    // allocating a fresh full-res Bitmap per frame — which is what made
+    // the phone hot. Now: analysis resolution is capped at 640x480 (more
+    // than enough for a face filling the front-camera frame), and frames
+    // are throttled to ~15fps. The OneEuroFilter smoothing downstream
+    // keeps the avatar looking smooth at that rate.
     LaunchedEffect(trackPose) {
         val provider = ProcessCameraProvider.getInstance(context).get()
         val analysis = ImageAnalysis.Builder()
+            .setTargetResolution(android.util.Size(640, 480))
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
             .also { useCase ->
                 useCase.setAnalyzer(cameraExecutor) { imageProxy ->
+                    val nowMs = SystemClock.uptimeMillis()
+                    // Throttle: skip frames that arrive sooner than ~66ms
+                    // after the last submitted one. KEEP_ONLY_LATEST already
+                    // drops backlog; this stops the landmarkers from ever
+                    // being *offered* more than ~15fps in the first place.
+                    if (nowMs - lastSubmittedMs.get() < 66L) {
+                        imageProxy.close()
+                        return@setAnalyzer
+                    }
+                    lastSubmittedMs.set(nowMs)
                     val timestampMs = System.currentTimeMillis()
                     val rotationDegrees = imageProxy.imageInfo.rotationDegrees
                     val bitmapBuffer = Bitmap.createBitmap(imageProxy.width, imageProxy.height, Bitmap.Config.ARGB_8888)
                     imageProxy.use { bitmapBuffer.copyPixelsFromBuffer(it.planes[0].buffer) }
                     val mpImage = BitmapImageBuilder(bitmapBuffer).build()
 
-                    faceLandmarkerHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
-                    handLandmarkerHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
-                    if (trackPose) poseLandmarkerHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
+                    faceHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
+                    handHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
+                    if (trackPose) poseHelper?.detectAsync(mpImage, rotationDegrees, timestampMs)
                 }
             }
         runCatching {

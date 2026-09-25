@@ -3,11 +3,21 @@ package com.mediaviewer.ui
 import android.util.Log
 import android.view.Choreographer
 import android.view.SurfaceView
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.google.android.filament.Engine
 import com.google.android.filament.EntityManager
@@ -17,7 +27,6 @@ import com.google.android.filament.utils.ModelViewer
 import com.google.android.filament.utils.Utils
 import com.mediaviewer.util.Quaternion
 import com.mediaviewer.util.VrmData
-import com.mediaviewer.util.VrmParser
 import com.mediaviewer.util.VrmSpecVersion
 import com.mediaviewer.util.multiplyColumnMajor4x4
 import java.nio.ByteBuffer
@@ -43,9 +52,10 @@ import java.nio.ByteBuffer
  * [AvatarRetargeter] makes never reach the skinned meshes (verified
  * against Filament 1.51.6's `ModelViewer.kt`: `render()` doesn't call it
  * itself), so the avatar would stay frozen in its rest pose no matter
- * what tracking reports. [onParsedVrmData] separately runs the same
- * bytes through [VrmParser] (step 4) and hands back the bone/expression
- * maps. [onRetargetTargetReady] hands back a [RetargetTarget] — the
+ * what tracking reports. [parsedVrmData] is the same bytes already run
+ * through [VrmParser] (step 4) off the main thread by the caller — this
+ * view never parses on the UI thread itself. [onRetargetTargetReady]
+ * hands back a [RetargetTarget] — the
  * node-index→entity bridge `AvatarRetargeter.kt` (step 6) needs to
  * actually drive this rendered model — built once right after a
  * successful load rather than resolved fresh every frame, since it's a
@@ -62,24 +72,28 @@ import java.nio.ByteBuffer
  * bundled `.ktx` IBL later is a self-contained follow-up to this function
  * alone, nothing else here depends on which lighting approach is used.
  *
- * ## Unverified
- * Same caveat as the rest of this pipeline, but with a specific note:
- * `ModelViewer`'s exact public surface (`engine`/`scene`/`loadModelGlb`/
- * `transformToUnitCube`/`destroyModel`/`render`/`asset.root` — all used
- * below) is
- * reconstructed from the well-known Filament Android sample app's shape,
- * not verified against the pinned `filament-utils-android` AAR version in
- * `build.gradle.kts`. If a name has moved, Android Studio's compile error
- * will point at exactly which call in this file needs updating — the
- * teardown path in [VrmAvatarView]'s `onDispose` is the single piece I'm
- * least sure of (see its own comment) and worth double-checking first if
- * repeatedly entering/leaving VRM mode ends up leaking native memory.
+ * ## Verified API surface
+ * `ModelViewer`'s public surface (`engine`/`scene`/`loadModelGlb`/
+ * `transformToUnitCube`/`destroyModel`/`render`/`asset`/`asset.root` — all
+ * used below) was verified against the pinned `filament-utils-android`
+ * 1.51.6 sources (ModelViewer.kt): `loadModelGlb(buffer)` calls
+ * `destroyModel()` itself, then `assetLoader.createAsset(buffer)` +
+ * `resourceLoader.asyncBeginLoad(asset)`, and `render()` drives
+ * `asyncUpdateLoad()` per frame — which is why a direct (not heap)
+ * `ByteBuffer` is required here: gltfio's native loader reads it via
+ * `GetDirectBufferAddress`. `render()` does NOT call
+ * `animator.updateBoneMatrices()` itself, hence the explicit call in the
+ * frame callback.
  */
 @Composable
 fun VrmAvatarView(
     modifier: Modifier = Modifier,
     vrmBytes: ByteArray?,
-    onParsedVrmData: (VrmData?) -> Unit = {},
+    // Parsed off the main thread by VrmModeScreen (VrmParser on a multi-MB
+    // file is not free) and handed in here — this view used to parse on
+    // the UI thread itself, once in the AndroidView factory and again in
+    // the LaunchedEffect, which was part of why opening VRM mode stalled.
+    parsedVrmData: VrmData? = null,
     onRetargetTargetReady: (RetargetTarget?) -> Unit = {}
 ) {
     // Held outside the AndroidView factory so the LaunchedEffect below —
@@ -88,6 +102,18 @@ fun VrmAvatarView(
     // (and therefore the whole Filament Engine/GL context) on every new
     // file pick.
     val viewerHolder = remember { arrayOfNulls<ModelViewer>(1) }
+    // Which exact ByteArray instance is currently loaded in the viewer.
+    // The AndroidView factory below loads vrmBytes on first composition;
+    // LaunchedEffect(vrmBytes) also fires on first composition (after the
+    // factory), so without this guard the model would load twice on every
+    // cold entry. Reference equality is the right check: vrmBytes is only
+    // ever reassigned when the file is actually re-read.
+    val loadedBytesHolder = remember { arrayOfNulls<ByteArray>(1) }
+    // Load failures used to be log-only (Log.e) — on a device that reads
+    // as "the model doesn't show up" with zero explanation. Surfaced here
+    // as a small on-screen line so a failed load is diagnosable instead
+    // of a silent black screen.
+    var loadError by remember { mutableStateOf<String?>(null) }
 
     DisposableEffect(Unit) {
         val choreographer = Choreographer.getInstance()
@@ -140,13 +166,16 @@ fun VrmAvatarView(
         }
         if (vrmBytes == null) {
             runCatching { viewer.destroyModel() }
-            onParsedVrmData(null)
+            loadedBytesHolder[0] = null
+            loadError = null
             onRetargetTargetReady(null)
             return@LaunchedEffect
         }
-        val parsedVrmData = runCatching { VrmParser.parse(vrmBytes) }.getOrNull()
-        loadVrmInto(viewer, vrmBytes, parsedVrmData)
-        onParsedVrmData(parsedVrmData)
+        // The factory already loaded these exact bytes during this
+        // composition — don't load twice (see loadedBytesHolder).
+        if (loadedBytesHolder[0] === vrmBytes) return@LaunchedEffect
+        loadedBytesHolder[0] = vrmBytes
+        loadError = loadVrmInto(viewer, vrmBytes, parsedVrmData)
         onRetargetTargetReady(buildRetargetTargetOrNull(viewer, parsedVrmData))
     }
 
@@ -161,14 +190,25 @@ fun VrmAvatarView(
             addFlatAmbientLight(viewer.engine, viewer.scene)
             viewerHolder[0] = viewer
             if (vrmBytes != null) {
-                val parsedVrmData = runCatching { VrmParser.parse(vrmBytes) }.getOrNull()
-                loadVrmInto(viewer, vrmBytes, parsedVrmData)
-                onParsedVrmData(parsedVrmData)
+                loadedBytesHolder[0] = vrmBytes
+                loadError = loadVrmInto(viewer, vrmBytes, parsedVrmData)
                 onRetargetTargetReady(buildRetargetTargetOrNull(viewer, parsedVrmData))
             }
             surfaceView
         }
     )
+
+    // See loadError's declaration — a failed load is shown, not silent.
+    loadError?.let { error ->
+        Box(modifier, contentAlignment = Alignment.BottomCenter) {
+            Text(
+                text = error,
+                color = Color.Red.copy(alpha = 0.85f),
+                fontSize = 12.sp,
+                modifier = Modifier.padding(16.dp)
+            )
+        }
+    }
 }
 
 /** Only meaningful once a model has actually loaded (needs [ModelViewer.asset]
@@ -183,15 +223,34 @@ private fun buildRetargetTargetOrNull(viewer: ModelViewer, parsedVrmData: VrmDat
         .getOrNull()
 }
 
-private fun loadVrmInto(viewer: ModelViewer, bytes: ByteArray, parsedVrmData: VrmData?) {
-    runCatching {
+/** Loads [bytes] into [viewer]; returns a human-readable error when the
+ *  model can't be shown, null on success. The error is what VrmAvatarView
+ *  draws on screen (see loadError) so a broken file is diagnosable. */
+private fun loadVrmInto(viewer: ModelViewer, bytes: ByteArray, parsedVrmData: VrmData?): String? {
+    // gltfio's native loader reads the buffer via GetDirectBufferAddress —
+    // a heap ByteBuffer (ByteBuffer.wrap) gives it a null pointer and the
+    // asset silently comes back empty. The official model-viewer sample
+    // always copies into a direct, native-order buffer first; do the same.
+    val direct = ByteBuffer.allocateDirect(bytes.size).order(java.nio.ByteOrder.nativeOrder())
+    direct.put(bytes)
+    direct.flip()
+    val failure = runCatching {
         viewer.destroyModel()
-        viewer.loadModelGlb(ByteBuffer.wrap(bytes))
+        viewer.loadModelGlb(direct)
         viewer.transformToUnitCube()
         if (parsedVrmData?.specVersion == VrmSpecVersion.VRM_0) {
             fixVrm0Facing(viewer)
         }
-    }.onFailure { Log.e(TAG, "Filament failed to load VRM file as glTF", it) }
+    }.exceptionOrNull()
+    if (failure != null) {
+        Log.e(TAG, "Filament failed to load VRM file as glTF", failure)
+        return "Couldn't load that .vrm file (${failure::class.simpleName})"
+    }
+    if (viewer.asset == null) {
+        Log.e(TAG, "Filament createAsset returned null for the VRM file")
+        return "Couldn't parse that .vrm file (not valid glTF?)"
+    }
+    return null
 }
 
 /**
@@ -215,7 +274,15 @@ private fun fixVrm0Facing(viewer: ModelViewer) {
     val current = FloatArray(16)
     transformManager.getTransform(instance, current)
     val flip180AboutY = Quaternion(0f, 1f, 0f, 0f).toColumnMajorMatrix()
-    transformManager.setTransform(instance, multiplyColumnMajor4x4(flip180AboutY, current))
+    val fixed = multiplyColumnMajor4x4(flip180AboutY, current)
+    // Never write a degenerate transform into the scene graph — a NaN or
+    // all-zero matrix here would make the whole model vanish with no
+    // error, which is worse than just leaving it facing the wrong way.
+    if (fixed.any { !it.isFinite() }) {
+        Log.e(TAG, "fixVrm0Facing produced a non-finite matrix — leaving the root transform alone")
+        return
+    }
+    transformManager.setTransform(instance, fixed)
 }
 
 /** A plain three-point directional-light rig — see this file's top doc
@@ -266,9 +333,14 @@ private fun addThreeLightRig(engine: Engine, scene: com.google.android.filament.
  * show, which a directional-only rig fundamentally can't do.
  */
 private fun addFlatAmbientLight(engine: Engine, scene: com.google.android.filament.Scene) {
+    // NOTE: IndirectLight intensity is a plain multiplier (1 = as-baked),
+    // NOT lux — an earlier version passed 12_000 here, which would shove
+    // every pixel to blown-out white. ~1.5 against the ~32k-lux key light
+    // is a gentle fill: enough to keep shadowed surfaces readable, not
+    // enough to wash the model out.
     val indirectLight = IndirectLight.Builder()
-        .irradiance(1, floatArrayOf(0.65f, 0.65f, 0.68f)) // band 0 only: a flat, faintly cool-white ambient
-        .intensity(12_000f)
+        .irradiance(1, floatArrayOf(0.9f, 0.9f, 0.95f)) // band 0 only: a flat, faintly cool-white ambient
+        .intensity(1.5f)
         .build(engine)
     scene.indirectLight = indirectLight
 }

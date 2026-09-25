@@ -1,11 +1,9 @@
 package com.mediaviewer
 
 import android.content.Context
-import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -52,6 +50,7 @@ import com.mediaviewer.ui.LocalGlassIntensity
 import com.mediaviewer.ui.LocalGlassRimIntensity
 import com.mediaviewer.ui.LocalGlassRimVibrantSecondary
 import com.mediaviewer.ui.NeutralGlassTint
+import com.mediaviewer.ui.rememberDominantColor
 import com.mediaviewer.ui.DmInboxOverlay
 import com.mediaviewer.ui.ListPickerDialog
 import com.mediaviewer.ui.LiveNowPlayerOverlay
@@ -819,9 +818,21 @@ private fun AppRoot(viewModel: MainViewModel) {
             // "Camera" tap for now — CaptureVideo() is the identical
             // pattern (see takePicture just above) if/when video capture
             // gets its own control (e.g. press-and-hold).
+            // The notch button wears the feed's current dominant color — except
+            // while the Hub (SettingsSheet) is open, where every other piece
+            // of hub UI tints itself with the logged-in user's OWN profile
+            // color instead (see SettingsSheet's dominantColor shadowing).
+            // The button follows the same rule so it doesn't stick out in
+            // the wrong color over the hub.
+            val notchTint = if (screenState == ScreenState.SETTINGS) {
+                val selfAvatar = selfProfile?.author?.avatarUrl
+                if (!selfAvatar.isNullOrBlank()) rememberDominantColor(selfAvatar) else currentDominantColor
+            } else {
+                currentDominantColor
+            }
             CameraNotchButton(
                 liquidGlass = liquidGlass,
-                tint = currentDominantColor,
+                tint = notchTint,
                 onOpenCamera = {
                     // ACTION_IMAGE_CAPTURE (what TakePicture launches under
                     // the hood) doesn't need this app to hold the CAMERA
@@ -829,18 +840,25 @@ private fun AppRoot(viewModel: MainViewModel) {
                     // that on its own.
                     val uri = newCameraCaptureUri(context)
                     cameraCaptureUri.value = uri
-                    // Two classic ways this dies: no camera app installed
-                    // at all (launch() throws ActivityNotFoundException),
-                    // or a camera app that chokes on the FileProvider Uri.
-                    // Either way, fail with a toast — never a crash.
-                    val cameraIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-                    val hasCameraApp = cameraIntent.resolveActivity(context.packageManager) != null
-                    if (!hasCameraApp) {
-                        Toast.makeText(context, "No camera app found on this device", Toast.LENGTH_SHORT).show()
-                    } else {
-                        runCatching { takePicture.launch(uri) }
-                            .onFailure { Toast.makeText(context, "Couldn't open the camera", Toast.LENGTH_SHORT).show() }
-                    }
+                    // No resolveActivity() pre-check here on purpose: on
+                    // API 30+ package-visibility rules make that query
+                    // return null even when a camera app IS installed
+                    // (unless a <queries> block declares the intent), so
+                    // the check itself was the bug — it showed "No camera
+                    // app found" on devices that have a camera. Just launch
+                    // and catch ActivityNotFoundException instead, which is
+                    // the only case that genuinely means "no camera app".
+                    // (The manifest keeps a <queries> block for
+                    // IMAGE_CAPTURE anyway — harmless, and it helps any
+                    // future explicit query.)
+                    runCatching { takePicture.launch(uri) }
+                        .onFailure { e ->
+                            if (e is android.content.ActivityNotFoundException) {
+                                Toast.makeText(context, "No camera app found on this device", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Couldn't open the camera", Toast.LENGTH_SHORT).show()
+                            }
+                        }
                 },
                 onOpenVrm = viewModel::openVrmMode
             )

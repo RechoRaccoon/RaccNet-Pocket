@@ -16,9 +16,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -45,9 +42,9 @@ import com.mediaviewer.util.rememberHapticTap
 /**
  * Item 8: the phone's real front-camera cutout, turned into a button.
  *
- * Collapsed, it's a small bubble hugging the actual display cutout — a
- * tight outline (see [outlinePadding]) so it visibly reads as a tappable
- * bubble rather than just decoration drawn around the notch. Tapping it
+ * Collapsed, it's a thin outline hugging the actual display cutout —
+ * just a ring around the notch itself (see [outlinePadding]), so it
+ * reads as part of the phone rather than a floating pill. Tapping it
  * gives a deep haptic tap and expands the bubble horizontally in *both*
  * directions at once — the notch's own position never moves, the outline
  * just grows outward around it — revealing a "Camera" text button on the
@@ -66,10 +63,10 @@ import com.mediaviewer.util.rememberHapticTap
  * (most emulators, some tablets) fall back to a small fixed size near the
  * top-center so the button still renders sensibly.
  *
- * Colors follow the app's adaptive [tint] (the feed's current dominant
- * color): the bubble fill and outline are tinted in both glass and flat
- * modes, so it reads as part of the adaptive UI rather than a floating
- * white pill.
+ * Colors follow the [tint] the caller passes in: the feed passes its
+ * current dominant color; the hub passes the logged-in user's own profile
+ * color — the button itself doesn't decide, it just wears whatever the
+ * surrounding UI is already using.
  */
 @Composable
 fun CameraNotchButton(
@@ -142,7 +139,11 @@ fun CameraNotchButton(
         onDispose { ViewCompat.setOnApplyWindowInsetsListener(view, null) }
     }
 
-    val outlinePadding = 4.dp
+    // Collapsed, this is a bare outline ring hugging the cutout rect as
+    // tightly as possible — no icon inside (any inner content forces the
+    // bubble bigger than the notch it's supposed to hug). Per feedback the
+    // ring should read as *the notch's own outline*, not a separate pill.
+    val outlinePadding = 2.dp
     val sideWidth = 56.dp
     val bubbleHeight = cutoutHeight + outlinePadding * 2
     val collapsedWidth = cutoutWidth + outlinePadding * 2
@@ -185,25 +186,19 @@ fun CameraNotchButton(
             Modifier.offset(x = xOffset, y = yOffset).width(width).height(bubbleHeight).clip(shape)
                 .then(
                     if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
-                    // Bumped up from 0.22f/0.55f — at the old alphas the
-                    // tint was hard to actually see against most feed
-                    // backgrounds, which likely reads as "not reflecting
-                    // the profile color" even though the same tint value
-                    // every other adaptive-color element uses is wired
-                    // through correctly here too.
-                    else Modifier.background(tint.copy(alpha = 0.32f)).border(1.5.dp, tint.copy(alpha = 0.75f), shape)
+                    // Flat mode: a translucent tinted fill under a thin
+                    // (1dp) tinted ring — the ring is the whole visual in
+                    // the collapsed state, so it stays hairline rather than
+                    // chunky.
+                    else Modifier.background(tint.copy(alpha = 0.28f)).border(1.dp, tint.copy(alpha = 0.8f), shape)
                 )
         ) {
             if (!expanded) {
+                // Bare ring — the tappable area is the whole bubble, no
+                // inner icon (see outlinePadding's comment).
                 Box(
-                    Modifier.matchParentSize().clickable { tap(); expanded = true },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        Icons.Default.PhotoCamera, contentDescription = "Camera / VRM",
-                        tint = Color.White.copy(0.85f), modifier = Modifier.height(cutoutHeight * 0.55f)
-                    )
-                }
+                    Modifier.matchParentSize().clickable { tap(); expanded = true }
+                )
             } else {
                 Row(Modifier.matchParentSize()) {
                     Box(
