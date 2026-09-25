@@ -101,7 +101,12 @@ fun CameraNotchButton(
     DisposableEffect(view) {
         fun applyFrom(insets: WindowInsetsCompat?) {
             val cutout = insets?.displayCutout ?: return
-            val rect = cutout.boundingRects.firstOrNull { it.width() > 0 && it.height() > 0 }
+            // Prefer the SMALLEST non-empty rect — some devices report a
+            // loose rect that covers the whole notch area; the smallest
+            // one hugs the actual camera lens best.
+            val rect = cutout.boundingRects
+                .filter { it.width() > 0 && it.height() > 0 }
+                .minByOrNull { it.width() * it.height() }
             if (rect != null) {
                 with(density) {
                     cutoutWidth = rect.width().toDp()
@@ -141,20 +146,20 @@ fun CameraNotchButton(
     }
 
     // Collapsed, this is a bare outline ring. It's always a CIRCLE (never
-    // an oval): diameter = the larger cutout dimension + 2dp per side,
-    // hard-capped at 36dp so a loose platform rect can never blow it up
-    // into a big pill. Tight rects still get a tight ring; loose rects get
-    // the cap. Centered on the real cutout position.
-    val outlinePadding = 2.dp
+    // an oval): diameter = the larger cutout dimension + 1dp per side,
+    // hard-capped at 28dp so it hugs the lens instead of reading as a
+    // big pill. Tight rects still get a tight ring; loose rects get the
+    // cap. Centered on the real cutout position.
+    val outlinePadding = 1.dp
     val sideWidth = 56.dp
-    val ringSize = minOf(maxOf(cutoutWidth, cutoutHeight) + outlinePadding * 2, 36.dp)
+    val ringSize = minOf(maxOf(cutoutWidth, cutoutHeight) + outlinePadding * 2, 28.dp)
     val collapsedWidth = ringSize
     val expandedWidth = collapsedWidth + sideWidth * 2
-    // "Smooth but snappy": a fast, slightly-overshooting spring rather than
-    // a slow linear/eased width tween.
+    // Smooth but snappy, no bounce: a fast non-bouncy spring rather than
+    // the old overshooting one.
     val width by animateDpAsState(
         targetValue = if (expanded) expandedWidth else collapsedWidth,
-        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessHigh),
+        animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessHigh),
         label = "notchBubbleWidth"
     )
     // Collapsed the ring is a circle; expanded it stretches into a pill.
