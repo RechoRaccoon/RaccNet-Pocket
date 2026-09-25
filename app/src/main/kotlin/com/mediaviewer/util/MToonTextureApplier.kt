@@ -4,6 +4,7 @@ import android.graphics.BitmapFactory
 import android.util.Log
 import com.google.android.filament.Engine
 import com.google.android.filament.Texture
+import com.google.android.filament.TextureSampler
 import com.google.android.filament.gltfio.FilamentAsset
 import java.nio.ByteBuffer
 
@@ -64,8 +65,10 @@ object MToonTextureApplier {
 
                 // Try to set the base color map. Filament's standard PBR
                 // material uses "baseColorMap" parameter name.
+                // (setParameter takes TextureSampler, not Texture.Sampler —
+                // verified against Filament 1.51.6 MaterialInstance source.)
                 try {
-                    materialInstance.setParameter("baseColorMap", texture, Texture.Sampler.SAMPLER_2D)
+                    materialInstance.setParameter("baseColorMap", texture, TextureSampler())
                     // Also set base color factor if not white
                     if (!matInfo.baseColorFactor.contentEquals(floatArrayOf(1f, 1f, 1f, 1f))) {
                         materialInstance.setParameter("baseColorFactor",
