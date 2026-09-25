@@ -23,10 +23,10 @@ import com.google.android.filament.Engine
 import com.google.android.filament.EntityManager
 import com.google.android.filament.IndirectLight
 import com.google.android.filament.LightManager
-import com.google.android.filament.math.Float3
 import com.google.android.filament.utils.Manipulator
 import com.google.android.filament.utils.ModelViewer
 import com.google.android.filament.utils.Utils
+import kotlinx.coroutines.launch
 import com.mediaviewer.util.VrmData
 import java.nio.ByteBuffer
 
@@ -208,12 +208,13 @@ fun VrmAvatarView(
             // (0,0,-4) with the camera home at (0,0,1) — and render()
             // overwrites the Filament camera from the manipulator EVERY
             // FRAME, so calling camera.lookAt() directly is dead code. The
-            // only way to frame the model is through the manipulator:
-            // target the origin (where we center the model) and start the
-            // camera head-on at a distance that fits the unit cube.
+            // only way to frame the model is through the manipulator.
+            // We use transformToUnitCube() with its default center (0,0,-4),
+            // so the target matches. Home is 2.5 units in front, slightly
+            // above, for a head-on view.
             val manipulator = Manipulator.Builder()
-                .targetPosition(0f, 0f, 0f)
-                .orbitHomePosition(0f, 0.1f, 2.5f)
+                .targetPosition(0f, 0f, -4f)
+                .orbitHomePosition(0f, 0.1f, -1.5f)
                 .viewport(1, 1) // real size applied on layout below
                 .build(Manipulator.Mode.ORBIT)
             val viewer = ModelViewer(surfaceView, manipulator = manipulator)
@@ -310,7 +311,7 @@ private fun loadVrmInto(
             )
             android.util.Log.i("VrmAvatarView", "Applied MToon textures to $texturesApplied materials")
         }
-        viewer.transformToUnitCube(Float3(0f, 0f, 0f))
+        viewer.transformToUnitCube()
         // NOTE: fixVrm0Facing() is intentionally NOT called. It rotated
         // 180° about Y through the ORIGIN, but the model was centered at
         // (0,0,-4) — so it flung the model to (0,0,4), behind the camera.
@@ -323,7 +324,7 @@ private fun loadVrmInto(
         // the Filament camera from its orbit manipulator EVERY FRAME, so
         // a direct lookAt is dead code. Framing is controlled through the
         // custom Manipulator passed to ModelViewer in the factory above
-        // (target origin, home position head-on).
+        // (target (0,0,-4), home position head-on).
     }.exceptionOrNull()
     if (failure != null) {
         Log.e(TAG, "Filament failed to load VRM file as glTF", failure)
