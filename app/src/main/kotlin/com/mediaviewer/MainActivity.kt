@@ -838,8 +838,7 @@ private fun AppRoot(viewModel: MainViewModel) {
                     // the hood) doesn't need this app to hold the CAMERA
                     // permission itself — the system camera app handles
                     // that on its own.
-                    val uri = newCameraCaptureUri(context)
-                    cameraCaptureUri.value = uri
+                    //
                     // No resolveActivity() pre-check here on purpose: on
                     // API 30+ package-visibility rules make that query
                     // return null even when a camera app IS installed
@@ -851,8 +850,15 @@ private fun AppRoot(viewModel: MainViewModel) {
                     // (The manifest keeps a <queries> block for
                     // IMAGE_CAPTURE anyway — harmless, and it helps any
                     // future explicit query.)
-                    runCatching { takePicture.launch(uri) }
-                        .onFailure { e ->
+                    //
+                    // The whole thing (Uri creation included) is inside the
+                    // runCatching: a FileProvider failure used to crash the
+                    // tap outright instead of saying anything.
+                    runCatching {
+                        val uri = newCameraCaptureUri(context)
+                        cameraCaptureUri.value = uri
+                        takePicture.launch(uri)
+                    }.onFailure { e ->
                             if (e is android.content.ActivityNotFoundException) {
                                 Toast.makeText(context, "No camera app found on this device", Toast.LENGTH_SHORT).show()
                             } else {

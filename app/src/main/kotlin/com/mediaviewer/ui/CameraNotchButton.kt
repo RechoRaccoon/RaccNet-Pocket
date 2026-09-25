@@ -139,14 +139,16 @@ fun CameraNotchButton(
         onDispose { ViewCompat.setOnApplyWindowInsetsListener(view, null) }
     }
 
-    // Collapsed, this is a bare outline ring hugging the cutout rect as
-    // tightly as possible — no icon inside (any inner content forces the
-    // bubble bigger than the notch it's supposed to hug). Per feedback the
-    // ring should read as *the notch's own outline*, not a separate pill.
+    // Collapsed, this is a bare outline ring. Some phones report a loose
+    // cutout rect (much bigger than the physical camera hole), so the
+    // collapsed ring is hard-capped at a small size — it stays centered
+    // on the real cutout position but can never grow into a big pill.
+    // Tight rects still get a tight ring (rect + 2dp per side); loose
+    // rects get the cap instead of a giant outline.
     val outlinePadding = 2.dp
     val sideWidth = 56.dp
-    val bubbleHeight = cutoutHeight + outlinePadding * 2
-    val collapsedWidth = cutoutWidth + outlinePadding * 2
+    val bubbleHeight = minOf(cutoutHeight + outlinePadding * 2, 30.dp)
+    val collapsedWidth = minOf(cutoutWidth + outlinePadding * 2, 40.dp)
     val expandedWidth = collapsedWidth + sideWidth * 2
     // "Smooth but snappy": a fast, slightly-overshooting spring rather than
     // a slow linear/eased width tween.

@@ -250,6 +250,14 @@ private fun loadVrmInto(viewer: ModelViewer, bytes: ByteArray, parsedVrmData: Vr
         Log.e(TAG, "Filament createAsset returned null for the VRM file")
         return "Couldn't parse that .vrm file (not valid glTF?)"
     }
+    // A heap (non-direct) ByteBuffer used to make gltfio's native loader
+    // silently produce an asset with zero entities — no exception, just
+    // nothing to render. Guard here so "black screen, no error" becomes
+    // an actual message instead.
+    if (viewer.asset!!.entities.isEmpty()) {
+        Log.e(TAG, "Filament loaded the VRM file but it contains no entities")
+        return "That .vrm file loaded empty (no visible geometry?)"
+    }
     return null
 }
 

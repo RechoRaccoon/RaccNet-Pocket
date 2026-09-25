@@ -22,6 +22,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -186,6 +187,12 @@ fun VrmModeScreen(
     var pickedVrmUri by remember { mutableStateOf<Uri?>(null) }
     var vrmBytes by remember { mutableStateOf<ByteArray?>(null) }
     var parsedVrmData by remember { mutableStateOf<VrmData?>(null) }
+    // True when we had a saved/picked Uri but the file itself couldn't be
+    // opened (moved, deleted, or its permission died on reinstall) — the
+    // empty state then says so explicitly instead of the generic "no
+    // avatar picked" hint, because "black screen, nothing explains why"
+    // is exactly what a dead Uri looks like.
+    var vrmFileUnreadable by remember { mutableStateOf(false) }
 
     // MediaPipe task files are created here, but NOT on the UI thread:
     // FaceLandmarker.createFromOptions compiles GPU shaders and loads a
@@ -272,6 +279,7 @@ fun VrmModeScreen(
                 .onFailure { android.util.Log.e("VrmModeScreen", "Could not read picked VRM file", it) }
                 .getOrNull()
         }
+        vrmFileUnreadable = bytes == null
         val parsed = if (bytes != null) {
             withContext(Dispatchers.Default) { runCatching { VrmParser.parse(bytes) }.getOrNull() }
         } else {
@@ -359,15 +367,28 @@ fun VrmModeScreen(
                     onRetargetTargetReady = { retargetTarget = it }
                 )
             } else {
-                Box(Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.navigationBars).padding(top = 72.dp)) {
-                    Text(
-                        "No avatar picked yet — open Settings to choose a .vrm file",
-                        color = Color.White.copy(0.7f), fontSize = 12.sp,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color.Black.copy(0.35f))
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                    )
+                // Prominent, not a 12sp hint: a dead/missing avatar file is
+                // otherwise just "black screen, nothing explains why". The
+                // button launches the picker right here — no detour through
+                // Settings needed.
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            if (vrmFileUnreadable)
+                                "Couldn't open your saved avatar file — it may have been moved, deleted, or its permission died. Pick it again:"
+                            else
+                                "No avatar picked yet — choose a .vrm file:",
+                            color = Color.White.copy(0.85f), fontSize = 15.sp,
+                            modifier = Modifier.padding(horizontal = 32.dp),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        androidx.compose.material3.Button(
+                            onClick = { vrmAvatarPickerLauncher.launch(arrayOf("*/*")) }
+                        ) {
+                            Text("Choose .vrm file")
+                        }
+                    }
                 }
             }
             // Item 8, step 3 above — this is where the tracked/retargeted
