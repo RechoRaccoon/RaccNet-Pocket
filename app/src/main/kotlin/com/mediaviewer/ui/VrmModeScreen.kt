@@ -136,6 +136,7 @@ import kotlinx.coroutines.withContext
 @Composable
 fun VrmModeScreen(
     liquidGlass: Boolean,
+    tint: Color,
     onClose: () -> Unit,
     // Non-null exactly one of these once a capture is taken — same shape as
     // the camera-notch button's own Camera action, so both funnel into the
@@ -222,11 +223,16 @@ fun VrmModeScreen(
     // screen leaves — they survive VrmCameraTracking's bind/unbind
     // cycles (the trackPose toggle), so toggling body tracking no longer
     // tears down and rebuilds the GPU pipelines.
+    //
+    // Every close is individually guarded: a helper that fails to close
+    // (or was never created) must not crash the X button. Catching
+    // Throwable, not just Exception — a native MediaPipe failure can
+    // surface as an Error.
     androidx.compose.runtime.DisposableEffect(Unit) {
         onDispose {
-            faceHelper?.close()
-            handHelper?.close()
-            poseHelper?.close()
+            runCatching { faceHelper?.close() }.onFailure { android.util.Log.e("VrmModeScreen", "faceHelper.close() failed", it) }
+            runCatching { handHelper?.close() }.onFailure { android.util.Log.e("VrmModeScreen", "handHelper.close() failed", it) }
+            runCatching { poseHelper?.close() }.onFailure { android.util.Log.e("VrmModeScreen", "poseHelper.close() failed", it) }
         }
     }
     // Item 8, VRM pipeline step 6 — the node-index→entity bridge into
@@ -396,6 +402,7 @@ fun VrmModeScreen(
             // prints step 1's raw landmarker output so tracking itself can
             // be confirmed working before anything is built on top of it.
             VrmTrackingOverlay(
+                tint = tint,
                 trackUpperBody = trackUpperBody,
                 trackFullBody = trackFullBody,
                 smoothedFaceBlendshapes = smoothedBlendshapes,
@@ -422,11 +429,12 @@ fun VrmModeScreen(
         }
 
         // Close button, top — mirrors every other full-screen overlay's own
-        // top-left close affordance in this app.
+        // top-left close affordance in this app. Tinted with the user's
+        // color so the VRM UI matches the rest of the app.
         Box(
             Modifier.align(Alignment.TopStart).windowInsetsPadding(WindowInsets.navigationBars).padding(16.dp)
                 .size(40.dp).clip(CircleShape)
-                .then(if (liquidGlass) Modifier.glassPanel(true, shape = CircleShape) else Modifier.background(Color.White.copy(0.12f)))
+                .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = CircleShape) else Modifier.background(tint.copy(alpha = 0.25f)))
                 .clickable { tap(); onClose() },
             contentAlignment = Alignment.Center
         ) {
@@ -435,13 +443,14 @@ fun VrmModeScreen(
 
         // Bottom bar: record/photo + settings, per spec ("a recording/
         // picture button at the bottom, and the settings next to it").
+        // Tinted with the user's color.
         Row(
             Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 28.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 Modifier.size(72.dp).clip(CircleShape)
-                    .then(if (liquidGlass) Modifier.glassPanel(true, shape = CircleShape) else Modifier.background(Color.White.copy(0.12f)))
+                    .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = CircleShape) else Modifier.background(tint.copy(alpha = 0.25f)))
                     .clickable {
                         tap()
                         // Item 8 follow-up: this fires the same still-capture
@@ -459,7 +468,7 @@ fun VrmModeScreen(
             Spacer(Modifier.width(20.dp))
             Box(
                 Modifier.size(48.dp).clip(CircleShape)
-                    .then(if (liquidGlass) Modifier.glassPanel(true, shape = CircleShape) else Modifier.background(Color.White.copy(0.12f)))
+                    .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = CircleShape) else Modifier.background(tint.copy(alpha = 0.25f)))
                     .clickable { tap(); settingsOpen = true },
                 contentAlignment = Alignment.Center
             ) {
@@ -687,6 +696,7 @@ private fun smoothedBodyWorldLandmarks(poseResult: PoseLandmarkerResult?, filter
  */
 @Composable
 private fun VrmTrackingOverlay(
+    tint: Color,
     trackUpperBody: Boolean,
     trackFullBody: Boolean,
     smoothedFaceBlendshapes: Map<String, Float>,
@@ -773,7 +783,7 @@ private fun VrmTrackingOverlay(
     Box(modifier) {
         Text(
             text = listOfNotNull(faceLine, handLine, poseLine, vrmDataLine, retargetLine, headRotationLine, armRotationLine, legRotationLine).joinToString("\n\n"),
-            color = Color.Green,
+            color = tint,
             fontSize = 12.sp,
             modifier = Modifier
                 .align(Alignment.TopEnd)

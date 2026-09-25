@@ -67,11 +67,26 @@ class FaceLandmarkerHelper private constructor(
          *  asset above isn't bundled yet, so callers — VrmCameraTracking —
          *  can fall back to "no tracking data" instead of crashing the
          *  whole VRM screen over a missing asset file. */
-        fun create(context: Context, onResult: (FaceLandmarkerResult) -> Unit): FaceLandmarkerHelper? =
+        fun create(context: Context, onResult: (FaceLandmarkerResult) -> Unit): FaceLandmarkerHelper? {
+            // Try GPU first, fall back to CPU. The GPU delegate can fail
+            // on specific devices/models even when the task file is fine —
+            // without this fallback, face tracking silently never starts
+            // ("no landmarker output yet") while hand tracking works.
+            return tryCreate(context, Delegate.GPU, onResult)
+                ?: tryCreate(context, Delegate.CPU, onResult).also {
+                    if (it != null) Log.w(TAG, "FaceLandmarker GPU failed, using CPU")
+                }
+        }
+
+        private fun tryCreate(
+            context: Context,
+            delegate: Delegate,
+            onResult: (FaceLandmarkerResult) -> Unit
+        ): FaceLandmarkerHelper? =
             runCatching {
                 val baseOptions = BaseOptions.builder()
                     .setModelAssetPath(MODEL_ASSET_PATH)
-                    .setDelegate(Delegate.GPU)
+                    .setDelegate(delegate)
                     .build()
                 val options = FaceLandmarker.FaceLandmarkerOptions.builder()
                     .setBaseOptions(baseOptions)

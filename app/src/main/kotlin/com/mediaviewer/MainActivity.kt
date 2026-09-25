@@ -877,8 +877,16 @@ private fun AppRoot(viewModel: MainViewModel) {
         }
 
         if (vrmModeOpen) {
+            // VRM UI wears the user's own profile color (same rule as the
+            // notch button over the Hub) so the debug text, X button, and
+            // bottom bar match the rest of the app instead of generic green.
+            val vrmTint = run {
+                val selfAvatar = selfProfile?.author?.avatarUrl
+                if (!selfAvatar.isNullOrBlank()) rememberDominantColor(selfAvatar) else currentDominantColor
+            }
             VrmModeScreen(
                 liquidGlass = liquidGlass,
+                tint = vrmTint,
                 onClose = viewModel::closeVrmMode,
                 onCapture = { imageUri, videoUri ->
                     viewModel.closeVrmMode()

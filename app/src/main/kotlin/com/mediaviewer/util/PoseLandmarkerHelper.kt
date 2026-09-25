@@ -52,11 +52,23 @@ class PoseLandmarkerHelper private constructor(
         private const val TAG = "PoseLandmarkerHelper"
         private const val MODEL_ASSET_PATH = "pose_landmarker_full.task"
 
-        fun create(context: Context, onResult: (PoseLandmarkerResult) -> Unit): PoseLandmarkerHelper? =
+        fun create(context: Context, onResult: (PoseLandmarkerResult) -> Unit): PoseLandmarkerHelper? {
+            // GPU first, CPU fallback — same rationale as FaceLandmarkerHelper.
+            return tryCreate(context, Delegate.GPU, onResult)
+                ?: tryCreate(context, Delegate.CPU, onResult).also {
+                    if (it != null) Log.w(TAG, "PoseLandmarker GPU failed, using CPU")
+                }
+        }
+
+        private fun tryCreate(
+            context: Context,
+            delegate: Delegate,
+            onResult: (PoseLandmarkerResult) -> Unit
+        ): PoseLandmarkerHelper? =
             runCatching {
                 val baseOptions = BaseOptions.builder()
                     .setModelAssetPath(MODEL_ASSET_PATH)
-                    .setDelegate(Delegate.GPU)
+                    .setDelegate(delegate)
                     .build()
                 val options = PoseLandmarker.PoseLandmarkerOptions.builder()
                     .setBaseOptions(baseOptions)

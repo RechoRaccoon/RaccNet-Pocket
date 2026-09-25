@@ -140,18 +140,17 @@ fun VrmAvatarView(
         choreographer.postFrameCallback(frameCallback)
         onDispose {
             choreographer.removeFrameCallback(frameCallback)
-            // Best-effort teardown — this is the one part of this file
-            // reconstructed with the least confidence (see this file's
-            // top doc comment). `destroyModel()` + `Engine.destroy()` is
-            // the shape the official sample's Activity.onDestroy uses;
-            // worth confirming this actually releases the native GL
-            // context and doesn't leak if a person repeatedly opens and
-            // closes VRM mode in one app session.
+            // Teardown is best-effort and NON-fatal: destroying the
+            // Filament engine here used to crash the X button (a native
+            // teardown racing an in-flight frame). We only destroy the
+            // MODEL, not the engine — the engine survives for reuse if
+            // VRM mode is reopened, and the Activity's own destroy
+            // handles the final GL context release. Catches Throwable
+            // because a native Filament failure surfaces as an Error,
+            // not an Exception.
             runCatching {
-                val viewer = viewerHolder[0] ?: return@runCatching
-                viewer.destroyModel()
-                viewer.engine.destroy()
-            }.onFailure { Log.e(TAG, "Filament teardown failed", it) }
+                viewerHolder[0]?.destroyModel()
+            }.onFailure { Log.e(TAG, "Filament destroyModel() failed", it) }
             viewerHolder[0] = null
         }
     }
@@ -243,9 +242,12 @@ private fun loadVrmInto(viewer: ModelViewer, bytes: ByteArray, parsedVrmData: Vr
         viewer.destroyModel()
         viewer.loadModelGlb(direct)
         viewer.transformToUnitCube()
-        if (parsedVrmData?.specVersion == VrmSpecVersion.VRM_0) {
-            fixVrm0Facing(viewer)
-        }
+        // fixVrm0Facing is intentionally NOT called: it was added after
+        // the Sept 24 build that provably rendered on-device, and the
+        // black-screen regression correlates with its introduction. The
+        // model may face away from the camera without it — that's a
+        // visible, diagnosable state, unlike a black screen. Reintroduce
+        // only with a verified-correct rotation once the avatar is seen.
     }.exceptionOrNull()
     if (failure != null) {
         Log.e(TAG, "Filament failed to load VRM file as glTF", failure)

@@ -47,11 +47,23 @@ class HandLandmarkerHelper private constructor(
         private const val TAG = "HandLandmarkerHelper"
         private const val MODEL_ASSET_PATH = "hand_landmarker.task"
 
-        fun create(context: Context, onResult: (HandLandmarkerResult) -> Unit): HandLandmarkerHelper? =
+        fun create(context: Context, onResult: (HandLandmarkerResult) -> Unit): HandLandmarkerHelper? {
+            // GPU first, CPU fallback — same rationale as FaceLandmarkerHelper.
+            return tryCreate(context, Delegate.GPU, onResult)
+                ?: tryCreate(context, Delegate.CPU, onResult).also {
+                    if (it != null) Log.w(TAG, "HandLandmarker GPU failed, using CPU")
+                }
+        }
+
+        private fun tryCreate(
+            context: Context,
+            delegate: Delegate,
+            onResult: (HandLandmarkerResult) -> Unit
+        ): HandLandmarkerHelper? =
             runCatching {
                 val baseOptions = BaseOptions.builder()
                     .setModelAssetPath(MODEL_ASSET_PATH)
-                    .setDelegate(Delegate.GPU)
+                    .setDelegate(delegate)
                     .build()
                 val options = HandLandmarker.HandLandmarkerOptions.builder()
                     .setBaseOptions(baseOptions)
