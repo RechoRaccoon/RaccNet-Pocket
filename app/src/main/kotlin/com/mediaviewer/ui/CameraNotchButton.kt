@@ -176,14 +176,18 @@ fun CameraNotchButton(
     // offset(x, y) lands the ring's center exactly on the cutout's center.
     // No other UI element's position, padding, or alignment can push it.
     val screenWidth = LocalConfiguration.current.screenWidthDp.dp
-    val xAbsolute = cutoutCenterX?.let { it - ringSize / 2 } ?: (screenWidth - ringSize) / 2
     // Nudge down 2dp — the system cutout rect sits slightly above the
     // actual lens on this device.
     val yNudge = 2.dp
     val yAbsolute = cutoutCenterY?.let { it - ringSize / 2 + yNudge } ?: (12.dp + yNudge)
-    // Expanded, the pill grows symmetrically from the ring's center so it
-    // stays anchored on the cutout instead of sliding sideways.
-    val expandedXAbsolute = cutoutCenterX?.let { it - expandedWidth / 2 } ?: (screenWidth - expandedWidth) / 2
+    // The bubble is ALWAYS centered on the cutout's center X, using the
+    // CURRENT ANIMATED width — not a switched target. This keeps x and
+    // width in sync during the animation so the pill grows symmetrically
+    // outward from the ring instead of jumping sideways. (The old code
+    // switched x instantly while width animated, which read as a
+    // different bubble sliding in from the left.)
+    val centerX = cutoutCenterX ?: screenWidth / 2
+    val xAbsolute = centerX - width / 2
 
     // Always fillMaxSize so the coordinate system is the whole screen and
     // the tap-away catcher (expanded) genuinely covers everything.
@@ -203,7 +207,7 @@ fun CameraNotchButton(
 
         Box(
             Modifier.offset(
-                x = if (expanded) expandedXAbsolute else xAbsolute,
+                x = xAbsolute,
                 y = yAbsolute
             ).width(width).height(ringSize).clip(shape)
                 .then(

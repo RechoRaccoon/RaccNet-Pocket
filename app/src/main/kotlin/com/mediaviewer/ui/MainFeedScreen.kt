@@ -2571,7 +2571,22 @@ private fun VideoPlayer(
     externallyPaused: Boolean = false
 ) {
     val context = LocalContext.current
-    val player  = remember { ExoPlayer.Builder(context).build().apply { repeatMode = Player.REPEAT_MODE_ONE; volume = 1f } }
+    // Optimized for TikTok-style instant playback: the default LoadControl
+    // waits for 2.5s of buffered media before starting, which reads as
+    // "black screen for a few seconds" on every scroll. These values start
+    // playback after just 500ms is buffered, while keeping a reasonable
+    // max buffer to avoid rebuffering mid-play.
+    val loadControl = remember {
+        androidx.media3.exoplayer.upstream.DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                10_000,  // minBufferMs: keep 10s buffered during playback
+                30_000,  // maxBufferMs: cap total buffer at 30s
+                500,     // bufferForPlaybackMs: START after 500ms (was 2500ms)
+                1_000    // bufferForPlaybackAfterRebufferMs: resume after 1s
+            )
+            .build()
+    }
+    val player  = remember { ExoPlayer.Builder(context).setLoadControl(loadControl).build().apply { repeatMode = Player.REPEAT_MODE_ONE; volume = 1f } }
     // Item 5: the transport controls are drawn over whatever bounds PlayerView
     // is given — so instead of stretching PlayerView across the whole screen
     // (which spreads controls across empty letterboxed space and lets them
