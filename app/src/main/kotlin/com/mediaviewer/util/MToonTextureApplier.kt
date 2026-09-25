@@ -37,13 +37,14 @@ object MToonTextureApplier {
     ): Int {
         var applied = 0
         try {
-            val materialInstances = asset.materialInstances
+            // Material instances live on FilamentInstance, not FilamentAsset
+            // (Filament 1.51.6: FilamentAsset.getInstance().getMaterialInstances()).
+            val materialInstances = asset.instance.materialInstances
             Log.i(TAG, "Asset has ${materialInstances.size} material instances, " +
                     "${parseResult.materials.size} parsed materials")
 
-            // Map glTF material index -> Filament material instance
-            // FilamentAsset.materialInstances should be in glTF material order,
-            // but we verify by count.
+            // Map glTF material index -> Filament material instance.
+            // getMaterialInstances() returns them in glTF material order.
             if (materialInstances.size != parseResult.materials.size) {
                 Log.w(TAG, "Material count mismatch: Filament=${materialInstances.size}, " +
                         "parsed=${parseResult.materials.size}. Attempting best-effort mapping.")

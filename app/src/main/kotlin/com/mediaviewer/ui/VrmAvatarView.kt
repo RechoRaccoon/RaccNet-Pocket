@@ -269,7 +269,7 @@ private fun loadVrmInto(viewer: ModelViewer, bytes: ByteArray, parsedVrmData: Vr
         // model head-on from a distance that fits the unit cube.
         // (ModelViewer exposes scene and view as separate properties —
         // the camera lives on view, not scene.view.)
-        viewer.view.camera.lookAt(
+        viewer.view.camera?.lookAt(
             0.0, 0.1, 2.5,  // eye
             0.0, 0.0, 0.0,  // center (look at origin)
             0.0, 1.0, 0.0   // up
