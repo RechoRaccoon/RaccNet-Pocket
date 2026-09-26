@@ -108,7 +108,12 @@ fun VrmAvatarView(
     onMaterialsPatched: (String) -> Unit = {},
     /** Latest face placement from tracking, or null if none seen yet. */
     framing: AvatarFraming? = null,
-    followTracking: Boolean = true
+    followTracking: Boolean = true,
+    /** The avatar's separate meshes (clothes, hair, accessories …), reported
+     *  once per load for the settings sheet's part toggles. */
+    onPartsReady: (List<AvatarPart>) -> Unit = {},
+    /** [AvatarPart.id]s to hide. */
+    hiddenParts: Set<String> = emptySet()
 ) {
     var session by remember { mutableStateOf<ViewerSession?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
@@ -118,6 +123,9 @@ fun VrmAvatarView(
     val currentOnRetarget by rememberUpdatedState(onRetargetTargetReady)
     val currentOnTextures by rememberUpdatedState(onTexturesApplied)
     val currentOnPatched by rememberUpdatedState(onMaterialsPatched)
+    val currentOnParts by rememberUpdatedState(onPartsReady)
+    // Bumped per load so hidden parts are re-applied to a fresh model.
+    var loadGeneration by remember { mutableStateOf(0) }
 
     // Load (or unload) whenever the viewer or the file changes.
     LaunchedEffect(session, vrmBytes) {
@@ -126,8 +134,9 @@ fun VrmAvatarView(
         // destroyed — otherwise the next recomposition's SideEffect writes
         // bone transforms into freed entities.
         currentOnRetarget(null)
+        currentOnParts(emptyList())
         if (vrmBytes == null) {
-            s.onMain { it.destroyModel(); s.baseTransform = null; s.anchor = null }
+            s.onMain { it.destroyModel(); s.freeModelResources(it.engine); s.baseTransform = null; s.anchor = null }
             loadError = null
             return@LaunchedEffect
         }
@@ -139,6 +148,8 @@ fun VrmAvatarView(
         loadError = result.error
         currentOnTextures(result.texturesApplied)
         currentOnPatched(result.patchSummary)
+        currentOnParts(result.parts)
+        loadGeneration++
         // The frame loop places the root from here on
         // (updateRootTransform); start without easing.
         s.snapFraming = true
@@ -153,6 +164,11 @@ fun VrmAvatarView(
             s.framing = framing
             s.followTracking = followTracking
         }
+    }
+
+    LaunchedEffect(session, hiddenParts, loadGeneration) {
+        val s = session ?: return@LaunchedEffect
+        s.onMain { s.applyHiddenParts(it.engine, hiddenParts) }
     }
 
     LaunchedEffect(session, backgroundTint) {
@@ -256,6 +272,60 @@ private class ViewerSession {
     var colorGrading: ColorGrading? = null
     var lightEntities: IntArray = IntArray(0)
 
+    // Per-model resources we own (freed right after destroyModel()).
+    var ownedTextures: List<com.google.android.filament.Texture> = emptyList()
+    var parts: List<AvatarPart> = emptyList()
+    /** Part id -> its original material instance, while hidden. */
+    private val hiddenOriginals = HashMap<String, com.google.android.filament.MaterialInstance>()
+    /** Part id -> the invisible stand-in material instance we made. */
+    private val hiddenStandIns = HashMap<String, com.google.android.filament.MaterialInstance>()
+
+    /**
+     * Hides/shows parts by swapping a primitive's material instance for a
+     * duplicate that writes neither color nor depth — the primitive keeps
+     * skinning/morphing but draws nothing. Per primitive, so a VRoid body
+     * mesh whose clothes are extra primitives can still be toggled piece
+     * by piece. Main thread only.
+     */
+    fun applyHiddenParts(engine: Engine, hidden: Set<String>) {
+        val rm = engine.renderableManager
+        for (part in parts) {
+            val ri = rm.getInstance(part.entity)
+            if (ri == 0) continue
+            val isHidden = part.id in hiddenOriginals
+            val wantHidden = part.id in hidden
+            if (wantHidden == isHidden) continue
+            runCatching {
+                if (wantHidden) {
+                    val original = rm.getMaterialInstanceAt(ri, part.primitiveIndex)
+                    val standIn = hiddenStandIns.getOrPut(part.id) {
+                        com.google.android.filament.MaterialInstance.duplicate(original, "hidden-${part.id}").apply {
+                            setColorWrite(false)
+                            setDepthWrite(false)
+                        }
+                    }
+                    rm.setMaterialInstanceAt(ri, part.primitiveIndex, standIn)
+                    hiddenOriginals[part.id] = original
+                } else {
+                    hiddenOriginals.remove(part.id)?.let { rm.setMaterialInstanceAt(ri, part.primitiveIndex, it) }
+                }
+            }.onFailure { Log.e(TAG, "Toggling part ${part.label} failed", it) }
+        }
+    }
+
+    /** Frees what we created for the current model. Call right AFTER
+     *  destroyModel() (nothing may still reference these). */
+    fun freeModelResources(engine: Engine) {
+        runCatching {
+            hiddenStandIns.values.forEach { engine.destroyMaterialInstance(it) }
+            ownedTextures.forEach { engine.destroyTexture(it) }
+        }.onFailure { Log.e(TAG, "Freeing model resources failed", it) }
+        hiddenStandIns.clear()
+        hiddenOriginals.clear()
+        ownedTextures = emptyList()
+        parts = emptyList()
+    }
+
     // Written by the composable (SideEffect), read by the frame loop.
     var userYawDegrees = 0f
     var zoom = DEFAULT_ZOOM
@@ -336,8 +406,31 @@ private class VrmLoadResult(
     val error: String?,
     val texturesApplied: Int,
     val target: RetargetTarget?,
-    val patchSummary: String = ""
+    val patchSummary: String = "",
+    val parts: List<AvatarPart> = emptyList()
 )
+
+/** One separately toggleable piece of the avatar: a mesh primitive. */
+class AvatarPart(
+    val id: String,
+    val label: String,
+    internal val entity: Int,
+    internal val primitiveIndex: Int
+)
+
+/** "Hair", or "Body · Tops" when a mesh has several materials. Unity/VRoid
+ *  material names carry noise like "N00_001_01_Tops_01_CLOTH (Instance)". */
+private fun partLabel(ref: com.mediaviewer.util.MToonMaterialParser.PrimitiveMaterialRef): String {
+    val node = ref.nodeName.replace('_', ' ').trim()
+    if (ref.primitiveCount <= 1) return node
+    val material = ref.materialName
+        .replace(Regex("\\s*\\(Instance\\)"), "")
+        .replace(Regex("^N\\d+_\\d+_\\d+_"), "")
+        .replace(Regex("_\\d+_[A-Z]+$"), "")
+        .replace('_', ' ').trim()
+        .ifEmpty { "part ${ref.primitiveIndex + 1}" }
+    return "$node · $material"
+}
 
 /** Returns null if the session was released (screen closed) mid-load. */
 private suspend fun loadVrm(session: ViewerSession, bytes: ByteArray, parsedVrmData: VrmData?): VrmLoadResult? {
@@ -363,13 +456,22 @@ private suspend fun loadVrm(session: ViewerSession, bytes: ByteArray, parsedVrmD
     // ── Filament work, main thread, only if the engine is still alive ──
     return session.onMain { viewer ->
         var texturesApplied = 0
+        var parts = emptyList<AvatarPart>()
         val failure = runCatching {
             viewer.destroyModel()
+            session.freeModelResources(viewer.engine)
             session.baseTransform = null
             viewer.loadModelGlb(direct)
             val asset = viewer.asset
             if (asset != null && mtoon != null) {
-                texturesApplied = MToonTextureApplier.bindTextures(viewer.engine, asset, mtoon, decoded)
+                val primitives = MToonTextureApplier.resolvePrimitives(viewer.engine, asset, mtoon.primitiveMaterials)
+                val bound = MToonTextureApplier.bindTextures(viewer.engine, primitives, mtoon, decoded)
+                texturesApplied = bound.materialsTextured
+                session.ownedTextures = bound.textures
+                parts = primitives.map { p ->
+                    AvatarPart("${p.ref.nodeIndex}:${p.ref.primitiveIndex}", partLabel(p.ref), p.entity, p.ref.primitiveIndex)
+                }
+                session.parts = parts
             }
             viewer.transformToUnitCube()
         }.exceptionOrNull()
@@ -396,7 +498,7 @@ private suspend fun loadVrm(session: ViewerSession, bytes: ByteArray, parsedVrmD
                 val facesNegativeZ = target?.facesNegativeZ ?: (parsedVrmData?.specVersion == VrmSpecVersion.VRM_0)
                 session.baseYawDegrees = if (facesNegativeZ) 180f else 0f
                 session.anchor = target?.let { FramingAnchor.from(it) }
-                VrmLoadResult(null, texturesApplied, target, patchSummary)
+                VrmLoadResult(null, texturesApplied, target, patchSummary, parts)
             }
         }
     }

@@ -87,9 +87,10 @@ class TrackingFrame(
     val body: Map<Int, BodyPoint>?,
     /** "Full Body" toggle — legs/hips only move when this is on. */
     val trackLegs: Boolean,
-    /** Finger curl angles (radians) keyed by AVATAR side ("left"/"right"):
-     *  5 fingers x 3 joints, thumb first — see [AvatarRetargeter.fingerCurls]. */
-    val fingerCurls: Map<String, FloatArray>
+    /** HandLandmarker's 21 world landmarks (x, y, z — same axes as the
+     *  pose's world landmarks), smoothed, keyed by the AVATAR side that
+     *  hand drives ("left"/"right"; mirroring already applied). */
+    val hands: Map<String, List<FloatArray>> = emptyMap()
 )
 
 class RetargetTarget(
@@ -126,11 +127,14 @@ object AvatarRetargeter {
     private const val TAU_TORSO = 0.08f
     private const val TAU_LIMB = 0.07f
     private const val TAU_FINGER = 0.06f
+    private const val TAU_HAND = 0.06f
 
     /** Share of the head turn taken by the neck (when the rig has one). */
     private const val NECK_SHARE = 0.4f
     /** Wrist can't bend further than this from the forearm (radians). */
-    private const val MAX_WRIST_BEND = 1.3f
+    private const val MAX_WRIST_BEND = 1.4f
+    /** A finger bone can't bend further than this from its parent (radians). */
+    private const val MAX_FINGER_BEND = 1.75f
 
     fun buildTarget(engine: Engine, asset: FilamentAsset, vrmData: VrmData): RetargetTarget {
         val nodeIndexToEntity = mutableMapOf<Int, Int>()
@@ -263,7 +267,10 @@ object AvatarRetargeter {
         ctx.drive("head", target.lastHead ?: ctx.parentDelta("head"), TAU_HEAD)
 
         // ── Arms, hands, fingers ──
-        for (side in SIDES) driveArm(ctx, side, ::point, frame.fingerCurls[side])
+        for (side in SIDES) {
+            val hand = frame.hands[side]?.takeIf { it.size >= 21 }?.map { modelPoint(it, flip) }
+            driveArm(ctx, side, ::point, hand)
+        }
 
         // ── Legs (rest pose unless Full Body is on and they're visible) ──
         for (side in SIDES) {
@@ -291,7 +298,7 @@ object AvatarRetargeter {
         ctx.drive(bone, quaternionBetweenDirections(current, targetDirection) * parent, tau)
     }
 
-    private fun driveArm(ctx: PoseContext, side: String, point: (Int) -> FloatArray?, curls: FloatArray?) {
+    private fun driveArm(ctx: PoseContext, side: String, point: (Int) -> FloatArray?, hand: List<FloatArray>?) {
         val bones = ctx.target.bones
         val flip = ctx.target.facesNegativeZ
         val s = sourceFor(side)
@@ -301,27 +308,39 @@ object AvatarRetargeter {
         val relaxedUpper = viewDirToModel(normalize(floatArrayOf(0.30f * sx, -1f, 0.05f)), flip)
         val relaxedLower = viewDirToModel(normalize(floatArrayOf(0.12f * sx, -1f, 0.30f)), flip)
 
-        val upper = "${side}UpperArm"; val lower = "${side}LowerArm"; val hand = "${side}Hand"
+        val upper = "${side}UpperArm"; val lower = "${side}LowerArm"
         driveSegment(ctx, upper, lower,
             if (shoulder != null && elbow != null) direction(shoulder, elbow) else relaxedUpper, TAU_LIMB)
-        driveSegment(ctx, lower, hand,
+        driveSegment(ctx, lower, "${side}Hand",
             if (elbow != null && wrist != null) direction(elbow, wrist) else relaxedLower, TAU_LIMB)
 
-        // Hand: full orientation from the pose's wrist/index/pinky points.
-        val handInfo = bones[hand] ?: return
-        val forearm = ctx.parentDelta(hand)
+        // Hand orientation. Best source: HandLandmarker's own 3-D points
+        // (wrist, index/middle/pinky knuckles) — far steadier than the
+        // pose's three rough hand points, which are only a fallback.
+        val handName = "${side}Hand"
+        val handInfo = bones[handName] ?: return
+        val forearm = ctx.parentDelta(handName)
         val indexBase = bones["${side}IndexProximal"]; val littleBase = bones["${side}LittleProximal"]
+        val middleBase = bones["${side}MiddleProximal"]
         var handDelta = forearm
-        val idx = point(s.index); val pinky = point(s.pinky)
-        if (wrist != null && idx != null && pinky != null && indexBase != null && littleBase != null) {
-            val restDir = sub(mid(indexBase.restWorldPosition, littleBase.restWorldPosition), handInfo.restWorldPosition)
+        if (indexBase != null && littleBase != null) {
             val restAcross = sub(indexBase.restWorldPosition, littleBase.restWorldPosition)
-            frameRotation(restDir, restAcross, sub(mid(idx, pinky), wrist), sub(idx, pinky))?.let {
-                handDelta = clampRelative(forearm, it, MAX_WRIST_BEND)
+            val restDir = sub(
+                middleBase?.restWorldPosition ?: mid(indexBase.restWorldPosition, littleBase.restWorldPosition),
+                handInfo.restWorldPosition
+            )
+            val tracked = if (hand != null) {
+                frameRotation(restDir, restAcross, sub(hand[9], hand[0]), sub(hand[5], hand[17]))
+            } else {
+                val idx = point(s.index); val pinky = point(s.pinky)
+                if (wrist != null && idx != null && pinky != null)
+                    frameRotation(restDir, restAcross, sub(mid(idx, pinky), wrist), sub(idx, pinky))
+                else null
             }
+            tracked?.let { handDelta = clampRelative(forearm, it, MAX_WRIST_BEND) }
         }
-        ctx.drive(hand, handDelta, TAU_LIMB)
-        driveFingers(ctx, side, curls)
+        ctx.drive(handName, handDelta, TAU_HAND)
+        driveFingers(ctx, side, hand)
     }
 
     private val FINGERS = listOf("Thumb", "Index", "Middle", "Ring", "Little")
@@ -333,69 +352,62 @@ object AvatarRetargeter {
         0.35f, 0.45f, 0.25f    // little
     )
 
-    private fun driveFingers(ctx: PoseContext, side: String, curls: FloatArray?) {
+    /** Landmark chains per finger (MediaPipe hand topology), thumb first. */
+    private val FINGER_CHAINS = arrayOf(
+        intArrayOf(1, 2, 3, 4), intArrayOf(5, 6, 7, 8), intArrayOf(9, 10, 11, 12),
+        intArrayOf(13, 14, 15, 16), intArrayOf(17, 18, 19, 20)
+    )
+
+    /**
+     * Fingers. With a tracked hand, each finger bone is swung onto the
+     * direction between its two landmarks (knuckle→next knuckle), exactly
+     * like the arms — so curl, spread and thumb opposition all come through,
+     * with no per-rig bend-axis guessing. Thumb bones map to landmarks
+     * 1→2→3→4 on both VRM 0.x (Proximal/Intermediate/Distal) and 1.0
+     * (Metacarpal/Proximal/Distal). A bone may bend at most
+     * [MAX_FINGER_BEND] away from its parent, which hides the occasional
+     * landmark glitch. Without a hand, the fingers rest gently curled.
+     */
+    private fun driveFingers(ctx: PoseContext, side: String, hand: List<FloatArray>?) {
         val bones = ctx.target.bones
-        val hand = bones["${side}Hand"] ?: return
+        val handBone = bones["${side}Hand"] ?: return
         val indexBase = bones["${side}IndexProximal"]; val littleBase = bones["${side}LittleProximal"]
-        // Palm normal (pointing out of the palm) from the rest skeleton; the
-        // cross-product order differs per side because the hands are mirror
-        // images of each other.
+        // Palm normal (out of the palm) from the rest skeleton; the cross
+        // order differs per side because the hands are mirror images.
         val palmNormal = if (indexBase != null && littleBase != null) {
-            val dir = sub(mid(indexBase.restWorldPosition, littleBase.restWorldPosition), hand.restWorldPosition)
+            val dir = sub(mid(indexBase.restWorldPosition, littleBase.restWorldPosition), handBone.restWorldPosition)
             val across = sub(indexBase.restWorldPosition, littleBase.restWorldPosition)
             normalize(if (side == "left") cross(dir, across) else cross(across, dir))
         } else floatArrayOf(0f, -1f, 0f)
-        val handDir = if (indexBase != null && littleBase != null)
-            direction(hand.restWorldPosition, mid(indexBase.restWorldPosition, littleBase.restWorldPosition))
-        else floatArrayOf(1f, 0f, 0f)
 
         for ((fi, finger) in FINGERS.withIndex()) {
             val segments = if (finger == "Thumb" && bones.containsKey("${side}ThumbMetacarpal"))
                 listOf("Metacarpal", "Proximal", "Distal") else listOf("Proximal", "Intermediate", "Distal")
             val names = segments.map { "$side$finger$it" }
-            var parent = ctx.parentDelta(names[0])
-            var previousDir = handDir
+            val chain = FINGER_CHAINS[fi]
+            var previousRestDir = direction(handBone.restWorldPosition, bones[names[0]]?.restWorldPosition ?: continue)
             for (k in 0 until 3) {
                 val info = bones[names[k]] ?: break
                 val next = bones.getOrNull(names.getOrNull(k + 1))
-                val segDir = if (next != null) direction(info.restWorldPosition, next.restWorldPosition) else previousDir
-                val axis = normalize(cross(segDir, palmNormal))
-                var angle = curls?.getOrNull(fi * 3 + k) ?: RELAXED_CURL[fi * 3 + k]
-                if (finger == "Thumb") angle *= 0.7f
-                parent = ctx.drive(names[k], parent * axisAngle(axis, angle), TAU_FINGER)
-                previousDir = segDir
+                // The last bone has no humanoid child: it continues its parent's line.
+                val restDir = if (next != null) direction(info.restWorldPosition, next.restWorldPosition) else previousRestDir
+                val parent = ctx.parentDelta(names[k])
+                val delta = if (hand != null) {
+                    val target = direction(hand[chain[k]], hand[chain[k + 1]])
+                    val swung = quaternionBetweenDirections(rotate(parent, restDir), target) * parent
+                    clampRelative(parent, swung, MAX_FINGER_BEND)
+                } else {
+                    var angle = RELAXED_CURL[fi * 3 + k]
+                    if (finger == "Thumb") angle *= 0.7f
+                    parent * axisAngle(normalize(cross(restDir, palmNormal)), angle)
+                }
+                ctx.drive(names[k], delta, TAU_FINGER)
+                previousRestDir = restDir
             }
         }
     }
 
     private fun Map<String, BoneRest>.getOrNull(key: String?): BoneRest? = key?.let { this[it] }
-
-    /**
-     * Finger curls from one hand's 21 MediaPipe world landmarks (x, y, z):
-     * 15 bend angles (5 fingers x 3 joints, thumb first), 0 = straight.
-     * Angles between consecutive segments don't change under mirroring, so
-     * only the side assignment has to care about the mirror.
-     */
-    fun fingerCurls(points: List<FloatArray>): FloatArray? {
-        if (points.size < 21) return null
-        fun bend(a: Int, b: Int, c: Int): Float {
-            val u = direction(points[a], points[b]); val v = direction(points[b], points[c])
-            return acos(dot(u, v).coerceIn(-1f, 1f))
-        }
-        val out = FloatArray(15)
-        // Thumb: 0-1-2-3-4. The CMC joint sits ~0.45 rad bent even with an
-        // open hand, so that much is treated as "straight".
-        out[0] = (bend(0, 1, 2) - 0.45f).coerceIn(0f, 1.2f)
-        out[1] = bend(1, 2, 3).coerceIn(0f, 1.4f)
-        out[2] = bend(2, 3, 4).coerceIn(0f, 1.4f)
-        val bases = intArrayOf(5, 9, 13, 17)
-        for ((i, m) in bases.withIndex()) {
-            out[3 + i * 3] = bend(0, m, m + 1).coerceIn(0f, 1.6f)
-            out[4 + i * 3] = bend(m, m + 1, m + 2).coerceIn(0f, 1.7f)
-            out[5 + i * 3] = bend(m + 1, m + 2, m + 3).coerceIn(0f, 1.4f)
-        }
-        return out
-    }
 
     private val SIDES = listOf("left", "right")
     private val UP = floatArrayOf(0f, 1f, 0f)
@@ -547,6 +559,10 @@ object AvatarRetargeter {
         val vx = if (MIRROR) -p.x else p.x
         return viewDirToModel(floatArrayOf(vx, -p.y, -p.z), flip)
     }
+
+    /** Same conversion for a raw (x, y, z) world landmark. */
+    private fun modelPoint(p: FloatArray, flip: Boolean): FloatArray =
+        modelPoint(BodyPoint(p[0], p[1], p[2], 1f), flip)
 
     private fun viewDirToModel(v: FloatArray, flip: Boolean): FloatArray =
         if (flip) floatArrayOf(-v[0], v[1], -v[2]) else v

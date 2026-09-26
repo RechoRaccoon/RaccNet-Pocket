@@ -4,282 +4,232 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Log
 import com.google.android.filament.Engine
+import com.google.android.filament.MaterialInstance
 import com.google.android.filament.Texture
 import com.google.android.filament.TextureSampler
 import com.google.android.filament.gltfio.FilamentAsset
 import java.nio.ByteBuffer
 
 /**
- * Applies MToon base-color textures to a loaded Filament asset.
+ * Textures the avatar: every material's base color (see
+ * [MToonMaterialParser]'s file doc for why gltfio no longer does this).
  *
- * After [MToonMaterialParser] extracts texture data from the GLB, this
- * creates Filament [Texture] objects from the image bytes and binds them
- * to the asset's material instances.
- *
- * Filament's gltfio does not support MToon, so materials load without
- * textures. This manually wires the base-color textures that MToon
- * materials reference.
- *
- * ## Why this is split into two phases
- * The old version did everything -- BitmapFactory.decodeByteArray at full
- * resolution, an IntArray copy of every pixel, a *third* manual per-pixel
- * copy into a direct ByteBuffer -- while already running on the UI thread
- * (the old call site wrapped the whole load in runBlocking(Dispatchers.Main)).
- * A real VRM export commonly ships several 2048x2048+ textures; decoding
- * one of those at full size needs three ~16-64MB buffers alive
- * simultaneously (bitmap + intarray + direct buffer) on top of the raw GLB
- * bytes already held for parsing -- exactly the kind of spike that produces
- * the OutOfMemoryError this screen was showing, and doing it all on the
- * main thread is what made "sometimes some textures load, sometimes they
- * don't" and general jank/ANR-adjacent stalls happen too.
- *
- * [decodeTextures] does the CPU-only, allocation-heavy work (decode +
- * downsample + pixel copy) and is safe -- required, even -- to call from a
- * background thread. It:
- *  - Reads the bitmap's bounds first and picks an inSampleSize so nothing
- *    decodes larger than [MAX_TEXTURE_DIMENSION] on its longest edge. A
- *    phone screen never shows enough of a VRM avatar's face at once to
- *    need a 4096px texture at full resolution, and this alone cuts
- *    worst-case per-texture memory by 4-16x before anything else.
- *  - Uses Bitmap.copyPixelsToBuffer instead of getPixels + a manual
- *    per-pixel loop. Android's ARGB_8888 config is stored in memory as
- *    R,G,B,A bytes per pixel -- which is exactly the byte layout Filament's
- *    Texture.Format.RGBA/Type.UBYTE wants -- so this is both a native bulk
- *    copy (fast) instead of ~4M+ individual ByteBuffer.put() calls, and
- *    needs only ONE extra buffer instead of two (no IntArray).
- *  - Catches OutOfMemoryError per-texture (not just Exception -- an Error,
- *    not caught by a plain catch (e: Exception)) so one huge texture
- *    failing to decode skips *that* texture instead of taking the whole
- *    avatar load down with it.
- *
- * [bindTextures] then does only fast, GL-context-bound work -- building a
- * Filament Texture from an already-decoded buffer and calling
- * setParameter -- and is the only part of this file that still needs to
- * run on the thread that owns the Filament engine (normally the main
- * thread, since that's where ModelViewer's SurfaceView/GL context live).
+ * Two phases:
+ *  - [decodeTextures] — CPU only, call off the main thread. Decodes each
+ *    image once, downsampled to [MAX_TEXTURE_DIMENSION], with STRAIGHT
+ *    (non-premultiplied) alpha as glTF expects — Android's default
+ *    premultiplied pixels darken semi-transparent hair/lash edges — and
+ *    builds the whole mip chain on the CPU, so there's no reliance on GPU
+ *    mipmap generation.
+ *  - [bindTextures] — main thread (owns the engine). Uploads each texture
+ *    once, shares it between every material that uses it, and binds it to
+ *    exactly the MaterialInstance(s) gltfio created for that glTF
+ *    material, via [resolvePrimitives]. Returns the textures so the caller
+ *    can destroy them when the model goes away.
  */
 object MToonTextureApplier {
     private const val TAG = "MToonApplier"
 
-    /** No VRM avatar needs to be rendered larger than this on a phone
-     *  screen -- VRM exports commonly ship 2048/4096px textures sized for
-     *  a desktop VTuber setup, which is far more resolution than this
-     *  screen can ever show and was the single biggest memory cost in the
-     *  old pipeline. Downsampling here, once, up front, is strictly better
-     *  than decoding full-size and letting Filament (or nothing) deal with
-     *  it later. */
+    /** Phone screens never need more than this per avatar texture. */
     private const val MAX_TEXTURE_DIMENSION = 1024
 
     private val SAMPLER = TextureSampler(
-        TextureSampler.MinFilter.LINEAR,
+        TextureSampler.MinFilter.LINEAR_MIPMAP_LINEAR,
         TextureSampler.MagFilter.LINEAR,
         TextureSampler.WrapMode.REPEAT
     )
 
-    /** One texture's CPU-decoded pixels, ready to hand straight to
-     *  Filament -- no further per-pixel work needed on the main thread. */
-    class DecodedTexture(val width: Int, val height: Int, val pixels: ByteBuffer)
+    /** One decoded texture: [levels] holds tightly packed RGBA8 pixels for
+     *  each mip level, largest first. */
+    class DecodedTexture(val width: Int, val height: Int, val levels: List<ByteBuffer>)
 
-    /**
-     * Phase 1 -- decode every referenced base-color texture to RGBA8
-     * pixels, downsampled to fit [MAX_TEXTURE_DIMENSION]. Pure CPU work;
-     * call this from a background dispatcher (e.g. Dispatchers.Default),
-     * never the main thread -- a multi-MB texture decode blocking the UI
-     * thread is exactly what starved MediaPipe's callbacks and made
-     * tracking look dead on first entry.
-     */
+    /** A glTF mesh primitive resolved to the Filament entity drawing it. */
+    class ResolvedPrimitive(val ref: MToonMaterialParser.PrimitiveMaterialRef, val entity: Int)
+
+    class BindResult(val materialsTextured: Int, val textures: List<Texture>)
+
+    // ─────────────────────────────────────────────────────────── decode
+
     fun decodeTextures(parseResult: MToonMaterialParser.ParseResult): Map<Int, DecodedTexture> {
-        val decoded = mutableMapOf<Int, DecodedTexture>()
+        val decoded = HashMap<Int, DecodedTexture>()
         for ((texIndex, bytes) in parseResult.textureBytes) {
-            val texture = decodeOneTexture(texIndex, bytes) ?: continue
-            decoded[texIndex] = texture
+            decodeOne(texIndex, bytes)?.let { decoded[texIndex] = it }
         }
-        Log.i(TAG, "Decoded ${decoded.size}/${parseResult.textureBytes.size} MToon textures")
+        Log.i(TAG, "Decoded ${decoded.size}/${parseResult.textureBytes.size} textures")
         return decoded
     }
 
-    private fun decodeOneTexture(texIndex: Int, bytes: ByteArray): DecodedTexture? {
-        return try {
-            // Bounds-only pass first: cheap (no pixel allocation at all),
-            // gives us the source size so we can pick an inSampleSize that
-            // lands at or under MAX_TEXTURE_DIMENSION on the long edge
-            // without ever allocating the full-size bitmap.
-            val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, boundsOptions)
-            val srcWidth = boundsOptions.outWidth
-            val srcHeight = boundsOptions.outHeight
-            if (srcWidth <= 0 || srcHeight <= 0) {
-                Log.w(TAG, "Texture $texIndex: BitmapFactory couldn't read bounds (${bytes.size} bytes)")
-                return null
-            }
-            var sampleSize = 1
-            val longestEdge = maxOf(srcWidth, srcHeight)
-            while (longestEdge / (sampleSize * 2) >= MAX_TEXTURE_DIMENSION) {
-                sampleSize *= 2
-            }
-
-            val decodeOptions = BitmapFactory.Options().apply {
-                inSampleSize = sampleSize
-                inPreferredConfig = Bitmap.Config.ARGB_8888 // matches Filament's RGBA8/UBYTE byte layout -- see class doc
+    private fun decodeOne(texIndex: Int, bytes: ByteArray): DecodedTexture? = try {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            Log.w(TAG, "Texture $texIndex: unreadable image (${bytes.size} bytes, ${bounds.outMimeType})")
+            null
+        } else {
+            var sample = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= MAX_TEXTURE_DIMENSION) sample *= 2
+            val options = BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+                inPremultiplied = false // glTF wants straight alpha
                 inScaled = false
-                inMutable = false
             }
-            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOptions) ?: run {
-                Log.e(TAG, "Texture $texIndex: BitmapFactory failed to decode ${bytes.size} bytes")
-                return null
-            }
-            // inPreferredConfig is a *hint* -- some encoders (indexed-
-            // palette PNGs, some JPEGs) still come back as a different
-            // config. copyPixelsToBuffer below assumes 4 bytes/pixel, so
-            // force a copy through ARGB_8888 if needed rather than
-            // silently mis-reading the buffer.
-            val argbBitmap = if (bitmap.config == Bitmap.Config.ARGB_8888) {
-                bitmap
-            } else {
+            var bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+                ?: throw IllegalStateException("BitmapFactory returned null")
+            if (bitmap.config != Bitmap.Config.ARGB_8888) {
                 val converted = bitmap.copy(Bitmap.Config.ARGB_8888, false)
                 bitmap.recycle()
-                converted ?: run {
-                    Log.e(TAG, "Texture $texIndex: could not convert ${bitmap.config} to ARGB_8888")
-                    return null
+                bitmap = converted ?: throw IllegalStateException("could not convert to ARGB_8888")
+            }
+            val w = bitmap.width
+            val h = bitmap.height
+            // ARGB_8888 is laid out R,G,B,A in memory — Filament's RGBA/UBYTE.
+            val base = ByteBuffer.allocateDirect(w * h * 4)
+            bitmap.copyPixelsToBuffer(base)
+            base.rewind()
+            bitmap.recycle()
+            DecodedTexture(w, h, buildMipChain(base, w, h))
+        }
+    } catch (oom: OutOfMemoryError) {
+        Log.e(TAG, "Texture $texIndex: out of memory — skipped", oom)
+        null
+    } catch (e: Exception) {
+        Log.e(TAG, "Texture $texIndex: decode failed", e)
+        null
+    }
+
+    /** 2x2 box filter down to 1x1, weighting color by alpha so transparent
+     *  texels (often black) don't bleed dark fringes into edges. */
+    private fun buildMipChain(base: ByteBuffer, width: Int, height: Int): List<ByteBuffer> {
+        val levels = arrayListOf(base)
+        var src = base
+        var w = width
+        var h = height
+        while (w > 1 || h > 1) {
+            val nw = maxOf(1, w / 2)
+            val nh = maxOf(1, h / 2)
+            val dst = ByteBuffer.allocateDirect(nw * nh * 4)
+            for (y in 0 until nh) {
+                val y0 = minOf(y * 2, h - 1); val y1 = minOf(y * 2 + 1, h - 1)
+                for (x in 0 until nw) {
+                    val x0 = minOf(x * 2, w - 1); val x1 = minOf(x * 2 + 1, w - 1)
+                    var r = 0; var g = 0; var b = 0; var a = 0; var rgbPlain0 = 0; var rgbPlain1 = 0; var rgbPlain2 = 0
+                    for (i in 0 until 4) {
+                        val sx = if (i and 1 == 0) x0 else x1
+                        val sy = if (i < 2) y0 else y1
+                        val o = (sy * w + sx) * 4
+                        val pa = src.get(o + 3).toInt() and 0xFF
+                        val pr = src.get(o).toInt() and 0xFF
+                        val pg = src.get(o + 1).toInt() and 0xFF
+                        val pb = src.get(o + 2).toInt() and 0xFF
+                        r += pr * pa; g += pg * pa; b += pb * pa; a += pa
+                        rgbPlain0 += pr; rgbPlain1 += pg; rgbPlain2 += pb
+                    }
+                    val o = (y * nw + x) * 4
+                    if (a > 0) {
+                        dst.put(o, (r / a).toByte()); dst.put(o + 1, (g / a).toByte()); dst.put(o + 2, (b / a).toByte())
+                    } else {
+                        dst.put(o, (rgbPlain0 / 4).toByte()); dst.put(o + 1, (rgbPlain1 / 4).toByte()); dst.put(o + 2, (rgbPlain2 / 4).toByte())
+                    }
+                    dst.put(o + 3, ((a + 2) / 4).toByte())
                 }
             }
-
-            val width = argbBitmap.width
-            val height = argbBitmap.height
-            // ONE buffer, filled by a native bulk copy -- no IntArray, no
-            // manual per-pixel loop. See this file's class doc for why
-            // ARGB_8888's in-memory layout already matches what Filament
-            // wants here.
-            val pixelBuffer = ByteBuffer.allocateDirect(width * height * 4)
-            argbBitmap.copyPixelsToBuffer(pixelBuffer)
-            pixelBuffer.rewind()
-            argbBitmap.recycle()
-
-            DecodedTexture(width, height, pixelBuffer)
-        } catch (oom: OutOfMemoryError) {
-            // Caught specifically (Exception alone would miss this) so one
-            // pathologically large texture skips itself instead of taking
-            // the whole avatar load down.
-            Log.e(TAG, "Texture $texIndex: out of memory even after downsampling (${bytes.size} source bytes) -- skipping", oom)
-            null
-        } catch (e: Exception) {
-            Log.e(TAG, "Texture $texIndex: failed to decode", e)
-            null
+            dst.rewind()
+            levels.add(dst)
+            src = dst; w = nw; h = nh
         }
+        return levels
     }
+
+    // ─────────────────────────────────────────────────────────── bind
 
     /**
-     * Phase 2 -- binds already-[decodeTextures]'d pixels to the asset's
-     * material instances. Only GL-context-bound calls here (building a
-     * Filament Texture, setParameter) -- must run on the thread that owns
-     * [engine] (normally the main thread). No decoding happens in this
-     * function, so it's fast: safe to call from runBlocking(Main) without
-     * reintroducing the stall this split was built to avoid.
-     *
-     * @return Number of materials that got textures applied.
+     * Matches each glTF (node, primitive) to the Filament renderable drawing
+     * it. gltfio names an entity after its node (or the node's mesh), so
+     * look up by that name; when several nodes share a name, the n-th one
+     * takes the n-th entity with a matching primitive count.
      */
-    fun bindTextures(
+    fun resolvePrimitives(
         engine: Engine,
         asset: FilamentAsset,
-        parseResult: MToonMaterialParser.ParseResult,
-        decodedTextures: Map<Int, DecodedTexture>
-    ): Int {
-        var applied = 0
-        try {
-            // Material instances live on FilamentInstance, not FilamentAsset
-            // (Filament 1.51.6: FilamentAsset.getInstance().getMaterialInstances()).
-            val materialInstances = asset.instance.materialInstances
-            Log.i(TAG, "Asset has ${materialInstances.size} material instances, " +
-                    "${parseResult.materials.size} parsed materials")
-
-            if (materialInstances.size != parseResult.materials.size) {
-                Log.w(TAG, "Material count mismatch: Filament=${materialInstances.size}, " +
-                        "parsed=${parseResult.materials.size}. Attempting best-effort mapping.")
-            }
-
-            // Resolve glTF material index -> the MaterialInstance(s) gltfio
-            // actually created for it, via node -> primitive. The old code
-            // indexed materialInstances by glTF material index, but that
-            // array is in creation order, not glTF order — so textures
-            // landed on the wrong materials (the wrongly-colored parts).
-            // MaterialInstance.getName() isn't usable instead: Filament
-            // returns "" for it in release builds.
-            val rm = engine.renderableManager
-            val byMaterialIndex = HashMap<Int, MutableSet<com.google.android.filament.MaterialInstance>>()
-            for (ref in parseResult.primitiveMaterials) {
-                val entity = runCatching { asset.getFirstEntityByName(ref.nodeName) }.getOrNull() ?: continue
-                if (entity == 0) continue
-                val ri = rm.getInstance(entity)
-                if (ri == 0 || ref.primitiveIndex >= rm.getPrimitiveCount(ri)) continue
-                val mi = runCatching { rm.getMaterialInstanceAt(ri, ref.primitiveIndex) }.getOrNull() ?: continue
-                byMaterialIndex.getOrPut(ref.materialIndex) { mutableSetOf() }.add(mi)
-            }
-            for (matInfo in parseResult.materials) {
-                if (!matInfo.needsManualBinding) continue
-                val texIndex = matInfo.baseColorTextureIndex ?: continue
-                val decoded = decodedTextures[texIndex] ?: continue
-                val targets = byMaterialIndex[matInfo.materialIndex]
-                if (targets.isNullOrEmpty()) {
-                    Log.w(TAG, "No material instance found for '${matInfo.name}' — skipping rather than guessing")
-                    continue
-                }
-                val texture = createFilamentTexture(engine, decoded) ?: continue
-                try {
-                    for (materialInstance in targets) {
-                        materialInstance.setParameter("baseColorMap", texture, SAMPLER)
-                        // gltfio's ubershaders only sample baseColorMap when
-                        // baseColorIndex (the UV set) is >= 0; a material that
-                        // had no plain-glTF texture was created with -1, so
-                        // without this the bound texture is silently ignored.
-                        runCatching { materialInstance.setParameter("baseColorIndex", 0) }
-                        runCatching {
-                            materialInstance.setParameter(
-                                "baseColorUvMatrix", com.google.android.filament.MaterialInstance.FloatElement.MAT3,
-                                floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f), 0, 1
-                            )
-                        }
-                        if (!matInfo.baseColorFactor.contentEquals(floatArrayOf(1f, 1f, 1f, 1f))) {
-                            materialInstance.setParameter("baseColorFactor",
-                                matInfo.baseColorFactor[0], matInfo.baseColorFactor[1],
-                                matInfo.baseColorFactor[2], matInfo.baseColorFactor[3])
-                        }
-                    }
-                    applied++
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to set texture on material '${matInfo.name}': ${e.message}")
-                    engine.destroyTexture(texture)
-                }
-            }
-
-            Log.i(TAG, "Applied textures to $applied/${parseResult.materials.size} materials")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to apply MToon textures", e)
+        refs: List<MToonMaterialParser.PrimitiveMaterialRef>
+    ): List<ResolvedPrimitive> {
+        val rm = engine.renderableManager
+        val byName = HashMap<String, MutableList<Int>>()
+        for (entity in asset.entities) {
+            val name = runCatching { asset.getName(entity) }.getOrNull() ?: continue
+            if (rm.getInstance(entity) == 0) continue
+            byName.getOrPut(name) { mutableListOf() }.add(entity)
         }
-        return applied
+        val out = ArrayList<ResolvedPrimitive>()
+        val chosen = HashMap<Pair<String, Int>, Int?>()
+        for (ref in refs) {
+            val entity = chosen.getOrPut(ref.nodeName to ref.occurrence) {
+                val candidates = byName[ref.nodeName].orEmpty().filter {
+                    rm.getPrimitiveCount(rm.getInstance(it)) == ref.primitiveCount
+                }
+                candidates.getOrNull(ref.occurrence) ?: candidates.firstOrNull()
+            } ?: continue
+            if (ref.primitiveIndex < rm.getPrimitiveCount(rm.getInstance(entity))) {
+                out.add(ResolvedPrimitive(ref, entity))
+            }
+        }
+        if (out.size < refs.size) Log.w(TAG, "Resolved ${out.size}/${refs.size} primitives to renderables")
+        return out
     }
 
-    private fun createFilamentTexture(engine: Engine, decoded: DecodedTexture): Texture? {
-        return try {
-            val texture = Texture.Builder()
-                .width(decoded.width)
-                .height(decoded.height)
-                .levels(1)
-                // Base colour is sRGB-encoded; RGBA8 made manually bound
-                // textures look washed out next to gltfio's own.
-                .format(Texture.InternalFormat.SRGB8_A8)
-                .sampler(Texture.Sampler.SAMPLER_2D)
-                .build(engine)
-
-            val buffer = Texture.PixelBufferDescriptor(
-                decoded.pixels,
-                Texture.Format.RGBA,
-                Texture.Type.UBYTE
-            )
-            texture.setImage(engine, 0, buffer)
-            texture
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to create Filament texture from decoded pixels", e)
-            null
+    fun bindTextures(
+        engine: Engine,
+        primitives: List<ResolvedPrimitive>,
+        parseResult: MToonMaterialParser.ParseResult,
+        decoded: Map<Int, DecodedTexture>
+    ): BindResult {
+        val rm = engine.renderableManager
+        val materials = parseResult.materials.associateBy { it.materialIndex }
+        val uploaded = HashMap<Int, Texture?>()
+        val textured = HashSet<Int>()
+        val handled = HashSet<MaterialInstance>()
+        for (p in primitives) {
+            val info = materials[p.ref.materialIndex] ?: continue
+            val texIndex = info.baseColorTextureIndex ?: continue
+            val texture = uploaded.getOrPut(texIndex) { decoded[texIndex]?.let { upload(engine, it) } } ?: continue
+            val mi = runCatching { rm.getMaterialInstanceAt(rm.getInstance(p.entity), p.ref.primitiveIndex) }.getOrNull() ?: continue
+            if (!handled.add(mi)) continue
+            runCatching {
+                mi.setParameter("baseColorMap", texture, SAMPLER)
+                // gltfio's ubershaders only sample baseColorMap when
+                // baseColorIndex (the UV set) is >= 0, and use the UV
+                // matrix — both were left at "no texture" values because
+                // the glTF no longer references one.
+                mi.setParameter("baseColorIndex", info.baseColorTexCoord)
+                mi.setParameter(
+                    "baseColorUvMatrix", MaterialInstance.FloatElement.MAT3,
+                    floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f), 0, 1
+                )
+                val f = info.baseColorFactor
+                mi.setParameter("baseColorFactor", f[0], f[1], f[2], f[3]) // linear, like glTF
+                textured.add(info.materialIndex)
+            }.onFailure { Log.w(TAG, "Binding '${info.name}' failed: ${it.message}") }
         }
+        val textures = uploaded.values.filterNotNull()
+        Log.i(TAG, "Textured ${textured.size} materials with ${textures.size} textures")
+        return BindResult(textured.size, textures)
+    }
+
+    private fun upload(engine: Engine, d: DecodedTexture): Texture? = try {
+        val texture = Texture.Builder()
+            .width(d.width)
+            .height(d.height)
+            .levels(d.levels.size)
+            .format(Texture.InternalFormat.SRGB8_A8)
+            .sampler(Texture.Sampler.SAMPLER_2D)
+            .build(engine)
+        for ((level, pixels) in d.levels.withIndex()) {
+            texture.setImage(engine, level, Texture.PixelBufferDescriptor(pixels, Texture.Format.RGBA, Texture.Type.UBYTE))
+        }
+        texture
+    } catch (e: Exception) {
+        Log.e(TAG, "Texture upload failed", e)
+        null
     }
 }

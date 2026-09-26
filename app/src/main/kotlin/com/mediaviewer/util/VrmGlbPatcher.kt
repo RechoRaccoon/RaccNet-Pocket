@@ -14,6 +14,8 @@ import java.nio.ByteOrder
  * chunk (meshes, textures) is copied through untouched.
  *
  * ## Why the avatar rendered black
+ * (Point 4, textures, is further down at [detachTextures].)
+ *
  * Three separate glTF-vs-VRM mismatches all produce "black with a few
  * specular glints" (exactly the screenshot), so all three are handled:
  *
@@ -47,11 +49,48 @@ object VrmGlbPatcher {
     class Stats(
         val unlitMaterials: Int = 0,
         val metallicFixed: Int = 0,
-        val vertexColorsStripped: Int = 0
+        val vertexColorsStripped: Int = 0,
+        val texturesDetached: Int = 0
     ) {
-        val changedAnything get() = unlitMaterials + metallicFixed + vertexColorsStripped > 0
+        val changedAnything get() = unlitMaterials + metallicFixed + vertexColorsStripped + texturesDetached > 0
         override fun toString() =
-            "$unlitMaterials toon→unlit, $metallicFixed metallic fixed, $vertexColorsStripped vertex-color prims stripped"
+            "$unlitMaterials toon→unlit, $metallicFixed metallic fixed, $vertexColorsStripped vertex-color prims stripped, " +
+                "$texturesDetached texture refs taken over"
+    }
+
+    private val TEXTURE_KEYS = listOf("normalTexture", "occlusionTexture", "emissiveTexture")
+    private val PBR_TEXTURE_KEYS = listOf("baseColorTexture", "metallicRoughnessTexture")
+
+    /**
+     * 4. **Textures.** Every texture reference is removed from the
+     *    materials, so gltfio's asynchronous loader never creates a texture
+     *    whose pixels might not arrive (black / solid-red avatars). The
+     *    base colors are decoded and bound synchronously by
+     *    [MToonTextureApplier] instead; normal/occlusion/metal maps are
+     *    dropped (MToon-as-unlit ignores them anyway), and an emissive
+     *    factor that only made sense through its (now gone) mask texture is
+     *    zeroed so nothing glows. Returns how many references were removed.
+     */
+    private fun detachTextures(mat: JSONObject): Int {
+        var removed = 0
+        mat.optJSONObject("pbrMetallicRoughness")?.let { pbr ->
+            for (k in PBR_TEXTURE_KEYS) if (pbr.remove(k) != null) {
+                removed++
+                if (k == "metallicRoughnessTexture") pbr.put("metallicFactor", 0.0)
+            }
+        }
+        for (k in TEXTURE_KEYS) if (mat.remove(k) != null) {
+            removed++
+            if (k == "emissiveTexture") mat.remove("emissiveFactor")
+        }
+        // Texture-carrying material extensions (clearcoat, sheen, …): keep
+        // only the ones that don't load images.
+        mat.optJSONObject("extensions")?.let { ext ->
+            ext.keys().asSequence().toList()
+                .filter { it.startsWith("KHR_materials_") && it != UNLIT && it != "KHR_materials_emissive_strength" }
+                .forEach { if (ext.remove(it) != null) removed++ }
+        }
+        return removed
     }
 
     class Result(val buffer: ByteBuffer, val stats: Stats)
@@ -113,8 +152,10 @@ object VrmGlbPatcher {
 
         var unlit = 0
         var metallic = 0
+        var detached = 0
         for (i in 0 until materials.length()) {
             val mat = materials.optJSONObject(i) ?: continue
+            detached += detachTextures(mat)
             val ext = mat.optJSONObject("extensions")
             val isToon = ext?.has("VRMC_materials_mtoon") == true ||
                 ext?.has("VRMC_materials_mtoon-1.0") == true ||
@@ -128,7 +169,7 @@ object VrmGlbPatcher {
             } else if (ext?.has(UNLIT) != true) {
                 val pbr = mat.optJSONObject("pbrMetallicRoughness")
                     ?: JSONObject().also { mat.put("pbrMetallicRoughness", it) }
-                if (!pbr.has("metallicFactor") && !pbr.has("metallicRoughnessTexture")) {
+                if (!pbr.has("metallicFactor")) {
                     pbr.put("metallicFactor", 0.0)
                     metallic++
                 }
@@ -159,7 +200,7 @@ object VrmGlbPatcher {
                 }
             }
         }
-        return Stats(unlit, metallic, stripped)
+        return Stats(unlit, metallic, stripped, detached)
     }
 
     private fun addExtensionUsed(root: JSONObject, name: String) {

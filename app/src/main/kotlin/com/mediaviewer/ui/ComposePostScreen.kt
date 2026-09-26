@@ -271,6 +271,36 @@ fun ComposePostScreen(
     var videoDescription by remember { mutableStateOf(TextFieldValue("")) }
     var threadPosts by remember { mutableStateOf(listOf(ThreadPostState(TextFieldValue("")))) }
     var activeThreadIndex by remember { mutableStateOf(0) }
+    // The camera-notch bubble works on this page too: a photo (or a VRM
+    // capture) taken while the composer is already open arrives as a NEW
+    // initial*Uri — attach it to the draft instead of ignoring it. The
+    // first values were already seeded into the state above.
+    val seededMedia = remember { mutableSetOf<Uri>().apply { initialImageUri?.let(::add); initialVideoUri?.let(::add) } }
+    LaunchedEffect(initialImageUri, initialVideoUri) {
+        initialImageUri?.takeIf { seededMedia.add(it) }?.let { uri ->
+            if (mode == ComposeMode.THREAD) {
+                val i = activeThreadIndex.coerceIn(0, threadPosts.lastIndex)
+                val post = threadPosts[i]
+                if (post.video == null && post.images.size < MAX_IMAGES) {
+                    threadPosts = threadPosts.toMutableList().also { it[i] = post.copy(images = post.images + uri) }
+                }
+            } else if (videoUri == null && images.size < MAX_IMAGES) {
+                images = images + uri
+            }
+        }
+        initialVideoUri?.takeIf { seededMedia.add(it) }?.let { uri ->
+            if (mode == ComposeMode.THREAD) {
+                val i = activeThreadIndex.coerceIn(0, threadPosts.lastIndex)
+                val post = threadPosts[i]
+                if (post.images.isEmpty()) {
+                    threadPosts = threadPosts.toMutableList().also { it[i] = post.copy(video = uri) }
+                }
+            } else if (mode != ComposeMode.REVIEW) {
+                videoUri = uri
+                mode = ComposeMode.VIDEO
+            }
+        }
+    }
     // Item 7/9: Blog is a standalone status toggle (not a full mode with its
     // own editor — the composer keeps using the same single-field editor
     // underneath it), separate from the Thread/Textshot mode switch below.

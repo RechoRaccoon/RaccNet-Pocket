@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.heightIn
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -170,6 +172,9 @@ fun VrmModeScreen(
     // Video-call / filter framing: the avatar's head sits where yours is in
     // the (mirrored) camera frame instead of being locked to the centre.
     var followHead by remember { mutableStateOf(true) }
+    // The loaded avatar's toggleable meshes, and which are hidden.
+    var avatarParts by remember { mutableStateOf<List<AvatarPart>>(emptyList()) }
+    var hiddenParts by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     // Step 1 verification state (see doc comment above): the latest result
     // from each landmarker, updated from VrmCameraTracking's ImageAnalysis
@@ -321,8 +326,8 @@ fun VrmModeScreen(
     val smoothedBodyLandmarks = remember(latestPoseResult) { smoothedBodyWorldLandmarks(latestPoseResult, poseFilters) }
     // Finger curls, keyed by the AVATAR's side (mirroring already applied).
     val handFilters = remember { OneEuroFilterBank(minCutoff = 1.5, beta = 0.5, dCutoff = 1.0) }
-    val fingerCurls = remember(latestHandResult, latestPoseResult, trackUpperBody) {
-        avatarFingerCurls(latestHandResult, if (trackUpperBody) latestPoseResult else null, handFilters)
+    val handPoints = remember(latestHandResult, latestPoseResult, trackUpperBody) {
+        avatarHandPoints(latestHandResult, if (trackUpperBody) latestPoseResult else null, handFilters)
     }
     // Where your eyes are in the camera frame (mirrored like the preview) —
     // drives "follow my head". The last known placement is held while the
@@ -339,6 +344,9 @@ fun VrmModeScreen(
     }
     androidx.compose.runtime.LaunchedEffect(pickedVrmUri) {
         val uri = pickedVrmUri
+        // A different avatar: its parts are different, start all visible.
+        hiddenParts = emptySet()
+        avatarParts = emptyList()
         if (uri == null) {
             vrmBytes = null
             parsedVrmData = null
@@ -400,7 +408,7 @@ fun VrmModeScreen(
                     faceMatrix = headMatrix,
                     body = if (trackUpperBody) smoothedBodyLandmarks else null,
                     trackLegs = trackFullBody,
-                    fingerCurls = fingerCurls
+                    hands = handPoints
                 )
             )
         }
@@ -460,7 +468,16 @@ fun VrmModeScreen(
                     onTexturesApplied = { texturesApplied = it },
                     onMaterialsPatched = { materialsPatched = it },
                     framing = framing,
-                    followTracking = followHead
+                    followTracking = followHead,
+                    onPartsReady = { parts ->
+                        avatarParts = parts
+                        // Keep choices for the same file; drop ids it no longer has.
+                        if (parts.isNotEmpty()) {
+                            val ids = parts.map { it.id }.toSet()
+                            hiddenParts = hiddenParts.filter { it in ids }.toSet()
+                        }
+                    },
+                    hiddenParts = hiddenParts
                 )
             } else {
                 // Prominent, not a 12sp hint: a dead/missing avatar file is
@@ -593,6 +610,10 @@ fun VrmModeScreen(
                 trackUpperBody = trackUpperBody, onToggleUpperBody = { trackUpperBody = it },
                 trackFullBody = trackFullBody, onToggleFullBody = { trackFullBody = it },
                 followHead = followHead, onToggleFollowHead = { followHead = it },
+                avatarParts = avatarParts,
+                hiddenParts = hiddenParts,
+                onSetPartVisible = { id, visible -> hiddenParts = if (visible) hiddenParts - id else hiddenParts + id },
+                onShowAllParts = { hiddenParts = emptySet() },
                 hasAvatar = vrmBytes != null,
                 onPickAvatar = { vrmAvatarPickerLauncher.launch(arrayOf("*/*")) },
                 onDismiss = { settingsOpen = false }
@@ -866,7 +887,8 @@ private fun smoothedBodyWorldLandmarks(poseResult: PoseLandmarkerResult?, filter
 }
 
 /**
- * Finger curls per AVATAR side from HandLandmarker's world landmarks.
+ * HandLandmarker's 21 world landmarks per AVATAR side, One-Euro smoothed —
+ * they drive the avatar's wrist orientation and every finger bone.
  *
  * Which physical hand is which: when the pose is tracked, each hand goes to
  * whichever pose wrist it's closest to (robust). Otherwise MediaPipe's
@@ -875,11 +897,11 @@ private fun smoothedBodyWorldLandmarks(poseResult: PoseLandmarkerResult?, filter
  * right hand. Then, mirrored, the person's right hand drives the avatar's
  * left (see AvatarRetargeter.MIRROR).
  */
-private fun avatarFingerCurls(
+private fun avatarHandPoints(
     hands: HandLandmarkerResult?,
     pose: PoseLandmarkerResult?,
     filters: OneEuroFilterBank
-): Map<String, FloatArray> {
+): Map<String, List<FloatArray>> {
     if (hands == null) {
         filters.resetPrefixed("finger.")
         return emptyMap()
@@ -889,7 +911,7 @@ private fun avatarFingerCurls(
     val handedness = hands.handednesses()
     val poseImage = pose?.landmarks()?.firstOrNull()?.takeIf { it.size > 16 }
     val timestampSeconds = hands.timestampMs() / 1000.0
-    val out = HashMap<String, FloatArray>()
+    val out = HashMap<String, List<FloatArray>>()
     for (i in world.indices) {
         val wrist = image.getOrNull(i)?.getOrNull(0)
         val personSide = if (poseImage != null && wrist != null) {
@@ -902,15 +924,21 @@ private fun avatarFingerCurls(
         } ?: continue
         val avatarSide = if (AvatarRetargeter.MIRROR) (if (personSide == "left") "right" else "left") else personSide
         if (out.containsKey(avatarSide)) continue
-        val curls = AvatarRetargeter.fingerCurls(world[i].map { floatArrayOf(it.x(), it.y(), it.z()) }) ?: continue
-        out[avatarSide] = FloatArray(curls.size) { k -> filters.filter("finger.$avatarSide.$k", curls[k], timestampSeconds) }
+        val points = world.getOrNull(i)?.takeIf { it.size >= 21 } ?: continue
+        out[avatarSide] = points.mapIndexed { k, p ->
+            floatArrayOf(
+                filters.filter("finger.$avatarSide.$k.x", p.x(), timestampSeconds),
+                filters.filter("finger.$avatarSide.$k.y", p.y(), timestampSeconds),
+                filters.filter("finger.$avatarSide.$k.z", p.z(), timestampSeconds)
+            )
+        }
     }
     for (side in listOf("left", "right")) if (!out.containsKey(side)) filters.resetPrefixed("finger.$side.")
     return out
 }
 
 /** MediaPipe's handedness label → the person's actual hand, for our
- *  un-mirrored camera frames (see [avatarFingerCurls]). */
+ *  un-mirrored camera frames (see [avatarHandPoints]). */
 private fun personSideFromLabel(label: String?): String? = when (label) {
     "Left" -> "right"
     "Right" -> "left"
@@ -1023,8 +1051,8 @@ private fun VrmTrackingOverlay(
     // has no MToon textures (or they're not in the expected format).
     val textureLine = when {
         texturesApplied < 0 -> "textures: loading…"
-        texturesApplied == 0 -> "textures: loaded by glTF loader"
-        else -> "textures: glTF loader + $texturesApplied MToon-only"
+        texturesApplied == 0 -> "textures: none bound (untextured model, or decode failed — see logcat MToonApplier)"
+        else -> "textures: $texturesApplied materials textured"
     } + if (materialsPatched.isNotBlank()) "\nmaterials: $materialsPatched" else ""
 
     // Hands: just a live count, plus which side(s) — full 21-point dump per
@@ -1110,16 +1138,23 @@ private fun VrmSettingsSheet(
     trackUpperBody: Boolean, onToggleUpperBody: (Boolean) -> Unit,
     trackFullBody: Boolean, onToggleFullBody: (Boolean) -> Unit,
     followHead: Boolean, onToggleFollowHead: (Boolean) -> Unit,
+    avatarParts: List<AvatarPart>,
+    hiddenParts: Set<String>,
+    onSetPartVisible: (id: String, visible: Boolean) -> Unit,
+    onShowAllParts: () -> Unit,
     hasAvatar: Boolean,
     onPickAvatar: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val tap = rememberHapticTap()
+    var partsExpanded by remember { mutableStateOf(false) }
     Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f)).clickable { tap(); onDismiss() }) {
     Box(
         Modifier.fillMaxWidth().align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navigationBars)
             .padding(16.dp).clip(RoundedCornerShape(20.dp))
             .then(if (liquidGlass) Modifier.glassPanel(true, shape = RoundedCornerShape(20.dp)) else Modifier.background(Color(0xFF1A1A1A)))
+            // Swallow taps on the sheet itself so they don't dismiss it.
+            .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null) {}
             .padding(18.dp)
     ) {
         androidx.compose.foundation.layout.Column {
@@ -1133,6 +1168,39 @@ private fun VrmSettingsSheet(
             VrmSettingsToggleRow("Upper Body", trackUpperBody) { onToggleUpperBody(it); if (!it) onToggleFullBody(false) }
             VrmSettingsToggleRow("Full Body", trackFullBody, enabled = trackUpperBody) { onToggleFullBody(it) }
             VrmSettingsToggleRow("Follow my head", followHead) { onToggleFollowHead(it) }
+            // Avatar parts: every mesh piece (clothes, hair, accessories …)
+            // can be hidden. Collapsed to one row; tap to list them.
+            if (avatarParts.isNotEmpty()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 10.dp).clickable { tap(); partsExpanded = !partsExpanded },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Avatar parts", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                    val shown = avatarParts.count { it.id !in hiddenParts }
+                    Text(
+                        "$shown/${avatarParts.size} shown  ${if (partsExpanded) "▴" else "▾"}",
+                        color = com.mediaviewer.ui.theme.DimGray, fontSize = 12.sp
+                    )
+                }
+                if (partsExpanded) {
+                    androidx.compose.foundation.layout.Column(
+                        Modifier.fillMaxWidth()
+                            .heightIn(max = 240.dp)
+                            .verticalScroll(androidx.compose.foundation.rememberScrollState())
+                            .padding(start = 12.dp)
+                    ) {
+                        for (part in avatarParts) {
+                            VrmSettingsToggleRow(part.label, part.id !in hiddenParts) { onSetPartVisible(part.id, it) }
+                        }
+                    }
+                    if (hiddenParts.isNotEmpty()) {
+                        Text(
+                            "Show all", color = Color(0xFF1083FE), fontSize = 13.sp,
+                            modifier = Modifier.padding(start = 12.dp, top = 4.dp, bottom = 4.dp).clickable { tap(); onShowAllParts() }
+                        )
+                    }
+                }
+            }
             Spacer(Modifier.height(10.dp))
             // Item 8, step 5 — no bundled default avatar (that'd mean
             // shipping someone's VRM model in the app), so the only way to

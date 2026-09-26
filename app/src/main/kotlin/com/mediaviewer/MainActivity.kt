@@ -1038,8 +1038,9 @@ private fun AppRoot(viewModel: MainViewModel) {
         // in-app layer (feed, Hub, profiles, Search, DMs, composer, VRM
         // mode), with a zIndex above the DM-feed loading screen. Only the
         // cold-launch cover and the pixel transition draw over it.
-        // Tapping (expanding into Camera/VRM) only works on the Hub and on
-        // a visible profile page; everywhere else it's a passive ring that
+        // Tapping (expanding into Camera/VRM) works on the Hub, a visible
+        // profile page and the posting page (a photo taken there is added
+        // to the draft); everywhere else it's a passive ring that
         // lets touches fall through to whatever is underneath.
         run {
             val cameraCaptureUri = remember { mutableStateOf<android.net.Uri?>(null) }
@@ -1070,10 +1071,10 @@ private fun AppRoot(viewModel: MainViewModel) {
             // The button follows the same rule so it doesn't stick out in
             // the wrong color over the hub.
             val profileVisible = profileOverlay?.let { !it.hidden && profileRevealArmed } == true
-            val notchInteractive = !vrmModeOpen && !composePostOpen && !searchOpen && !dmInboxOpen &&
+            val notchInteractive = !vrmModeOpen && !searchOpen && !dmInboxOpen &&
                 !taggingOverlayOpen && playingLive == null &&
-                (profileVisible || screenState == ScreenState.SETTINGS)
-            val notchTint = if (screenState == ScreenState.SETTINGS || vrmModeOpen) {
+                (composePostOpen || profileVisible || screenState == ScreenState.SETTINGS)
+            val notchTint = if (screenState == ScreenState.SETTINGS || vrmModeOpen || composePostOpen) {
                 val selfAvatar = selfProfile?.author?.avatarUrl
                 if (!selfAvatar.isNullOrBlank()) rememberDominantColor(selfAvatar) else currentDominantColor
             } else {
