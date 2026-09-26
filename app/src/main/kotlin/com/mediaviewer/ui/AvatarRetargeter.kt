@@ -117,6 +117,10 @@ object AvatarRetargeter {
      *  and left/right face blendshapes all follow this one flag. */
     const val MIRROR = true
 
+    /** Multiplies every bone smoothing time constant below (the settings
+     *  smoothing slider; 1 = default, 0 = bones follow tracking instantly). */
+    @Volatile var smoothingScale = 1f
+
     /** Pose landmarks below this visibility are treated as untracked. */
     private const val MIN_VISIBILITY = 0.5f
 
@@ -433,8 +437,9 @@ object AvatarRetargeter {
         fun drive(bone: String, desired: Quaternion, tau: Float): Quaternion {
             val info = target.bones[bone] ?: return desired
             val previous = target.smoothed[bone]
-            val d = if (previous == null) desired
-            else Quaternion.slerp(previous, desired, 1f - exp(-dt / tau))
+            val t = tau * smoothingScale
+            val d = if (previous == null || t <= 1e-4f) desired
+            else Quaternion.slerp(previous, desired, 1f - exp(-dt / t))
             target.smoothed[bone] = d
             deltas[bone] = d
             // world = P·Wparent_rest·L_rest·X = P·W_rest·X  ⇒  X = W⁻¹·P⁻¹·D·W

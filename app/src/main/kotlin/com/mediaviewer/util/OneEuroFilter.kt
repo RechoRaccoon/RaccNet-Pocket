@@ -44,7 +44,8 @@ import kotlin.math.abs
  * managing instances by hand.
  */
 class OneEuroFilter(
-    private val minCutoff: Double = 1.0,
+    /** Mutable so a bank can retune live filters (smoothing slider). */
+    var minCutoff: Double = 1.0,
     private val beta: Double = 0.0,
     private val dCutoff: Double = 1.0
 ) {
@@ -122,10 +123,26 @@ class OneEuroFilterBank(
 ) {
     private val filters = mutableMapOf<String, OneEuroFilter>()
 
+    /**
+     * Smoothing strength, 1 = the bank's tuned default. The resting cutoff
+     * scales as `minCutoff / strength` (stronger = smoother when still);
+     * `beta` is left alone, so fast movements still cut through with little
+     * lag at any strength. 0 (or less) = no smoothing at all.
+     */
+    var strength: Double = 1.0
+        set(value) {
+            if (value == field) return
+            field = value
+            if (value > 0) filters.values.forEach { it.minCutoff = minCutoff / value }
+            else filters.values.forEach { it.reset() }
+        }
+
     /** Smooths [value] under [key], creating that key's filter on first use. */
-    fun filter(key: String, value: Double, timestampSeconds: Double): Double =
-        filters.getOrPut(key) { OneEuroFilter(minCutoff, beta, dCutoff) }
+    fun filter(key: String, value: Double, timestampSeconds: Double): Double {
+        if (strength <= 0.0) return value
+        return filters.getOrPut(key) { OneEuroFilter(minCutoff / strength, beta, dCutoff) }
             .filter(value, timestampSeconds)
+    }
 
     /** Convenience for Float-valued sources (blendshape scores, landmark
      *  coordinates are all Float in MediaPipe's result types). */

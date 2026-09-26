@@ -73,7 +73,9 @@ object MToonMaterialParser {
         val materials: List<MToonMaterialInfo>,
         /** glTF texture index -> its encoded image inside the file. */
         val textureSlices: Map<Int, ImageSlice>,
-        val primitiveMaterials: List<PrimitiveMaterialRef> = emptyList()
+        val primitiveMaterials: List<PrimitiveMaterialRef> = emptyList(),
+        /** Spring bones (hair/ear/tail physics), if the file has any. */
+        val springs: VrmSpringBones.SpringData? = null
     )
 
     fun parse(glbBytes: ByteArray): ParseResult? = try {
@@ -207,7 +209,7 @@ object MToonMaterialParser {
 
         Log.i(TAG, "Parsed ${infos.size} materials (${infos.count { it.isMToon }} MToon), " +
             "${imageSlices.size}/${needed.size} base textures, ${refs.size} primitives")
-        return ParseResult(infos, imageSlices, refs)
+        return ParseResult(infos, imageSlices, refs, VrmSpringBones.parse(json))
     }
 
     private fun color(a: JSONArray, fallback: FloatArray): FloatArray =

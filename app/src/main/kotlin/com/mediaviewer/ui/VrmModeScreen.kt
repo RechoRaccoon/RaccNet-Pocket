@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -167,14 +168,40 @@ fun VrmModeScreen(
     // phone getting hot in VRM mode traced largely to it running from
     // the moment the screen opened. The Settings sheet's "Upper Body"
     // toggle turns it on when the user actually wants it.
-    var trackUpperBody by remember { mutableStateOf(false) }
-    var trackFullBody by remember { mutableStateOf(false) }
+    // Every setting below is remembered across launches (VrmSettingsStore):
+    // read once here, written back whenever it changes.
+    val store = remember { com.mediaviewer.util.VrmSettingsStore(context) }
+    val K = com.mediaviewer.util.VrmSettingsStore
+    var trackUpperBody by remember { mutableStateOf(store.bool(K.UPPER_BODY, false)) }
+    var trackFullBody by remember { mutableStateOf(store.bool(K.FULL_BODY, false)) }
     // Video-call / filter framing: the avatar's head sits where yours is in
     // the (mirrored) camera frame instead of being locked to the centre.
-    var followHead by remember { mutableStateOf(true) }
+    var followHead by remember { mutableStateOf(store.bool(K.FOLLOW_HEAD, true)) }
+    // 0 = raw tracking, 10 = heaviest smoothing.
+    var smoothing by remember { mutableStateOf(store.int(K.SMOOTHING, K.DEFAULT_SMOOTHING).coerceIn(0, 10)) }
+    // ~30 fps tracking instead of ~15 fps (more battery/heat).
+    var fastTracking by remember { mutableStateOf(store.bool(K.FAST_TRACKING, false)) }
+    // Manual eyes: blink tracking off, openness set by the slider.
+    var manualEyes by remember { mutableStateOf(store.bool(K.MANUAL_EYES, false)) }
+    var eyeClosed by remember { mutableStateOf(store.float(K.EYE_CLOSED, 0f).coerceIn(0f, 1f)) }
+    var springBones by remember { mutableStateOf(store.bool(K.SPRING_BONES, true)) }
+    var showDebug by remember { mutableStateOf(store.bool(K.SHOW_DEBUG, false)) }
+    var showPreview by remember { mutableStateOf(store.bool(K.SHOW_PREVIEW, true)) }
     // The loaded avatar's toggleable meshes, and which are hidden.
     var avatarParts by remember { mutableStateOf<List<AvatarPart>>(emptyList()) }
-    var hiddenParts by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var hiddenParts by remember { mutableStateOf(store.strings(K.HIDDEN_PARTS)) }
+    androidx.compose.runtime.LaunchedEffect(trackUpperBody) { store.put(K.UPPER_BODY, trackUpperBody) }
+    androidx.compose.runtime.LaunchedEffect(trackFullBody) { store.put(K.FULL_BODY, trackFullBody) }
+    androidx.compose.runtime.LaunchedEffect(followHead) { store.put(K.FOLLOW_HEAD, followHead) }
+    androidx.compose.runtime.LaunchedEffect(smoothing) { store.put(K.SMOOTHING, smoothing) }
+    androidx.compose.runtime.LaunchedEffect(fastTracking) { store.put(K.FAST_TRACKING, fastTracking) }
+    androidx.compose.runtime.LaunchedEffect(manualEyes) { store.put(K.MANUAL_EYES, manualEyes) }
+    androidx.compose.runtime.LaunchedEffect(eyeClosed) { store.put(K.EYE_CLOSED, eyeClosed) }
+    androidx.compose.runtime.LaunchedEffect(springBones) { store.put(K.SPRING_BONES, springBones) }
+    androidx.compose.runtime.LaunchedEffect(showDebug) { store.put(K.SHOW_DEBUG, showDebug) }
+    androidx.compose.runtime.LaunchedEffect(showPreview) { store.put(K.SHOW_PREVIEW, showPreview) }
+    androidx.compose.runtime.LaunchedEffect(hiddenParts) { store.put(K.HIDDEN_PARTS, hiddenParts) }
+    val trackerGate = remember { TrackerGate() }
 
     // Step 1 verification state (see doc comment above): the latest result
     // from each landmarker, updated from VrmCameraTracking's ImageAnalysis
@@ -251,13 +278,20 @@ fun VrmModeScreen(
                 pending[0] = FaceLandmarkerHelper.create(
                     context,
                     onResult = {
+                        trackerGate.release(TrackerGate.FACE)
                         latestFaceResult = it
                         faceResultCount++
                     },
                     onError = { faceHelperError = it }
                 )
-                pending[1] = HandLandmarkerHelper.create(context, onResult = { latestHandResult = it })
-                pending[2] = PoseLandmarkerHelper.create(context, onResult = { latestPoseResult = it })
+                pending[1] = HandLandmarkerHelper.create(context, onResult = {
+                    trackerGate.release(TrackerGate.HAND)
+                    latestHandResult = it
+                })
+                pending[2] = PoseLandmarkerHelper.create(context, onResult = {
+                    trackerGate.release(TrackerGate.POSE)
+                    latestPoseResult = it
+                })
             }
             faceHelper = pending[0] as FaceLandmarkerHelper?
             handHelper = pending[1] as HandLandmarkerHelper?
@@ -322,18 +356,32 @@ fun VrmModeScreen(
     // face blendshapes already get, in a bank of its own (per
     // OneEuroFilterBank's own doc comment: face/body tuning may need to
     // diverge, and a bank is cheap).
-    val poseFilters = remember { OneEuroFilterBank(minCutoff = 1.0, beta = 0.3, dCutoff = 1.0) }
+    // beta is per unit of speed: these landmarks are in metres (an arm
+    // swing is ~1-2 m/s), so beta 8 opens the filter to ~10-17 Hz during
+    // fast moves — the old 0.3 left it at ~1.5 Hz, i.e. visible lag.
+    val poseFilters = remember { OneEuroFilterBank(minCutoff = 1.0, beta = 8.0, dCutoff = 1.0) }
     val smoothedBodyLandmarks = remember(latestPoseResult) { smoothedBodyWorldLandmarks(latestPoseResult, poseFilters) }
     // Finger curls, keyed by the AVATAR's side (mirroring already applied).
-    val handFilters = remember { OneEuroFilterBank(minCutoff = 1.5, beta = 0.5, dCutoff = 1.0) }
+    // Hand world landmarks are hand-centred metres (small, slower numbers).
+    val handFilters = remember { OneEuroFilterBank(minCutoff = 1.5, beta = 20.0, dCutoff = 1.0) }
     val handPoints = remember(latestHandResult, latestPoseResult, trackUpperBody) {
         avatarHandPoints(latestHandResult, if (trackUpperBody) latestPoseResult else null, handFilters)
     }
     // Where your eyes are in the camera frame (mirrored like the preview) —
     // drives "follow my head". The last known placement is held while the
     // face is briefly lost, so the avatar doesn't snap back to the centre.
-    val framingFilters = remember { OneEuroFilterBank(minCutoff = 1.2, beta = 0.8, dCutoff = 1.0) }
+    val framingFilters = remember { OneEuroFilterBank(minCutoff = 1.2, beta = 2.0, dCutoff = 1.0) }
     val lastFraming = remember { arrayOfNulls<AvatarFraming>(1) }
+    // Smoothing slider → every filter bank + the retargeter's bone easing.
+    // 5 = the tuned defaults; 0 = raw; 10 = twice as smooth.
+    androidx.compose.runtime.SideEffect {
+        val strength = smoothing / K.DEFAULT_SMOOTHING.toDouble()
+        blendshapeFilters.strength = strength
+        poseFilters.strength = strength
+        handFilters.strength = strength
+        framingFilters.strength = strength
+        AvatarRetargeter.smoothingScale = strength.toFloat()
+    }
     val framing = remember(latestFaceResult, trackingFrameWidth, trackingFrameHeight) {
         faceFraming(latestFaceResult, trackingFrameWidth, trackingFrameHeight, framingFilters)
             ?.also { lastFraming[0] = it } ?: lastFraming[0]
@@ -344,8 +392,6 @@ fun VrmModeScreen(
     }
     androidx.compose.runtime.LaunchedEffect(pickedVrmUri) {
         val uri = pickedVrmUri
-        // A different avatar: its parts are different, start all visible.
-        hiddenParts = emptySet()
         avatarParts = emptyList()
         if (uri == null) {
             vrmBytes = null
@@ -383,8 +429,10 @@ fun VrmModeScreen(
         runCatching {
             context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }.onFailure { android.util.Log.e("VrmModeScreen", "Could not persist VRM file permission", it) }
-        // A newly picked avatar gets a fresh try at full-quality textures.
+        // A newly picked avatar gets a fresh try at full-quality textures,
+        // and all of its parts start visible.
         com.mediaviewer.util.CrashBreadcrumbs.resetVrmTextureMode()
+        if (uri != pickedVrmUri) hiddenParts = emptySet()
         pickedVrmUri = uri
         coroutineScope.launch { prefsManager.setVrmAvatarUri(uri.toString()) }
     }
@@ -399,7 +447,13 @@ fun VrmModeScreen(
         val target = retargetTarget
         val vrmData = parsedVrmData
         if (target != null && vrmData != null) {
-            AvatarRetargeter.applyExpressions(target, vrmData, smoothedBlendshapes)
+            // Manual eyes: blink tracking replaced by the slider's value.
+            val scores = if (manualEyes) smoothedBlendshapes + mapOf(
+                "eyeBlinkLeft" to eyeClosed, "eyeBlinkRight" to eyeClosed,
+                "eyeSquintLeft" to 0f, "eyeSquintRight" to 0f,
+                "eyeWideLeft" to 0f, "eyeWideRight" to 0f
+            ) else smoothedBlendshapes
+            AvatarRetargeter.applyExpressions(target, vrmData, scores)
             // One call poses the whole skeleton (hips → spine → head → arms
             // → hands → fingers → legs), mirrored like the preview. Body
             // data is only passed while "Upper Body" is on (otherwise it'd be
@@ -432,6 +486,8 @@ fun VrmModeScreen(
                     handHelper = handHelper,
                     poseHelper = poseHelper,
                     trackPose = trackUpperBody,
+                    gate = trackerGate,
+                    frameIntervalMs = if (fastTracking) 33L else 66L,
                     onFrame = { w, h ->
                         cameraFrameCount++
                         if (w != trackingFrameWidth) trackingFrameWidth = w
@@ -479,7 +535,9 @@ fun VrmModeScreen(
                             hiddenParts = hiddenParts.filter { it in ids }.toSet()
                         }
                     },
-                    hiddenParts = hiddenParts
+                    hiddenParts = hiddenParts,
+                    springBones = springBones,
+                    maxFps = if (fastTracking) 60 else 30
                 )
             } else {
                 // Prominent, not a 12sp hint: a dead/missing avatar file is
@@ -510,7 +568,8 @@ fun VrmModeScreen(
             // VRM avatar renders once the pipeline exists; today it just
             // prints step 1's raw landmarker output so tracking itself can
             // be confirmed working before anything is built on top of it.
-            VrmTrackingOverlay(
+            // Debug readout: off unless turned on in settings.
+            if (showDebug) VrmTrackingOverlay(
                 tint = tint,
                 trackUpperBody = trackUpperBody,
                 trackFullBody = trackFullBody,
@@ -530,10 +589,10 @@ fun VrmModeScreen(
                 legTrackingActive = smoothedBodyLandmarks.isNotEmpty(),
                 modifier = Modifier.fillMaxSize()
             )
-            // Small black "what the tracker sees" box, bottom-right: landmark
+            // Small black "what the tracker sees" box, top-right: landmark
             // dots/skeleton only — never the camera image itself (VRM mode
-            // deliberately never shows the user's real face).
-            TrackingPreview(
+            // deliberately never shows the user's real face). Toggleable.
+            if (showPreview) TrackingPreview(
                 faceResult = latestFaceResult,
                 handResult = latestHandResult,
                 poseResult = if (trackUpperBody) latestPoseResult else null,
@@ -541,9 +600,9 @@ fun VrmModeScreen(
                 frameHeight = trackingFrameHeight,
                 tint = tint,
                 modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .windowInsetsPadding(WindowInsets.navigationBars)
-                    .padding(end = 12.dp, bottom = 12.dp)
+                    .align(Alignment.TopEnd)
+                    .windowInsetsPadding(WindowInsets.statusBars)
+                    .padding(end = 12.dp, top = 12.dp)
             )
         } else {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -609,15 +668,25 @@ fun VrmModeScreen(
         if (settingsOpen) {
             VrmSettingsSheet(
                 liquidGlass = liquidGlass,
-                trackUpperBody = trackUpperBody, onToggleUpperBody = { trackUpperBody = it },
-                trackFullBody = trackFullBody, onToggleFullBody = { trackFullBody = it },
-                followHead = followHead, onToggleFollowHead = { followHead = it },
-                avatarParts = avatarParts,
-                hiddenParts = hiddenParts,
-                onSetPartVisible = { id, visible -> hiddenParts = if (visible) hiddenParts - id else hiddenParts + id },
-                onShowAllParts = { hiddenParts = emptySet() },
-                hasAvatar = vrmBytes != null,
-                onPickAvatar = { vrmAvatarPickerLauncher.launch(arrayOf("*/*")) },
+                tint = tint,
+                ui = VrmSettingsUi(
+                    trackUpperBody = trackUpperBody, onToggleUpperBody = { trackUpperBody = it },
+                    trackFullBody = trackFullBody, onToggleFullBody = { trackFullBody = it },
+                    followHead = followHead, onToggleFollowHead = { followHead = it },
+                    smoothing = smoothing, onSmoothing = { smoothing = it },
+                    fastTracking = fastTracking, onToggleFastTracking = { fastTracking = it },
+                    manualEyes = manualEyes, onToggleManualEyes = { manualEyes = it },
+                    eyeClosed = eyeClosed, onEyeClosed = { eyeClosed = it },
+                    springBones = springBones, onToggleSpringBones = { springBones = it },
+                    showPreview = showPreview, onTogglePreview = { showPreview = it },
+                    showDebug = showDebug, onToggleDebug = { showDebug = it },
+                    avatarParts = avatarParts,
+                    hiddenParts = hiddenParts,
+                    onSetPartVisible = { id, visible -> hiddenParts = if (visible) hiddenParts - id else hiddenParts + id },
+                    onShowAllParts = { hiddenParts = emptySet() },
+                    hasAvatar = vrmBytes != null,
+                    onPickAvatar = { vrmAvatarPickerLauncher.launch(arrayOf("*/*")) }
+                ),
                 onDismiss = { settingsOpen = false }
             )
         }
@@ -653,6 +722,9 @@ private fun VrmCameraTracking(
     handHelper: HandLandmarkerHelper?,
     poseHelper: PoseLandmarkerHelper?,
     trackPose: Boolean,
+    gate: TrackerGate,
+    /** 33 ms (~30 fps, "Fast tracking") or 66 ms (~15 fps). */
+    frameIntervalMs: Long = 66L,
     onFrame: (uprightWidth: Int, uprightHeight: Int) -> Unit = { _, _ -> },
     onCameraError: (String) -> Unit = {}
 ) {
@@ -664,7 +736,9 @@ private fun VrmCameraTracking(
     // Read on the analyzer thread, written from composition — so toggling
     // "Upper Body" no longer tears the whole camera down and rebinds it.
     val trackPoseFlag = remember { java.util.concurrent.atomic.AtomicBoolean(trackPose) }
-    androidx.compose.runtime.SideEffect { trackPoseFlag.set(trackPose) }
+    val intervalMs = remember { java.util.concurrent.atomic.AtomicLong(frameIntervalMs) }
+    androidx.compose.runtime.SideEffect { trackPoseFlag.set(trackPose); intervalMs.set(frameIntervalMs) }
+    val frameBitmaps = remember { FrameBitmaps() }
     val analysisHolder = remember { arrayOfNulls<ImageAnalysis>(1) }
     // Scratch buffers for de-striding camera rows (analyzer thread only).
     val tightBufferHolder = remember { arrayOfNulls<java.nio.ByteBuffer>(1) }
@@ -710,6 +784,9 @@ private fun VrmCameraTracking(
                 ProcessCameraProvider.getInstance(context).get().unbindAll()
             }.onFailure { android.util.Log.e("VrmModeScreen", "unbindAll() on close failed", it) }
             analysisHolder[0] = null
+            // Free the reused frame bitmaps on the analyzer thread, after
+            // any frame still being converted there.
+            runCatching { trackingExecutor.execute { frameBitmaps.release() } }
         }
     }
 
@@ -734,13 +811,13 @@ private fun VrmCameraTracking(
         analysis.setAnalyzer(trackingExecutor) { imageProxy ->
             val nowMs = SystemClock.uptimeMillis()
             // ~15fps cap into the landmarkers; OneEuro smoothing covers the gaps.
-            if (nowMs - lastSubmittedMs.get() < 66L) {
+            if (nowMs - lastSubmittedMs.get() < intervalMs.get()) {
                 imageProxy.close()
                 return@setAnalyzer
             }
             lastSubmittedMs.set(nowMs)
             val upright: Bitmap = try {
-                imageProxy.use { proxy -> proxyToUprightBitmap(proxy, tightBufferHolder, rowScratchHolder) }
+                imageProxy.use { proxy -> proxyToUprightBitmap(proxy, tightBufferHolder, rowScratchHolder, frameBitmaps) }
             } catch (t: Throwable) {
                 android.util.Log.e("VrmModeScreen", "Frame conversion failed", t)
                 return@setAnalyzer
@@ -749,9 +826,15 @@ private fun VrmCameraTracking(
             // Rotation 0: the bitmap is already upright (see note above).
             // uptimeMillis, not currentTimeMillis — LIVE_STREAM mode rejects
             // timestamps that ever go backwards, and wall-clock time can.
-            faceHelper?.detectAsync(mpImage, 0, nowMs)
-            handHelper?.detectAsync(mpImage, 0, nowMs)
-            if (trackPoseFlag.get()) poseHelper?.detectAsync(mpImage, 0, nowMs)
+            // Each detector only gets the frame if its previous one is done.
+            try {
+                if (faceHelper != null && gate.tryAcquire(TrackerGate.FACE, nowMs)) faceHelper.detectAsync(mpImage, 0, nowMs)
+                if (handHelper != null && gate.tryAcquire(TrackerGate.HAND, nowMs)) handHelper.detectAsync(mpImage, 0, nowMs)
+                if (trackPoseFlag.get() && poseHelper != null && gate.tryAcquire(TrackerGate.POSE, nowMs)) poseHelper.detectAsync(mpImage, 0, nowMs)
+            } finally {
+                // Pixels were copied inside detectAsync; free the wrapper.
+                runCatching { mpImage.close() }
+            }
             onFrame(upright.width, upright.height)
         }
         analysisHolder[0] = analysis
@@ -765,6 +848,36 @@ private fun VrmCameraTracking(
     }
 }
 
+/**
+ * At most ONE frame in flight per landmarker. MediaPipe's GPU pipelines
+ * can fall behind the camera; handing them a new frame before the last
+ * result came back let work queue up inside them, so tracking got
+ * steadily more delayed the longer VRM mode ran. A detector that's still
+ * busy simply skips this frame. A result that never arrives (a dropped or
+ * failed frame) frees its slot after [STUCK_MS].
+ */
+private class TrackerGate {
+    private val busySince = Array(3) { java.util.concurrent.atomic.AtomicLong(0L) }
+    fun tryAcquire(slot: Int, nowMs: Long): Boolean {
+        val since = busySince[slot].get()
+        if (since != 0L && nowMs - since < STUCK_MS) return false
+        busySince[slot].set(nowMs)
+        return true
+    }
+    fun release(slot: Int) = busySince[slot].set(0L)
+    companion object {
+        const val FACE = 0; const val HAND = 1; const val POSE = 2
+        const val STUCK_MS = 500L
+    }
+}
+
+/** Reused frame bitmaps (analyzer thread only): no per-frame allocation. */
+private class FrameBitmaps {
+    var raw: Bitmap? = null
+    var upright: Bitmap? = null
+    fun release() { raw?.recycle(); upright?.recycle(); raw = null; upright = null }
+}
+
 /** RGBA_8888 ImageProxy → upright ARGB_8888 Bitmap. Handles padded rows
  *  (rowStride > width*4), which the old straight copyPixelsFromBuffer did
  *  not, then rotates by the frame's rotationDegrees so the face is upright
@@ -772,7 +885,8 @@ private fun VrmCameraTracking(
 private fun proxyToUprightBitmap(
     proxy: androidx.camera.core.ImageProxy,
     tightBufferHolder: Array<java.nio.ByteBuffer?>,
-    rowScratchHolder: Array<ByteArray?>
+    rowScratchHolder: Array<ByteArray?>,
+    bitmaps: FrameBitmaps
 ): Bitmap {
     val width = proxy.width
     val height = proxy.height
@@ -780,7 +894,11 @@ private fun proxyToUprightBitmap(
     val source = plane.buffer
     source.rewind()
     val rowBytes = width * 4
-    val raw = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    // Reused every frame — MediaPipe copies the pixels synchronously in
+    // detectAsync, so nothing holds on to these afterwards. The old code
+    // allocated two fresh ~1.2 MB bitmaps per frame and never freed them.
+    val raw = bitmaps.raw?.takeIf { it.width == width && it.height == height && !it.isRecycled }
+        ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bitmaps.raw?.recycle(); bitmaps.raw = it }
     if (plane.rowStride == rowBytes && plane.pixelStride == 4) {
         raw.copyPixelsFromBuffer(source)
     } else {
@@ -805,10 +923,17 @@ private fun proxyToUprightBitmap(
     }
     val rotation = proxy.imageInfo.rotationDegrees
     if (rotation == 0) return raw
-    val matrix = android.graphics.Matrix().apply { postRotate(rotation.toFloat()) }
-    val rotated = Bitmap.createBitmap(raw, 0, 0, width, height, matrix, false)
-    if (rotated !== raw) raw.recycle()
-    return rotated
+    val sideways = rotation == 90 || rotation == 270
+    val outW = if (sideways) height else width
+    val outH = if (sideways) width else height
+    val upright = bitmaps.upright?.takeIf { it.width == outW && it.height == outH && !it.isRecycled }
+        ?: Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888).also { bitmaps.upright?.recycle(); bitmaps.upright = it }
+    val matrix = android.graphics.Matrix().apply {
+        postRotate(rotation.toFloat(), width / 2f, height / 2f)
+        postTranslate((outW - width) / 2f, (outH - height) / 2f)
+    }
+    android.graphics.Canvas(upright).drawBitmap(raw, matrix, null)
+    return upright
 }
 
 /** VRM pipeline step 2 (smoothing): every current ARKit blendshape score,
@@ -1135,29 +1260,51 @@ private fun VrmTrackingOverlay(
     }
 }
 
+/** Everything the VRM settings sheet shows and changes. */
+private class VrmSettingsUi(
+    val trackUpperBody: Boolean, val onToggleUpperBody: (Boolean) -> Unit,
+    val trackFullBody: Boolean, val onToggleFullBody: (Boolean) -> Unit,
+    val followHead: Boolean, val onToggleFollowHead: (Boolean) -> Unit,
+    val smoothing: Int, val onSmoothing: (Int) -> Unit,
+    val fastTracking: Boolean, val onToggleFastTracking: (Boolean) -> Unit,
+    val manualEyes: Boolean, val onToggleManualEyes: (Boolean) -> Unit,
+    val eyeClosed: Float, val onEyeClosed: (Float) -> Unit,
+    val springBones: Boolean, val onToggleSpringBones: (Boolean) -> Unit,
+    val showPreview: Boolean, val onTogglePreview: (Boolean) -> Unit,
+    val showDebug: Boolean, val onToggleDebug: (Boolean) -> Unit,
+    val avatarParts: List<AvatarPart>,
+    val hiddenParts: Set<String>,
+    val onSetPartVisible: (id: String, visible: Boolean) -> Unit,
+    val onShowAllParts: () -> Unit,
+    val hasAvatar: Boolean,
+    val onPickAvatar: () -> Unit
+)
+
+/** The settings sheet wears the user's profile color ([tint]) like the rest
+ *  of VRM mode: tinted glass (or a tint-darkened panel), tinted switches,
+ *  sliders and links. */
 @Composable
 private fun VrmSettingsSheet(
     liquidGlass: Boolean,
-    trackUpperBody: Boolean, onToggleUpperBody: (Boolean) -> Unit,
-    trackFullBody: Boolean, onToggleFullBody: (Boolean) -> Unit,
-    followHead: Boolean, onToggleFollowHead: (Boolean) -> Unit,
-    avatarParts: List<AvatarPart>,
-    hiddenParts: Set<String>,
-    onSetPartVisible: (id: String, visible: Boolean) -> Unit,
-    onShowAllParts: () -> Unit,
-    hasAvatar: Boolean,
-    onPickAvatar: () -> Unit,
+    tint: Color,
+    ui: VrmSettingsUi,
     onDismiss: () -> Unit
 ) {
     val tap = rememberHapticTap()
     var partsExpanded by remember { mutableStateOf(false) }
+    val dim = Color.White.copy(alpha = 0.6f)
+    // Flat mode: the tint mixed into near-black, so it reads as "your color".
+    val flatPanel = androidx.compose.ui.graphics.lerp(Color(0xFF121212), tint, 0.22f)
     Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f)).clickable { tap(); onDismiss() }) {
     Box(
         Modifier.fillMaxWidth().align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navigationBars)
             .padding(16.dp).clip(RoundedCornerShape(20.dp))
-            .then(if (liquidGlass) Modifier.glassPanel(true, shape = RoundedCornerShape(20.dp)) else Modifier.background(Color(0xFF1A1A1A)))
+            .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = RoundedCornerShape(20.dp)) else Modifier.background(flatPanel))
+            .border(1.dp, tint.copy(alpha = 0.45f), RoundedCornerShape(20.dp))
             // Swallow taps on the sheet itself so they don't dismiss it.
             .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null) {}
+            .heightIn(max = 560.dp)
+            .verticalScroll(androidx.compose.foundation.rememberScrollState())
             .padding(18.dp)
     ) {
         androidx.compose.foundation.layout.Column {
@@ -1165,85 +1312,140 @@ private fun VrmSettingsSheet(
             Spacer(Modifier.height(4.dp))
             Text(
                 "Face and hand tracking are always on. Body tracking is heavier — turn on only what you need.",
-                color = com.mediaviewer.ui.theme.DimGray, fontSize = 12.sp
+                color = dim, fontSize = 12.sp
             )
-            Spacer(Modifier.height(14.dp))
-            VrmSettingsToggleRow("Upper Body", trackUpperBody) { onToggleUpperBody(it); if (!it) onToggleFullBody(false) }
-            VrmSettingsToggleRow("Full Body", trackFullBody, enabled = trackUpperBody) { onToggleFullBody(it) }
-            VrmSettingsToggleRow("Follow my head", followHead) { onToggleFollowHead(it) }
+
+            VrmSettingsSection("Tracking", tint)
+            VrmSettingsToggleRow("Upper Body", ui.trackUpperBody, tint) { ui.onToggleUpperBody(it); if (!it) ui.onToggleFullBody(false) }
+            VrmSettingsToggleRow("Full Body", ui.trackFullBody, tint, enabled = ui.trackUpperBody) { ui.onToggleFullBody(it) }
+            VrmSettingsToggleRow("Fast tracking (30 fps)", ui.fastTracking, tint,
+                hint = "Keeps up with quick movements. Uses more battery and warms the phone.") { ui.onToggleFastTracking(it) }
+            VrmSettingsSlider(
+                label = "Smoothing", valueText = if (ui.smoothing == 0) "off" else ui.smoothing.toString(),
+                value = ui.smoothing.toFloat(), range = 0f..10f, steps = 9, tint = tint,
+                hint = "0 = raw and instant, 10 = smoothest. Fast moves stay responsive at any setting."
+            ) { ui.onSmoothing(kotlin.math.round(it).toInt()) }
+
+            VrmSettingsSection("Avatar", tint)
+            VrmSettingsToggleRow("Follow my head", ui.followHead, tint) { ui.onToggleFollowHead(it) }
+            VrmSettingsToggleRow("Physics (hair, ears, tails)", ui.springBones, tint,
+                hint = "The avatar's spring bones, if it has any.") { ui.onToggleSpringBones(it) }
+            VrmSettingsToggleRow("Manual eyes", ui.manualEyes, tint,
+                hint = "Ignores blinking; set how open the eyes are below.") { ui.onToggleManualEyes(it) }
+            if (ui.manualEyes) {
+                VrmSettingsSlider(
+                    label = "Eyes", valueText = when {
+                        ui.eyeClosed <= 0.02f -> "open"
+                        ui.eyeClosed >= 0.98f -> "closed"
+                        else -> "${((1f - ui.eyeClosed) * 100).toInt()}% open"
+                    },
+                    value = ui.eyeClosed, range = 0f..1f, steps = 0, tint = tint,
+                    startLabel = "Open", endLabel = "Closed"
+                ) { ui.onEyeClosed(it) }
+            }
             // Avatar parts: every mesh piece (clothes, hair, accessories …)
             // can be hidden. Collapsed to one row; tap to list them.
-            if (avatarParts.isNotEmpty()) {
+            if (ui.avatarParts.isNotEmpty()) {
                 Row(
                     Modifier.fillMaxWidth().padding(vertical = 10.dp).clickable { tap(); partsExpanded = !partsExpanded },
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("Avatar parts", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                    val shown = avatarParts.count { it.id !in hiddenParts }
-                    Text(
-                        "$shown/${avatarParts.size} shown  ${if (partsExpanded) "▴" else "▾"}",
-                        color = com.mediaviewer.ui.theme.DimGray, fontSize = 12.sp
-                    )
+                    val shown = ui.avatarParts.count { it.id !in ui.hiddenParts }
+                    Text("$shown/${ui.avatarParts.size} shown  ${if (partsExpanded) "▴" else "▾"}", color = dim, fontSize = 12.sp)
                 }
                 if (partsExpanded) {
-                    androidx.compose.foundation.layout.Column(
-                        Modifier.fillMaxWidth()
-                            .heightIn(max = 240.dp)
-                            .verticalScroll(androidx.compose.foundation.rememberScrollState())
-                            .padding(start = 12.dp)
-                    ) {
-                        for (part in avatarParts) {
-                            VrmSettingsToggleRow(part.label, part.id !in hiddenParts) { onSetPartVisible(part.id, it) }
+                    androidx.compose.foundation.layout.Column(Modifier.fillMaxWidth().padding(start = 12.dp)) {
+                        for (part in ui.avatarParts) {
+                            VrmSettingsToggleRow(part.label, part.id !in ui.hiddenParts, tint) { ui.onSetPartVisible(part.id, it) }
                         }
                     }
-                    if (hiddenParts.isNotEmpty()) {
+                    if (ui.hiddenParts.isNotEmpty()) {
                         Text(
-                            "Show all", color = Color(0xFF1083FE), fontSize = 13.sp,
-                            modifier = Modifier.padding(start = 12.dp, top = 4.dp, bottom = 4.dp).clickable { tap(); onShowAllParts() }
+                            "Show all", color = tint, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                            modifier = Modifier.padding(start = 12.dp, top = 4.dp, bottom = 4.dp).clickable { tap(); ui.onShowAllParts() }
                         )
                     }
                 }
             }
-            Spacer(Modifier.height(10.dp))
-            // Item 8, step 5 — no bundled default avatar (that'd mean
-            // shipping someone's VRM model in the app), so the only way to
-            // get anything on screen is picking one's own file. `"*/*"` is
-            // the broadest MIME filter the system picker accepts — `.vrm`
-            // has no registered MIME type of its own, so a stricter filter
-            // would risk hiding valid files rather than catching invalid
-            // ones; the tradeoff is the picker won't pre-filter to VRM
-            // files specifically. VrmParser (step 4) is what actually
-            // rejects a non-VRM pick, by finding no VRM extension block.
+            // Item 8, step 5 — no bundled default avatar, so the only way to
+            // get anything on screen is picking one's own file. "*/*" because
+            // .vrm has no registered MIME type; VrmParser rejects non-VRM picks.
             Row(
-                Modifier.fillMaxWidth().padding(vertical = 10.dp).clickable { tap(); onPickAvatar() },
+                Modifier.fillMaxWidth().padding(vertical = 10.dp).clickable { tap(); ui.onPickAvatar() },
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    if (hasAvatar) "Change VRM avatar…" else "Choose VRM avatar…",
-                    color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f)
+                    if (ui.hasAvatar) "Change VRM avatar…" else "Choose VRM avatar…",
+                    color = tint, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f)
                 )
             }
+
+            VrmSettingsSection("Display", tint)
+            VrmSettingsToggleRow("Tracking preview", ui.showPreview, tint) { ui.onTogglePreview(it) }
+            VrmSettingsToggleRow("Debug info", ui.showDebug, tint) { ui.onToggleDebug(it) }
         }
     }
     }
 }
 
 @Composable
-private fun VrmSettingsToggleRow(label: String, checked: Boolean, enabled: Boolean = true, onToggle: (Boolean) -> Unit) {
+private fun VrmSettingsSection(title: String, tint: Color) {
+    Spacer(Modifier.height(14.dp))
+    Text(title.uppercase(), color = tint, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, letterSpacing = 1.sp)
+    Spacer(Modifier.height(2.dp))
+}
+
+@Composable
+private fun VrmSettingsToggleRow(
+    label: String, checked: Boolean, tint: Color, enabled: Boolean = true, hint: String? = null, onToggle: (Boolean) -> Unit
+) {
     val tap = rememberHapticTap()
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 10.dp)
+        Modifier.fillMaxWidth().padding(vertical = 8.dp)
             .clickable(enabled = enabled) { tap(); onToggle(!checked) },
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(label, color = if (enabled) Color.White else com.mediaviewer.ui.theme.DimGray, fontSize = 14.sp, modifier = Modifier.weight(1f))
+        androidx.compose.foundation.layout.Column(Modifier.weight(1f)) {
+            Text(label, color = if (enabled) Color.White else Color.White.copy(alpha = 0.35f), fontSize = 14.sp)
+            if (hint != null) Text(hint, color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp)
+        }
+        Spacer(Modifier.width(10.dp))
         Box(
             Modifier.width(44.dp).height(26.dp).clip(RoundedCornerShape(13.dp))
-                .background(if (checked && enabled) Color(0xFF1083FE) else Color.White.copy(0.15f)),
+                .background(if (checked && enabled) tint else Color.White.copy(0.15f)),
             contentAlignment = if (checked) Alignment.CenterEnd else Alignment.CenterStart
         ) {
             Box(Modifier.padding(3.dp).size(20.dp).clip(CircleShape).background(Color.White))
         }
+    }
+}
+
+@Composable
+private fun VrmSettingsSlider(
+    label: String, valueText: String, value: Float, range: ClosedFloatingPointRange<Float>, steps: Int, tint: Color,
+    hint: String? = null, startLabel: String? = null, endLabel: String? = null, onChange: (Float) -> Unit
+) {
+    androidx.compose.foundation.layout.Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Text(valueText, color = tint, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+        }
+        androidx.compose.material3.Slider(
+            value = value, onValueChange = onChange, valueRange = range, steps = steps,
+            colors = androidx.compose.material3.SliderDefaults.colors(
+                thumbColor = tint, activeTrackColor = tint, inactiveTrackColor = Color.White.copy(alpha = 0.18f),
+                activeTickColor = Color.White.copy(alpha = 0.5f), inactiveTickColor = Color.White.copy(alpha = 0.3f)
+            )
+        )
+        if (startLabel != null || endLabel != null) {
+            Row {
+                Text(startLabel ?: "", color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp, modifier = Modifier.weight(1f))
+                Text(endLabel ?: "", color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp)
+            }
+        }
+        if (hint != null) Text(hint, color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp)
     }
 }
 

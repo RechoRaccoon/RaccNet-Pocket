@@ -31,16 +31,16 @@ object CrashBreadcrumbs {
      * How VRM textures are uploaded. Each native crash while texturing
      * steps this down one level and it STAYS there (saved to disk), so the
      * app settles on the most capable mode this device survives:
-     *  0 = sRGB + mipmaps + all material parameters
-     *  1 = sRGB, single level, minimal parameters
-     *  2 = plain RGBA8, single level, texture + UV set only
-     *  3 = no textures
+     *  0 = sRGB, single level, texture + UV set + UV matrix (the mode that
+     *      survived on device; the old mipmapped mode is gone)
+     *  1 = plain RGBA8, texture + UV set only
+     *  2 = no textures
      * Picking a different avatar starts again from 0.
      */
     var vrmTextureMode = 0
         private set
     val skipVrmTextures get() = vrmTextureMode >= VRM_TEXTURE_MODE_OFF
-    const val VRM_TEXTURE_MODE_OFF = 3
+    const val VRM_TEXTURE_MODE_OFF = 2
     private var modeFile: File? = null
 
     fun resetVrmTextureMode() {
@@ -57,7 +57,7 @@ object CrashBreadcrumbs {
         file = f
         previousRunDiedDuring = runCatching { if (f.exists()) f.readText().takeIf { it.isNotBlank() } else null }.getOrNull()
         runCatching { f.delete() }
-        val mf = File(context.filesDir, "vrm_texture_mode.txt")
+        val mf = File(context.filesDir, "vrm_texture_mode_v2.txt") // v2: fresh start with the new mode numbering
         modeFile = mf
         vrmTextureMode = runCatching { mf.readText().trim().toInt() }.getOrDefault(0).coerceIn(0, VRM_TEXTURE_MODE_OFF)
         if (previousRunDiedDuring?.startsWith(VRM_TEXTURE_STEP) == true && vrmTextureMode < VRM_TEXTURE_MODE_OFF) {

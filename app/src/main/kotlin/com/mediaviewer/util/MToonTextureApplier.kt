@@ -28,9 +28,8 @@ import java.nio.ByteBuffer
  *  - [decodeOne] — CPU only, call off the main thread. Decodes the image
  *    downsampled to [MAX_TEXTURE_DIMENSION], with STRAIGHT
  *    (non-premultiplied) alpha as glTF expects — Android's default
- *    premultiplied pixels darken semi-transparent hair/lash edges — and
- *    builds the whole mip chain on the CPU, so there's no reliance on GPU
- *    mipmap generation.
+ *    premultiplied pixels darken semi-transparent hair/lash edges. One
+ *    level only: uploading a mip chain aborted Filament on a real device.
  *  - [uploadAndBind] — main thread (owns the engine). Uploads it once,
  *    shared by every material that uses it, bound to exactly the
  *    MaterialInstance(s) gltfio created for those glTF materials (see
@@ -42,12 +41,6 @@ object MToonTextureApplier {
 
     /** Phone screens never need more than this per avatar texture. */
     private const val MAX_TEXTURE_DIMENSION = 1024
-
-    private val SAMPLER = TextureSampler(
-        TextureSampler.MinFilter.LINEAR_MIPMAP_LINEAR,
-        TextureSampler.MagFilter.LINEAR,
-        TextureSampler.WrapMode.REPEAT
-    )
 
     private val SAMPLER_SINGLE = TextureSampler(
         TextureSampler.MinFilter.LINEAR,
@@ -102,7 +95,7 @@ object MToonTextureApplier {
             bitmap.copyPixelsToBuffer(base)
             base.rewind()
             bitmap.recycle()
-            DecodedTexture(w, h, if (mode == 0) buildMipChain(base, w, h) else listOf(base))
+            DecodedTexture(w, h, listOf(base))
         } catch (oom: OutOfMemoryError) {
             Log.e(TAG, "Texture $texIndex: out of memory — skipped", oom)
             null
@@ -110,49 +103,6 @@ object MToonTextureApplier {
             Log.e(TAG, "Texture $texIndex: decode failed", e)
             null
         }
-    }
-
-    /** 2x2 box filter down to 1x1, weighting color by alpha so transparent
-     *  texels (often black) don't bleed dark fringes into edges. */
-    private fun buildMipChain(base: ByteBuffer, width: Int, height: Int): List<ByteBuffer> {
-        val levels = arrayListOf(base)
-        var src = base
-        var w = width
-        var h = height
-        while (w > 1 || h > 1) {
-            val nw = maxOf(1, w / 2)
-            val nh = maxOf(1, h / 2)
-            val dst = ByteBuffer.allocateDirect(nw * nh * 4)
-            for (y in 0 until nh) {
-                val y0 = minOf(y * 2, h - 1); val y1 = minOf(y * 2 + 1, h - 1)
-                for (x in 0 until nw) {
-                    val x0 = minOf(x * 2, w - 1); val x1 = minOf(x * 2 + 1, w - 1)
-                    var r = 0; var g = 0; var b = 0; var a = 0; var rgbPlain0 = 0; var rgbPlain1 = 0; var rgbPlain2 = 0
-                    for (i in 0 until 4) {
-                        val sx = if (i and 1 == 0) x0 else x1
-                        val sy = if (i < 2) y0 else y1
-                        val o = (sy * w + sx) * 4
-                        val pa = src.get(o + 3).toInt() and 0xFF
-                        val pr = src.get(o).toInt() and 0xFF
-                        val pg = src.get(o + 1).toInt() and 0xFF
-                        val pb = src.get(o + 2).toInt() and 0xFF
-                        r += pr * pa; g += pg * pa; b += pb * pa; a += pa
-                        rgbPlain0 += pr; rgbPlain1 += pg; rgbPlain2 += pb
-                    }
-                    val o = (y * nw + x) * 4
-                    if (a > 0) {
-                        dst.put(o, (r / a).toByte()); dst.put(o + 1, (g / a).toByte()); dst.put(o + 2, (b / a).toByte())
-                    } else {
-                        dst.put(o, (rgbPlain0 / 4).toByte()); dst.put(o + 1, (rgbPlain1 / 4).toByte()); dst.put(o + 2, (rgbPlain2 / 4).toByte())
-                    }
-                    dst.put(o + 3, ((a + 2) / 4).toByte())
-                }
-            }
-            dst.rewind()
-            levels.add(dst)
-            src = dst; w = nw; h = nh
-        }
-        return levels
     }
 
     // ─────────────────────────────────────────────────────────── bind
@@ -212,7 +162,7 @@ object MToonTextureApplier {
         val targets = primitives.filter { it.ref.materialIndex in users }
         if (targets.isEmpty()) return null
         val texture = upload(engine, decoded, mode, crumb) ?: return null
-        val sampler = if (mode == 0 && decoded.levels.size > 1) SAMPLER else SAMPLER_SINGLE
+        val sampler = SAMPLER_SINGLE
         val handled = HashSet<MaterialInstance>()
         val textured = HashSet<Int>()
         for (p in targets) {
@@ -239,14 +189,12 @@ object MToonTextureApplier {
                 // the glTF no longer references one.
                 crumb("set baseColorIndex on $m")
                 if (has("baseColorIndex")) mi.setParameter("baseColorIndex", info.baseColorTexCoord)
-                if (mode <= 1) crumb("set baseColorUvMatrix on $m")
-                if (mode <= 1 && has("baseColorUvMatrix")) mi.setParameter(
+                if (mode == 0) crumb("set baseColorUvMatrix on $m")
+                if (mode == 0 && has("baseColorUvMatrix")) mi.setParameter(
                     "baseColorUvMatrix", MaterialInstance.FloatElement.MAT3,
                     floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f), 0, 1
                 )
-                val f = info.baseColorFactor
-                if (mode == 0) crumb("set baseColorFactor on $m")
-                if (mode == 0 && has("baseColorFactor")) mi.setParameter("baseColorFactor", f[0], f[1], f[2], f[3]) // linear, like glTF
+                // baseColorFactor is left as gltfio set it from the glTF.
                 textured.add(info.materialIndex)
             }.onFailure { Log.w(TAG, "Binding '${info.name}' failed: ${it.message}") }
         }
@@ -261,8 +209,10 @@ object MToonTextureApplier {
             require(px.isDirect && px.remaining() >= w * h * 4) { "level $level buffer too small" }
         }
         require(d.levels.size <= 32 - Integer.numberOfLeadingZeros(maxOf(d.width, d.height))) { "too many levels" }
-        val levels = if (mode == 0) d.levels else d.levels.take(1)
-        val format = if (mode <= 1) Texture.InternalFormat.SRGB8_A8 else Texture.InternalFormat.RGBA8
+        // Single level: the mipmapped upload is what crashed Filament on
+        // device (see CrashBreadcrumbs.vrmTextureMode history).
+        val levels = d.levels.take(1)
+        val format = if (mode == 0) Texture.InternalFormat.SRGB8_A8 else Texture.InternalFormat.RGBA8
         crumb("create texture ${d.width}x${d.height}, ${levels.size} levels, $format")
         val texture = Texture.Builder()
             .width(d.width)

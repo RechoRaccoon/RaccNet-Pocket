@@ -113,7 +113,11 @@ fun VrmAvatarView(
      *  once per load for the settings sheet's part toggles. */
     onPartsReady: (List<AvatarPart>) -> Unit = {},
     /** [AvatarPart.id]s to hide. */
-    hiddenParts: Set<String> = emptySet()
+    hiddenParts: Set<String> = emptySet(),
+    /** Simulate VRM spring bones (hair/ear/tail physics). */
+    springBones: Boolean = true,
+    /** Render-rate cap. */
+    maxFps: Int = 30
 ) {
     var session by remember { mutableStateOf<ViewerSession?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
@@ -167,6 +171,8 @@ fun VrmAvatarView(
             s.zoom = zoom
             s.framing = framing
             s.followTracking = followTracking
+            s.springsEnabled = springBones
+            s.maxFps = maxFps
         }
     }
 
@@ -211,7 +217,10 @@ fun VrmAvatarView(
                 // No setOnTouchListener(viewer): the camera stays put; the
                 // gesture layer below moves the model instead.
                 newSession.viewer = viewer
-                newSession.lightEntities = addThreeLightRig(viewer.engine, viewer.scene)
+                addCameraLightRig(viewer.engine, viewer.scene).let { (entities, dirs) ->
+                    newSession.lightEntities = entities
+                    newSession.lightDirections = dirs
+                }
                 newSession.indirectLight = addFlatAmbientLight(viewer.engine, viewer.scene)
                 newSession.colorGrading = applyLinearToneMapping(viewer)
                 applyBackgroundColor(viewer, newSession, backgroundTint)
@@ -275,6 +284,36 @@ private class ViewerSession {
     var indirectLight: IndirectLight? = null
     var colorGrading: ColorGrading? = null
     var lightEntities: IntArray = IntArray(0)
+    /** Each light's direction in CAMERA space (see [updateLights]). */
+    var lightDirections: List<FloatArray> = emptyList()
+
+    /** Frames per second to render at most (written by the composable). */
+    var maxFps = 30
+    /** Spring bone simulation for the loaded model, if it has any. */
+    var springs: com.mediaviewer.util.VrmSpringBones.Simulation? = null
+    var springsEnabled = true
+    private var springsActive = false
+
+    /**
+     * Keeps the lights fixed relative to the CAMERA rather than the world,
+     * so the key light always falls on the side of the avatar you're
+     * looking at — its face and front — however the model or camera is
+     * turned. (World-fixed lights lit this avatar mostly from behind.)
+     */
+    fun updateLights(v: ModelViewer) {
+        if (lightEntities.isEmpty()) return
+        val m = v.camera.getModelMatrix(null as FloatArray?)
+        val lm = v.engine.lightManager
+        for ((i, e) in lightEntities.withIndex()) {
+            val d = lightDirections.getOrNull(i) ?: continue
+            val inst = lm.getInstance(e)
+            if (inst == 0) continue
+            lm.setDirection(inst,
+                m[0] * d[0] + m[4] * d[1] + m[8] * d[2],
+                m[1] * d[0] + m[5] * d[1] + m[9] * d[2],
+                m[2] * d[0] + m[6] * d[1] + m[10] * d[2])
+        }
+    }
 
     // Per-model resources we own (freed right after destroyModel()).
     var ownedTextures: List<com.google.android.filament.Texture> = emptyList()
@@ -326,6 +365,7 @@ private class ViewerSession {
         }.onFailure { Log.e(TAG, "Freeing model resources failed", it) }
         hiddenStandIns.clear()
         hiddenOriginals.clear()
+        springs = null
         ownedTextures = emptyList()
         parts = emptyList()
     }
@@ -357,10 +397,27 @@ private class ViewerSession {
             if (released) return
             choreographer.postFrameCallback(this)
             val v = viewer ?: return
+            // Render-rate cap. Tracking only updates 15-30 times a second;
+            // drawing every vsync (up to 120 Hz) just heats the phone until
+            // it throttles, which is part of why tracking got laggier the
+            // longer VRM mode stayed open.
+            val minInterval = 1_000_000_000L / maxFps.coerceIn(15, 120) - 2_000_000L
+            if (lastFrameNanos != 0L && frameTimeNanos - lastFrameNanos < minInterval) return
             val dt = if (lastFrameNanos == 0L) 0f else ((frameTimeNanos - lastFrameNanos) / 1e9f).coerceIn(0f, 0.25f)
             lastFrameNanos = frameTimeNanos
             runCatching { updateRootTransform(v, dt) }
                 .onFailure { Log.e(TAG, "Placing the model failed", it) }
+            runCatching { updateLights(v) }
+            runCatching {
+                val sim = springs
+                if (springsEnabled && sim != null) {
+                    if (dt > 0f) sim.update(dt)
+                    springsActive = true
+                } else if (springsActive) {
+                    sim?.reset()
+                    springsActive = false
+                }
+            }.onFailure { Log.e(TAG, "Spring bones failed", it) }
             runCatching {
                 // render() doesn't push bone transforms to skinned meshes
                 // itself; without this the avatar stays frozen in rest pose.
@@ -564,6 +621,17 @@ private suspend fun loadVrm(session: ViewerSession, bytes: ByteArray, parsedVrmD
                 // way it faces; the spec version is only a fallback.
                 val facesNegativeZ = target?.facesNegativeZ ?: (parsedVrmData?.specVersion == VrmSpecVersion.VRM_0)
                 session.baseYawDegrees = if (facesNegativeZ) 180f else 0f
+                // Spring bones — needs the node→entity map the retargeter built.
+                val springData = mtoon?.springs
+                session.springs = if (target != null && springData != null && !springData.isEmpty) {
+                    runCatching {
+                        com.mediaviewer.util.VrmSpringBones.Simulation(
+                            viewer.engine, asset.root, springData,
+                            nodeEntity = { target.nodeIndexToEntity[it] },
+                            excluded = target.bones.values.map { it.entity }.toSet()
+                        )
+                    }.onFailure { Log.e(TAG, "Could not set up spring bones", it) }.getOrNull()
+                } else null
                 session.anchor = target?.let { FramingAnchor.from(it) }
                 VrmLoadResult(null, 0, target, patchSummary, parts, mtoon, primitives)
             }
@@ -827,27 +895,34 @@ private fun applyBackgroundColor(viewer: ModelViewer, session: ViewerSession, ti
  *  are a starting guess (a portrait-lighting key/fill/rim split), not
  *  measured against a real avatar on a real device; adjust to taste once
  *  step 5 is actually visible to look at. */
-private fun addThreeLightRig(engine: Engine, scene: com.google.android.filament.Scene): IntArray {
+/**
+ * Lights defined in CAMERA space (camera looks down -Z; a direction is
+ * where the light travels, so -Z = shining from behind the viewer onto the
+ * avatar's front). [ViewerSession.updateLights] turns them into world
+ * directions every frame.
+ */
+private fun addCameraLightRig(engine: Engine, scene: com.google.android.filament.Scene): Pair<IntArray, List<FloatArray>> {
     val entityManager = EntityManager.get()
-    val created = ArrayList<Int>(4)
-
-    fun directionalLight(x: Float, y: Float, z: Float, intensityLux: Float) {
+    val entities = ArrayList<Int>(4)
+    val dirs = ArrayList<FloatArray>(4)
+    fun light(x: Float, y: Float, z: Float, intensityLux: Float) {
+        val l = kotlin.math.sqrt(x * x + y * y + z * z)
+        val d = floatArrayOf(x / l, y / l, z / l)
         val entity = entityManager.create()
         LightManager.Builder(LightManager.Type.DIRECTIONAL)
             .color(1.0f, 1.0f, 1.0f)
             .intensity(intensityLux)
-            .direction(x, y, z)
+            .direction(d[0], d[1], d[2])
             .castShadows(false)
             .build(engine, entity)
         scene.addEntity(entity)
-        created.add(entity)
+        entities.add(entity)
+        dirs.add(d)
     }
-
-    directionalLight(-0.5f, -1.0f, -0.3f, 32_000f)  // key: front-upper-left, brightest — kept well below clipping so saturated albedos (reds) don't blow out
-    directionalLight(0.6f, -0.2f, -0.4f, 14_000f)   // fill: front-right, softer, keeps the key's shadow side readable
-    directionalLight(0.0f, 0.3f, 1.0f, 10_000f)    // rim: from behind, separates the avatar's silhouette from the background
-    directionalLight(0.0f, -0.1f, -1.0f, 9_000f)    // frontal lift: dim head-on light so unlit faces fall to dark grey, not pure black
-    return created.toIntArray()
+    light(-0.35f, -0.45f, -1.0f, 34_000f) // key: from the viewer, slightly upper-left — lights the face
+    light(0.55f, -0.15f, -1.0f, 14_000f)  // fill: from the viewer's right, softens the key's shadows
+    light(0.0f, -0.2f, 1.0f, 8_000f)      // rim: from behind, separates the silhouette from the background
+    return entities.toIntArray() to dirs
 }
 
 /**
