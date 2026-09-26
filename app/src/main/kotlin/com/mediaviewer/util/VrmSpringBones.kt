@@ -37,7 +37,7 @@ object VrmSpringBones {
         val gravityDir: FloatArray,
         val dragForce: Float,
         val hitRadius: Float,
-        val colliderGroups: IntArray
+        val colliderGroups: List<Int>
     )
 
     class ColliderDef(val node: Int, val offset: FloatArray, val radius: Float, val tail: FloatArray?)
@@ -59,7 +59,7 @@ object VrmSpringBones {
     private fun unityVec(o: JSONObject?, d: FloatArray) =
         if (o == null) d else floatArrayOf(o.optDouble("x", 0.0).toFloat(), o.optDouble("y", 0.0).toFloat(), -o.optDouble("z", 0.0).toFloat())
 
-    private fun ints(a: JSONArray?) = IntArray(a?.length() ?: 0) { a!!.optInt(it, -1) }
+    private fun ints(a: JSONArray?): List<Int> = List(a?.length() ?: 0) { a!!.optInt(it, -1) }
 
     private fun parseVrm1(sb: JSONObject): SpringData {
         val colliders = ArrayList<ColliderDef?>()
