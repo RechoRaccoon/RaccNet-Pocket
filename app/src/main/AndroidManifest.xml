@@ -31,7 +31,11 @@
         </intent>
     </queries>
 
+    <!-- largeHeap: VRM mode holds the whole .vrm file (often 30-80 MB) in
+         memory while Filament loads it; the default 256 MB heap is shared
+         with the feed's image/network caches. -->
     <application
+        android:largeHeap="true"
         android:allowBackup="true"
         android:label="RaccNet Lite"
         android:icon="@mipmap/ic_launcher"

@@ -146,7 +146,7 @@ fun VrmAvatarView(
         loading = false
         if (result == null) return@LaunchedEffect // released/cancelled mid-load
         loadError = result.error
-        currentOnTextures(result.texturesApplied)
+        currentOnTextures(if (result.error == null) -1 else 0) // "loading…" until streamed in
         currentOnPatched(result.patchSummary)
         currentOnParts(result.parts)
         loadGeneration++
@@ -154,6 +154,10 @@ fun VrmAvatarView(
         // (updateRootTransform); start without easing.
         s.snapFraming = true
         currentOnRetarget(result.target)
+        if (result.error == null) {
+            streamTextures(s, vrmBytes, result) { currentOnTextures(it) }
+                ?.let { currentOnTextures(it) }
+        }
     }
 
     // Plain field writes on the main thread; the frame loop reads them.
@@ -407,8 +411,42 @@ private class VrmLoadResult(
     val texturesApplied: Int,
     val target: RetargetTarget?,
     val patchSummary: String = "",
-    val parts: List<AvatarPart> = emptyList()
+    val parts: List<AvatarPart> = emptyList(),
+    val materials: com.mediaviewer.util.MToonMaterialParser.ParseResult? = null,
+    val primitives: List<MToonTextureApplier.ResolvedPrimitive> = emptyList()
 )
+
+/**
+ * Textures the freshly loaded model one texture at a time: decode (off the
+ * main thread) → upload + bind (main) → drop → next. Only one decoded
+ * texture is ever alive, which is what keeps the Java heap from filling
+ * (see MToonTextureApplier's doc). The model is already on screen while
+ * this runs; untextured parts show their flat base color for a moment.
+ * Returns how many materials got textured, or null if the session/model
+ * went away mid-way.
+ */
+private suspend fun streamTextures(
+    session: ViewerSession,
+    bytes: ByteArray,
+    result: VrmLoadResult,
+    onProgress: (Int) -> Unit
+): Int? {
+    val parse = result.materials ?: return 0
+    if (result.primitives.isEmpty()) return 0
+    var textured = 0
+    for (texIndex in MToonTextureApplier.neededTextures(parse)) {
+        val decoded = withContext(Dispatchers.Default) { MToonTextureApplier.decodeOne(bytes, parse, texIndex) } ?: continue
+        val bound = session.onMain { viewer ->
+            if (viewer.asset == null) return@onMain null
+            MToonTextureApplier.uploadAndBind(viewer.engine, result.primitives, parse, texIndex, decoded)
+                ?.also { (texture, _) -> session.ownedTextures = session.ownedTextures + texture }
+                ?: (null to 0)
+        } ?: return null
+        textured += bound.second
+        onProgress(textured)
+    }
+    return textured
+}
 
 /** One separately toggleable piece of the avatar: a mesh primitive. */
 class AvatarPart(
@@ -442,32 +480,25 @@ private suspend fun loadVrm(session: ViewerSession, bytes: ByteArray, parsedVrmD
         // (vertex-colour masks, default metallic = 1, MToon). See VrmGlbPatcher.
         val patched = VrmGlbPatcher.patchToDirectBuffer(bytes)
         patchSummary = patched.stats.toString()
-        val direct = patched.buffer
-        val mtoon = MToonMaterialParser.parse(bytes)
-        val decoded = if (mtoon != null) {
-            runCatching { MToonTextureApplier.decodeTextures(mtoon) }
-                .onFailure { Log.e(TAG, "Texture decode pass failed", it) }
-                .getOrDefault(emptyMap())
-        } else emptyMap()
-        Triple(direct, mtoon, decoded)
+        patched.buffer to MToonMaterialParser.parse(bytes)
     }
-    val (direct, mtoon, decoded) = prepared
+    // Held only until loadModelGlb has copied it into native memory.
+    var direct: java.nio.ByteBuffer? = prepared.first
+    val mtoon = prepared.second
 
     // ── Filament work, main thread, only if the engine is still alive ──
     return session.onMain { viewer ->
-        var texturesApplied = 0
         var parts = emptyList<AvatarPart>()
+        var primitives = emptyList<MToonTextureApplier.ResolvedPrimitive>()
         val failure = runCatching {
             viewer.destroyModel()
             session.freeModelResources(viewer.engine)
             session.baseTransform = null
-            viewer.loadModelGlb(direct)
+            viewer.loadModelGlb(direct!!)
+            direct = null // Filament has its own copy now; let this ~file-sized buffer go
             val asset = viewer.asset
             if (asset != null && mtoon != null) {
-                val primitives = MToonTextureApplier.resolvePrimitives(viewer.engine, asset, mtoon.primitiveMaterials)
-                val bound = MToonTextureApplier.bindTextures(viewer.engine, primitives, mtoon, decoded)
-                texturesApplied = bound.materialsTextured
-                session.ownedTextures = bound.textures
+                primitives = MToonTextureApplier.resolvePrimitives(viewer.engine, asset, mtoon.primitiveMaterials)
                 parts = primitives.map { p ->
                     AvatarPart("${p.ref.nodeIndex}:${p.ref.primitiveIndex}", partLabel(p.ref), p.entity, p.ref.primitiveIndex)
                 }
@@ -479,10 +510,10 @@ private suspend fun loadVrm(session: ViewerSession, bytes: ByteArray, parsedVrmD
         when {
             failure != null -> {
                 Log.e(TAG, "Filament failed to load VRM file as glTF", failure)
-                VrmLoadResult("Couldn't load that .vrm file (${failure::class.simpleName})", texturesApplied, null, patchSummary)
+                VrmLoadResult("Couldn't load that .vrm file (${failure::class.simpleName})", 0, null, patchSummary)
             }
-            asset == null -> VrmLoadResult("Couldn't parse that .vrm file (not valid glTF?)", texturesApplied, null, patchSummary)
-            asset.entities.isEmpty() -> VrmLoadResult("That .vrm file loaded empty (no visible geometry?)", texturesApplied, null, patchSummary)
+            asset == null -> VrmLoadResult("Couldn't parse that .vrm file (not valid glTF?)", 0, null, patchSummary)
+            asset.entities.isEmpty() -> VrmLoadResult("That .vrm file loaded empty (no visible geometry?)", 0, null, patchSummary)
             else -> {
                 session.baseTransform = captureRootTransform(viewer)
                 // Built HERE, on the main thread, while the root still holds
@@ -498,7 +529,7 @@ private suspend fun loadVrm(session: ViewerSession, bytes: ByteArray, parsedVrmD
                 val facesNegativeZ = target?.facesNegativeZ ?: (parsedVrmData?.specVersion == VrmSpecVersion.VRM_0)
                 session.baseYawDegrees = if (facesNegativeZ) 180f else 0f
                 session.anchor = target?.let { FramingAnchor.from(it) }
-                VrmLoadResult(null, texturesApplied, target, patchSummary, parts)
+                VrmLoadResult(null, 0, target, patchSummary, parts, mtoon, primitives)
             }
         }
     }

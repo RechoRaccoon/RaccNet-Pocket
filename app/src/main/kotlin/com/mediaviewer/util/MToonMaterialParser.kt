@@ -64,10 +64,15 @@ object MToonMaterialParser {
         val materialName: String = ""
     )
 
+    /** Where one encoded image (PNG/JPEG/WebP) sits inside the .vrm bytes.
+     *  Decoded straight from there — never copied out (memory; see
+     *  [MToonTextureApplier]). */
+    class ImageSlice(val offset: Int, val length: Int)
+
     data class ParseResult(
         val materials: List<MToonMaterialInfo>,
-        /** glTF texture index -> encoded image bytes (PNG/JPEG). */
-        val textureBytes: Map<Int, ByteArray>,
+        /** glTF texture index -> its encoded image inside the file. */
+        val textureSlices: Map<Int, ImageSlice>,
         val primitiveMaterials: List<PrimitiveMaterialRef> = emptyList()
     )
 
@@ -151,9 +156,9 @@ object MToonMaterialParser {
             infos.add(MToonMaterialInfo(i, name, texIndex, texCoord.coerceIn(0, 1), factor, isMToon))
         }
 
-        // Texture -> image -> bufferView -> bytes, for every texture used.
+        // Texture -> image -> bufferView -> location in the file.
         val needed = infos.mapNotNull { it.baseColorTextureIndex }.toSet()
-        val imageBytes = HashMap<Int, ByteArray>()
+        val imageSlices = HashMap<Int, ImageSlice>()
         if (textures != null && images != null && bufferViews != null && binOffset >= 0) {
             for (texIndex in needed) {
                 val tex = textures.optJSONObject(texIndex) ?: continue
@@ -169,7 +174,7 @@ object MToonMaterialParser {
                 val start = binOffset + bv.optInt("byteOffset", 0)
                 val length = bv.optInt("byteLength", 0)
                 if (length > 0 && start + length <= binOffset + binLength) {
-                    imageBytes[texIndex] = glbBytes.copyOfRange(start, start + length)
+                    imageSlices[texIndex] = ImageSlice(start, length)
                 }
             }
         }
@@ -201,8 +206,8 @@ object MToonMaterialParser {
         }
 
         Log.i(TAG, "Parsed ${infos.size} materials (${infos.count { it.isMToon }} MToon), " +
-            "${imageBytes.size}/${needed.size} base textures, ${refs.size} primitives")
-        return ParseResult(infos, imageBytes, refs)
+            "${imageSlices.size}/${needed.size} base textures, ${refs.size} primitives")
+        return ParseResult(infos, imageSlices, refs)
     }
 
     private fun color(a: JSONArray, fallback: FloatArray): FloatArray =

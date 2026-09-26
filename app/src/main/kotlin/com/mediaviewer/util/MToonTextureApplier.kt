@@ -14,18 +14,28 @@ import java.nio.ByteBuffer
  * Textures the avatar: every material's base color (see
  * [MToonMaterialParser]'s file doc for why gltfio no longer does this).
  *
- * Two phases:
- *  - [decodeTextures] — CPU only, call off the main thread. Decodes each
- *    image once, downsampled to [MAX_TEXTURE_DIMENSION], with STRAIGHT
+ * ## Memory: one texture at a time
+ * Android allocates `ByteBuffer.allocateDirect` on the regular Java heap
+ * (256 MB on most phones, shared with the rest of the app). Decoding every
+ * texture up front — ~5.6 MB each at 1024px with mips, 15-25 textures on
+ * a VRoid avatar — plus copying each embedded image out of the file filled
+ * that heap, and the app died on whatever allocated next (a feed request).
+ * So the caller now streams: [decodeOne] one texture (read in place from
+ * the file bytes), [uploadAndBind] it, drop it, next. Peak extra memory is
+ * one texture instead of all of them.
+ *
+ * Two steps per texture:
+ *  - [decodeOne] — CPU only, call off the main thread. Decodes the image
+ *    downsampled to [MAX_TEXTURE_DIMENSION], with STRAIGHT
  *    (non-premultiplied) alpha as glTF expects — Android's default
  *    premultiplied pixels darken semi-transparent hair/lash edges — and
  *    builds the whole mip chain on the CPU, so there's no reliance on GPU
  *    mipmap generation.
- *  - [bindTextures] — main thread (owns the engine). Uploads each texture
- *    once, shares it between every material that uses it, and binds it to
- *    exactly the MaterialInstance(s) gltfio created for that glTF
- *    material, via [resolvePrimitives]. Returns the textures so the caller
- *    can destroy them when the model goes away.
+ *  - [uploadAndBind] — main thread (owns the engine). Uploads it once,
+ *    shared by every material that uses it, bound to exactly the
+ *    MaterialInstance(s) gltfio created for those glTF materials (see
+ *    [resolvePrimitives]). The caller destroys the returned texture when
+ *    the model goes away.
  */
 object MToonTextureApplier {
     private const val TAG = "MToonApplier"
@@ -46,26 +56,24 @@ object MToonTextureApplier {
     /** A glTF mesh primitive resolved to the Filament entity drawing it. */
     class ResolvedPrimitive(val ref: MToonMaterialParser.PrimitiveMaterialRef, val entity: Int)
 
-    class BindResult(val materialsTextured: Int, val textures: List<Texture>)
 
     // ─────────────────────────────────────────────────────────── decode
 
-    fun decodeTextures(parseResult: MToonMaterialParser.ParseResult): Map<Int, DecodedTexture> {
-        val decoded = HashMap<Int, DecodedTexture>()
-        for ((texIndex, bytes) in parseResult.textureBytes) {
-            decodeOne(texIndex, bytes)?.let { decoded[texIndex] = it }
-        }
-        Log.i(TAG, "Decoded ${decoded.size}/${parseResult.textureBytes.size} textures")
-        return decoded
-    }
+    /** Every texture the avatar needs, in the order to load them. */
+    fun neededTextures(parseResult: MToonMaterialParser.ParseResult): List<Int> =
+        parseResult.materials.mapNotNull { it.baseColorTextureIndex }.distinct()
+            .filter { it in parseResult.textureSlices }
 
-    private fun decodeOne(texIndex: Int, bytes: ByteArray): DecodedTexture? = try {
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-            Log.w(TAG, "Texture $texIndex: unreadable image (${bytes.size} bytes, ${bounds.outMimeType})")
-            null
-        } else {
+    /** Decodes texture [texIndex] straight out of [glb]; null if it can't. */
+    fun decodeOne(glb: ByteArray, parseResult: MToonMaterialParser.ParseResult, texIndex: Int): DecodedTexture? {
+        val slice = parseResult.textureSlices[texIndex] ?: return null
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(glb, slice.offset, slice.length, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                Log.w(TAG, "Texture $texIndex: unreadable image (${slice.length} bytes, ${bounds.outMimeType})")
+                return null
+            }
             var sample = 1
             while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= MAX_TEXTURE_DIMENSION) sample *= 2
             val options = BitmapFactory.Options().apply {
@@ -74,7 +82,7 @@ object MToonTextureApplier {
                 inPremultiplied = false // glTF wants straight alpha
                 inScaled = false
             }
-            var bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+            var bitmap = BitmapFactory.decodeByteArray(glb, slice.offset, slice.length, options)
                 ?: throw IllegalStateException("BitmapFactory returned null")
             if (bitmap.config != Bitmap.Config.ARGB_8888) {
                 val converted = bitmap.copy(Bitmap.Config.ARGB_8888, false)
@@ -89,13 +97,13 @@ object MToonTextureApplier {
             base.rewind()
             bitmap.recycle()
             DecodedTexture(w, h, buildMipChain(base, w, h))
+        } catch (oom: OutOfMemoryError) {
+            Log.e(TAG, "Texture $texIndex: out of memory — skipped", oom)
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "Texture $texIndex: decode failed", e)
+            null
         }
-    } catch (oom: OutOfMemoryError) {
-        Log.e(TAG, "Texture $texIndex: out of memory — skipped", oom)
-        null
-    } catch (e: Exception) {
-        Log.e(TAG, "Texture $texIndex: decode failed", e)
-        null
     }
 
     /** 2x2 box filter down to 1x1, weighting color by alpha so transparent
@@ -178,21 +186,25 @@ object MToonTextureApplier {
         return out
     }
 
-    fun bindTextures(
+    /** Uploads [decoded] and binds it to every primitive whose material
+     *  uses texture [texIndex]. Returns the texture (caller owns it) and
+     *  how many materials it went onto; null if nothing could use it. */
+    fun uploadAndBind(
         engine: Engine,
         primitives: List<ResolvedPrimitive>,
         parseResult: MToonMaterialParser.ParseResult,
-        decoded: Map<Int, DecodedTexture>
-    ): BindResult {
+        texIndex: Int,
+        decoded: DecodedTexture
+    ): Pair<Texture, Int>? {
         val rm = engine.renderableManager
-        val materials = parseResult.materials.associateBy { it.materialIndex }
-        val uploaded = HashMap<Int, Texture?>()
-        val textured = HashSet<Int>()
+        val users = parseResult.materials.filter { it.baseColorTextureIndex == texIndex }.associateBy { it.materialIndex }
+        val targets = primitives.filter { it.ref.materialIndex in users }
+        if (targets.isEmpty()) return null
+        val texture = upload(engine, decoded) ?: return null
         val handled = HashSet<MaterialInstance>()
-        for (p in primitives) {
-            val info = materials[p.ref.materialIndex] ?: continue
-            val texIndex = info.baseColorTextureIndex ?: continue
-            val texture = uploaded.getOrPut(texIndex) { decoded[texIndex]?.let { upload(engine, it) } } ?: continue
+        val textured = HashSet<Int>()
+        for (p in targets) {
+            val info = users[p.ref.materialIndex] ?: continue
             val mi = runCatching { rm.getMaterialInstanceAt(rm.getInstance(p.entity), p.ref.primitiveIndex) }.getOrNull() ?: continue
             if (!handled.add(mi)) continue
             runCatching {
@@ -211,9 +223,7 @@ object MToonTextureApplier {
                 textured.add(info.materialIndex)
             }.onFailure { Log.w(TAG, "Binding '${info.name}' failed: ${it.message}") }
         }
-        val textures = uploaded.values.filterNotNull()
-        Log.i(TAG, "Textured ${textured.size} materials with ${textures.size} textures")
-        return BindResult(textured.size, textures)
+        return texture to textured.size
     }
 
     private fun upload(engine: Engine, d: DecodedTexture): Texture? = try {
