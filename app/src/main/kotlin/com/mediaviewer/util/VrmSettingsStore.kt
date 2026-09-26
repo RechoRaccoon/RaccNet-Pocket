@@ -37,6 +37,8 @@ class VrmSettingsStore(context: Context) {
         const val SPRING_BONES = "spring_bones"
         const val SHOW_DEBUG = "show_debug"
         const val SHOW_PREVIEW = "show_preview"
+        const val VIDEO_MODE = "video_mode"        // capture button records video
+        const val FULL_BRIGHT = "full_bright"      // all materials unlit
         const val HIDDEN_PARTS = "hidden_parts"
         const val DEFAULT_SMOOTHING = 5
     }

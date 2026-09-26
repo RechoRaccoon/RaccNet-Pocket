@@ -42,7 +42,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -187,6 +189,69 @@ fun VrmModeScreen(
     var springBones by remember { mutableStateOf(store.bool(K.SPRING_BONES, true)) }
     var showDebug by remember { mutableStateOf(store.bool(K.SHOW_DEBUG, false)) }
     var showPreview by remember { mutableStateOf(store.bool(K.SHOW_PREVIEW, true)) }
+    var videoMode by remember { mutableStateOf(store.bool(K.VIDEO_MODE, false)) }
+    var fullBright by remember { mutableStateOf(store.bool(K.FULL_BRIGHT, false)) }
+    var cameraResetKey by remember { mutableStateOf(0) }
+    androidx.compose.runtime.LaunchedEffect(videoMode) { store.put(K.VIDEO_MODE, videoMode) }
+    androidx.compose.runtime.LaunchedEffect(fullBright) { store.put(K.FULL_BRIGHT, fullBright) }
+
+    // ── Capture (photo / video of the rendered avatar) ──
+    val captureController = remember { VrmCaptureController() }
+    var recording by remember { mutableStateOf(false) }
+    var recordingStartMs by remember { mutableStateOf(0L) }
+    var recordingElapsedS by remember { mutableStateOf(0) }
+    var captureBusy by remember { mutableStateOf(false) }
+    var captureError by remember { mutableStateOf<String?>(null) }
+    val captureScope = androidx.compose.runtime.rememberCoroutineScope()
+    fun finishRecording() {
+        if (!recording) return
+        recording = false
+        captureBusy = true
+        captureScope.launch {
+            val uri = captureController.stopRecording(context)
+            captureBusy = false
+            if (uri != null) onCapture(null, uri) else captureError = "Recording failed — nothing was saved"
+        }
+    }
+    fun beginRecording(withAudio: Boolean) {
+        if (captureController.startRecording(context, withAudio)) {
+            recording = true
+            recordingStartMs = android.os.SystemClock.elapsedRealtime()
+            recordingElapsedS = 0
+        } else captureError = "Couldn't start recording on this device"
+    }
+    val micPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { granted -> beginRecording(withAudio = granted) }
+    // Recording timer: 0:01 … 10:00, then it stops by itself.
+    androidx.compose.runtime.LaunchedEffect(recording) {
+        while (recording) {
+            kotlinx.coroutines.delay(250)
+            val elapsedMs = android.os.SystemClock.elapsedRealtime() - recordingStartMs
+            recordingElapsedS = (elapsedMs / 1000).toInt()
+            if (elapsedMs >= VrmCaptureController.MAX_RECORDING_MS) finishRecording()
+        }
+    }
+    androidx.compose.runtime.LaunchedEffect(captureError) {
+        if (captureError != null) { kotlinx.coroutines.delay(3000); captureError = null }
+    }
+    fun onCapturePressed() {
+        if (captureBusy) return
+        if (!videoMode) {
+            captureBusy = true
+            captureScope.launch {
+                val uri = captureController.takePhoto(context)
+                captureBusy = false
+                if (uri != null) onCapture(uri, null) else captureError = "Couldn't capture the photo"
+            }
+        } else if (recording) {
+            finishRecording()
+        } else {
+            val micGranted = androidx.core.content.ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (micGranted) beginRecording(withAudio = true) else micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
     // The loaded avatar's toggleable meshes, and which are hidden.
     var avatarParts by remember { mutableStateOf<List<AvatarPart>>(emptyList()) }
     var hiddenParts by remember { mutableStateOf(store.strings(K.HIDDEN_PARTS)) }
@@ -364,8 +429,11 @@ fun VrmModeScreen(
     // Finger curls, keyed by the AVATAR's side (mirroring already applied).
     // Hand world landmarks are hand-centred metres (small, slower numbers).
     val handFilters = remember { OneEuroFilterBank(minCutoff = 1.5, beta = 20.0, dCutoff = 1.0) }
-    val handPoints = remember(latestHandResult, latestPoseResult, trackUpperBody) {
-        avatarHandPoints(latestHandResult, if (trackUpperBody) latestPoseResult else null, handFilters)
+    val handPoints = remember(latestHandResult, latestPoseResult, trackUpperBody, trackingFrameWidth, trackingFrameHeight) {
+        avatarHands(
+            latestHandResult, if (trackUpperBody) latestPoseResult else null, latestFaceResult,
+            trackingFrameWidth, trackingFrameHeight, handFilters
+        )
     }
     // Where your eyes are in the camera frame (mirrored like the preview) —
     // drives "follow my head". The last known placement is held while the
@@ -537,7 +605,10 @@ fun VrmModeScreen(
                     },
                     hiddenParts = hiddenParts,
                     springBones = springBones,
-                    maxFps = if (fastTracking) 60 else 30
+                    maxFps = if (fastTracking) 60 else 30,
+                    fullBright = fullBright,
+                    cameraResetKey = cameraResetKey,
+                    captureController = captureController
                 )
             } else {
                 // Prominent, not a 12sp hint: a dead/missing avatar file is
@@ -630,38 +701,81 @@ fun VrmModeScreen(
             Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(20.dp))
         }
 
-        // Bottom bar: record/photo + settings, per spec ("a recording/
-        // picture button at the bottom, and the settings next to it").
-        // Tinted with the user's color.
-        Row(
+        // Bottom bar: [photo/video mode]  [capture]  [settings]. The capture
+        // button shows what it will do (camera or video icon; stop while
+        // recording); the left bubble shows the OTHER mode and switches to
+        // it. The mode is remembered. While recording, a timer sits above.
+        val bubble = { m: Modifier ->
+            m.clip(CircleShape).then(
+                if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = CircleShape)
+                else Modifier.background(tint.copy(alpha = 0.25f))
+            )
+        }
+        androidx.compose.foundation.layout.Column(
             Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 28.dp),
-            verticalAlignment = Alignment.CenterVertically
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Box(
-                Modifier.size(72.dp).clip(CircleShape)
-                    .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = CircleShape) else Modifier.background(tint.copy(alpha = 0.25f)))
-                    .clickable {
-                        tap()
-                        // Item 8 follow-up: this fires the same still-capture
-                        // as the notch button's Camera action for now (a
-                        // screenshot of the current preview frame) — real
-                        // photo/video capture *of the rendered avatar* needs
-                        // the Filament renderer from step 4 above to exist
-                        // first, since that's what's actually being recorded.
-                        onCapture(null, null)
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(Icons.Default.FiberManualRecord, contentDescription = "Capture", tint = Color.White, modifier = Modifier.size(30.dp))
+            val status = when {
+                captureError != null -> captureError
+                captureBusy -> if (videoMode) "Saving video…" else "Saving photo…"
+                recording -> "%d:%02d".format(maxOf(1, recordingElapsedS) / 60, maxOf(1, recordingElapsedS) % 60)
+                else -> null
             }
-            Spacer(Modifier.width(20.dp))
-            Box(
-                Modifier.size(48.dp).clip(CircleShape)
-                    .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = CircleShape) else Modifier.background(tint.copy(alpha = 0.25f)))
-                    .clickable { tap(); settingsOpen = true },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(Icons.Default.Settings, contentDescription = "VRM Settings", tint = Color.White, modifier = Modifier.size(20.dp))
+            Box(Modifier.height(30.dp), contentAlignment = Alignment.Center) {
+                if (status != null) {
+                    Row(
+                        Modifier.clip(RoundedCornerShape(14.dp)).background(Color.Black.copy(alpha = 0.45f))
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (recording) {
+                            Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFFFF3B30)))
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        Text(status, color = Color.White, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // Left: switch photo ↔ video (disabled while recording/saving).
+                Box(
+                    bubble(Modifier.size(48.dp))
+                        .clickable(enabled = !recording && !captureBusy) { tap(); videoMode = !videoMode },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        if (videoMode) Icons.Default.PhotoCamera else Icons.Default.Videocam,
+                        contentDescription = if (videoMode) "Switch to photo" else "Switch to video",
+                        tint = Color.White.copy(alpha = if (recording || captureBusy) 0.35f else 1f),
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                Spacer(Modifier.width(24.dp))
+                // Centre: capture.
+                Box(
+                    bubble(Modifier.size(72.dp))
+                        .then(if (recording) Modifier.border(3.dp, Color(0xFFFF3B30), CircleShape) else Modifier)
+                        .clickable(enabled = !captureBusy) { tap(); onCapturePressed() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    when {
+                        captureBusy -> androidx.compose.material3.CircularProgressIndicator(
+                            color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(26.dp)
+                        )
+                        recording -> Icon(Icons.Default.Stop, contentDescription = "Stop recording", tint = Color(0xFFFF3B30), modifier = Modifier.size(34.dp))
+                        videoMode -> Icon(Icons.Default.Videocam, contentDescription = "Record video", tint = Color.White, modifier = Modifier.size(32.dp))
+                        else -> Icon(Icons.Default.PhotoCamera, contentDescription = "Take photo", tint = Color.White, modifier = Modifier.size(30.dp))
+                    }
+                }
+                Spacer(Modifier.width(24.dp))
+                // Right: settings.
+                Box(
+                    bubble(Modifier.size(48.dp)).clickable { tap(); settingsOpen = true },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.Settings, contentDescription = "VRM Settings", tint = Color.White, modifier = Modifier.size(20.dp))
+                }
             }
         }
 
@@ -680,6 +794,8 @@ fun VrmModeScreen(
                     springBones = springBones, onToggleSpringBones = { springBones = it },
                     showPreview = showPreview, onTogglePreview = { showPreview = it },
                     showDebug = showDebug, onToggleDebug = { showDebug = it },
+                    fullBright = fullBright, onToggleFullBright = { fullBright = it },
+                    onResetCamera = { cameraResetKey++ },
                     avatarParts = avatarParts,
                     hiddenParts = hiddenParts,
                     onSetPartVisible = { id, visible -> hiddenParts = if (visible) hiddenParts - id else hiddenParts + id },
@@ -1014,61 +1130,133 @@ private fun smoothedBodyWorldLandmarks(poseResult: PoseLandmarkerResult?, filter
 }
 
 /**
- * HandLandmarker's 21 world landmarks per AVATAR side, One-Euro smoothed —
- * they drive the avatar's wrist orientation and every finger bone.
+ * Tracked hands per AVATAR side: HandLandmarker's 21 world landmarks
+ * (wrist/finger orientation) plus where the wrist is relative to your eyes
+ * (drives the arm IK). All One-Euro smoothed.
  *
- * Which physical hand is which: when the pose is tracked, each hand goes to
- * whichever pose wrist it's closest to (robust). Otherwise MediaPipe's
- * handedness label is used — it's documented as assuming a mirrored selfie
- * image, and our frames are NOT mirrored, so its "Left" is the person's
- * right hand. Then, mirrored, the person's right hand drives the avatar's
- * left (see AvatarRetargeter.MIRROR).
+ * Which physical hand is which — by position, never by MediaPipe's
+ * left/right label (that label came out reversed on real devices, which is
+ * why the hands swapped whenever body tracking was off):
+ *  1. Body tracking on: the nearest pose wrist.
+ *  2. Otherwise, relative to your face: our frames are NOT mirrored, so
+ *     your right hand appears on the image's left. Two hands: the one
+ *     further left in the image is your right.
+ *  3. No face either: the label, as a last resort.
+ * Then, mirrored, your right hand drives the avatar's left.
  */
-private fun avatarHandPoints(
+private fun avatarHands(
     hands: HandLandmarkerResult?,
     pose: PoseLandmarkerResult?,
+    face: FaceLandmarkerResult?,
+    frameWidth: Int,
+    frameHeight: Int,
     filters: OneEuroFilterBank
-): Map<String, List<FloatArray>> {
-    if (hands == null) {
+): Map<String, TrackedHand> {
+    if (hands == null || hands.worldLandmarks().isEmpty()) {
         filters.resetPrefixed("finger.")
+        filters.resetPrefixed("handpos.")
         return emptyMap()
     }
     val world = hands.worldLandmarks()
     val image = hands.landmarks()
     val handedness = hands.handednesses()
     val poseImage = pose?.landmarks()?.firstOrNull()?.takeIf { it.size > 16 }
+    val facePoints = face?.faceLandmarks()?.firstOrNull()?.takeIf { it.size > 362 }
     val timestampSeconds = hands.timestampMs() / 1000.0
-    val out = HashMap<String, List<FloatArray>>()
-    for (i in world.indices) {
-        val wrist = image.getOrNull(i)?.getOrNull(0)
-        val personSide = if (poseImage != null && wrist != null) {
+    val W = frameWidth.toFloat().coerceAtLeast(1f)
+    val H = frameHeight.toFloat().coerceAtLeast(1f)
+
+    // Person side per detected hand.
+    val sides = arrayOfNulls<String>(world.size)
+    val wristX = FloatArray(world.size) { i -> image.getOrNull(i)?.getOrNull(0)?.x() ?: 0.5f }
+    val wristY = FloatArray(world.size) { i -> image.getOrNull(i)?.getOrNull(0)?.y() ?: 0.5f }
+    if (poseImage != null) {
+        for (i in world.indices) {
             val l = poseImage[15]; val r = poseImage[16]
-            val dl = (wrist.x() - l.x()) * (wrist.x() - l.x()) + (wrist.y() - l.y()) * (wrist.y() - l.y())
-            val dr = (wrist.x() - r.x()) * (wrist.x() - r.x()) + (wrist.y() - r.y()) * (wrist.y() - r.y())
-            if (dl <= dr) "left" else "right"
-        } else {
-            personSideFromLabel(handedness.getOrNull(i)?.firstOrNull()?.categoryName())
-        } ?: continue
+            val dl = (wristX[i] - l.x()) * (wristX[i] - l.x()) + (wristY[i] - l.y()) * (wristY[i] - l.y())
+            val dr = (wristX[i] - r.x()) * (wristX[i] - r.x()) + (wristY[i] - r.y()) * (wristY[i] - r.y())
+            sides[i] = if (dl <= dr) "left" else "right"
+        }
+    } else if (world.size >= 2) {
+        val leftmost = if (wristX[0] <= wristX[1]) 0 else 1
+        sides[leftmost] = "right"; sides[1 - leftmost] = "left"
+    } else if (facePoints != null) {
+        val faceX = (facePoints[33].x() + facePoints[263].x()) / 2f
+        sides[0] = if (wristX[0] < faceX) "right" else "left"
+    } else {
+        sides[0] = personSideFromLabel(handedness.getOrNull(0)?.firstOrNull()?.categoryName())
+    }
+
+    // Camera model for the position estimate: focal length ≈ 0.7 × the
+    // long side (front cameras are ~70-75° across the long side).
+    val f = 0.7f * maxOf(W, H)
+    // Your eyes: 3-D spacing (so turning your head doesn't read as moving
+    // away) against a 63 mm average interpupillary distance → depth.
+    val eyes: FloatArray? = facePoints?.let { p ->
+        val ax = (p[33].x() + p[133].x()) / 2f * W; val ay = (p[33].y() + p[133].y()) / 2f * H; val az = (p[33].z() + p[133].z()) / 2f * W
+        val bx = (p[362].x() + p[263].x()) / 2f * W; val by = (p[362].y() + p[263].y()) / 2f * H; val bz = (p[362].z() + p[263].z()) / 2f * W
+        val px = kotlin.math.sqrt((ax - bx) * (ax - bx) + (ay - by) * (ay - by) + (az - bz) * (az - bz))
+        if (px < 1f) null else {
+            val z = f * 0.063f / px
+            floatArrayOf(((ax + bx) / 2f - W / 2f) * z / f, ((ay + by) / 2f - H / 2f) * z / f, z)
+        }
+    }
+
+    val out = HashMap<String, TrackedHand>()
+    for (i in world.indices) {
+        val personSide = sides[i] ?: continue
         val avatarSide = if (AvatarRetargeter.MIRROR) (if (personSide == "left") "right" else "left") else personSide
         if (out.containsKey(avatarSide)) continue
-        val points = world.getOrNull(i)?.takeIf { it.size >= 21 } ?: continue
-        out[avatarSide] = points.mapIndexed { k, p ->
+        val w = world.getOrNull(i)?.takeIf { it.size >= 21 } ?: continue
+        val img = image.getOrNull(i)?.takeIf { it.size >= 21 }
+        val points = w.mapIndexed { k, p ->
             floatArrayOf(
                 filters.filter("finger.$avatarSide.$k.x", p.x(), timestampSeconds),
                 filters.filter("finger.$avatarSide.$k.y", p.y(), timestampSeconds),
                 filters.filter("finger.$avatarSide.$k.z", p.z(), timestampSeconds)
             )
         }
+        // Wrist depth from the palm's apparent size: real length (world
+        // landmarks, metres) over on-screen length (pixels). The least
+        // foreshortened palm edge gives the truest reading.
+        var offset: FloatArray? = null
+        if (eyes != null && img != null) {
+            var best = 0f
+            for ((a, b) in PALM_EDGES) {
+                val pxLen = kotlin.math.hypot((img[a].x() - img[b].x()) * W, (img[a].y() - img[b].y()) * H)
+                val dx = w[a].x() - w[b].x(); val dy = w[a].y() - w[b].y(); val dz = w[a].z() - w[b].z()
+                val mLen = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
+                if (mLen > 0.02f) best = maxOf(best, pxLen / mLen)
+            }
+            if (best > 0f) {
+                val z = f / best
+                val raw = floatArrayOf(
+                    (img[0].x() * W - W / 2f) * z / f - eyes[0],
+                    (img[0].y() * H - H / 2f) * z / f - eyes[1],
+                    (z - eyes[2]).coerceIn(-0.7f, 0.3f) // depth is the least reliable axis
+                )
+                offset = FloatArray(3) { k -> filters.filter("handpos.$avatarSide.$k", raw[k], timestampSeconds) }
+            }
+        }
+        if (offset == null) filters.resetPrefixed("handpos.$avatarSide.")
+        out[avatarSide] = TrackedHand(points, offset)
     }
-    for (side in listOf("left", "right")) if (!out.containsKey(side)) filters.resetPrefixed("finger.$side.")
+    for (side in listOf("left", "right")) if (!out.containsKey(side)) {
+        filters.resetPrefixed("finger.$side.")
+        filters.resetPrefixed("handpos.$side.")
+    }
     return out
 }
 
-/** MediaPipe's handedness label → the person's actual hand, for our
- *  un-mirrored camera frames (see [avatarHandPoints]). */
+/** Palm edges (wrist–index, wrist–middle, wrist–pinky, index–pinky). */
+private val PALM_EDGES = listOf(0 to 5, 0 to 9, 0 to 17, 5 to 17)
+
+/** MediaPipe's handedness label → the person's actual hand. Only a last
+ *  resort (see [avatarHands]); on devices tested the label matched the
+ *  person's own hand directly. */
 private fun personSideFromLabel(label: String?): String? = when (label) {
-    "Left" -> "right"
-    "Right" -> "left"
+    "Left" -> "left"
+    "Right" -> "right"
     else -> null
 }
 
@@ -1272,6 +1460,8 @@ private class VrmSettingsUi(
     val springBones: Boolean, val onToggleSpringBones: (Boolean) -> Unit,
     val showPreview: Boolean, val onTogglePreview: (Boolean) -> Unit,
     val showDebug: Boolean, val onToggleDebug: (Boolean) -> Unit,
+    val fullBright: Boolean, val onToggleFullBright: (Boolean) -> Unit,
+    val onResetCamera: () -> Unit,
     val avatarParts: List<AvatarPart>,
     val hiddenParts: Set<String>,
     val onSetPartVisible: (id: String, visible: Boolean) -> Unit,
@@ -1383,6 +1573,17 @@ private fun VrmSettingsSheet(
             }
 
             VrmSettingsSection("Display", tint)
+            VrmSettingsToggleRow("Full bright", ui.fullBright, tint,
+                hint = "No lighting or shadows — every texture shown at full brightness.") { ui.onToggleFullBright(it) }
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = 10.dp).clickable { tap(); ui.onResetCamera() },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                androidx.compose.foundation.layout.Column(Modifier.weight(1f)) {
+                    Text("Reset camera", color = tint, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+                    Text("Undo any spinning or zooming of the view.", color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp)
+                }
+            }
             VrmSettingsToggleRow("Tracking preview", ui.showPreview, tint) { ui.onTogglePreview(it) }
             VrmSettingsToggleRow("Debug info", ui.showDebug, tint) { ui.onToggleDebug(it) }
         }

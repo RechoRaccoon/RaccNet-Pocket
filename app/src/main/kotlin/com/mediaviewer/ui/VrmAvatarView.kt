@@ -117,7 +117,13 @@ fun VrmAvatarView(
     /** Simulate VRM spring bones (hair/ear/tail physics). */
     springBones: Boolean = true,
     /** Render-rate cap. */
-    maxFps: Int = 30
+    maxFps: Int = 30,
+    /** All materials unlit (pure texture colors). Changing it reloads the model. */
+    fullBright: Boolean = false,
+    /** Bump to put the camera (drag-spin + pinch-zoom) back to default. */
+    cameraResetKey: Int = 0,
+    /** Photo/video capture of the rendered avatar. */
+    captureController: VrmCaptureController? = null
 ) {
     var session by remember { mutableStateOf<ViewerSession?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
@@ -132,7 +138,15 @@ fun VrmAvatarView(
     var loadGeneration by remember { mutableStateOf(0) }
 
     // Load (or unload) whenever the viewer or the file changes.
-    LaunchedEffect(session, vrmBytes) {
+    LaunchedEffect(cameraResetKey) {
+        if (cameraResetKey != 0) {
+            userYawDegrees = 0f
+            zoom = DEFAULT_ZOOM
+        }
+    }
+    SideEffect { captureController?.session = session }
+
+    LaunchedEffect(session, vrmBytes, fullBright) {
         val s = session ?: return@LaunchedEffect
         // Retargeting must stop pointing at the old asset BEFORE it's
         // destroyed — otherwise the next recomposition's SideEffect writes
@@ -146,7 +160,8 @@ fun VrmAvatarView(
         }
         loading = true
         userYawDegrees = 0f
-        val result = loadVrm(s, vrmBytes, parsedVrmData)
+        val result = loadVrm(s, vrmBytes, parsedVrmData,
+            if (fullBright) VrmGlbPatcher.Lighting.FULL_BRIGHT else VrmGlbPatcher.Lighting.LIT)
         loading = false
         if (result == null) return@LaunchedEffect // released/cancelled mid-load
         loadError = result.error
@@ -204,6 +219,7 @@ fun VrmAvatarView(
                     holder.setFormat(android.graphics.PixelFormat.OPAQUE)
                 }
                 val newSession = ViewerSession()
+                newSession.surfaceView = surfaceView
                 // MUST be added before ModelViewer(surfaceView) — listeners
                 // fire in the order they were added, and ModelViewer's own
                 // detach listener destroys the engine.
@@ -274,8 +290,28 @@ private const val ZOOM_FOCUS_Y = 0.5f
 
 /** Everything tied to one SurfaceView / Filament engine. All engine access
  *  goes through [onMain], which refuses once [released] is set. */
-private class ViewerSession {
+internal class ViewerSession {
     var viewer: ModelViewer? = null
+    var surfaceView: SurfaceView? = null
+    /** Active video recording, rendered into every frame (see [renderRecording]). */
+    var recording: VrmRecording? = null
+
+    /** Renders the current frame a second time, into the video encoder's
+     *  surface. Same view/camera, viewport switched to the video size. */
+    fun renderRecording(v: ModelViewer, frameTimeNanos: Long) {
+        val rec = recording ?: return
+        val view = v.view
+        val saved = view.viewport
+        try {
+            view.viewport = com.google.android.filament.Viewport(0, 0, rec.width, rec.height)
+            if (v.renderer.beginFrame(rec.swapChain, frameTimeNanos)) {
+                v.renderer.render(view)
+                v.renderer.endFrame()
+            }
+        } finally {
+            view.viewport = saved
+        }
+    }
     var released = false
         private set
     var baseTransform: FloatArray? = null
@@ -423,6 +459,8 @@ private class ViewerSession {
                 // itself; without this the avatar stays frozen in rest pose.
                 v.animator?.updateBoneMatrices()
                 v.render(frameTimeNanos)
+                runCatching { renderRecording(v, frameTimeNanos) }
+                    .onFailure { Log.e(TAG, "Recording frame failed", it) }
                 if (clearBreadcrumbAfterFrame && --breadcrumbFrames <= 0) {
                     clearBreadcrumbAfterFrame = false
                     com.mediaviewer.util.CrashBreadcrumbs.clearMark()
@@ -451,6 +489,14 @@ private class ViewerSession {
         val v = viewer
         release()
         if (v == null) return
+        // Screen closed mid-recording: stop cleanly (the file is discarded).
+        recording?.let { rec ->
+            recording = null
+            runCatching { v.engine.destroySwapChain(rec.swapChain); v.engine.flushAndWait() }
+            runCatching { rec.recorder.stop() }
+            runCatching { rec.recorder.release() }
+            runCatching { rec.file.delete() }
+        }
         runCatching {
             val engine = v.engine
             skybox?.let { v.scene.skybox = null; engine.destroySkybox(it) }
@@ -562,14 +608,19 @@ private fun partLabel(ref: com.mediaviewer.util.MToonMaterialParser.PrimitiveMat
 }
 
 /** Returns null if the session was released (screen closed) mid-load. */
-private suspend fun loadVrm(session: ViewerSession, bytes: ByteArray, parsedVrmData: VrmData?): VrmLoadResult? {
+private suspend fun loadVrm(
+    session: ViewerSession,
+    bytes: ByteArray,
+    parsedVrmData: VrmData?,
+    lighting: VrmGlbPatcher.Lighting
+): VrmLoadResult? {
     var patchSummary = ""
     // ── CPU-only prep, off the main thread ──
     val prepared = withContext(Dispatchers.Default) {
         // The glTF JSON is rewritten so gltfio renders VRM materials the way
         // VRM viewers do — without this the avatar is a black silhouette
         // (vertex-colour masks, default metallic = 1, MToon). See VrmGlbPatcher.
-        val patched = VrmGlbPatcher.patchToDirectBuffer(bytes)
+        val patched = VrmGlbPatcher.patchToDirectBuffer(bytes, lighting)
         patchSummary = patched.stats.toString()
         patched.buffer to MToonMaterialParser.parse(bytes)
     }
@@ -960,3 +1011,131 @@ private fun addFlatAmbientLight(engine: Engine, scene: com.google.android.filame
 }
 
 private const val TAG = "VrmAvatarView"
+
+
+internal class VrmRecording(
+    val recorder: android.media.MediaRecorder,
+    val swapChain: com.google.android.filament.SwapChain,
+    val width: Int,
+    val height: Int,
+    val file: java.io.File
+)
+
+/**
+ * Photo and video capture of the RENDERED avatar (never the camera): only
+ * what Filament draws — avatar and background — no buttons or overlays.
+ * Files go to the cache folder the app's FileProvider exposes, and come
+ * back as content:// Uris ready to attach to a post. Main thread only.
+ */
+class VrmCaptureController {
+    internal var session: ViewerSession? = null
+
+    val isRecording: Boolean get() = session?.recording != null
+
+    /** Grabs the current frame as a JPEG. Null if it couldn't. */
+    suspend fun takePhoto(context: android.content.Context): android.net.Uri? {
+        val sv = session?.surfaceView ?: return null
+        if (sv.width <= 0 || sv.height <= 0) return null
+        val bitmap = android.graphics.Bitmap.createBitmap(sv.width, sv.height, android.graphics.Bitmap.Config.ARGB_8888)
+        val result = kotlinx.coroutines.suspendCancellableCoroutine<Int> { cont ->
+            android.view.PixelCopy.request(sv, bitmap, { code -> if (cont.isActive) cont.resumeWith(Result.success(code)) },
+                android.os.Handler(android.os.Looper.getMainLooper()))
+        }
+        if (result != android.view.PixelCopy.SUCCESS) {
+            Log.e(TAG, "PixelCopy failed: $result")
+            bitmap.recycle()
+            return null
+        }
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val file = newCaptureFile(context, "jpg")
+                file.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, it) }
+                bitmap.recycle()
+                captureUri(context, file)
+            }.onFailure { Log.e(TAG, "Saving photo failed", it) }.getOrNull()
+        }
+    }
+
+    /** Starts recording what's rendered (plus the mic when [withAudio]).
+     *  Returns false if the encoder couldn't be set up. */
+    fun startRecording(context: android.content.Context, withAudio: Boolean): Boolean {
+        val s = session ?: return false
+        val v = s.viewer ?: return false
+        val sv = s.surfaceView ?: return false
+        if (s.recording != null) return true
+        // Encoder-friendly size: same aspect as the screen, long side ≤ 1280,
+        // both sides multiples of 16.
+        val scale = minOf(1f, 1280f / maxOf(sv.width, sv.height))
+        val w = ((sv.width * scale).toInt() / 16 * 16).coerceAtLeast(16)
+        val h = ((sv.height * scale).toInt() / 16 * 16).coerceAtLeast(16)
+        fun build(audio: Boolean): Pair<android.media.MediaRecorder, java.io.File>? {
+            val file = newCaptureFile(context, "mp4")
+            @Suppress("DEPRECATION")
+            val r = if (android.os.Build.VERSION.SDK_INT >= 31) android.media.MediaRecorder(context) else android.media.MediaRecorder()
+            return try {
+                if (audio) r.setAudioSource(android.media.MediaRecorder.AudioSource.MIC)
+                r.setVideoSource(android.media.MediaRecorder.VideoSource.SURFACE)
+                r.setOutputFormat(android.media.MediaRecorder.OutputFormat.MPEG_4)
+                r.setOutputFile(file.absolutePath)
+                r.setVideoEncoder(android.media.MediaRecorder.VideoEncoder.H264)
+                r.setVideoSize(w, h)
+                r.setVideoFrameRate(30)
+                r.setVideoEncodingBitRate(8_000_000)
+                if (audio) {
+                    r.setAudioEncoder(android.media.MediaRecorder.AudioEncoder.AAC)
+                    r.setAudioSamplingRate(44_100)
+                    r.setAudioEncodingBitRate(128_000)
+                }
+                r.setMaxDuration(MAX_RECORDING_MS + 2_000) // the UI stops at 10:00; this is a backstop
+                r.prepare()
+                r to file
+            } catch (e: Exception) {
+                Log.e(TAG, "MediaRecorder setup failed (audio=$audio)", e)
+                runCatching { r.release() }
+                file.delete()
+                null
+            }
+        }
+        val (recorder, file) = (if (withAudio) build(true) else null) ?: build(false) ?: return false
+        return try {
+            val swapChain = v.engine.createSwapChain(recorder.surface)
+            recorder.start()
+            s.recording = VrmRecording(recorder, swapChain, w, h, file)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Starting recording failed", e)
+            runCatching { recorder.release() }
+            file.delete()
+            false
+        }
+    }
+
+    /** Stops and finalises the video. Null if nothing usable was recorded. */
+    suspend fun stopRecording(context: android.content.Context): android.net.Uri? {
+        val s = session ?: return null
+        val rec = s.recording ?: return null
+        s.recording = null // no more frames go to the encoder
+        runCatching {
+            s.viewer?.engine?.let { e -> e.destroySwapChain(rec.swapChain); e.flushAndWait() }
+        }.onFailure { Log.e(TAG, "Releasing recording surface failed", it) }
+        val ok = withContext(Dispatchers.IO) {
+            val stopped = runCatching { rec.recorder.stop() }.onFailure { Log.e(TAG, "MediaRecorder.stop failed", it) }.isSuccess
+            runCatching { rec.recorder.release() }
+            stopped && rec.file.length() > 0
+        }
+        if (!ok) { rec.file.delete(); return null }
+        return runCatching { captureUri(context, rec.file) }.getOrNull()
+    }
+
+    companion object {
+        const val MAX_RECORDING_MS = 10 * 60 * 1000
+
+        private fun newCaptureFile(context: android.content.Context, ext: String): java.io.File {
+            val dir = java.io.File(context.cacheDir, "camera_capture").also { it.mkdirs() }
+            return java.io.File(dir, "vrm_${System.currentTimeMillis()}.$ext")
+        }
+
+        private fun captureUri(context: android.content.Context, file: java.io.File): android.net.Uri =
+            androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    }
+}

@@ -50,12 +50,13 @@ object VrmGlbPatcher {
         val unlitMaterials: Int = 0,
         val metallicFixed: Int = 0,
         val vertexColorsStripped: Int = 0,
-        val texturesDetached: Int = 0
+        val texturesDetached: Int = 0,
+        val unlitToLit: Int = 0
     ) {
-        val changedAnything get() = unlitMaterials + metallicFixed + vertexColorsStripped + texturesDetached > 0
+        val changedAnything get() = unlitMaterials + metallicFixed + vertexColorsStripped + texturesDetached + unlitToLit > 0
         override fun toString() =
-            "$unlitMaterials toon→unlit, $metallicFixed metallic fixed, $vertexColorsStripped vertex-color prims stripped, " +
-                "$texturesDetached texture refs taken over"
+            "$unlitMaterials made unlit, $unlitToLit unlit→lit, $metallicFixed metallic fixed, " +
+                "$vertexColorsStripped vertex-color prims stripped, $texturesDetached texture refs taken over"
     }
 
     private val TEXTURE_KEYS = listOf("normalTexture", "occlusionTexture", "emissiveTexture")
@@ -97,13 +98,26 @@ object VrmGlbPatcher {
 
     /** Returns a native-order direct buffer ready for `loadModelGlb`. Never
      *  throws: on any parsing problem it returns the original bytes as-is. */
-    fun patchToDirectBuffer(glb: ByteArray): Result {
-        return runCatching { patch(glb) }
+    /**
+     * How materials are shaded.
+     *  - LIT (default): every material responds to the scene lights. VRM
+     *    exporters mark MToon materials (face, hair…) KHR_materials_unlit
+     *    as their fallback, which made those parts ignore the lights
+     *    entirely while the clothes were lit — "the light doesn't hit the
+     *    face". Here that flag is removed and they become matte,
+     *    non-metallic surfaces like everything else.
+     *  - FULL_BRIGHT: every material unlit — pure texture colors, no
+     *    shading or shadows at all.
+     */
+    enum class Lighting { LIT, FULL_BRIGHT }
+
+    fun patchToDirectBuffer(glb: ByteArray, lighting: Lighting = Lighting.LIT): Result {
+        return runCatching { patch(glb, lighting) }
             .onFailure { Log.e(TAG, "Patching failed — loading the file unmodified", it) }
             .getOrNull() ?: Result(copyToDirect(glb), Stats())
     }
 
-    private fun patch(glb: ByteArray): Result? {
+    private fun patch(glb: ByteArray, lighting: Lighting): Result? {
         if (glb.size < 20) return null
         val header = ByteBuffer.wrap(glb, 0, 12).order(ByteOrder.LITTLE_ENDIAN)
         if (header.int != GLB_MAGIC) return null
@@ -116,7 +130,7 @@ object VrmGlbPatcher {
         val restOffset = 20 + jsonLength // BIN (and any other) chunks, copied verbatim
 
         val root = JSONObject(String(glb, 20, jsonLength, Charsets.UTF_8))
-        val stats = patchJson(root)
+        val stats = patchJson(root, lighting)
         if (!stats.changedAnything) return Result(copyToDirect(glb), stats)
 
         var jsonBytes = root.toString().toByteArray(Charsets.UTF_8)
@@ -134,7 +148,7 @@ object VrmGlbPatcher {
         return Result(out.order(ByteOrder.nativeOrder()), stats)
     }
 
-    private fun patchJson(root: JSONObject): Stats {
+    private fun patchJson(root: JSONObject, lighting: Lighting): Stats {
         val materials = root.optJSONArray("materials") ?: JSONArray()
 
         // VRM 0.x keeps MToon parameters in one top-level list, matched to
@@ -159,6 +173,7 @@ object VrmGlbPatcher {
         var unlit = 0
         var metallic = 0
         var detached = 0
+        var litFromUnlit = 0
         for (i in 0 until materials.length()) {
             val mat = materials.optJSONObject(i) ?: continue
             detached += detachTextures(mat)
@@ -167,19 +182,25 @@ object VrmGlbPatcher {
                 ext?.has("VRMC_materials_mtoon-1.0") == true ||
                 mat.optString("name", "\u0000") in vrm0ToonNames ||
                 i in vrm0ToonIndices
-            if (isToon) {
+            if (lighting == Lighting.FULL_BRIGHT) {
                 if (ext?.has(UNLIT) != true) {
                     val e = ext ?: JSONObject().also { mat.put("extensions", it) }
                     e.put(UNLIT, JSONObject())
                     unlit++
                 }
-            } else if (ext?.has(UNLIT) != true) {
+            } else {
+                // Lit: drop any unlit fallback so the lights reach this part.
+                if (ext?.remove(UNLIT) != null) litFromUnlit++
                 val pbr = mat.optJSONObject("pbrMetallicRoughness")
                     ?: JSONObject().also { mat.put("pbrMetallicRoughness", it) }
-                if (!pbr.has("metallicFactor")) {
+                // Toon materials: matte and non-metallic whatever the fallback
+                // PBR values say. Others: only fill in the missing default
+                // (glTF's metallic = 1 would be black without reflections).
+                if (isToon || !pbr.has("metallicFactor")) {
                     pbr.put("metallicFactor", 0.0)
                     metallic++
                 }
+                if (isToon) pbr.put("roughnessFactor", 0.9)
             }
         }
         if (unlit > 0) addExtensionUsed(root, UNLIT)
@@ -207,7 +228,7 @@ object VrmGlbPatcher {
                 }
             }
         }
-        return Stats(unlit, metallic, stripped, detached)
+        return Stats(unlit, metallic, stripped, detached, litFromUnlit)
     }
 
     private fun addExtensionUsed(root: JSONObject, name: String) {

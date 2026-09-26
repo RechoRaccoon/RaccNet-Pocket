@@ -1076,9 +1076,11 @@ private fun AppRoot(viewModel: MainViewModel) {
             // The button follows the same rule so it doesn't stick out in
             // the wrong color over the hub.
             val profileVisible = profileOverlay?.let { !it.hidden && profileRevealArmed } == true
-            val notchInteractive = !vrmModeOpen && !searchOpen && !dmInboxOpen &&
-                !taggingOverlayOpen && playingLive == null &&
-                (composePostOpen || profileVisible || screenState == ScreenState.SETTINGS)
+            // The posting page always gets a working notch (it may have been
+            // opened on top of Search/DMs, whose flags stay set underneath).
+            val notchInteractive = !vrmModeOpen && (composePostOpen || (
+                !searchOpen && !dmInboxOpen && !taggingOverlayOpen && playingLive == null &&
+                    (profileVisible || screenState == ScreenState.SETTINGS)))
             val notchTint = if (screenState == ScreenState.SETTINGS || vrmModeOpen || composePostOpen) {
                 val selfAvatar = selfProfile?.author?.avatarUrl
                 if (!selfAvatar.isNullOrBlank()) rememberDominantColor(selfAvatar) else currentDominantColor

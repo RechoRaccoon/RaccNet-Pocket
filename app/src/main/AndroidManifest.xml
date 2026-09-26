@@ -14,6 +14,8 @@
          that itself), but VRM mode's own live preview needs direct camera
          access in-app. -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- VRM mode video recording: the mic track (optional; video still records without it). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.front" android:required="false" />
 

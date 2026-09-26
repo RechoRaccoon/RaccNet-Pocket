@@ -87,10 +87,21 @@ class TrackingFrame(
     val body: Map<Int, BodyPoint>?,
     /** "Full Body" toggle — legs/hips only move when this is on. */
     val trackLegs: Boolean,
-    /** HandLandmarker's 21 world landmarks (x, y, z — same axes as the
-     *  pose's world landmarks), smoothed, keyed by the AVATAR side that
-     *  hand drives ("left"/"right"; mirroring already applied). */
-    val hands: Map<String, List<FloatArray>> = emptyMap()
+    /** Tracked hands keyed by the AVATAR side each one drives
+     *  ("left"/"right"; mirroring already applied). */
+    val hands: Map<String, TrackedHand> = emptyMap()
+)
+
+/** One tracked hand. */
+class TrackedHand(
+    /** HandLandmarker's 21 world landmarks (metres, hand-centred; same axes
+     *  as the pose's world landmarks), smoothed — hand/finger orientation. */
+    val points: List<FloatArray>,
+    /** Where the WRIST is relative to the midpoint between your eyes, in
+     *  metres, camera axes (+x image-right, +y down, +z away), estimated
+     *  from apparent face and hand size. Drives the arm IK; null if there
+     *  was no face to measure against. */
+    val offsetFromEyes: FloatArray?
 )
 
 class RetargetTarget(
@@ -132,6 +143,10 @@ object AvatarRetargeter {
     private const val TAU_LIMB = 0.07f
     private const val TAU_FINGER = 0.06f
     private const val TAU_HAND = 0.06f
+
+    /** Typical adult shoulder→wrist length (m): maps your hand's reach
+     *  onto the avatar's own arm length. */
+    private const val USER_ARM_M = 0.58f
 
     /** Share of the head turn taken by the neck (when the rig has one). */
     private const val NECK_SHARE = 0.4f
@@ -272,8 +287,10 @@ object AvatarRetargeter {
 
         // ── Arms, hands, fingers ──
         for (side in SIDES) {
-            val hand = frame.hands[side]?.takeIf { it.size >= 21 }?.map { modelPoint(it, flip) }
-            driveArm(ctx, side, ::point, hand)
+            val tracked = frame.hands[side]
+            val hand = tracked?.points?.takeIf { it.size >= 21 }?.map { modelPoint(it, flip) }
+            val offset = tracked?.offsetFromEyes?.let { modelPoint(it, flip) }
+            driveArm(ctx, side, ::point, hand, offset)
         }
 
         // ── Legs (rest pose unless Full Body is on and they're visible) ──
@@ -302,7 +319,23 @@ object AvatarRetargeter {
         ctx.drive(bone, quaternionBetweenDirections(current, targetDirection) * parent, tau)
     }
 
-    private fun driveArm(ctx: PoseContext, side: String, point: (Int) -> FloatArray?, hand: List<FloatArray>?) {
+    /**
+     * Arms by two-bone IK, so the hands land where yours are and the rest
+     * of the arm follows:
+     *  - **Wrist target** — your tracked hand (its estimated position
+     *    relative to your eyes, scaled to the avatar's proportions) when a
+     *    hand is visible; otherwise the pose's wrist (relative to your
+     *    shoulder) when Upper Body is on; otherwise the arm relaxes down.
+     *    Hand tracking wins because it keeps working when the arm itself is
+     *    hidden or the pose disagrees with where the hand really is.
+     *  - **Elbow direction** — your tracked elbow when the pose sees it (so
+     *    arm tracking still shapes the pose), else a natural down-and-back
+     *    bend.
+     */
+    private fun driveArm(
+        ctx: PoseContext, side: String, point: (Int) -> FloatArray?,
+        hand: List<FloatArray>?, handOffset: FloatArray?
+    ) {
         val bones = ctx.target.bones
         val flip = ctx.target.facesNegativeZ
         val s = sourceFor(side)
@@ -311,17 +344,43 @@ object AvatarRetargeter {
         val sx = if (side == "left") 1f else -1f
         val relaxedUpper = viewDirToModel(normalize(floatArrayOf(0.30f * sx, -1f, 0.05f)), flip)
         val relaxedLower = viewDirToModel(normalize(floatArrayOf(0.12f * sx, -1f, 0.30f)), flip)
+        val defaultPole = viewDirToModel(normalize(floatArrayOf(0.35f * sx, -1f, -0.5f)), flip)
 
-        val upper = "${side}UpperArm"; val lower = "${side}LowerArm"
-        driveSegment(ctx, upper, lower,
-            if (shoulder != null && elbow != null) direction(shoulder, elbow) else relaxedUpper, TAU_LIMB)
-        driveSegment(ctx, lower, "${side}Hand",
-            if (elbow != null && wrist != null) direction(elbow, wrist) else relaxedLower, TAU_LIMB)
+        val upper = "${side}UpperArm"; val lower = "${side}LowerArm"; val handName = "${side}Hand"
+        val upperRest = bones[upper]; val lowerRest = bones[lower]; val handRest = bones[handName]
+        val target: FloatArray? = if (upperRest != null && lowerRest != null && handRest != null) {
+            val a = length(sub(lowerRest.restWorldPosition, upperRest.restWorldPosition))
+            val b = length(sub(handRest.restWorldPosition, lowerRest.restWorldPosition))
+            val shoulderNow = ctx.currentPosition(upper)
+            when {
+                handOffset != null && ctx.eyesNow() != null ->
+                    add(ctx.eyesNow()!!, scale(handOffset, (a + b) / USER_ARM_M))
+                shoulder != null && wrist != null && shoulderNow != null -> {
+                    val userArm = if (elbow != null) length(sub(elbow, shoulder)) + length(sub(wrist, elbow)) else USER_ARM_M
+                    add(shoulderNow, scale(sub(wrist, shoulder), (a + b) / userArm.coerceAtLeast(0.2f)))
+                }
+                else -> null
+            }
+        } else null
+
+        val shoulderNow = ctx.currentPosition(upper)
+        if (target != null && shoulderNow != null && upperRest != null && lowerRest != null && handRest != null) {
+            val a = length(sub(lowerRest.restWorldPosition, upperRest.restWorldPosition))
+            val b = length(sub(handRest.restWorldPosition, lowerRest.restWorldPosition))
+            val pole = if (shoulder != null && elbow != null) sub(elbow, shoulder) else defaultPole
+            val (elbowPos, wristPos) = solveTwoBone(shoulderNow, target, a, b, pole, defaultPole)
+            driveSegment(ctx, upper, lower, direction(shoulderNow, elbowPos), TAU_LIMB)
+            driveSegment(ctx, lower, handName, direction(elbowPos, wristPos), TAU_LIMB)
+        } else {
+            driveSegment(ctx, upper, lower,
+                if (shoulder != null && elbow != null) direction(shoulder, elbow) else relaxedUpper, TAU_LIMB)
+            driveSegment(ctx, lower, handName,
+                if (elbow != null && wrist != null) direction(elbow, wrist) else relaxedLower, TAU_LIMB)
+        }
 
         // Hand orientation. Best source: HandLandmarker's own 3-D points
         // (wrist, index/middle/pinky knuckles) — far steadier than the
         // pose's three rough hand points, which are only a fallback.
-        val handName = "${side}Hand"
         val handInfo = bones[handName] ?: return
         val forearm = ctx.parentDelta(handName)
         val indexBase = bones["${side}IndexProximal"]; val littleBase = bones["${side}LittleProximal"]
@@ -421,6 +480,50 @@ object AvatarRetargeter {
     private class PoseContext(val target: RetargetTarget, val dt: Float) {
         private val deltas = HashMap<String, Quaternion>()
         private val tm = target.engine.transformManager
+
+        /** World delta of [bone] this update (its own if driven already,
+         *  else inherited from its parents). */
+        fun deltaOf(bone: String): Quaternion = deltas[bone] ?: parentDelta(bone)
+
+        /** Where [bone]'s pivot is now, with every rotation applied so far
+         *  (hips stay put: the pose only rotates, never translates). */
+        fun currentPosition(bone: String): FloatArray? {
+            val info = target.bones[bone] ?: return null
+            val parent = info.parentBone ?: return info.restWorldPosition
+            val parentInfo = target.bones[parent] ?: return info.restWorldPosition
+            val parentNow = currentPosition(parent) ?: return info.restWorldPosition
+            return addV(parentNow, rotateV(deltaOf(parent), subV(info.restWorldPosition, parentInfo.restWorldPosition)))
+        }
+
+        /** Midpoint between the avatar's eyes now (head must be driven
+         *  first). Falls back to a point a little above the head bone. */
+        fun eyesNow(): FloatArray? {
+            val head = target.bones["head"] ?: return null
+            val headNow = currentPosition("head") ?: return null
+            val l = target.bones["leftEye"]?.restWorldPosition
+            val r = target.bones["rightEye"]?.restWorldPosition
+            val eyesRest = if (l != null && r != null) floatArrayOf((l[0] + r[0]) / 2f, (l[1] + r[1]) / 2f, (l[2] + r[2]) / 2f)
+            else {
+                // ~6 cm above the head pivot for a typical 1.5 m avatar,
+                // scaled by the avatar's own arm length.
+                val arm = target.bones["leftUpperArm"]?.let { u -> target.bones["leftHand"]?.let { h ->
+                    sqrt(subV(h.restWorldPosition, u.restWorldPosition).let { it[0] * it[0] + it[1] * it[1] + it[2] * it[2] })
+                } } ?: 0.5f
+                floatArrayOf(head.restWorldPosition[0], head.restWorldPosition[1] + arm * 0.12f, head.restWorldPosition[2])
+            }
+            return addV(headNow, rotateV(deltaOf("head"), subV(eyesRest, head.restWorldPosition)))
+        }
+
+        private fun subV(a: FloatArray, b: FloatArray) = floatArrayOf(a[0] - b[0], a[1] - b[1], a[2] - b[2])
+        private fun addV(a: FloatArray, b: FloatArray) = floatArrayOf(a[0] + b[0], a[1] + b[1], a[2] + b[2])
+        private fun rotateV(q: Quaternion, v: FloatArray): FloatArray {
+            val tx = 2f * (q.y * v[2] - q.z * v[1]); val ty = 2f * (q.z * v[0] - q.x * v[2]); val tz = 2f * (q.x * v[1] - q.y * v[0])
+            return floatArrayOf(
+                v[0] + q.w * tx + (q.y * tz - q.z * ty),
+                v[1] + q.w * ty + (q.z * tx - q.x * tz),
+                v[2] + q.w * tz + (q.x * ty - q.y * tx)
+            )
+        }
 
         /** World delta currently carried by [bone]'s parent chain. */
         fun parentDelta(bone: String): Quaternion {
@@ -628,6 +731,34 @@ object AvatarRetargeter {
     }
 
     private fun sub(a: FloatArray, b: FloatArray) = floatArrayOf(a[0] - b[0], a[1] - b[1], a[2] - b[2])
+    private fun add(a: FloatArray, b: FloatArray) = floatArrayOf(a[0] + b[0], a[1] + b[1], a[2] + b[2])
+    private fun scale(a: FloatArray, s: Float) = floatArrayOf(a[0] * s, a[1] * s, a[2] * s)
+
+    /**
+     * Two-bone IK: shoulder at [s], bone lengths [a] (upper) and [b]
+     * (fore), wrist aimed at [t]. The elbow bends towards [pole] (any
+     * vector; only its part perpendicular to shoulder→target counts),
+     * falling back to [fallbackPole] when those are parallel. An
+     * out-of-reach target gets a straight arm pointing at it. Returns
+     * (elbow, wrist) positions.
+     */
+    private fun solveTwoBone(
+        s: FloatArray, t: FloatArray, a: Float, b: Float, pole: FloatArray, fallbackPole: FloatArray
+    ): Pair<FloatArray, FloatArray> {
+        val toTarget = sub(t, s)
+        val raw = length(toTarget)
+        val dir = if (raw < 1e-5f) normalize(fallbackPole) else scale(toTarget, 1f / raw)
+        val d = raw.coerceIn(abs(a - b) + 1e-3f, a + b - 1e-3f)
+        val cosA = ((a * a + d * d - b * b) / (2f * a * d)).coerceIn(-1f, 1f)
+        val sinA = sqrt(1f - cosA * cosA)
+        fun perpOf(p: FloatArray): FloatArray = sub(p, scale(dir, dot(p, dir)))
+        var perp = perpOf(pole)
+        if (length(perp) < 1e-4f) perp = perpOf(fallbackPole)
+        if (length(perp) < 1e-4f) perp = perpOf(floatArrayOf(0f, -1f, 0f))
+        perp = normalize(perp)
+        val elbow = add(s, add(scale(dir, a * cosA), scale(perp, a * sinA)))
+        return elbow to add(s, scale(dir, d))
+    }
     private fun mid(a: FloatArray, b: FloatArray) = floatArrayOf((a[0] + b[0]) / 2f, (a[1] + b[1]) / 2f, (a[2] + b[2]) / 2f)
     private fun dot(a: FloatArray, b: FloatArray) = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
     private fun length(a: FloatArray) = sqrt(dot(a, a))
