@@ -154,6 +154,10 @@ private fun CrashLogScreen(log: String, onDismiss: () -> Unit) {
 }
 
 class MainActivity : ComponentActivity() {
+    // Screens (VRM mode) can claim hardware keys — see HardwareKeys.
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean =
+        com.mediaviewer.util.HardwareKeys.dispatch(event) || super.dispatchKeyEvent(event)
+
     private val viewModel: MainViewModel by viewModels()
     override fun onCreate(savedInstanceState: Bundle?) {        super.onCreate(savedInstanceState)
         installCrashHandler(applicationContext)

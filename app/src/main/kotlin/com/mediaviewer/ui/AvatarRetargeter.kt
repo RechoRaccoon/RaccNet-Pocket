@@ -89,7 +89,10 @@ class TrackingFrame(
     val trackLegs: Boolean,
     /** Tracked hands keyed by the AVATAR side each one drives
      *  ("left"/"right"; mirroring already applied). */
-    val hands: Map<String, TrackedHand> = emptyMap()
+    val hands: Map<String, TrackedHand> = emptyMap(),
+    /** "Hand IK": tracked hands position the arms (two-bone IK). Off =
+     *  arms come only from body tracking (relaxed when it's off). */
+    val armIk: Boolean = false
 )
 
 /** One tracked hand. */
@@ -289,8 +292,8 @@ object AvatarRetargeter {
         for (side in SIDES) {
             val tracked = frame.hands[side]
             val hand = tracked?.points?.takeIf { it.size >= 21 }?.map { modelPoint(it, flip) }
-            val offset = tracked?.offsetFromEyes?.let { modelPoint(it, flip) }
-            driveArm(ctx, side, ::point, hand, offset)
+            val offset = if (frame.armIk) tracked?.offsetFromEyes?.let { modelPoint(it, flip) } else null
+            driveArm(ctx, side, ::point, hand, offset, frame.armIk)
         }
 
         // ── Legs (rest pose unless Full Body is on and they're visible) ──
@@ -334,7 +337,7 @@ object AvatarRetargeter {
      */
     private fun driveArm(
         ctx: PoseContext, side: String, point: (Int) -> FloatArray?,
-        hand: List<FloatArray>?, handOffset: FloatArray?
+        hand: List<FloatArray>?, handOffset: FloatArray?, useIk: Boolean
     ) {
         val bones = ctx.target.bones
         val flip = ctx.target.facesNegativeZ
@@ -348,7 +351,7 @@ object AvatarRetargeter {
 
         val upper = "${side}UpperArm"; val lower = "${side}LowerArm"; val handName = "${side}Hand"
         val upperRest = bones[upper]; val lowerRest = bones[lower]; val handRest = bones[handName]
-        val target: FloatArray? = if (upperRest != null && lowerRest != null && handRest != null) {
+        val target: FloatArray? = if (useIk && upperRest != null && lowerRest != null && handRest != null) {
             val a = length(sub(lowerRest.restWorldPosition, upperRest.restWorldPosition))
             val b = length(sub(handRest.restWorldPosition, lowerRest.restWorldPosition))
             val shoulderNow = ctx.currentPosition(upper)

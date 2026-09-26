@@ -1624,14 +1624,21 @@ private fun ImageGrid(images: List<Uri>, onRemove: (Uri) -> Unit) {
 @Composable
 private fun ThreadVideoPreview(uri: Uri, onRemove: () -> Unit) {
     val tap = rememberHapticTap()
+    val context = LocalContext.current
+    var aspect by remember(uri) { mutableStateOf(16f / 9f) }
+    LaunchedEffect(uri) { aspect = withContext(Dispatchers.IO) { probeVideoAspect(context, uri) } }
     Box(
-        Modifier.fillMaxWidth(0.55f).aspectRatio(16f / 9f).clip(RoundedCornerShape(10.dp))
-            .background(Color.Black).clickable { tap(); onRemove() }
+        Modifier.fillMaxWidth(0.55f).aspectRatio(aspect).clip(RoundedCornerShape(10.dp))
     ) {
-        Icon(Icons.Default.PlayArrow, contentDescription = "Video", tint = Color.White.copy(0.7f),
-            modifier = Modifier.align(Alignment.Center).size(28.dp))
-        Icon(Icons.Default.Close, contentDescription = "Remove video", tint = Color.White.copy(0.85f),
-            modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(16.dp))
+        // Tap the video to play it; the X removes it.
+        InlineVideoPlayer(uri, Modifier.fillMaxSize())
+        Box(
+            Modifier.align(Alignment.TopEnd).padding(4.dp).size(24.dp).clip(CircleShape)
+                .background(Color.Black.copy(0.5f)).clickable { tap(); onRemove() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.Default.Close, contentDescription = "Remove video", tint = Color.White, modifier = Modifier.size(16.dp))
+        }
     }
 }
 
@@ -1648,12 +1655,7 @@ private fun VideoAndThumbnailRow(
     if (videoUri == null) return
     val tap = rememberHapticTap()
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Box(
-            Modifier.weight(1f).aspectRatio(aspect).clip(RoundedCornerShape(10.dp)).background(Color.Black)
-        ) {
-            Icon(Icons.Default.PlayArrow, contentDescription = "Video", tint = Color.White.copy(0.7f),
-                modifier = Modifier.align(Alignment.Center).size(32.dp))
-        }
+        InlineVideoPlayer(videoUri, Modifier.weight(1f).aspectRatio(aspect).clip(RoundedCornerShape(10.dp)))
         Box(
             Modifier.weight(1f).aspectRatio(aspect).clip(RoundedCornerShape(10.dp))
                 .background(Color.White.copy(0.06f)).clickable(onClick = { tap(); onTapThumbnail() }),

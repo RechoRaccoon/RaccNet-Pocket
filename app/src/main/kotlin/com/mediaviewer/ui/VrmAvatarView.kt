@@ -233,6 +233,13 @@ fun VrmAvatarView(
                 // No setOnTouchListener(viewer): the camera stays put; the
                 // gesture layer below moves the model instead.
                 newSession.viewer = viewer
+                // ModelViewer adds its own default "sun": 100,000 lux pointing
+                // straight DOWN, with shadows. It out-shone our front lights
+                // ~3x — the top-down light that left the face dark and cast
+                // the head's shadow onto the shirt. Take it out of the scene
+                // (ModelViewer still owns and destroys the entity).
+                runCatching { viewer.scene.removeEntity(viewer.light) }
+                    .onFailure { Log.e(TAG, "Couldn't remove ModelViewer's default light", it) }
                 addCameraLightRig(viewer.engine, viewer.scene).let { (entities, dirs) ->
                     newSession.lightEntities = entities
                     newSession.lightDirections = dirs
@@ -970,9 +977,15 @@ private fun addCameraLightRig(engine: Engine, scene: com.google.android.filament
         entities.add(entity)
         dirs.add(d)
     }
-    light(-0.35f, -0.45f, -1.0f, 34_000f) // key: from the viewer, slightly upper-left — lights the face
-    light(0.55f, -0.15f, -1.0f, 14_000f)  // fill: from the viewer's right, softens the key's shadows
-    light(0.0f, -0.2f, 1.0f, 8_000f)      // rim: from behind, separates the silhouette from the background
+    // Front-heavy: the camera's exposure maps ~100k lux to full white, so the
+    // old 34k key barely out-shone the flat ambient light (which reaches
+    // every side equally) — the face read as no brighter than the back.
+    light(0.0f, -0.15f, -1.0f, 40_000f)   // headlight: straight from the viewer onto the face
+    // A direction is where the light TRAVELS: +x travels rightwards, so it
+    // comes from the left. (These were swapped before.)
+    light(0.35f, -0.45f, -1.0f, 30_000f)  // key: from the viewer's upper-left, gives the face some shape
+    light(-0.55f, -0.15f, -1.0f, 10_000f) // fill: from the viewer's right
+    light(0.0f, -0.2f, 1.0f, 5_000f)      // rim: from behind, a faint silhouette edge
     return entities.toIntArray() to dirs
 }
 
@@ -999,12 +1012,12 @@ private fun addCameraLightRig(engine: Engine, scene: com.google.android.filament
  * show, which a directional-only rig fundamentally can't do.
  */
 private fun addFlatAmbientLight(engine: Engine, scene: com.google.android.filament.Scene): IndirectLight {
-    // EXACT values from the old working build — do not "fix" these.
-    // Band 0 only: a flat, faintly cool-white ambient. 12,000 intensity
-    // is correct for this irradiance setup; it does NOT blow out to white.
+    // Flat, faintly cool-white ambient (band 0 only). Kept low on purpose:
+    // the camera-relative lights are what light the front (see addCameraLightRig).
+    // Band-0 irradiance at this intensity does not blow out to white.
     val indirectLight = IndirectLight.Builder()
         .irradiance(1, floatArrayOf(0.65f, 0.65f, 0.68f))
-        .intensity(12_000f)
+        .intensity(6_000f) // lower flat ambient, so front vs. back actually differs
         .build(engine)
     scene.indirectLight = indirectLight
     return indirectLight

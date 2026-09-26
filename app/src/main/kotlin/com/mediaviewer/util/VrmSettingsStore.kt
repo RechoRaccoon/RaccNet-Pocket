@@ -39,6 +39,7 @@ class VrmSettingsStore(context: Context) {
         const val SHOW_PREVIEW = "show_preview"
         const val VIDEO_MODE = "video_mode"        // capture button records video
         const val FULL_BRIGHT = "full_bright"      // all materials unlit
+        const val ARM_IK = "arm_ik"                // hands place the arms (IK)
         const val HIDDEN_PARTS = "hidden_parts"
         const val DEFAULT_SMOOTHING = 5
     }

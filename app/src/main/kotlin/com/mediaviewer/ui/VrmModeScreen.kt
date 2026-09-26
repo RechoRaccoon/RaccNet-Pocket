@@ -191,6 +191,8 @@ fun VrmModeScreen(
     var showPreview by remember { mutableStateOf(store.bool(K.SHOW_PREVIEW, true)) }
     var videoMode by remember { mutableStateOf(store.bool(K.VIDEO_MODE, false)) }
     var fullBright by remember { mutableStateOf(store.bool(K.FULL_BRIGHT, false)) }
+    var armIk by remember { mutableStateOf(store.bool(K.ARM_IK, false)) }
+    androidx.compose.runtime.LaunchedEffect(armIk) { store.put(K.ARM_IK, armIk) }
     var cameraResetKey by remember { mutableStateOf(0) }
     androidx.compose.runtime.LaunchedEffect(videoMode) { store.put(K.VIDEO_MODE, videoMode) }
     androidx.compose.runtime.LaunchedEffect(fullBright) { store.put(K.FULL_BRIGHT, fullBright) }
@@ -250,6 +252,27 @@ fun VrmModeScreen(
             val micGranted = androidx.core.content.ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED
             if (micGranted) beginRecording(withAudio = true) else micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+    // Volume up/down = the capture button (photo, or start/stop recording),
+    // like the system camera. The key is swallowed so the volume doesn't
+    // change; holding it down doesn't repeat. Not while settings are open.
+    val onCapturePressedRef = androidx.compose.runtime.rememberUpdatedState { onCapturePressed() }
+    val settingsOpenRef = androidx.compose.runtime.rememberUpdatedState(settingsOpen)
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        val handler: (android.view.KeyEvent) -> Boolean = handler@{ event ->
+            if (event.keyCode != android.view.KeyEvent.KEYCODE_VOLUME_UP &&
+                event.keyCode != android.view.KeyEvent.KEYCODE_VOLUME_DOWN) return@handler false
+            if (settingsOpenRef.value) return@handler false
+            if (event.action == android.view.KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                tap()
+                onCapturePressedRef.value()
+            }
+            true
+        }
+        com.mediaviewer.util.HardwareKeys.handler = handler
+        onDispose {
+            if (com.mediaviewer.util.HardwareKeys.handler === handler) com.mediaviewer.util.HardwareKeys.handler = null
         }
     }
     // The loaded avatar's toggleable meshes, and which are hidden.
@@ -532,7 +555,8 @@ fun VrmModeScreen(
                     faceMatrix = headMatrix,
                     body = if (trackUpperBody) smoothedBodyLandmarks else null,
                     trackLegs = trackFullBody,
-                    hands = handPoints
+                    hands = handPoints,
+                    armIk = armIk
                 )
             )
         }
@@ -795,6 +819,7 @@ fun VrmModeScreen(
                     showPreview = showPreview, onTogglePreview = { showPreview = it },
                     showDebug = showDebug, onToggleDebug = { showDebug = it },
                     fullBright = fullBright, onToggleFullBright = { fullBright = it },
+                    armIk = armIk, onToggleArmIk = { armIk = it },
                     onResetCamera = { cameraResetKey++ },
                     avatarParts = avatarParts,
                     hiddenParts = hiddenParts,
@@ -1461,6 +1486,7 @@ private class VrmSettingsUi(
     val showPreview: Boolean, val onTogglePreview: (Boolean) -> Unit,
     val showDebug: Boolean, val onToggleDebug: (Boolean) -> Unit,
     val fullBright: Boolean, val onToggleFullBright: (Boolean) -> Unit,
+    val armIk: Boolean, val onToggleArmIk: (Boolean) -> Unit,
     val onResetCamera: () -> Unit,
     val avatarParts: List<AvatarPart>,
     val hiddenParts: Set<String>,
@@ -1508,6 +1534,8 @@ private fun VrmSettingsSheet(
             VrmSettingsSection("Tracking", tint)
             VrmSettingsToggleRow("Upper Body", ui.trackUpperBody, tint) { ui.onToggleUpperBody(it); if (!it) ui.onToggleFullBody(false) }
             VrmSettingsToggleRow("Full Body", ui.trackFullBody, tint, enabled = ui.trackUpperBody) { ui.onToggleFullBody(it) }
+            VrmSettingsToggleRow("Hand IK (experimental)", ui.armIk, tint,
+                hint = "Your tracked hands place the avatar's arms, even with body tracking off.") { ui.onToggleArmIk(it) }
             VrmSettingsToggleRow("Fast tracking (30 fps)", ui.fastTracking, tint,
                 hint = "Keeps up with quick movements. Uses more battery and warms the phone.") { ui.onToggleFastTracking(it) }
             VrmSettingsSlider(
