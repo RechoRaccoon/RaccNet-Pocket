@@ -520,15 +520,7 @@ fun SettingsSheet(
             // page instead of pushing the bar down). Drop the chip on it to
             // unsave that feed.
             Box(Modifier.fillMaxWidth().height(0.dp).zIndex(2f), contentAlignment = Alignment.BottomCenter) {
-                AnimatedVisibility(
-                    visible = feedDrag.active,
-                    enter = fadeIn(tween(160)) + scaleIn(initialScale = 0.6f, animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 500f)),
-                    exit = fadeOut(tween(140)) + scaleOut(targetScale = 0.7f, animationSpec = tween(140)),
-                    modifier = Modifier.wrapContentHeight(align = Alignment.Bottom, unbounded = true).padding(bottom = 10.dp)
-                ) {
-                    HubRemoveBubble(hovered = feedDrag.overRemove, liquidGlass = liquidGlass,
-                        modifier = Modifier.onGloballyPositioned { feedDrag.removeBounds = it.boundsInRoot() })
-                }
+                HubRemoveDropTarget(feedDrag, liquidGlass)
             }
             Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp).padding(top = 6.dp)) {
                 ReturnToFeedBar(
@@ -2511,6 +2503,21 @@ private fun HubFeedDragGhost(drag: HubFeedDragState, liquidGlass: Boolean, tint:
             ),
             onClick = null
         )
+    }
+}
+
+/** Pops the Remove bubble in/out while a feed is held. (Its own function so
+ *  the plain AnimatedVisibility is used, not a parent Column's scoped one.) */
+@Composable
+private fun HubRemoveDropTarget(feedDrag: HubFeedDragState, liquidGlass: Boolean) {
+    AnimatedVisibility(
+        visible = feedDrag.active,
+        enter = fadeIn(tween(160)) + scaleIn(initialScale = 0.6f, animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 500f)),
+        exit = fadeOut(tween(140)) + scaleOut(targetScale = 0.7f, animationSpec = tween(140)),
+        modifier = Modifier.wrapContentHeight(align = Alignment.Bottom, unbounded = true).padding(bottom = 10.dp)
+    ) {
+        HubRemoveBubble(hovered = feedDrag.overRemove, liquidGlass = liquidGlass,
+            modifier = Modifier.onGloballyPositioned { feedDrag.removeBounds = it.boundsInRoot() })
     }
 }
 
