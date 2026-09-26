@@ -1050,6 +1050,7 @@ private fun VrmTrackingOverlay(
     // model hasn't finished loading yet; 0 with no error means the model
     // has no MToon textures (or they're not in the expected format).
     val textureLine = when {
+        texturesApplied == SKIPPED_AFTER_CRASH -> "textures: skipped — the app crashed while texturing last time (see the crash report)"
         texturesApplied < 0 -> "textures: loading…"
         texturesApplied == 0 -> "textures: none bound (untextured model, or decode failed — see logcat MToonApplier)"
         else -> "textures: $texturesApplied materials textured"

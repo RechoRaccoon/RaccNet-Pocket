@@ -337,6 +337,11 @@ private class ViewerSession {
     var followTracking = true
     /** Bones the follow framing anchors on; set when a model loads. */
     var anchor: FramingAnchor? = null
+    /** A crash breadcrumb to clear once a few frames have rendered fine
+     *  (Filament's GPU work runs a frame or two behind render()). */
+    var clearBreadcrumbAfterFrame = false
+        set(value) { field = value; if (value) breadcrumbFrames = 3 }
+    private var breadcrumbFrames = 0
     /** Jump straight to the target placement next frame (fresh load). */
     var snapFraming = true
 
@@ -361,6 +366,10 @@ private class ViewerSession {
                 // itself; without this the avatar stays frozen in rest pose.
                 v.animator?.updateBoneMatrices()
                 v.render(frameTimeNanos)
+                if (clearBreadcrumbAfterFrame && --breadcrumbFrames <= 0) {
+                    clearBreadcrumbAfterFrame = false
+                    com.mediaviewer.util.CrashBreadcrumbs.clearMark()
+                }
             }.onFailure { Log.e(TAG, "Filament render() failed", it) }
         }
     }
@@ -372,6 +381,11 @@ private class ViewerSession {
         if (released) return
         released = true
         choreographer.removeFrameCallback(frameCallback)
+        // Leaving the screen normally isn't a crash.
+        if (clearBreadcrumbAfterFrame) {
+            clearBreadcrumbAfterFrame = false
+            com.mediaviewer.util.CrashBreadcrumbs.clearMark()
+        }
     }
 
     /** Called from our detach listener, i.e. just BEFORE ModelViewer
@@ -425,6 +439,9 @@ private class VrmLoadResult(
  * Returns how many materials got textured, or null if the session/model
  * went away mid-way.
  */
+/** [streamTextures] result: texturing skipped because it crashed last run. */
+const val SKIPPED_AFTER_CRASH = -2
+
 private suspend fun streamTextures(
     session: ViewerSession,
     bytes: ByteArray,
@@ -433,13 +450,27 @@ private suspend fun streamTextures(
 ): Int? {
     val parse = result.materials ?: return 0
     if (result.primitives.isEmpty()) return 0
+    // The previous run died while texturing: show the avatar untextured
+    // this once rather than crash again (the crash screen has the details).
+    if (com.mediaviewer.util.CrashBreadcrumbs.skipVrmTextures) return SKIPPED_AFTER_CRASH
     var textured = 0
-    for (texIndex in MToonTextureApplier.neededTextures(parse)) {
+    val needed = MToonTextureApplier.neededTextures(parse)
+    for ((n, texIndex) in needed.withIndex()) {
         val decoded = withContext(Dispatchers.Default) { MToonTextureApplier.decodeOne(bytes, parse, texIndex) } ?: continue
+        val step = "${com.mediaviewer.util.CrashBreadcrumbs.VRM_TEXTURE_STEP} ${n + 1}/${needed.size} " +
+            "(glTF texture $texIndex, ${decoded.width}x${decoded.height}, ${decoded.levels.size} mip levels)"
         val bound = session.onMain { viewer ->
             if (viewer.asset == null) return@onMain null
-            MToonTextureApplier.uploadAndBind(viewer.engine, result.primitives, parse, texIndex, decoded)
-                ?.also { (texture, _) -> session.ownedTextures = session.ownedTextures + texture }
+            com.mediaviewer.util.CrashBreadcrumbs.around(step) {
+                MToonTextureApplier.uploadAndBind(viewer.engine, result.primitives, parse, texIndex, decoded)
+            }
+                ?.also { (texture, _) ->
+                    session.ownedTextures = session.ownedTextures + texture
+                    // Keep the note until a frame has actually been drawn
+                    // with this texture — a bad texture can also die in render().
+                    com.mediaviewer.util.CrashBreadcrumbs.mark("$step — first frame drawn with it")
+                    session.clearBreadcrumbAfterFrame = true
+                }
                 ?: (null to 0)
         } ?: return null
         textured += bound.second
@@ -494,7 +525,9 @@ private suspend fun loadVrm(session: ViewerSession, bytes: ByteArray, parsedVrmD
             viewer.destroyModel()
             session.freeModelResources(viewer.engine)
             session.baseTransform = null
-            viewer.loadModelGlb(direct!!)
+            com.mediaviewer.util.CrashBreadcrumbs.around("VRM model load (Filament loadModelGlb)") {
+                viewer.loadModelGlb(direct!!)
+            }
             direct = null // Filament has its own copy now; let this ~file-sized buffer go
             val asset = viewer.asset
             if (asset != null && mtoon != null) {

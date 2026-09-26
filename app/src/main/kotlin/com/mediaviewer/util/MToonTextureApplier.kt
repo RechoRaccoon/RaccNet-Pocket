@@ -207,19 +207,27 @@ object MToonTextureApplier {
             val info = users[p.ref.materialIndex] ?: continue
             val mi = runCatching { rm.getMaterialInstanceAt(rm.getInstance(p.entity), p.ref.primitiveIndex) }.getOrNull() ?: continue
             if (!handled.add(mi)) continue
+            // Filament ABORTS the whole process (not an exception) when a
+            // parameter doesn't exist on the material, so check each one.
+            val material = runCatching { mi.material }.getOrNull() ?: continue
+            fun has(name: String) = runCatching { material.hasParameter(name) }.getOrDefault(false)
+            if (!has("baseColorMap")) {
+                Log.w(TAG, "'${info.name}' uses material '${material.name}' with no baseColorMap — skipped")
+                continue
+            }
             runCatching {
                 mi.setParameter("baseColorMap", texture, SAMPLER)
                 // gltfio's ubershaders only sample baseColorMap when
                 // baseColorIndex (the UV set) is >= 0, and use the UV
                 // matrix — both were left at "no texture" values because
                 // the glTF no longer references one.
-                mi.setParameter("baseColorIndex", info.baseColorTexCoord)
-                mi.setParameter(
+                if (has("baseColorIndex")) mi.setParameter("baseColorIndex", info.baseColorTexCoord)
+                if (has("baseColorUvMatrix")) mi.setParameter(
                     "baseColorUvMatrix", MaterialInstance.FloatElement.MAT3,
                     floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f), 0, 1
                 )
                 val f = info.baseColorFactor
-                mi.setParameter("baseColorFactor", f[0], f[1], f[2], f[3]) // linear, like glTF
+                if (has("baseColorFactor")) mi.setParameter("baseColorFactor", f[0], f[1], f[2], f[3]) // linear, like glTF
                 textured.add(info.materialIndex)
             }.onFailure { Log.w(TAG, "Binding '${info.name}' failed: ${it.message}") }
         }
@@ -227,6 +235,13 @@ object MToonTextureApplier {
     }
 
     private fun upload(engine: Engine, d: DecodedTexture): Texture? = try {
+        // Every precondition Filament would otherwise abort on, checked here.
+        require(d.width in 1..4096 && d.height in 1..4096) { "bad size ${d.width}x${d.height}" }
+        for ((level, px) in d.levels.withIndex()) {
+            val w = maxOf(1, d.width shr level); val h = maxOf(1, d.height shr level)
+            require(px.isDirect && px.remaining() >= w * h * 4) { "level $level buffer too small" }
+        }
+        require(d.levels.size <= 32 - Integer.numberOfLeadingZeros(maxOf(d.width, d.height))) { "too many levels" }
         val texture = Texture.Builder()
             .width(d.width)
             .height(d.height)

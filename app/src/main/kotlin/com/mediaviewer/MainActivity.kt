@@ -115,11 +115,15 @@ private fun installCrashHandler(context: Context) {
 
 private fun readCrashLog(context: Context): String? {
     val file = File(context.filesDir, CRASH_LOG_FILENAME)
-    return if (file.exists()) runCatching { file.readText() }.getOrNull()?.takeIf { it.isNotBlank() } else null
+    val javaLog = if (file.exists()) runCatching { file.readText() }.getOrNull()?.takeIf { it.isNotBlank() } else null
+    // Native (Filament) aborts and low-memory kills skip the Java handler;
+    // the breadcrumb says what was running instead.
+    return javaLog ?: com.mediaviewer.util.CrashBreadcrumbs.report()
 }
 
 private fun clearCrashLog(context: Context) {
     runCatching { File(context.filesDir, CRASH_LOG_FILENAME).delete() }
+    com.mediaviewer.util.CrashBreadcrumbs.dismissReport()
 }
 
 @Composable
@@ -153,6 +157,7 @@ class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
     override fun onCreate(savedInstanceState: Bundle?) {        super.onCreate(savedInstanceState)
         installCrashHandler(applicationContext)
+        com.mediaviewer.util.CrashBreadcrumbs.init(applicationContext)
         enableEdgeToEdge()
         hideSystemStatusBar()
         // Bug fix: lets the background/media draw all the way up under the

@@ -139,13 +139,19 @@ object VrmGlbPatcher {
 
         // VRM 0.x keeps MToon parameters in one top-level list, matched to
         // glTF materials by name.
+        // UniVRM writes that list in the same order as `materials`, so when
+        // names don't line up (renamed on export, "(Instance)" suffixes…)
+        // the entry at the same index is used.
         val vrm0ToonNames = HashSet<String>()
+        val vrm0ToonIndices = HashSet<Int>()
         root.optJSONObject("extensions")?.optJSONObject("VRM")?.optJSONArray("materialProperties")?.let { props ->
+            val aligned = props.length() == materials.length()
             for (i in 0 until props.length()) {
                 val p = props.optJSONObject(i) ?: continue
                 val shader = p.optString("shader", "")
                 if (shader.contains("MToon", ignoreCase = true) || shader.contains("Unlit", ignoreCase = true)) {
                     vrm0ToonNames.add(p.optString("name", ""))
+                    if (aligned) vrm0ToonIndices.add(i)
                 }
             }
         }
@@ -159,7 +165,8 @@ object VrmGlbPatcher {
             val ext = mat.optJSONObject("extensions")
             val isToon = ext?.has("VRMC_materials_mtoon") == true ||
                 ext?.has("VRMC_materials_mtoon-1.0") == true ||
-                mat.optString("name", "\u0000") in vrm0ToonNames
+                mat.optString("name", "\u0000") in vrm0ToonNames ||
+                i in vrm0ToonIndices
             if (isToon) {
                 if (ext?.has(UNLIT) != true) {
                     val e = ext ?: JSONObject().also { mat.put("extensions", it) }
