@@ -454,15 +454,18 @@ private suspend fun streamTextures(
     // this once rather than crash again (the crash screen has the details).
     if (com.mediaviewer.util.CrashBreadcrumbs.skipVrmTextures) return SKIPPED_AFTER_CRASH
     var textured = 0
+    val mode = com.mediaviewer.util.CrashBreadcrumbs.vrmTextureMode
     val needed = MToonTextureApplier.neededTextures(parse)
     for ((n, texIndex) in needed.withIndex()) {
-        val decoded = withContext(Dispatchers.Default) { MToonTextureApplier.decodeOne(bytes, parse, texIndex) } ?: continue
+        val decoded = withContext(Dispatchers.Default) { MToonTextureApplier.decodeOne(bytes, parse, texIndex, mode) } ?: continue
         val step = "${com.mediaviewer.util.CrashBreadcrumbs.VRM_TEXTURE_STEP} ${n + 1}/${needed.size} " +
-            "(glTF texture $texIndex, ${decoded.width}x${decoded.height}, ${decoded.levels.size} mip levels)"
+            "(glTF texture $texIndex, ${decoded.width}x${decoded.height}, safe mode $mode)"
         val bound = session.onMain { viewer ->
             if (viewer.asset == null) return@onMain null
             com.mediaviewer.util.CrashBreadcrumbs.around(step) {
-                MToonTextureApplier.uploadAndBind(viewer.engine, result.primitives, parse, texIndex, decoded)
+                MToonTextureApplier.uploadAndBind(viewer.engine, result.primitives, parse, texIndex, decoded, mode) { detail ->
+                    com.mediaviewer.util.CrashBreadcrumbs.mark("$step\n  at: $detail")
+                }
             }
                 ?.also { (texture, _) ->
                     session.ownedTextures = session.ownedTextures + texture

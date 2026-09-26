@@ -49,6 +49,12 @@ object MToonTextureApplier {
         TextureSampler.WrapMode.REPEAT
     )
 
+    private val SAMPLER_SINGLE = TextureSampler(
+        TextureSampler.MinFilter.LINEAR,
+        TextureSampler.MagFilter.LINEAR,
+        TextureSampler.WrapMode.REPEAT
+    )
+
     /** One decoded texture: [levels] holds tightly packed RGBA8 pixels for
      *  each mip level, largest first. */
     class DecodedTexture(val width: Int, val height: Int, val levels: List<ByteBuffer>)
@@ -65,7 +71,7 @@ object MToonTextureApplier {
             .filter { it in parseResult.textureSlices }
 
     /** Decodes texture [texIndex] straight out of [glb]; null if it can't. */
-    fun decodeOne(glb: ByteArray, parseResult: MToonMaterialParser.ParseResult, texIndex: Int): DecodedTexture? {
+    fun decodeOne(glb: ByteArray, parseResult: MToonMaterialParser.ParseResult, texIndex: Int, mode: Int = 0): DecodedTexture? {
         val slice = parseResult.textureSlices[texIndex] ?: return null
         return try {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -96,7 +102,7 @@ object MToonTextureApplier {
             bitmap.copyPixelsToBuffer(base)
             base.rewind()
             bitmap.recycle()
-            DecodedTexture(w, h, buildMipChain(base, w, h))
+            DecodedTexture(w, h, if (mode == 0) buildMipChain(base, w, h) else listOf(base))
         } catch (oom: OutOfMemoryError) {
             Log.e(TAG, "Texture $texIndex: out of memory — skipped", oom)
             null
@@ -194,47 +200,60 @@ object MToonTextureApplier {
         primitives: List<ResolvedPrimitive>,
         parseResult: MToonMaterialParser.ParseResult,
         texIndex: Int,
-        decoded: DecodedTexture
+        decoded: DecodedTexture,
+        /** See CrashBreadcrumbs.vrmTextureMode. */
+        mode: Int = 0,
+        /** Called right before each native call with what it's about to do,
+         *  so a Filament abort can be pinned to the exact call. */
+        crumb: (String) -> Unit = {}
     ): Pair<Texture, Int>? {
         val rm = engine.renderableManager
         val users = parseResult.materials.filter { it.baseColorTextureIndex == texIndex }.associateBy { it.materialIndex }
         val targets = primitives.filter { it.ref.materialIndex in users }
         if (targets.isEmpty()) return null
-        val texture = upload(engine, decoded) ?: return null
+        val texture = upload(engine, decoded, mode, crumb) ?: return null
+        val sampler = if (mode == 0 && decoded.levels.size > 1) SAMPLER else SAMPLER_SINGLE
         val handled = HashSet<MaterialInstance>()
         val textured = HashSet<Int>()
         for (p in targets) {
             val info = users[p.ref.materialIndex] ?: continue
+            crumb("get material instance of '${p.ref.nodeName}' primitive ${p.ref.primitiveIndex}")
             val mi = runCatching { rm.getMaterialInstanceAt(rm.getInstance(p.entity), p.ref.primitiveIndex) }.getOrNull() ?: continue
             if (!handled.add(mi)) continue
             // Filament ABORTS the whole process (not an exception) when a
             // parameter doesn't exist on the material, so check each one.
+            crumb("read material of '${info.name}'")
             val material = runCatching { mi.material }.getOrNull() ?: continue
             fun has(name: String) = runCatching { material.hasParameter(name) }.getOrDefault(false)
             if (!has("baseColorMap")) {
                 Log.w(TAG, "'${info.name}' uses material '${material.name}' with no baseColorMap — skipped")
                 continue
             }
+            val m = "'${info.name}' (material '${runCatching { material.name }.getOrDefault("?")}')"
             runCatching {
-                mi.setParameter("baseColorMap", texture, SAMPLER)
+                crumb("set baseColorMap on $m")
+                mi.setParameter("baseColorMap", texture, sampler)
                 // gltfio's ubershaders only sample baseColorMap when
                 // baseColorIndex (the UV set) is >= 0, and use the UV
                 // matrix — both were left at "no texture" values because
                 // the glTF no longer references one.
+                crumb("set baseColorIndex on $m")
                 if (has("baseColorIndex")) mi.setParameter("baseColorIndex", info.baseColorTexCoord)
-                if (has("baseColorUvMatrix")) mi.setParameter(
+                if (mode <= 1) crumb("set baseColorUvMatrix on $m")
+                if (mode <= 1 && has("baseColorUvMatrix")) mi.setParameter(
                     "baseColorUvMatrix", MaterialInstance.FloatElement.MAT3,
                     floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f), 0, 1
                 )
                 val f = info.baseColorFactor
-                if (has("baseColorFactor")) mi.setParameter("baseColorFactor", f[0], f[1], f[2], f[3]) // linear, like glTF
+                if (mode == 0) crumb("set baseColorFactor on $m")
+                if (mode == 0 && has("baseColorFactor")) mi.setParameter("baseColorFactor", f[0], f[1], f[2], f[3]) // linear, like glTF
                 textured.add(info.materialIndex)
             }.onFailure { Log.w(TAG, "Binding '${info.name}' failed: ${it.message}") }
         }
         return texture to textured.size
     }
 
-    private fun upload(engine: Engine, d: DecodedTexture): Texture? = try {
+    private fun upload(engine: Engine, d: DecodedTexture, mode: Int, crumb: (String) -> Unit): Texture? = try {
         // Every precondition Filament would otherwise abort on, checked here.
         require(d.width in 1..4096 && d.height in 1..4096) { "bad size ${d.width}x${d.height}" }
         for ((level, px) in d.levels.withIndex()) {
@@ -242,14 +261,18 @@ object MToonTextureApplier {
             require(px.isDirect && px.remaining() >= w * h * 4) { "level $level buffer too small" }
         }
         require(d.levels.size <= 32 - Integer.numberOfLeadingZeros(maxOf(d.width, d.height))) { "too many levels" }
+        val levels = if (mode == 0) d.levels else d.levels.take(1)
+        val format = if (mode <= 1) Texture.InternalFormat.SRGB8_A8 else Texture.InternalFormat.RGBA8
+        crumb("create texture ${d.width}x${d.height}, ${levels.size} levels, $format")
         val texture = Texture.Builder()
             .width(d.width)
             .height(d.height)
-            .levels(d.levels.size)
-            .format(Texture.InternalFormat.SRGB8_A8)
+            .levels(levels.size)
+            .format(format)
             .sampler(Texture.Sampler.SAMPLER_2D)
             .build(engine)
-        for ((level, pixels) in d.levels.withIndex()) {
+        for ((level, pixels) in levels.withIndex()) {
+            crumb("upload level $level (${maxOf(1, d.width shr level)}x${maxOf(1, d.height shr level)}, ${pixels.remaining()} bytes)")
             texture.setImage(engine, level, Texture.PixelBufferDescriptor(pixels, Texture.Format.RGBA, Texture.Type.UBYTE))
         }
         texture

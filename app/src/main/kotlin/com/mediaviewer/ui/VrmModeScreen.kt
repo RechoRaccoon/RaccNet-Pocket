@@ -383,6 +383,8 @@ fun VrmModeScreen(
         runCatching {
             context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }.onFailure { android.util.Log.e("VrmModeScreen", "Could not persist VRM file permission", it) }
+        // A newly picked avatar gets a fresh try at full-quality textures.
+        com.mediaviewer.util.CrashBreadcrumbs.resetVrmTextureMode()
         pickedVrmUri = uri
         coroutineScope.launch { prefsManager.setVrmAvatarUri(uri.toString()) }
     }
@@ -1050,10 +1052,10 @@ private fun VrmTrackingOverlay(
     // model hasn't finished loading yet; 0 with no error means the model
     // has no MToon textures (or they're not in the expected format).
     val textureLine = when {
-        texturesApplied == SKIPPED_AFTER_CRASH -> "textures: skipped — the app crashed while texturing last time (see the crash report)"
-        texturesApplied < 0 -> "textures: loading…"
+        texturesApplied == SKIPPED_AFTER_CRASH -> "textures: off — crashed in every safe mode (pick the avatar again to retry)"
+        texturesApplied < 0 -> "textures: loading… (safe mode ${com.mediaviewer.util.CrashBreadcrumbs.vrmTextureMode})"
         texturesApplied == 0 -> "textures: none bound (untextured model, or decode failed — see logcat MToonApplier)"
-        else -> "textures: $texturesApplied materials textured"
+        else -> "textures: $texturesApplied materials textured (safe mode ${com.mediaviewer.util.CrashBreadcrumbs.vrmTextureMode})"
     } + if (materialsPatched.isNotBlank()) "\nmaterials: $materialsPatched" else ""
 
     // Hands: just a live count, plus which side(s) — full 21-point dump per

@@ -27,11 +27,26 @@ object CrashBreadcrumbs {
     var previousRunDiedDuring: String? = null
         private set
 
-    /** True when the previous run died while texturing a VRM avatar: VRM
-     *  mode then shows the avatar untextured this time instead of dying
-     *  again. Not reset by dismissing the crash screen; next launch retries. */
-    var skipVrmTextures = false
+    /**
+     * How VRM textures are uploaded. Each native crash while texturing
+     * steps this down one level and it STAYS there (saved to disk), so the
+     * app settles on the most capable mode this device survives:
+     *  0 = sRGB + mipmaps + all material parameters
+     *  1 = sRGB, single level, minimal parameters
+     *  2 = plain RGBA8, single level, texture + UV set only
+     *  3 = no textures
+     * Picking a different avatar starts again from 0.
+     */
+    var vrmTextureMode = 0
         private set
+    val skipVrmTextures get() = vrmTextureMode >= VRM_TEXTURE_MODE_OFF
+    const val VRM_TEXTURE_MODE_OFF = 3
+    private var modeFile: File? = null
+
+    fun resetVrmTextureMode() {
+        vrmTextureMode = 0
+        runCatching { modeFile?.delete() }
+    }
 
     /** Android's own record of how the previous run ended (API 30+). */
     var previousExitReason: String? = null
@@ -42,7 +57,13 @@ object CrashBreadcrumbs {
         file = f
         previousRunDiedDuring = runCatching { if (f.exists()) f.readText().takeIf { it.isNotBlank() } else null }.getOrNull()
         runCatching { f.delete() }
-        skipVrmTextures = previousRunDiedDuring?.startsWith(VRM_TEXTURE_STEP) == true
+        val mf = File(context.filesDir, "vrm_texture_mode.txt")
+        modeFile = mf
+        vrmTextureMode = runCatching { mf.readText().trim().toInt() }.getOrDefault(0).coerceIn(0, VRM_TEXTURE_MODE_OFF)
+        if (previousRunDiedDuring?.startsWith(VRM_TEXTURE_STEP) == true && vrmTextureMode < VRM_TEXTURE_MODE_OFF) {
+            vrmTextureMode++
+            runCatching { mf.writeText(vrmTextureMode.toString()) }
+        }
         if (previousRunDiedDuring != null && Build.VERSION.SDK_INT >= 30) {
             previousExitReason = runCatching {
                 val am = context.getSystemService(ActivityManager::class.java)
@@ -78,6 +99,10 @@ object CrashBreadcrumbs {
             append("The app was killed without a Java exception (native crash or out of memory).\n\n")
             append("It died during: ").append(step).append('\n')
             previousExitReason?.let { append("Android exit reason: ").append(it).append('\n') }
+            if (step.startsWith(VRM_TEXTURE_STEP)) {
+                append("\nVRM textures now use safe mode $vrmTextureMode of $VRM_TEXTURE_MODE_OFF")
+                append(if (vrmTextureMode >= VRM_TEXTURE_MODE_OFF) " (textures off).\n" else ".\n")
+            }
         }
     }
 
