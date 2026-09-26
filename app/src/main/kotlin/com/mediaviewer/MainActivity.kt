@@ -61,7 +61,9 @@ import com.mediaviewer.ui.PixelMatrixOverlay
 import com.mediaviewer.ui.PixelPhase
 import com.mediaviewer.ui.ProfileOverlay
 import com.mediaviewer.ui.fetchDominantColor
-import com.mediaviewer.ui.rememberPixelTransitionController
+import com.mediaviewer.ui.rememberLoadingTransition
+import com.mediaviewer.ui.ShatterOverlay
+import com.mediaviewer.ui.recordLastTap
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -366,7 +368,8 @@ private fun AppRoot(viewModel: MainViewModel) {
     // opening a feed from the Feeds row. See PixelTransitionOverlay.kt for
     // the state machine and rendering; everything below is just real app
     // events (never artificial timers) driving it.
-    val pixelController = rememberPixelTransitionController()
+    // Pixels or Shatter, per Settings → Loading Animation (see LoadingTransition).
+    val pixelController = rememberLoadingTransition()
     val rootScope = rememberCoroutineScope()
 
     // Bug fix (item 3 — Login page/real UI flashing before the loading
@@ -623,7 +626,7 @@ private fun AppRoot(viewModel: MainViewModel) {
         LocalGlassRimIntensity provides glassRimIntensity,
         LocalGlassRimVibrantSecondary provides glassRimVibrantSecondary
     ) {
-    Box(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize().recordLastTap(pixelController.shatter)) {
         // Feature request #8: lifted out of MainFeedScreen so a multi-image
         // grid tile in ProfileOverlay's Pinterest/All layout can seed which
         // image within a post's group the pager should open on, before
@@ -690,6 +693,8 @@ private fun AppRoot(viewModel: MainViewModel) {
             onCreateLiveLinkWidget    = viewModel::createLiveLinkWidget,
             onToggleLiveLink          = viewModel::toggleLiveLink,
             onEndLiveLink             = viewModel::endLiveLink,
+            onMoveFeed                = viewModel::moveFeed,
+            onRemoveFeed              = viewModel::removeFeed,
             availableFeeds            = availableFeeds,
             selectedFeedUri           = selectedFeed,
             authorFeedState           = authorFeedState,
@@ -1179,7 +1184,9 @@ private fun AppRoot(viewModel: MainViewModel) {
         // Retro pixel-matrix transition overlay — last child so it draws
         // above every other layer (feed, Hub, profile, dialogs) while a
         // transition is in progress; renders nothing once HIDDEN.
-        PixelMatrixOverlay(controller = pixelController, modifier = Modifier.fillMaxSize().zIndex(13f))
+        PixelMatrixOverlay(controller = pixelController.pixels, modifier = Modifier.fillMaxSize().zIndex(13f))
+        // Shatter: the screenshot-of-the-old-page glass, cracking and falling away.
+        ShatterOverlay(controller = pixelController.shatter, modifier = Modifier.fillMaxSize().zIndex(13f))
 
         // Settings → App Functionality → "Debug Overlay".
         if (com.mediaviewer.util.UiToggles.debugOverlay) {

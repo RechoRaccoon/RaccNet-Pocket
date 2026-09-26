@@ -1485,6 +1485,64 @@ class BlueskyRepository {
         if (!putResp.isSuccessful) error("Put prefs ${putResp.code()}: ${errorBodyText(putResp)}")
     }
 
+    /**
+     * Writes a new order for the user's saved feeds (and drops [removedUris])
+     * into their Bluesky preferences, so the Hub's order is the order every
+     * AT Protocol app shows. [orderedUris] is the Hub's list, top to bottom
+     * (the "Following" timeline as [FOLLOWING_FEED_URI]). Entries the Hub
+     * doesn't show (pinned lists, etc.) keep their exact positions: the
+     * shown ones are re-dealt into the slots shown ones already occupied.
+     */
+    suspend fun saveFeedOrder(token: String, orderedUris: List<String>, removedUris: Set<String>): Result<Unit> = runCatching {
+        val getResp = api.getPreferences("Bearer $token")
+        val body = getResp.body() ?: error("Prefs ${getResp.code()}")
+        val preferences = body.preferences.toMutableList()
+        val rank = orderedUris.withIndex().associate { it.value to it.index }
+
+        val v2Index = preferences.indexOfFirst {
+            it.isJsonObject && it.asJsonObject.get("\$type")?.asString?.endsWith("savedFeedsPrefV2") == true
+        }
+        if (v2Index >= 0) {
+            val v2Obj = preferences[v2Index].asJsonObject.deepCopy()
+            val items = v2Obj.getAsJsonArray("items") ?: com.google.gson.JsonArray()
+            fun keyOf(e: com.google.gson.JsonElement): String? {
+                if (!e.isJsonObject) return null
+                val o = e.asJsonObject
+                return when (o.get("type")?.asString) {
+                    "timeline" -> FOLLOWING_FEED_URI
+                    "feed" -> o.get("value")?.asString
+                    else -> null
+                }
+            }
+            val kept = items.filter { e -> keyOf(e)?.let { it !in removedUris } ?: true }
+            val shownSlots = kept.withIndex().filter { keyOf(it.value)?.let { k -> k in rank } == true }.map { it.index }
+            val shownSorted = shownSlots.map { kept[it] }.sortedBy { rank[keyOf(it)] ?: Int.MAX_VALUE }
+            val out = kept.toMutableList()
+            shownSlots.forEachIndexed { i, slot -> out[slot] = shownSorted[i] }
+            v2Obj.add("items", com.google.gson.JsonArray().apply { out.forEach { add(it) } })
+            preferences[v2Index] = v2Obj
+        } else {
+            val v1Index = preferences.indexOfFirst {
+                it.isJsonObject && it.asJsonObject.get("\$type")?.asString?.endsWith("savedFeedsPref") == true
+            }
+            if (v1Index < 0) return@runCatching
+            val v1Obj = preferences[v1Index].asJsonObject.deepCopy()
+            for (field in listOf("pinned", "saved")) {
+                val arr = v1Obj.getAsJsonArray(field) ?: continue
+                val uris = arr.mapNotNull { runCatching { it.asString }.getOrNull() }.filter { it !in removedUris }
+                val shown = uris.withIndex().filter { it.value in rank }.map { it.index }
+                val sorted = shown.map { uris[it] }.sortedBy { rank[it] ?: Int.MAX_VALUE }
+                val out = uris.toMutableList()
+                shown.forEachIndexed { i, slot -> out[slot] = sorted[i] }
+                v1Obj.add(field, com.google.gson.JsonArray().apply { out.forEach { add(it) } })
+            }
+            preferences[v1Index] = v1Obj
+        }
+
+        val putResp = api.putPreferences("Bearer $token", BskyPreferencesResponse(preferences))
+        if (!putResp.isSuccessful) error("Put prefs ${putResp.code()}: ${errorBodyText(putResp)}")
+    }
+
     // ── Social Actions ────────────────────────────────────────────────────────
 
     suspend fun likePost(token: String, did: String, postUri: String, postCid: String): Result<String> =

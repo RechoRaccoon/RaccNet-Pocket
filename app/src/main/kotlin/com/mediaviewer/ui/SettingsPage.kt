@@ -352,12 +352,30 @@ internal fun SettingsPageContent(
 
         ToggleBubble("Reduced Animations", reducedAnimations, onToggleReducedAnimations, liquidGlass, tint, backdrop)
         ToggleBubble("Rounded Grid Tiles", squareGridRounded, onToggleSquareGridRounded, liquidGlass, tint, backdrop)
-        // Skips the pixel loading screen/transition everywhere: pages open
-        // instantly and fill in as their data arrives.
-        ToggleBubble(
-            "Disable Loading Screens", !com.mediaviewer.util.UiToggles.loadingScreens,
-            { com.mediaviewer.util.UiToggles.updateLoadingScreens(!it) }, liquidGlass, tint, backdrop
-        )
+        // Which transition plays while a page loads: None (pages open
+        // instantly and fill in as their data arrives), Pixels, or Shatter.
+        SettingsBubble(liquidGlass, tint, backdrop) {
+            var animMenuExpanded by remember { mutableStateOf(false) }
+            val currentAnim = com.mediaviewer.util.UiToggles.loadingAnimation
+            BubbleRow {
+                RowLabel("Loading Animation", Modifier.weight(1f))
+                Box {
+                    Text(
+                        currentAnim.label,
+                        color = VoteGreen, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.clickable { animMenuExpanded = true }
+                    )
+                    DropdownMenu(expanded = animMenuExpanded, onDismissRequest = { animMenuExpanded = false }) {
+                        com.mediaviewer.util.UiToggles.LoadingAnimation.entries.forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(option.label, fontWeight = if (option == currentAnim) FontWeight.SemiBold else FontWeight.Normal) },
+                                onClick = { com.mediaviewer.util.UiToggles.updateLoadingAnimation(option); animMenuExpanded = false }
+                            )
+                        }
+                    }
+                }
+            }
+        }
 
         // Glass Theme + its Background/Outline dials + the highlight toggle
         // share one bubble; none of the rows inside draws its own outline.

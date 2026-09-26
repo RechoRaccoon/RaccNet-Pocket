@@ -4351,3 +4351,88 @@ fun ResultsInteractionBar(
         }
     }
 }
+
+// ─── Virtualized results (feed Grid) ────────────────────────────────────────
+// The LazyColumn helpers above render a masonry as ONE lazy item holding
+// every tile, which is fine for a profile's first pages but crawls on a feed
+// with hundreds of posts (every tile — each with its own image request and,
+// for multi-image posts, its own pager — stays composed at once). These two
+// pieces let a LazyVerticalStaggeredGrid do the same layouts with only the
+// on-screen tiles composed: [resultsLayoutSpec] says how many lanes and what
+// spacing a (sub-tab, grid mode) uses, [PostResultTile] draws one post in
+// that layout, reusing the profile's own tiles so everything looks the same.
+
+/** Lanes/spacing of one results layout (see [sharedPostResults] for what
+ *  each (filter, gridMode) pair means). */
+data class ResultsLayoutSpec(val lanes: Int, val spacing: Dp, val horizontalPadding: Dp)
+
+fun resultsLayoutSpec(filter: PostKindFilter, gridMode: Int, roundedGridTiles: Boolean): ResultsLayoutSpec = when (filter) {
+    PostKindFilter.ALL, PostKindFilter.IMAGES -> when (gridMode) {
+        2 -> if (roundedGridTiles) ResultsLayoutSpec(3, 4.dp, 4.dp) else ResultsLayoutSpec(3, 0.dp, 0.dp)
+        1 -> ResultsLayoutSpec(3, 6.dp, 6.dp)
+        else -> ResultsLayoutSpec(2, 6.dp, 6.dp)
+    }
+    PostKindFilter.TEXT_POSTS -> when (gridMode) {
+        2 -> ResultsLayoutSpec(3, 6.dp, 6.dp)
+        1 -> ResultsLayoutSpec(2, 6.dp, 6.dp)
+        else -> ResultsLayoutSpec(1, 10.dp, 12.dp)
+    }
+    PostKindFilter.HORIZONTAL_VIDEOS -> ResultsLayoutSpec(1, 0.dp, 0.dp)
+    PostKindFilter.VERTICAL_VIDEOS -> ResultsLayoutSpec(3, 4.dp, 4.dp)
+}
+
+/** One post, drawn the way the profile draws it in this (filter, gridMode). */
+@Composable
+fun PostResultTile(
+    item: MediaItem,
+    filter: PostKindFilter,
+    gridMode: Int,
+    tint: Color,
+    liquidGlass: Boolean,
+    roundedGridTiles: Boolean,
+    onSeedSubImageIndex: (String, Int) -> Unit,
+    onClick: () -> Unit
+) {
+    val mediaShape = RoundedCornerShape(14.dp)
+    val textShape = RoundedCornerShape(12.dp)
+    when (filter) {
+        PostKindFilter.ALL, PostKindFilter.IMAGES -> if (gridMode == 2) {
+            val shape = if (roundedGridTiles) RoundedCornerShape(10.dp) else RoundedCornerShape(0.dp)
+            val cell = Modifier.fillMaxWidth().aspectRatio(1f)
+            if (item.mediaGroup.size > 1) {
+                SwipeableThumbBox(item, tint, shape, cell, liquidGlass, onSeedSubImageIndex = onSeedSubImageIndex, onClick = onClick, rounded = roundedGridTiles)
+            } else {
+                ThumbBox(item, tint, shape, cell, liquidGlass, playIconSize = 16.dp, rounded = roundedGridTiles, onClick = onClick)
+            }
+        } else {
+            PinterestEntryTile(item, tint, mediaShape, textShape, liquidGlass, onSeedSubImageIndex, onClick)
+        }
+        PostKindFilter.TEXT_POSTS -> if (gridMode == 0) {
+            TextPostBubble(item = item, liquidGlass = liquidGlass, tint = tint, onOpen = onClick)
+        } else {
+            PinterestEntryTile(item, tint, mediaShape, textShape, liquidGlass, onSeedSubImageIndex, onClick)
+        }
+        PostKindFilter.HORIZONTAL_VIDEOS -> {
+            val tap = rememberHapticTap()
+            Row(
+                Modifier.fillMaxWidth().clickable { tap(); onClick() }.padding(horizontal = 10.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                ThumbBox(item, tint, RoundedCornerShape(10.dp), Modifier.width(168.dp).aspectRatio(16f / 9f), liquidGlass,
+                    playIconSize = 20.dp, onClick = onClick)
+                Column(Modifier.weight(1f).padding(top = 2.dp)) {
+                    Text(
+                        item.text.ifBlank { "@${item.author.handle}" }, color = Color.White, fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(item.author.displayName.ifBlank { item.author.handle }, color = DimGray, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(2.dp))
+                    Text("${item.likeCount} likes · ${item.replyCount} replies", color = DimGray, fontSize = 11.sp)
+                }
+            }
+        }
+        PostKindFilter.VERTICAL_VIDEOS ->
+            ThumbBox(item, tint, RoundedCornerShape(10.dp), Modifier.fillMaxWidth().aspectRatio(9f / 16f), liquidGlass, onClick = onClick)
+    }
+}

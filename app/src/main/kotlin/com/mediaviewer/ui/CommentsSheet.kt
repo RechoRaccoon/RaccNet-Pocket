@@ -159,13 +159,9 @@ fun CommentsSheet(
             .graphicsLayer { translationY = dragOffset }
             .nestedScroll(dragConnection)
             .blockClicksBehind()
-            // A soft dark wash over the blurred post so white text stays
-            // readable on bright media.
-            .background(
-                androidx.compose.ui.graphics.Brush.verticalGradient(
-                    listOf(Color.Black.copy(alpha = 0.45f), Color.Black.copy(alpha = 0.25f), Color.Black.copy(alpha = 0.5f))
-                )
-            )
+            // (The dark wash that keeps white text readable is NOT on the
+            // sheet: it's a full-screen scrim in FeedView that fades in with
+            // the blur, so it doesn't slide up with the comments.)
     ) {
         Column(Modifier.fillMaxSize()) {
             // ── Header: grab it anywhere to drag the sheet ──
@@ -179,23 +175,20 @@ fun CommentsSheet(
                     )
                     .padding(top = rememberTopCutoutClearance())
             ) {
-                Box(
-                    Modifier.align(Alignment.CenterHorizontally).padding(top = 2.dp, bottom = 8.dp)
-                        .size(width = 36.dp, height = 4.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.35f))
-                )
+                Spacer(Modifier.height(6.dp))
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 8.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        "Comments", color = if (!showTags) Color.White else DimGray,
+                        "Comments", color = if (!showTags) Color.White else Color.White.copy(alpha = 0.6f),
                         fontSize = 15.sp, fontWeight = if (!showTags) FontWeight.SemiBold else FontWeight.Normal,
                         modifier = Modifier.clickable(enabled = showTagsToggle) { tap(); showTags = false }
                     )
                     if (showTagsToggle) {
                         Text(
-                            "Tags", color = if (showTags) Color.White else DimGray,
+                            "Tags", color = if (showTags) Color.White else Color.White.copy(alpha = 0.6f),
                             fontSize = 15.sp, fontWeight = if (showTags) FontWeight.SemiBold else FontWeight.Normal,
                             modifier = Modifier.clickable { tap(); showTags = true }
                         )
@@ -273,14 +266,14 @@ fun CommentsSheet(
                                 }
                             }
                             when {
-                                parent == null && commentsLoading -> item(key = "loading") {
-                                    Box(Modifier.fillParentMaxWidth().fillParentMaxHeight(0.8f), contentAlignment = Alignment.Center) {
-                                        CircularProgressIndicator(color = Color.White, strokeWidth = 1.5.dp)
-                                    }
-                                }
+                                // Comments are fetched as soon as a post is on screen
+                                // (see FeedView), so they're normally already here;
+                                // if they're still arriving, show nothing rather
+                                // than a spinner — they simply appear.
+                                parent == null && commentsLoading && displayedComments.isEmpty() -> {}
                                 displayedComments.isEmpty() -> item(key = "empty") {
                                     Box(Modifier.fillParentMaxWidth().fillParentMaxHeight(0.8f), contentAlignment = Alignment.Center) {
-                                        Text("no comments", color = DimGray, fontSize = 14.sp)
+                                        Text("no comments", color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp)
                                     }
                                 }
                                 else -> items(displayedComments, key = { it.id }) { comment ->
@@ -311,11 +304,11 @@ fun CommentsSheet(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                "Replying to @${target.authorHandle}", color = DimGray, fontSize = 11.sp,
+                                "Replying to @${target.authorHandle}", color = Color.White, fontSize = 11.sp,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
                             )
                             Icon(
-                                Icons.Default.Close, contentDescription = "Cancel reply", tint = DimGray,
+                                Icons.Default.Close, contentDescription = "Cancel reply", tint = Color.White,
                                 modifier = Modifier.size(16.dp).clickable {
                                     tap()
                                     replyTarget = null
@@ -350,7 +343,7 @@ fun CommentsSheet(
                                     keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSend = { send() }),
                                     modifier = Modifier.fillMaxWidth()
                                 )
-                                if (commentText.isEmpty()) Text(if (replyTarget != null) "Reply…" else "Add a comment…", color = DimGray, fontSize = 14.sp)
+                                if (commentText.isEmpty()) Text(if (replyTarget != null) "Reply…" else "Add a comment…", color = Color.White, fontSize = 14.sp)
                             }
                         }
                         if (liquidGlass) {
@@ -364,7 +357,7 @@ fun CommentsSheet(
                             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Icon(
                                     Icons.Default.Send, contentDescription = "Send",
-                                    tint = if (commentText.isNotBlank()) Color.White else Color.White.copy(alpha = 0.45f),
+                                    tint = Color.White,
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
@@ -462,7 +455,7 @@ private fun CommentRow(
                     modifier = Modifier.weight(1f, fill = false)
                 )
                 Text(
-                    "@${comment.authorHandle}", color = DimGray, fontSize = 11.sp,
+                    "@${comment.authorHandle}", color = Color.White, fontSize = 11.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
             }
@@ -481,11 +474,11 @@ private fun CommentRow(
                     // when this comment actually has replies).
                     Icon(
                         imageVector = if (comment.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-                        contentDescription = "Like", tint = if (comment.isLiked) LikeRed else DimGray,
+                        contentDescription = "Like", tint = if (comment.isLiked) LikeRed else Color.White,
                         modifier = Modifier.size(14.dp).clickable { tap(); onLike(comment) }
                     )
                     if (comment.replyCount > 0) {
-                        Text("replies: ${comment.replyCount}", color = DimGray, fontSize = 11.sp)
+                        Text("replies: ${comment.replyCount}", color = Color.White, fontSize = 11.sp)
                     }
                     Spacer(Modifier.weight(1f))
                     Text(
@@ -494,15 +487,15 @@ private fun CommentRow(
                     )
                 } else {
                     Icon(Icons.Default.ArrowUpward, contentDescription = "Upvote",
-                        tint = if (comment.e621UserVote == 1) VoteGreen else DimGray,
+                        tint = if (comment.e621UserVote == 1) VoteGreen else Color.White,
                         modifier = Modifier.size(14.dp).clickable { tap(); onVote(comment, 1) })
-                    Text(comment.likeCount.toString(), color = DimGray, fontSize = 11.sp)
+                    Text(comment.likeCount.toString(), color = Color.White, fontSize = 11.sp)
                     Icon(Icons.Default.ArrowDownward, contentDescription = "Downvote",
-                        tint = if (comment.e621UserVote == -1) VoteRed else DimGray,
+                        tint = if (comment.e621UserVote == -1) VoteRed else Color.White,
                         modifier = Modifier.size(14.dp).clickable { tap(); onVote(comment, -1) })
                     if (comment.replyCount > 0) {
                         Spacer(Modifier.width(4.dp))
-                        Text("replies: ${comment.replyCount}", color = DimGray, fontSize = 11.sp)
+                        Text("replies: ${comment.replyCount}", color = Color.White, fontSize = 11.sp)
                     }
                 }
             }
@@ -564,7 +557,7 @@ private fun ThreadParentHeader(
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(parent.authorDisplayName, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 12.sp,
                             maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                        Text("@${parent.authorHandle}", color = DimGray, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("@${parent.authorHandle}", color = Color.White, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Spacer(Modifier.height(3.dp))
                     Text(parent.body, color = Color.White, fontSize = 13.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)

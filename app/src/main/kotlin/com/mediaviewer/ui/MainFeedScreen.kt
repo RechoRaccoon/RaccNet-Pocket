@@ -204,6 +204,8 @@ fun MainFeedScreen(
     onCreateLiveLinkWidget: () -> Unit = {},
     onToggleLiveLink: (com.mediaviewer.model.LiveNowPlatform) -> Unit = {},
     onEndLiveLink: () -> Unit = {},
+    onMoveFeed: (Int, Int) -> Unit = { _, _ -> },
+    onRemoveFeed: (String) -> Unit = {},
     availableFeeds: List<BskyFeedInfo>,
     selectedFeedUri: String?,
     authorFeedState: MainViewModel.AuthorFeedSavedState?,
@@ -602,7 +604,9 @@ fun MainFeedScreen(
                         onSaveLiveYoutubeUrl      = onSaveLiveYoutubeUrl,
                         onCreateLiveLinkWidget    = onCreateLiveLinkWidget,
                         onToggleLiveLink          = onToggleLiveLink,
-                        onEndLiveLink             = onEndLiveLink
+                        onEndLiveLink             = onEndLiveLink,
+                        onMoveFeed                = onMoveFeed,
+                        onRemoveFeed              = onRemoveFeed
                     )
                     ScreenState.GRID -> GridScreen(
                         items           = mediaItems,
@@ -637,11 +641,18 @@ fun MainFeedScreen(
             }
         }
 
+        // The dark wash behind the comments: the whole screen at once, fading
+        // in together with the blur (it used to be painted on the sheet and
+        // slide up with it). Drag-to-close fades it back out with the finger.
+        if (commentsFraction > 0.001f && !isLandscape) {
+            Box(Modifier.fillMaxSize().zIndex(4.9f).background(Color.Black.copy(alpha = 0.45f * commentsFraction)))
+        }
+
         // The comments sheet, over the (blurred) post.
         AnimatedVisibility(
             visible = commentsOpen && !isLandscape,
             enter = if (reducedAnimations) EnterTransition.None
-                else slideInVertically(tween(320, easing = FastOutSlowInEasing)) { it } + fadeIn(tween(200)),
+                else slideInVertically(tween(320, easing = FastOutSlowInEasing)) { it },
             exit = if (reducedAnimations) ExitTransition.None
                 else slideOutVertically(tween(260, easing = FastOutSlowInEasing)) { it } + fadeOut(tween(220)),
             modifier = Modifier.fillMaxSize().zIndex(5f)

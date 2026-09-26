@@ -1122,6 +1122,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ── Hub: reorder / remove saved feeds ─────────────────────────────────
+    // Optimistic: the Hub's row changes the moment the chip is dropped, and
+    // the new order is written to the user's Bluesky preferences in the
+    // background (so it matches in every AT Protocol app). Writes run one
+    // at a time, newest state wins; a failure reloads the real list.
+    private val feedPrefsMutex = Mutex()
+
+    fun moveFeed(fromIndex: Int, toIndex: Int) {
+        val list = _availableFeeds.value.toMutableList()
+        if (fromIndex !in list.indices) return
+        val to = toIndex.coerceIn(0, list.lastIndex)
+        if (to == fromIndex) return
+        list.add(to, list.removeAt(fromIndex))
+        _availableFeeds.value = list
+        persistFeedOrder(emptySet())
+    }
+
+    fun removeFeed(uri: String) {
+        val list = _availableFeeds.value
+        if (list.none { it.uri == uri }) return
+        _availableFeeds.value = list.filterNot { it.uri == uri }
+        persistFeedOrder(setOf(uri))
+    }
+
+    private fun persistFeedOrder(removed: Set<String>) {
+        if (!_bskyLoggedIn.value) return
+        viewModelScope.launch(Dispatchers.IO) {
+            feedPrefsMutex.withLock {
+                val order = _availableFeeds.value.map { it.uri }
+                var result = bskyRepo.saveFeedOrder(bskyToken, order, removed)
+                if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
+                    if (refreshBskyTokenIfPossible()) result = bskyRepo.saveFeedOrder(bskyToken, order, removed)
+                }
+                result.onFailure {
+                    _errorMessage.value = "Couldn't update your feeds: ${it.message}"
+                    loadAvailableFeeds()
+                }
+            }
+        }
+    }
+
     /** Opens a post found via search in its own standalone pager, the same
      *  way tapping into any other feed does — navDirection 0 since there's
      *  no meaningful slide direction coming from a flat search result list.
@@ -4337,23 +4378,78 @@ _bskyDid.value          = session.did
 
     // ── Comments ──────────────────────────────────────────────────────────────
 
-    private fun loadComments() {
-        val item = currentItem.value ?: return
-        viewModelScope.launch(Dispatchers.IO) {
-            _commentsLoading.value = true
-            _comments.value = emptyList()
-            if (_appMode.value == AppMode.BLUESKY)
-                bskyRepo.getPostThread(bskyToken, item.postUri)
-                    .onSuccess { _comments.value = it }
-                    .onFailure { _errorMessage.value = it.message }
-            else {
-                val pid = item.e621PostId ?: return@launch
-                e621Repo.getComments(e621Username, e621ApiKey, pid)
-                    .onSuccess { _comments.value = it }
-                    .onFailure { _errorMessage.value = it.message }
+    // Comments are fetched as soon as a post settles on screen (not when the
+    // sheet opens), so swiping up shows them straight away with no spinner.
+    // A small per-post cache keeps swiping back and forth free.
+    private class CachedComments(val atMs: Long, val list: List<CommentItem>)
+    private val commentsCache = object : LinkedHashMap<String, CachedComments>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedComments>?) = size > 30
+    }
+    @Volatile private var commentsShownFor: String? = null
+    private fun commentKey(item: MediaItem) = "${_appMode.value}:${item.id}"
+    private fun cachedComments(key: String): CachedComments? = synchronized(commentsCache) { commentsCache[key] }
+    private fun putCachedComments(key: String, list: List<CommentItem>) {
+        synchronized(commentsCache) { commentsCache[key] = CachedComments(System.currentTimeMillis(), list) }
+    }
+
+    init {
+        viewModelScope.launch {
+            currentItem.distinctUntilChangedBy { it?.id }.collectLatest { item ->
+                if (item == null) return@collectLatest
+                showCommentsFor(item)
+                // Don't fetch for every post flicked straight past.
+                delay(350)
+                val key = commentKey(item)
+                if (cachedComments(key) == null) {
+                    if (_appMode.value == AppMode.BLUESKY && item.replyCount == 0 && item.postUri.isNotBlank()) {
+                        putCachedComments(key, emptyList())
+                        if (commentsShownFor == key) { _comments.value = emptyList(); _commentsLoading.value = false }
+                    } else {
+                        fetchComments(item)
+                    }
+                }
             }
-            _commentsLoading.value = false
         }
+    }
+
+    /** Points the sheet at [item]'s comments (cached ones right away). */
+    private fun showCommentsFor(item: MediaItem) {
+        val key = commentKey(item)
+        if (commentsShownFor == key) return
+        commentsShownFor = key
+        val cached = cachedComments(key)
+        _comments.value = cached?.list ?: emptyList()
+        _commentsLoading.value = cached == null
+    }
+
+    private fun fetchComments(item: MediaItem) {
+        val key = commentKey(item)
+        viewModelScope.launch(Dispatchers.IO) {
+            if (commentsShownFor == key && _comments.value.isEmpty()) _commentsLoading.value = true
+            val result: Result<List<CommentItem>>? = if (_appMode.value == AppMode.BLUESKY) {
+                if (item.postUri.isBlank()) null else bskyRepo.getPostThread(bskyToken, item.postUri)
+            } else {
+                item.e621PostId?.let { pid -> e621Repo.getComments(e621Username, e621ApiKey, pid) }
+            }
+            result?.onSuccess { list ->
+                putCachedComments(key, list)
+                if (commentsShownFor == key) _comments.value = list
+            }?.onFailure {
+                // A background prefetch failing stays quiet; only report it
+                // when the sheet is actually open on this post.
+                if (commentsShownFor == key && _screenState.value == ScreenState.COMMENTS) _errorMessage.value = it.message
+            }
+            if (commentsShownFor == key) _commentsLoading.value = false
+        }
+    }
+
+    /** Opening the sheet / after posting: show what's cached and refresh if
+     *  it's missing, stale (2 min) or [force]d. */
+    private fun loadComments(force: Boolean = false) {
+        val item = currentItem.value ?: return
+        showCommentsFor(item)
+        val cached = cachedComments(commentKey(item))
+        if (force || cached == null || System.currentTimeMillis() - cached.atMs > 120_000) fetchComments(item)
     }
 
     // Item 20: replying to a specific comment now actually threads the reply
@@ -4371,11 +4467,11 @@ _bskyDid.value          = session.did
                 val parentCid = replyTo?.cid?.takeIf { it.isNotBlank() } ?: item.postCid
                 bskyRepo.replyToPost(bskyToken, _bskyDid.value,
                     item.postUri, item.postCid, parentUri, parentCid, text)
-                    .onSuccess { loadComments() }
+                    .onSuccess { loadComments(force = true) }
                     .onFailure { _errorMessage.value = it.message }
             } else {
                 e621Repo.createComment(e621Username, e621ApiKey, item.e621PostId ?: return@launch, text)
-                    .onSuccess { loadComments() }
+                    .onSuccess { loadComments(force = true) }
                     .onFailure { _errorMessage.value = it.message }
             }
         }
@@ -5030,6 +5126,7 @@ _bskyDid.value          = session.did
 
     private fun updateComment(commentId: String, transform: (CommentItem) -> CommentItem) {
         _comments.value = _comments.value.map { if (it.id == commentId) transform(it) else it }
+        commentsShownFor?.let { key -> if (cachedComments(key) != null) putCachedComments(key, _comments.value) }
     }
 
     // ── Live Link widget feature ────────────────────────────────────────

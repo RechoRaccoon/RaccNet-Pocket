@@ -428,6 +428,17 @@ internal class ViewerSession {
                 m[1] * d[0] + m[5] * d[1] + m[9] * d[2],
                 m[2] * d[0] + m[6] * d[1] + m[10] * d[2])
         }
+        // Turn the directional ambient with the camera too (its +Z bias is
+        // the viewer-side fill). Camera→world rotation, column-major 3×3.
+        indirectLight?.let { il ->
+            runCatching {
+                il.setRotation(floatArrayOf(
+                    m[0], m[1], m[2],
+                    m[4], m[5], m[6],
+                    m[8], m[9], m[10]
+                ))
+            }
+        }
     }
 
     // Per-model resources we own (freed right after destroyModel()).
@@ -1055,15 +1066,14 @@ private fun addCameraLightRig(engine: Engine, scene: com.google.android.filament
         entities.add(entity)
         dirs.add(d)
     }
-    // Front-heavy: the camera's exposure maps ~100k lux to full white, so the
-    // old 34k key barely out-shone the flat ambient light (which reaches
-    // every side equally) — the face read as no brighter than the back.
-    light(0.0f, -0.15f, -1.0f, LIGHT_RIG_INTENSITIES[0])   // headlight: straight from the viewer onto the face
-    // A direction is where the light TRAVELS: +x travels rightwards, so it
-    // comes from the left. (These were swapped before.)
-    light(0.35f, -0.45f, -1.0f, LIGHT_RIG_INTENSITIES[1])  // key: from the viewer's upper-left, gives the face some shape
-    light(-0.55f, -0.15f, -1.0f, LIGHT_RIG_INTENSITIES[2]) // fill: from the viewer's right
-    light(0.0f, -0.2f, 1.0f, LIGHT_RIG_INTENSITIES[3])     // rim: from behind, a faint silhouette edge
+    // ONE light on purpose. Filament supports a single directional light:
+    // with several in the scene it silently uses just one of them — the
+    // old 4-light rig ended up lit by whichever it picked (in practice the
+    // rim light from BEHIND), which is exactly why the face stayed dark.
+    // Front/fill shaping now comes from the directional ambient below.
+    // A direction is where the light TRAVELS: +x rightwards (so it comes
+    // from the viewer's left), -y downwards (from above), -z into the scene.
+    light(0.15f, -0.35f, -1.0f, LIGHT_RIG_INTENSITIES[0])
     return entities.toIntArray() to dirs
 }
 
@@ -1090,11 +1100,21 @@ private fun addCameraLightRig(engine: Engine, scene: com.google.android.filament
  * show, which a directional-only rig fundamentally can't do.
  */
 private fun addFlatAmbientLight(engine: Engine, scene: com.google.android.filament.Scene): IndirectLight {
-    // Flat, faintly cool-white ambient (band 0 only). Kept low on purpose:
-    // the camera-relative lights are what light the front (see addCameraLightRig).
-    // Band-0 irradiance at this intensity does not blow out to white.
+    // 2-band spherical harmonics (L00, L1-1=y, L10=z, L11=x per channel),
+    // pre-scaled irradiance. The +Z term makes surfaces facing +Z brighter
+    // (0.5+0.3) and those facing away darker (0.5-0.3); +Y adds a little
+    // sky from above. [ViewerSession.updateLights] rotates this light with
+    // the camera every frame, so "+Z" is always "toward the viewer": the
+    // face gets the fill, the back of the head stays dimmer, and nothing
+    // ever drops to black.
+    val sh = floatArrayOf(
+        0.50f, 0.50f, 0.52f,   // L00  — base ambient
+        0.10f, 0.10f, 0.11f,   // L1-1 — from above
+        0.30f, 0.30f, 0.30f,   // L10  — from the viewer
+        0.00f, 0.00f, 0.00f    // L11
+    )
     val indirectLight = IndirectLight.Builder()
-        .irradiance(1, floatArrayOf(0.65f, 0.65f, 0.68f))
+        .irradiance(2, sh)
         .intensity(AMBIENT_INTENSITY)
         .build(engine)
     scene.indirectLight = indirectLight
@@ -1103,11 +1123,11 @@ private fun addFlatAmbientLight(engine: Engine, scene: com.google.android.filame
 
 private const val TAG = "VrmAvatarView"
 
-/** Headlight, key, fill, rim (lux) — see [addCameraLightRig]. */
-private val LIGHT_RIG_INTENSITIES = floatArrayOf(45_000f, 28_000f, 12_000f, 5_000f)
+/** The single camera-relative key light (lux) — see [addCameraLightRig]. */
+private val LIGHT_RIG_INTENSITIES = floatArrayOf(60_000f)
 /** Flat ambient: enough that no part of the face ever drops to near-black,
  *  low enough that the front/back lighting still reads. */
-private const val AMBIENT_INTENSITY = 9_000f
+private const val AMBIENT_INTENSITY = 11_000f
 
 /** The live-stream encoder surface Filament renders into. */
 internal class VrmStreamTarget(

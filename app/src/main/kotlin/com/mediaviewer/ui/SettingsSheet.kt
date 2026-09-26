@@ -85,6 +85,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.sp
 import kotlin.math.roundToInt
+import android.view.HapticFeedbackConstants
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import com.mediaviewer.model.AppMode
 import com.mediaviewer.model.BskyFeedInfo
@@ -262,6 +273,9 @@ fun SettingsSheet(
     onCreateLiveLinkWidget: () -> Unit = {},
     onToggleLiveLink: (com.mediaviewer.model.LiveNowPlatform) -> Unit = {},
     onEndLiveLink: () -> Unit = {},
+    // Hub feed row: drag a feed chip to reorder it / drop it on "Remove".
+    onMoveFeed: (Int, Int) -> Unit = { _, _ -> },
+    onRemoveFeed: (String) -> Unit = {},
     // Reworked Settings page: multiple accounts, tagging-model download and
     // the e621 download button — see SettingsExtras.
     settingsExtras: SettingsExtras = SettingsExtras()
@@ -338,7 +352,9 @@ fun SettingsSheet(
         if (liquidGlass) GlassBackdrop(hubBackgroundLayer) { hubBackgroundOrigin } else null
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    val feedDrag = remember { HubFeedDragState() }
+
+    Box(modifier = Modifier.fillMaxSize().onGloballyPositioned { feedDrag.rootOrigin = it.positionInRoot() }) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -456,6 +472,7 @@ fun SettingsSheet(
                             liveTwitchUrl = liveTwitchUrl, liveYoutubeUrl = liveYoutubeUrl,
                             liveActivePlatform = liveActivePlatform,
                             onToggleLiveLink = onToggleLiveLink, onEndLiveLink = onEndLiveLink,
+                            feedDrag = feedDrag, onMoveFeed = onMoveFeed, onRemoveFeed = onRemoveFeed,
                             // Item 14: e621's Hot/Favorites/Following quick
                             // buttons folded in here (were the standalone
                             // e621 page's whole reason to exist) — shown
@@ -498,6 +515,21 @@ fun SettingsSheet(
                 HubPage.MAIN -> bskyLoggedIn
                 HubPage.SETTINGS -> false
             }
+            // While a feed chip is held: a "Remove" bubble floats just above
+            // the Return to Feed bar (a zero-height anchor, so it overlays the
+            // page instead of pushing the bar down). Drop the chip on it to
+            // unsave that feed.
+            Box(Modifier.fillMaxWidth().height(0.dp).zIndex(2f), contentAlignment = Alignment.BottomCenter) {
+                AnimatedVisibility(
+                    visible = feedDrag.active,
+                    enter = fadeIn(tween(160)) + scaleIn(initialScale = 0.6f, animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 500f)),
+                    exit = fadeOut(tween(140)) + scaleOut(targetScale = 0.7f, animationSpec = tween(140)),
+                    modifier = Modifier.wrapContentHeight(align = Alignment.Bottom, unbounded = true).padding(bottom = 10.dp)
+                ) {
+                    HubRemoveBubble(hovered = feedDrag.overRemove, liquidGlass = liquidGlass,
+                        modifier = Modifier.onGloballyPositioned { feedDrag.removeBounds = it.boundsInRoot() })
+                }
+            }
             Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp).padding(top = 6.dp)) {
                 ReturnToFeedBar(
                     liquidGlass = liquidGlass, tint = dominantColor, backdrop = null,
@@ -527,6 +559,9 @@ fun SettingsSheet(
                 modifier = Modifier.padding(bottom = 20.dp, top = 2.dp)
             )
         }
+
+        // The held feed chip, popped up and following the finger.
+        HubFeedDragGhost(feedDrag, liquidGlass, dominantColor)
     }
 }
 
@@ -593,6 +628,9 @@ private fun AtProtocolPageContent(
     // Item (this session): replaces the removed swipe-up-to-feed gesture.
     onReturnToFeed: () -> Unit = {},
     hasVisitedFeed: Boolean = false,
+    feedDrag: HubFeedDragState = remember { HubFeedDragState() },
+    onMoveFeed: (Int, Int) -> Unit = { _, _ -> },
+    onRemoveFeed: (String) -> Unit = {},
     // Live Link widget feature: mirrors the widget's own toggle as the very
     // bottom row of this page, per the feature request — only rendered once
     // at least one channel URL is saved (see the bottom of this function).
@@ -750,19 +788,11 @@ private fun AtProtocolPageContent(
         }
         Spacer(Modifier.height(6.dp))
 
-        Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            val saved = authorFeedState
-            if (saved != null) {
-                AuthorChip(author = saved.author, liquidGlass = liquidGlass, dominantColor = dominantColor)
-            }
-            availableFeeds.forEach { feed ->
-                FeedChip(feed.displayName, feed.avatarUrl,
-                    selectedFeedUri == feed.uri && saved == null, liquidGlass = liquidGlass, dominantColor = dominantColor) { onSelectFeed(feed.uri) }
-            }
-        }
+        HubFeedRow(
+            availableFeeds = availableFeeds, selectedFeedUri = selectedFeedUri, authorFeedState = authorFeedState,
+            liquidGlass = liquidGlass, dominantColor = dominantColor, drag = feedDrag,
+            onSelectFeed = onSelectFeed, onMoveFeed = onMoveFeed, onRemoveFeed = onRemoveFeed
+        )
 
         Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -2115,9 +2145,9 @@ fun AuthorChip(author: com.mediaviewer.model.AuthorInfo, liquidGlass: Boolean = 
 }
 
 @Composable
-fun FeedChip(name: String, avatarUrl: String?, isSelected: Boolean, liquidGlass: Boolean = false, dominantColor: Color = NeutralGlassTint, onClick: () -> Unit) {
+fun FeedChip(name: String, avatarUrl: String?, isSelected: Boolean, liquidGlass: Boolean = false, dominantColor: Color = NeutralGlassTint, modifier: Modifier = Modifier, onClick: (() -> Unit)?) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .then(
                 if (liquidGlass) Modifier.glassPanel(
                     true, tint = if (isSelected) dominantColor else dominantColor.copy(alpha = 0.5f),
@@ -2126,7 +2156,7 @@ fun FeedChip(name: String, avatarUrl: String?, isSelected: Boolean, liquidGlass:
                 else Modifier.clip(RoundedCornerShape(20.dp))
                     .background(if (isSelected) Color.White.copy(0.15f) else Color.White.copy(0.06f))
             )
-            .clickable(onClick = onClick)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 12.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -2243,5 +2273,266 @@ internal fun ExportDatasetNameDialog(
                 Box(Modifier.fillMaxWidth(0.88f).clip(shape).background(OffBlack)) { DialogContent() }
             }
         }
+    }
+}
+
+
+// ── Hub feed row: long-press a feed to pick it up, drag to reorder, drop on
+// "Remove" to unsave it. The new order is written to the account's Bluesky
+// preferences (MainViewModel.moveFeed / removeFeed), so every AT Protocol
+// app shows the same order. ───────────────────────────────────────────────
+
+/** What's being dragged. Lives at the Hub's root so the floating chip and
+ *  the Remove bubble (both outside the scrolling page) can see it. */
+@Stable
+class HubFeedDragState {
+    var active by mutableStateOf(false)
+    var feed by mutableStateOf<BskyFeedInfo?>(null)
+    var fromIndex by mutableIntStateOf(-1)
+    var targetIndex by mutableIntStateOf(-1)
+    /** Finger position, root coordinates. */
+    var pointer by mutableStateOf(Offset.Zero)
+    /** Where on the chip it was grabbed. */
+    var grab by mutableStateOf(Offset.Zero)
+    var chipWidthPx by mutableIntStateOf(0)
+    var overRemove by mutableStateOf(false)
+    var removeBounds: Rect? = null
+    var rootOrigin: Offset = Offset.Zero
+
+    fun reset() {
+        active = false; feed = null; fromIndex = -1; targetIndex = -1; overRemove = false
+    }
+}
+
+private fun android.view.View.hubHaptic(kind: Int) { runCatching { performHapticFeedback(kind) } }
+
+@Composable
+private fun HubFeedRow(
+    availableFeeds: List<BskyFeedInfo>,
+    selectedFeedUri: String?,
+    authorFeedState: MainViewModel.AuthorFeedSavedState?,
+    liquidGlass: Boolean,
+    dominantColor: Color,
+    drag: HubFeedDragState,
+    onSelectFeed: (String?) -> Unit,
+    onMoveFeed: (Int, Int) -> Unit,
+    onRemoveFeed: (String) -> Unit
+) {
+    // The row's own copy of the order, so a drop re-lays it out in the same
+    // frame the drag ends (no one-frame jump while the ViewModel catches up).
+    var order by remember(availableFeeds) { mutableStateOf(availableFeeds) }
+    val latestOrder by rememberUpdatedState(order)
+    val scroll = rememberScrollState()
+    val view = LocalView.current
+    val density = LocalDensity.current
+    val spacingPx = with(density) { 8.dp.toPx() }
+    val edgePx = with(density) { 56.dp.toPx() }
+    val coords = remember { HashMap<String, LayoutCoordinates>() }
+    var rowCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+
+    fun recomputeTarget() {
+        val f = drag.feed ?: return
+        val x = drag.pointer.x
+        val others = latestOrder.filter { it.uri != f.uri }
+        val t = others.count { o ->
+            val c = coords[o.uri]?.takeIf { it.isAttached } ?: return@count false
+            c.localToRoot(Offset(c.size.width / 2f, 0f)).x < x
+        }
+        if (t != drag.targetIndex) {
+            if (drag.targetIndex >= 0) view.hubHaptic(HapticFeedbackConstants.CLOCK_TICK)
+            drag.targetIndex = t
+        }
+        val over = drag.removeBounds?.let { r ->
+            Rect(r.left - 24f, r.top - 32f, r.right + 24f, r.bottom + 32f).contains(drag.pointer)
+        } == true
+        if (over != drag.overRemove) {
+            view.hubHaptic(if (over) HapticFeedbackConstants.LONG_PRESS else HapticFeedbackConstants.CLOCK_TICK)
+            drag.overRemove = over
+        }
+    }
+
+    fun finish(commit: Boolean) {
+        val f = drag.feed
+        val from = drag.fromIndex
+        val to = drag.targetIndex
+        if (commit && f != null) {
+            if (drag.overRemove) {
+                order = latestOrder.filterNot { it.uri == f.uri }
+                view.hubHaptic(if (android.os.Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.LONG_PRESS)
+                onRemoveFeed(f.uri)
+            } else if (from >= 0 && to >= 0 && to != from) {
+                order = latestOrder.toMutableList().apply { add(to, removeAt(from)) }
+                view.hubHaptic(HapticFeedbackConstants.VIRTUAL_KEY)
+                onMoveFeed(from, to)
+            } else {
+                view.hubHaptic(HapticFeedbackConstants.VIRTUAL_KEY)
+            }
+        }
+        drag.reset()
+    }
+
+    // Holding a chip near either edge scrolls the row.
+    LaunchedEffect(drag.active) {
+        while (drag.active) {
+            androidx.compose.runtime.withFrameNanos { }
+            val rc = rowCoords?.takeIf { it.isAttached } ?: continue
+            val left = rc.localToRoot(Offset.Zero).x
+            val right = left + rc.size.width
+            val x = drag.pointer.x
+            val delta = when {
+                x < left + edgePx -> -(1f - (x - left).coerceAtLeast(0f) / edgePx) * 18f
+                x > right - edgePx -> (1f - (right - x).coerceAtLeast(0f) / edgePx) * 18f
+                else -> 0f
+            }
+            if (delta != 0f && scroll.dispatchRawDelta(delta) != 0f) recomputeTarget()
+        }
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth()
+            .onGloballyPositioned { rowCoords = it }
+            .horizontalScroll(scroll)
+            .padding(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        val saved = authorFeedState
+        if (saved != null) {
+            AuthorChip(author = saved.author, liquidGlass = liquidGlass, dominantColor = dominantColor)
+        }
+        order.forEachIndexed { index, feed ->
+            key(feed.uri) {
+                val isHeld = drag.active && drag.feed?.uri == feed.uri
+                val shiftTarget = if (!drag.active || isHeld) 0f else {
+                    val from = drag.fromIndex
+                    val t = drag.targetIndex
+                    val w = drag.chipWidthPx + spacingPx
+                    when {
+                        from < t && index in (from + 1)..t -> -w
+                        from > t && index in t until from -> w
+                        else -> 0f
+                    }
+                }
+                val shift by animateFloatAsState(
+                    targetValue = shiftTarget,
+                    animationSpec = if (drag.active) androidx.compose.animation.core.spring(dampingRatio = 0.75f, stiffness = 420f)
+                        else androidx.compose.animation.core.snap(),
+                    label = "feedShift"
+                )
+                // Dropped chips settle in with a small bounce.
+                val settle = remember { Animatable(1f) }
+                LaunchedEffect(isHeld) {
+                    if (!isHeld && settle.value != 1f) settle.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.45f, stiffness = 500f))
+                    if (isHeld) settle.snapTo(0.85f)
+                }
+                Box(
+                    Modifier
+                        .onGloballyPositioned { coords[feed.uri] = it }
+                        .pointerInput(feed.uri, availableFeeds) {
+                            detectTapGestures(onTap = { view.hubHaptic(HapticFeedbackConstants.VIRTUAL_KEY); onSelectFeed(feed.uri) })
+                        }
+                        .pointerInput(feed.uri, availableFeeds) {
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = { off ->
+                                    val c = coords[feed.uri] ?: return@detectDragGesturesAfterLongPress
+                                    drag.feed = feed
+                                    drag.fromIndex = latestOrder.indexOfFirst { it.uri == feed.uri }
+                                    drag.targetIndex = drag.fromIndex
+                                    drag.grab = off
+                                    drag.chipWidthPx = c.size.width
+                                    drag.pointer = c.localToRoot(off)
+                                    drag.overRemove = false
+                                    drag.active = true
+                                    view.hubHaptic(HapticFeedbackConstants.LONG_PRESS)
+                                },
+                                onDrag = { change, _ ->
+                                    change.consume()
+                                    val c = coords[feed.uri]?.takeIf { it.isAttached } ?: return@detectDragGesturesAfterLongPress
+                                    drag.pointer = c.localToRoot(change.position)
+                                    recomputeTarget()
+                                },
+                                onDragEnd = { finish(commit = true) },
+                                onDragCancel = { finish(commit = false) }
+                            )
+                        }
+                ) {
+                    FeedChip(
+                        feed.displayName, feed.avatarUrl,
+                        selectedFeedUri == feed.uri && saved == null,
+                        liquidGlass = liquidGlass, dominantColor = dominantColor,
+                        modifier = Modifier.graphicsLayer {
+                            translationX = shift
+                            alpha = if (isHeld) 0f else 1f
+                            scaleX = settle.value; scaleY = settle.value
+                        },
+                        onClick = null
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** The picked-up chip: lifted (bigger, with a shadow) and following the
+ *  finger; shrinks and turns red over the Remove bubble. */
+@Composable
+private fun HubFeedDragGhost(drag: HubFeedDragState, liquidGlass: Boolean, tint: Color) {
+    val feed = drag.feed ?: return
+    if (!drag.active) return
+    val red = Color(0xFFFF453A)
+    val lift = remember(feed.uri) { Animatable(1f) }
+    LaunchedEffect(feed.uri) { lift.animateTo(1.14f, androidx.compose.animation.core.spring(dampingRatio = 0.5f, stiffness = 600f)) }
+    val overScale by animateFloatAsState(if (drag.overRemove) 0.78f else 1f, androidx.compose.animation.core.spring(dampingRatio = 0.6f, stiffness = 500f), label = "ghostOver")
+    Box(
+        Modifier
+            .zIndex(30f)
+            .offset {
+                IntOffset(
+                    (drag.pointer.x - drag.grab.x - drag.rootOrigin.x).roundToInt(),
+                    (drag.pointer.y - drag.grab.y - drag.rootOrigin.y).roundToInt()
+                )
+            }
+            .graphicsLayer {
+                val sc = lift.value * overScale
+                scaleX = sc; scaleY = sc
+                transformOrigin = TransformOrigin(
+                    (drag.grab.x / drag.chipWidthPx.coerceAtLeast(1)).coerceIn(0f, 1f), 0.5f
+                )
+                shadowElevation = 14.dp.toPx()
+                shape = RoundedCornerShape(20.dp)
+                clip = false
+                alpha = if (drag.overRemove) 0.85f else 1f
+            }
+    ) {
+        FeedChip(
+            feed.displayName, feed.avatarUrl, isSelected = true,
+            liquidGlass = liquidGlass, dominantColor = if (drag.overRemove) red else tint,
+            modifier = if (liquidGlass) Modifier else Modifier.background(
+                if (drag.overRemove) red.copy(alpha = 0.55f) else Color(0xFF2A2A2A), RoundedCornerShape(20.dp)
+            ),
+            onClick = null
+        )
+    }
+}
+
+/** "Remove" drop target shown above Return to Feed while a feed is held. */
+@Composable
+private fun HubRemoveBubble(hovered: Boolean, liquidGlass: Boolean, modifier: Modifier = Modifier) {
+    val red = Color(0xFFFF453A)
+    val shape = RoundedCornerShape(22.dp)
+    val scale by animateFloatAsState(if (hovered) 1.15f else 1f, androidx.compose.animation.core.spring(dampingRatio = 0.5f, stiffness = 500f), label = "removeScale")
+    Row(
+        modifier
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .then(
+                if (liquidGlass) Modifier.glassPanel(true, tint = if (hovered) red else red.copy(alpha = 0.55f), shape = shape)
+                    .background(red.copy(alpha = if (hovered) 0.35f else 0.12f), shape)
+                else Modifier.clip(shape).background(red.copy(alpha = if (hovered) 0.6f else 0.3f))
+            )
+            .padding(horizontal = 22.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Icon(Icons.Default.Delete, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+        Text("Remove", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
     }
 }
