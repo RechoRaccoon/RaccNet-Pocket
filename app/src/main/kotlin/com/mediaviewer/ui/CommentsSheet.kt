@@ -33,6 +33,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.Velocity
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import kotlinx.coroutines.launch
 import coil.compose.AsyncImage
 import com.mediaviewer.model.AppMode
 import com.mediaviewer.model.CommentItem
@@ -40,6 +50,18 @@ import com.mediaviewer.model.MediaItem
 import com.mediaviewer.ui.theme.*
 import com.mediaviewer.util.rememberHapticTap
 
+/**
+ * Comments, as a layer over the post instead of a separate screen: the post
+ * stays where it is (blurred, its buttons faded — see FeedView's
+ * `commentsFraction`), and this sheet slides up over it, starting right
+ * under the camera cutout. The list scrolls; the input box sits at the
+ * bottom exactly like the DM box and rides up on top of the keyboard.
+ *
+ * Closing follows the finger: pull down from the top of the list (or grab
+ * the header anywhere) and the sheet tracks the drag, the blur behind it
+ * easing off as it goes ([onDragFractionChanged]); let go past ~20% of the
+ * screen (or flick down) and it closes, otherwise it springs back.
+ */
 @Composable
 fun CommentsSheet(
     currentItem: MediaItem?,
@@ -58,294 +80,299 @@ fun CommentsSheet(
     // reflect it the same way the in-post glass buttons do.
     dominantColor: Color = NeutralGlassTint,
     backdrop: GlassBackdrop? = null,
-    reducedAnimations: Boolean = false
+    reducedAnimations: Boolean = false,
+    /** 0 = fully open … 1 = dragged all the way down (for the blur behind). */
+    onDragFractionChanged: (Float) -> Unit = {}
 ) {
     val tap = rememberHapticTap()
     var threadStack by remember(currentItem?.id) { mutableStateOf(listOf<CommentItem>()) }
     var commentText by remember { mutableStateOf("") }
-    var attachedUri by remember { mutableStateOf<Uri?>(null) }
     var showTags by remember(currentItem?.id) { mutableStateOf(false) }
-    // Item 20: which comment (if any) is actually being replied to. Previously
-    // "Reply" only stuffed an "@handle" into the text box and posted as a
-    // top-level reply to the post — this makes it a real threaded reply.
+    // Item 20: which comment (if any) is actually being replied to.
     var replyTarget by remember(currentItem?.id) { mutableStateOf<CommentItem?>(null) }
 
-    val mediaPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.GetContent()
-    ) { uri -> attachedUri = uri }
+    // ── Drag-to-close ──
+    val scope = rememberCoroutineScope()
+    var sheetHeightPx by remember { mutableIntStateOf(1) }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    var closing by remember { mutableStateOf(false) }
+    val onClose by rememberUpdatedState(onSwipeDown)
+    LaunchedEffect(dragOffset, sheetHeightPx) {
+        onDragFractionChanged((dragOffset / sheetHeightPx).coerceIn(0f, 1f))
+    }
+    DisposableEffect(Unit) { onDispose { onDragFractionChanged(0f) } }
+    fun settle(velocityY: Float) {
+        if (closing) return
+        if (dragOffset > sheetHeightPx * 0.2f || (velocityY > 1600f && dragOffset > 0f)) {
+            closing = true
+            onClose()
+        } else if (dragOffset > 0f) {
+            scope.launch {
+                androidx.compose.animation.core.animate(
+                    dragOffset, 0f,
+                    animationSpec = androidx.compose.animation.core.spring(stiffness = androidx.compose.animation.core.Spring.StiffnessMediumLow)
+                ) { v, _ -> dragOffset = v }
+            }
+        }
+    }
+    val settleRef by rememberUpdatedState(::settle)
+    val dragConnection = remember {
+        object : NestedScrollConnection {
+            // Pulled down, now pushing back up: shrink the pull before the
+            // list scrolls.
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (available.y < 0f && dragOffset > 0f) {
+                    val used = maxOf(available.y, -dragOffset)
+                    dragOffset += used
+                    return Offset(0f, used)
+                }
+                return Offset.Zero
+            }
+            // The list is at its top and the finger keeps going down: that
+            // leftover movement pulls the whole sheet down.
+            @Suppress("DEPRECATION")
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                if (available.y > 0f && source == NestedScrollSource.Drag && !closing) {
+                    dragOffset += available.y
+                    return Offset(0f, available.y)
+                }
+                return Offset.Zero
+            }
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                if (dragOffset > 0f) {
+                    settleRef(available.y)
+                    return available
+                }
+                return Velocity.Zero
+            }
+        }
+    }
 
-    Column(
-        modifier = Modifier
+    // Item 3 bug fix: Bluesky posts opened from the Liked search tab carry
+    // the AI tagger's tags too, so the toggle isn't e621-only.
+    val showTagsToggle = currentItem != null && (appMode == AppMode.E621 || currentItem.tags.isNotBlank())
+
+    Box(
+        Modifier
             .fillMaxSize()
-            .then(
-                // Item 14: reuse the post's own dominant-color gradient instead
-                // of a fixed neutral tint, so Comments matches the post it's on.
-                if (liquidGlass) Modifier.background(postBackgroundBrush(dominantColor))
-                else Modifier.background(OledBlack)
+            .onSizeChanged { sheetHeightPx = it.height.coerceAtLeast(1) }
+            .graphicsLayer { translationY = dragOffset }
+            .nestedScroll(dragConnection)
+            .blockClicksBehind()
+            // A soft dark wash over the blurred post so white text stays
+            // readable on bright media.
+            .background(
+                androidx.compose.ui.graphics.Brush.verticalGradient(
+                    listOf(Color.Black.copy(alpha = 0.45f), Color.Black.copy(alpha = 0.25f), Color.Black.copy(alpha = 0.5f))
+                )
             )
     ) {
-        // ── Shrunk media preview (swipe down here also returns to feed) ────────
-        currentItem?.let { item ->
+        Column(Modifier.fillMaxSize()) {
+            // ── Header: grab it anywhere to drag the sheet ──
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .draggable(
+                        orientation = androidx.compose.foundation.gestures.Orientation.Vertical,
+                        state = rememberDraggableState { d -> if (!closing) dragOffset = (dragOffset + d).coerceAtLeast(0f) },
+                        onDragStopped = { v -> settle(v) }
+                    )
+                    .padding(top = rememberTopCutoutClearance())
+            ) {
+                Box(
+                    Modifier.align(Alignment.CenterHorizontally).padding(top = 2.dp, bottom = 8.dp)
+                        .size(width = 36.dp, height = 4.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.35f))
+                )
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Comments", color = if (!showTags) Color.White else DimGray,
+                        fontSize = 15.sp, fontWeight = if (!showTags) FontWeight.SemiBold else FontWeight.Normal,
+                        modifier = Modifier.clickable(enabled = showTagsToggle) { tap(); showTags = false }
+                    )
+                    if (showTagsToggle) {
+                        Text(
+                            "Tags", color = if (showTags) Color.White else DimGray,
+                            fontSize = 15.sp, fontWeight = if (showTags) FontWeight.SemiBold else FontWeight.Normal,
+                            modifier = Modifier.clickable { tap(); showTags = true }
+                        )
+                    }
+                }
+            }
+
+            // ── Body — swipe left/right toggles Comments <-> Tags ──
             Box(
                 modifier = Modifier
+                    .weight(1f)
                     .fillMaxWidth()
-                    .height(150.dp)
-                    .background(Color.Black)
-                    .pointerInput(Unit) {
-                        var totalY = 0f
-                        detectDragGestures(
-                            onDragStart = { totalY = 0f },
-                            onDragEnd   = { if (totalY > 60f) onSwipeDown() },
-                            onDragCancel = { }
-                        ) { change, dragAmount ->
-                            totalY += dragAmount.y
-                            change.consume()
-                        }
+                    .let { base ->
+                        if (showTagsToggle && currentItem != null) {
+                            base.pointerInput(currentItem.id) {
+                                var totalX = 0f
+                                detectHorizontalDragGestures(
+                                    onDragEnd = {
+                                        if (totalX < -70f) showTags = true
+                                        else if (totalX > 70f) showTags = false
+                                        totalX = 0f
+                                    },
+                                    onDragCancel = { totalX = 0f }
+                                ) { _, dragAmount -> totalX += dragAmount }
+                            }
+                        } else base
                     }
             ) {
-                AsyncImage(
-                    model              = item.thumbUrl.ifBlank { item.mediaUrl },
-                    contentDescription = null,
-                    contentScale       = ContentScale.Fit,
-                    modifier           = Modifier.fillMaxSize()
-                )
-            }
-        }
-
-        HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
-
-        // Item 3 bug fix: the Comments/Tags toggle used to be gated to
-        // e621 mode only — Bluesky posts opened from the Liked search tab
-        // now carry the AI tagger's tags in this same `tags` field (see
-        // MainViewModel.openLikedPostFromSearch), so the toggle needs to
-        // show for those too, not just genuine e621 posts.
-        val showTagsToggle = currentItem != null && (appMode == AppMode.E621 || currentItem.tags.isNotBlank())
-        if (showTagsToggle && currentItem != null) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(OffBlack)
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                // Bug fix: Comments and Tags are supposed to sit at opposite
-                // ends of the bar, not bunched together — SpaceBetween with
-                // no inner spacing (was a fixed 16dp gap between two
-                // left-aligned items) pins Comments to the far left and
-                // Tags to the far right.
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text("Comments", color = if (!showTags) Color.White else DimGray,
-                    fontSize = 13.sp, fontWeight = if (!showTags) FontWeight.SemiBold else FontWeight.Normal,
-                    modifier = Modifier.clickable { showTags = false })
-                Text("Tags", color = if (showTags) Color.White else DimGray,
-                    fontSize = 13.sp, fontWeight = if (showTags) FontWeight.SemiBold else FontWeight.Normal,
-                    modifier = Modifier.clickable { showTags = true })
-            }
-            HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
-        }
-
-        // ── Body — swipe left/right here (anywhere) toggles Comments <-> Tags ──
-        // Uses the orientation-aware horizontal detector so it only claims clearly
-        // horizontal motion, leaving vertical drags free for the list to scroll.
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .let { base ->
-                    if (showTagsToggle && currentItem != null) {
-                        base.pointerInput(currentItem.id) {
-                            var totalX = 0f
-                            detectHorizontalDragGestures(
-                                onDragEnd = {
-                                    if (totalX < -70f) showTags = true
-                                    else if (totalX > 70f) showTags = false
-                                    totalX = 0f
-                                },
-                                onDragCancel = { totalX = 0f }
-                            ) { _, dragAmount -> totalX += dragAmount }
-                        }
-                    } else base
-                }
-        ) {
-            if (showTags && currentItem != null) {
-                // Per request: tags shown alphabetically rather than in
-                // whatever order the source (native e621 tags, or the AI
-                // tagger's confidence-sorted list) provided them in.
-                val tags = currentItem.tags.split(" ").filter { it.isNotBlank() }
-                    .sortedBy { it.lowercase() }
-                val tagListState = rememberLazyListState()
-                if (tags.isEmpty()) {
-                    Text("no tags", color = DimGray, fontSize = 14.sp, modifier = Modifier.align(Alignment.Center))
-                } else {
-                    Box(
-                        Modifier.fillMaxSize().pointerInput(Unit) {
-                            observeBoundarySwipeDown(tagListState, onSwipeDown)
-                        }
-                    ) {
-                        LazyColumn(
-                            state = tagListState,
-                            modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(vertical = 8.dp)
-                        ) {
+                if (showTags && currentItem != null) {
+                    // Per request: tags shown alphabetically.
+                    val tags = currentItem.tags.split(" ").filter { it.isNotBlank() }.sortedBy { it.lowercase() }
+                    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 8.dp)) {
+                        if (tags.isEmpty()) {
+                            item { Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) { Text("no tags", color = DimGray, fontSize = 14.sp) } }
+                        } else {
                             items(tags) { tag -> TagRow(tag, onTagClick, onTagAdd, onTagExclude) }
                         }
                     }
+                } else {
+                    // Item 16: reply-chain navigation. The AnimatedContent's
+                    // target IS the stack, and each page draws from the stack
+                    // it was created with — so the page sliding out keeps
+                    // showing the old level instead of both pages jumping to
+                    // the new one first (the "jumps, then animates" jank).
+                    AnimatedContent(
+                        targetState = threadStack,
+                        contentKey = { stack -> stack.size to (stack.lastOrNull()?.id ?: "") },
+                        transitionSpec = {
+                            if (reducedAnimations) {
+                                EnterTransition.None togetherWith ExitTransition.None
+                            } else if (targetState.size > initialState.size) {
+                                (slideInHorizontally(animationSpec = tween(260)) { w -> w } + fadeIn(tween(200)))
+                                    .togetherWith(slideOutHorizontally(animationSpec = tween(260)) { w -> -w } + fadeOut(tween(180)))
+                            } else {
+                                (slideInHorizontally(animationSpec = tween(260)) { w -> -w } + fadeIn(tween(200)))
+                                    .togetherWith(slideOutHorizontally(animationSpec = tween(260)) { w -> w } + fadeOut(tween(180)))
+                            }
+                        },
+                        label = "thread-nav"
+                    ) { stack ->
+                        val parent = stack.lastOrNull()
+                        val displayedComments = parent?.replies ?: comments
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(top = 2.dp, bottom = 8.dp)
+                        ) {
+                            if (parent != null) {
+                                item(key = "parent-${parent.id}") {
+                                    ThreadParentHeader(
+                                        parent = parent, liquidGlass = liquidGlass, dominantColor = dominantColor, backdrop = backdrop,
+                                        onBack = { threadStack = stack.dropLast(1) }
+                                    )
+                                    HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp,
+                                        modifier = Modifier.padding(vertical = 4.dp))
+                                }
+                            }
+                            when {
+                                parent == null && commentsLoading -> item(key = "loading") {
+                                    Box(Modifier.fillParentMaxWidth().fillParentMaxHeight(0.8f), contentAlignment = Alignment.Center) {
+                                        CircularProgressIndicator(color = Color.White, strokeWidth = 1.5.dp)
+                                    }
+                                }
+                                displayedComments.isEmpty() -> item(key = "empty") {
+                                    Box(Modifier.fillParentMaxWidth().fillParentMaxHeight(0.8f), contentAlignment = Alignment.Center) {
+                                        Text("no comments", color = DimGray, fontSize = 14.sp)
+                                    }
+                                }
+                                else -> items(displayedComments, key = { it.id }) { comment ->
+                                    CommentRow(
+                                        comment, appMode, liquidGlass, onLikeComment, onVoteComment,
+                                        onReplyToComment = { c -> replyTarget = c; commentText = "@${c.authorHandle} " },
+                                        onOpenThread = { c -> if (c.replies.isNotEmpty()) threadStack = stack + c },
+                                        dominantColor = dominantColor, backdrop = backdrop,
+                                        indented = parent != null
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
-            } else {
-                Column(Modifier.fillMaxSize()) {
-                    if (attachedUri != null) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().background(OffBlack).padding(horizontal = 12.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("Attachment: ${attachedUri?.lastPathSegment ?: "file"}", color = DimGray, fontSize = 11.sp, modifier = Modifier.weight(1f))
-                            TextButton(onClick = { attachedUri = null }) { Text("Remove", color = Color(0xFFEF5350), fontSize = 11.sp) }
-                        }
-                    }
+            }
 
-                    @Composable
-                    fun InputBarContent() {
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            // Item 20: shows which comment is being replied to,
-                            // with a way to cancel back to a top-level comment.
-                            replyTarget?.let { target ->
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        "Replying to @${target.authorHandle}", color = DimGray, fontSize = 11.sp,
-                                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
-                                    )
-                                    Icon(
-                                        Icons.Default.Close, contentDescription = "Cancel reply", tint = DimGray,
-                                        modifier = Modifier.size(14.dp).clickable {
-                                            tap()
-                                            replyTarget = null
-                                            if (commentText == "@${target.authorHandle} ") commentText = ""
-                                        }
-                                    )
-                                }
-                            }
+            // ── Input — same look and keyboard behaviour as the DM box ──
+            if (!showTags) {
+                Column(
+                    Modifier.fillMaxWidth()
+                        .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
+                        .padding(horizontal = 10.dp, vertical = 10.dp)
+                ) {
+                    replyTarget?.let { target ->
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            IconButton(onClick = { tap(); mediaPicker.launch("image/* video/*") }, modifier = Modifier.size(34.dp)) {
-                                // Item 10: a photo/media icon (not a paperclip) — this
-                                // attaches an image or video to the comment.
-                                Icon(Icons.Default.Image, contentDescription = "Attach media", tint = DimGray, modifier = Modifier.size(18.dp))
-                            }
-                            OutlinedTextField(
-                                value = commentText, onValueChange = { commentText = it },
-                                placeholder = { Text("Add a comment…", color = DimGray, fontSize = 13.sp) },
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedTextColor = Color.White, unfocusedTextColor = Color.White,
-                                    focusedBorderColor = Color.Transparent, unfocusedBorderColor = Color.Transparent,
-                                    cursorColor = Color.White, focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent
-                                ),
-                                textStyle = LocalTextStyle.current.copy(fontSize = 13.sp), maxLines = 3,
-                                modifier = Modifier.weight(1f)
+                            Text(
+                                "Replying to @${target.authorHandle}", color = DimGray, fontSize = 11.sp,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
                             )
-                            IconButton(
-                                onClick = {
+                            Icon(
+                                Icons.Default.Close, contentDescription = "Cancel reply", tint = DimGray,
+                                modifier = Modifier.size(16.dp).clickable {
                                     tap()
-                                    if (commentText.isNotBlank()) {
-                                        onPostComment(commentText.trim(), replyTarget)
-                                        commentText = ""; attachedUri = null; replyTarget = null
-                                    }
-                                },
-                                modifier = Modifier.size(34.dp)
-                            ) {
-                                Icon(Icons.Default.Send, contentDescription = "Send", tint = if (commentText.isNotBlank()) Color.White else DimGray, modifier = Modifier.size(18.dp))
-                            }
-                        }
-                        }
-                    }
-                    if (liquidGlass) {
-                        // Item 4: same horizontal inset as CommentRow below (8.dp) so
-                        // the comment box is exactly as wide as the comments.
-                        LiquidGlassSurface(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
-                            shape = RoundedCornerShape(24.dp), tint = dominantColor, backdrop = backdrop
-                        ) { InputBarContent() }
-                    } else {
-                        Box(Modifier.fillMaxWidth().background(OffBlack)) { InputBarContent() }
-                    }
-
-                    if (!liquidGlass) HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
-
-                    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                        when {
-                            commentsLoading -> CircularProgressIndicator(modifier = Modifier.align(Alignment.Center), color = Color.White, strokeWidth = 1.5.dp)
-                            comments.isEmpty() -> Text("no comments", color = DimGray, fontSize = 14.sp, modifier = Modifier.align(Alignment.Center))
-                            else -> {
-                                // Item 16: reply-chain navigation. `threadStack` is the
-                                // path of parent comments drilled into so far — empty
-                                // means we're looking at the top-level comments. Each
-                                // push/pop is driven entirely from data already fetched
-                                // up front (see CommentItem.replies), so no new network
-                                // calls are needed to walk into a chain.
-                                val navKey = threadStack.size to (threadStack.lastOrNull()?.id ?: "")
-                                AnimatedContent(
-                                    targetState = navKey,
-                                    transitionSpec = {
-                                        if (reducedAnimations) {
-                                            EnterTransition.None togetherWith ExitTransition.None
-                                        } else if (targetState.first > initialState.first) {
-                                            // Pushing deeper: new page slides in from the
-                                            // right, old page exits to the left.
-                                            (slideInHorizontally(animationSpec = tween(260)) { w -> w } + fadeIn(tween(200)))
-                                                .togetherWith(slideOutHorizontally(animationSpec = tween(260)) { w -> -w } + fadeOut(tween(180)))
-                                        } else {
-                                            // Backing out: previous page slides back in
-                                            // from the left, current page exits right.
-                                            (slideInHorizontally(animationSpec = tween(260)) { w -> -w } + fadeIn(tween(200)))
-                                                .togetherWith(slideOutHorizontally(animationSpec = tween(260)) { w -> w } + fadeOut(tween(180)))
-                                        }
-                                    },
-                                    label = "thread-nav"
-                                ) { _ ->
-                                    val parent = threadStack.lastOrNull()
-                                    val displayedComments = parent?.replies ?: comments
-                                    val commentListState = rememberLazyListState()
-                                    Box(
-                                        Modifier.fillMaxSize().pointerInput(parent?.id) {
-                                            observeBoundarySwipeDown(commentListState) {
-                                                if (parent != null) threadStack = threadStack.dropLast(1) else onSwipeDown()
-                                            }
-                                        }
-                                    ) {
-                                        LazyColumn(
-                                            state = commentListState,
-                                            modifier = Modifier.fillMaxSize(),
-                                            contentPadding = PaddingValues(vertical = 8.dp)
-                                        ) {
-                                            if (parent != null) {
-                                                item(key = "parent-${parent.id}") {
-                                                    ThreadParentHeader(
-                                                        parent = parent, liquidGlass = liquidGlass, dominantColor = dominantColor, backdrop = backdrop,
-                                                        onBack = { threadStack = threadStack.dropLast(1) }
-                                                    )
-                                                    HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp,
-                                                        modifier = Modifier.padding(vertical = 4.dp))
-                                                }
-                                            }
-                                            items(displayedComments, key = { it.id }) { comment ->
-                                                CommentRow(
-                                                    comment, appMode, liquidGlass, onLikeComment, onVoteComment,
-                                                    onReplyToComment = { c -> replyTarget = c; commentText = "@${c.authorHandle} " },
-                                                    onOpenThread = { c -> if (c.replies.isNotEmpty()) threadStack = threadStack + c },
-                                                    dominantColor = dominantColor, backdrop = backdrop,
-                                                    // Item 16: a slight indent on every row while inside a
-                                                    // thread page, to show they're all replies to the
-                                                    // pinned parent above.
-                                                    indented = parent != null
-                                                )
-                                            }
-                                        }
-                                    }
+                                    replyTarget = null
+                                    if (commentText == "@${target.authorHandle} ") commentText = ""
                                 }
+                            )
+                        }
+                    }
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val fieldShape = RoundedCornerShape(24.dp)
+                        fun send() {
+                            if (commentText.isNotBlank()) {
+                                onPostComment(commentText.trim(), replyTarget)
+                                commentText = ""; replyTarget = null
                             }
+                        }
+                        @Composable
+                        fun FieldContent() {
+                            Box(Modifier.fillMaxSize().padding(horizontal = 16.dp), contentAlignment = Alignment.CenterStart) {
+                                androidx.compose.foundation.text.BasicTextField(
+                                    value = commentText, onValueChange = { commentText = it },
+                                    singleLine = true,
+                                    textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp),
+                                    cursorBrush = androidx.compose.ui.graphics.SolidColor(Color.White),
+                                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                        imeAction = androidx.compose.ui.text.input.ImeAction.Send
+                                    ),
+                                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSend = { send() }),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                if (commentText.isEmpty()) Text(if (replyTarget != null) "Reply…" else "Add a comment…", color = DimGray, fontSize = 14.sp)
+                            }
+                        }
+                        if (liquidGlass) {
+                            LiquidGlassSurface(Modifier.weight(1f).height(46.dp), shape = fieldShape, tint = dominantColor, backdrop = backdrop) { FieldContent() }
+                        } else {
+                            Box(Modifier.weight(1f).height(46.dp).clip(fieldShape).background(Color.White.copy(0.08f))) { FieldContent() }
+                        }
+                        val sendModifier = Modifier.size(46.dp).clickable(enabled = commentText.isNotBlank()) { tap(); send() }
+                        @Composable
+                        fun SendContent() {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Icon(
+                                    Icons.Default.Send, contentDescription = "Send",
+                                    tint = if (commentText.isNotBlank()) Color.White else Color.White.copy(alpha = 0.45f),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                        if (liquidGlass) {
+                            LiquidGlassSurface(sendModifier, shape = CircleShape, tint = dominantColor, backdrop = backdrop) { SendContent() }
+                        } else {
+                            Box(sendModifier.clip(CircleShape).background(Color.White.copy(0.14f))) { SendContent() }
                         }
                     }
                 }
@@ -548,38 +575,6 @@ private fun ThreadParentHeader(
             LiquidGlassSurface(modifier = Modifier.weight(1f), shape = RoundedCornerShape(16.dp), tint = dominantColor, backdrop = backdrop) { ParentPillContent() }
         } else {
             Box(Modifier.weight(1f).clip(RoundedCornerShape(16.dp)).background(Color.White.copy(0.06f))) { ParentPillContent() }
-        }
-    }
-}
-
-// ─── Boundary swipe-down observer ──────────────────────────────────────────────
-// Watches raw touch movement on the Initial pass (before the list's own scrolling
-// consumes it) without ever calling consume() itself, so normal scrolling inside
-// the list is completely unaffected. If the list was already scrolled to the very
-// top at the moment the gesture began, and the finger then moves down past a small
-// threshold, we treat that as "swipe down to go back".
-private suspend fun PointerInputScope.observeBoundarySwipeDown(
-    listState: LazyListState,
-    onSwipeDown: () -> Unit
-) {
-    awaitEachGesture {
-        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-        val wasAtTop = listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
-        var dy = 0f
-        var dx = 0f
-
-        while (true) {
-            val event = awaitPointerEvent(PointerEventPass.Initial)
-            val pressed = event.changes.filter { it.pressed }
-            if (pressed.isEmpty()) {
-                if (wasAtTop && dy > 55f && dy > kotlin.math.abs(dx) * 1.2f) {
-                    onSwipeDown()
-                }
-                break
-            }
-            val change = pressed[0]
-            dy += change.positionChange().y
-            dx += change.positionChange().x
         }
     }
 }

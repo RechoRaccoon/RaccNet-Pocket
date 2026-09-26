@@ -223,7 +223,22 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
             resultSet = resultSet?.apply { retainAll(matches) } ?: matches
             if (resultSet.isEmpty()) break
         }
-        return (resultSet ?: emptySet()).take(limit)
+        val matched = resultSet ?: return emptyList()
+        if (matched.isEmpty()) return emptyList()
+        // Bug fix ("search shows the newest posts for a tag, then refreshes
+        // to older ones and the newer ones disappear"): matches came back in
+        // raw table order — oldest-tagged first — and were then cut to
+        // [limit], so for any popular tag the newest posts were exactly the
+        // ones dropped. Results now come newest-tagged first (the same order
+        // the unfiltered browse view uses) BEFORE the limit is applied.
+        val ordered = ArrayList<String>(minOf(limit, matched.size))
+        db.rawQuery("SELECT post_uri FROM liked_media ORDER BY indexed_timestamp DESC", null).use { cursor ->
+            while (ordered.size < limit && cursor.moveToNext()) {
+                val uri = cursor.getString(0)
+                if (uri in matched) ordered.add(uri)
+            }
+        }
+        return ordered
     }
 
     /** Item 2: default "browse all" view for the Liked search tab, most

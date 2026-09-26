@@ -3546,6 +3546,23 @@ _bskyDid.value          = session.did
         }
     }
 
+    /** More menu → Delete, on the signed-in account's own post. */
+    fun deleteCurrentPost() {
+        val item = currentItem.value ?: return
+        if (_appMode.value != AppMode.BLUESKY) return
+        if (item.postUri.isBlank() || item.author.did != _bskyDid.value) return
+        viewModelScope.launch(Dispatchers.IO) {
+            bskyRepo.deletePost(bskyToken, _bskyDid.value, item.postUri)
+                .onSuccess {
+                    showToast("Post deleted")
+                    val remaining = _mediaItems.value.filterNot { it.postUri == item.postUri }
+                    _mediaItems.value = remaining
+                    _currentIndex.value = _currentIndex.value.coerceAtMost((remaining.size - 1).coerceAtLeast(0))
+                }
+                .onFailure { _errorMessage.value = "Couldn't delete the post: ${it.message}" }
+        }
+    }
+
     // ── "Show more/less like this" (item 4) ─────────────────────────────────
     // Sends Bluesky's own feed-personalization interaction signal for
     // whichever post is currently on screen back to the AppView, which
@@ -3558,7 +3575,7 @@ _bskyDid.value          = session.did
         if (_appMode.value != AppMode.BLUESKY) return
         val generatorDid = _selectedFeedUri.value?.let { _feedGeneratorDid.value[it] }
         viewModelScope.launch(Dispatchers.IO) {
-            bskyRepo.sendFeedInteraction(bskyToken, item.postUri, wantMore = true, feedContext = item.feedContext, generatorDid = generatorDid)
+            bskyRepo.sendFeedInteraction(bskyToken, _bskyDid.value, item.postUri, wantMore = true, feedContext = item.feedContext, generatorDid = generatorDid)
                 .onSuccess { showToast("Showing more like this") }
                 .onFailure { _errorMessage.value = "Couldn't send feedback: ${it.message}" }
         }
@@ -3569,7 +3586,7 @@ _bskyDid.value          = session.did
         if (_appMode.value != AppMode.BLUESKY) return
         val generatorDid = _selectedFeedUri.value?.let { _feedGeneratorDid.value[it] }
         viewModelScope.launch(Dispatchers.IO) {
-            bskyRepo.sendFeedInteraction(bskyToken, item.postUri, wantMore = false, feedContext = item.feedContext, generatorDid = generatorDid)
+            bskyRepo.sendFeedInteraction(bskyToken, _bskyDid.value, item.postUri, wantMore = false, feedContext = item.feedContext, generatorDid = generatorDid)
                 .onSuccess { showToast("Showing less like this") }
                 .onFailure { _errorMessage.value = "Couldn't send feedback: ${it.message}" }
         }
@@ -4657,12 +4674,41 @@ _bskyDid.value          = session.did
         viewModelScope.launch { prefs.setTagPostWhenLiked(enabled) }
     }
 
+    // ── Tag-on-like queue ────────────────────────────────────────────────
+    // Liking several posts quickly used to launch one tagging job per like,
+    // all at once: several model loads/inferences in parallel, which is
+    // what made the app lag or crash. Likes now go into a queue that ONE
+    // worker drains, one post at a time, in order. Its state also feeds the
+    // debug overlay's "Activating tagger… / Tagging N posts" readout.
+    enum class LikeTagPhase { IDLE, ACTIVATING, TAGGING }
+    private val _likeTagPhase = MutableStateFlow(LikeTagPhase.IDLE)
+    val likeTagPhase: StateFlow<LikeTagPhase> = _likeTagPhase
+    private val _likeTagPending = MutableStateFlow(0)
+    val likeTagPending: StateFlow<Int> = _likeTagPending
+    private val likeTagQueue = kotlinx.coroutines.channels.Channel<MediaItem>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+    private val likeTagQueued = java.util.Collections.synchronizedSet(HashSet<String>())
+    private val likeTagWorker = viewModelScope.launch(Dispatchers.IO) {
+        for (item in likeTagQueue) {
+            // Never overlap the full "Tag all liked posts" pass either.
+            while (_taggingUiState.value.isRunning) delay(500)
+            _likeTagPhase.value = if (taggingRepo.isTaggerLoaded()) LikeTagPhase.TAGGING else LikeTagPhase.ACTIVATING
+            runCatching { taggingRepo.tagOnLike(item) }
+                .onFailure { Log.e("MainViewModel", "Tag-on-like failed", it) }
+            likeTagQueued.remove(item.postUri)
+            _likeTagPending.value = (_likeTagPending.value - 1).coerceAtLeast(0)
+            _likeTagPhase.value = if (_likeTagPending.value > 0) LikeTagPhase.TAGGING else LikeTagPhase.IDLE
+            if (_likeTagPending.value == 0) refreshTaggingCounts()
+        }
+    }
+
     private fun maybeTagOnLike(item: MediaItem) {
         if (!tagPostWhenLiked.value) return
-        viewModelScope.launch(Dispatchers.IO) {
-            taggingRepo.tagOnLike(item)
-            refreshTaggingCounts()
+        if (item.postUri.isBlank() || !likeTagQueued.add(item.postUri)) return
+        _likeTagPending.value = _likeTagPending.value + 1
+        if (_likeTagPhase.value == LikeTagPhase.IDLE) {
+            _likeTagPhase.value = if (taggingRepo.isTaggerLoaded()) LikeTagPhase.TAGGING else LikeTagPhase.ACTIVATING
         }
+        likeTagQueue.trySend(item)
     }
 
     /** Opens the full-screen tagging overlay and kicks off (or resumes) a
@@ -4894,10 +4940,19 @@ _bskyDid.value          = session.did
     /** Item 2: blank query browses everything tagged so far, most recent
      *  first, instead of an empty "type to search" state — a search query
      *  narrows that same list by tag. */
+    private val likedSearchGeneration = java.util.concurrent.atomic.AtomicInteger(0)
+
     private suspend fun performLikedTagSearch(query: String) {
+        // Only the most recently started search may publish results — an
+        // older, slower one (a tab-switch refresh, a background refresh
+        // after tagging) finishing later used to replace the results of
+        // the search the person actually just ran.
+        val generation = likedSearchGeneration.incrementAndGet()
         _searchState.value = _searchState.value.copy(loading = true)
         val uris = if (query.isBlank()) taggingRepo.browseAllTagged() else taggingRepo.search(query)
-        _likedTagSearchResults.value = hydrateLikedUris(uris)
+        val hydrated = hydrateLikedUris(uris)
+        if (generation != likedSearchGeneration.get()) return
+        _likedTagSearchResults.value = hydrated
         _searchState.value = _searchState.value.copy(loading = false, hasSearched = true)
     }
 

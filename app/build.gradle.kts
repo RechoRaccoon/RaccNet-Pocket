@@ -73,6 +73,11 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.8.0")
     implementation("androidx.media3:media3-exoplayer-hls:1.8.0")
     implementation("androidx.media3:media3-ui:1.8.0")
+    // Feed video preloading + on-disk cache (FeedVideoPool): SimpleCache /
+    // CacheDataSource live in datasource, its index DB in database. Both are
+    // already transitive deps of exoplayer; declared so the imports are stable.
+    implementation("androidx.media3:media3-datasource:1.8.0")
+    implementation("androidx.media3:media3-database:1.8.0")
     // Video-thumbnail stitching (VideoThumbnailStitcher): needs
     // media3-transformer 1.8.0+ for EditedMediaItemSequence +
     // experimentalSetForceAudioTrack, which is why compileSdk is 35.

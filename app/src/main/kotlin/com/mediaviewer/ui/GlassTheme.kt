@@ -610,6 +610,8 @@ fun UploadPlaceholderButton(
 data class GlassMenuItem(
     val label: String,
     val destructive: Boolean = false,
+    /** Tapping it runs [onClick] without closing the menu. */
+    val keepOpen: Boolean = false,
     val onClick: () -> Unit
 )
 

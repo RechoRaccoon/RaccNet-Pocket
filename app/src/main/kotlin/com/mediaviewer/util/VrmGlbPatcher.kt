@@ -51,12 +51,14 @@ object VrmGlbPatcher {
         val metallicFixed: Int = 0,
         val vertexColorsStripped: Int = 0,
         val texturesDetached: Int = 0,
-        val unlitToLit: Int = 0
+        val unlitToLit: Int = 0,
+        val morphNormalsStripped: Int = 0
     ) {
-        val changedAnything get() = unlitMaterials + metallicFixed + vertexColorsStripped + texturesDetached + unlitToLit > 0
+        val changedAnything get() = unlitMaterials + metallicFixed + vertexColorsStripped + texturesDetached + unlitToLit + morphNormalsStripped > 0
         override fun toString() =
             "$unlitMaterials made unlit, $unlitToLit unlit→lit, $metallicFixed metallic fixed, " +
-                "$vertexColorsStripped vertex-color prims stripped, $texturesDetached texture refs taken over"
+                "$vertexColorsStripped vertex-color prims stripped, $texturesDetached texture refs taken over, " +
+                "$morphNormalsStripped morph normal/tangent sets dropped"
     }
 
     private val TEXTURE_KEYS = listOf("normalTexture", "occlusionTexture", "emissiveTexture")
@@ -206,6 +208,7 @@ object VrmGlbPatcher {
         if (unlit > 0) addExtensionUsed(root, UNLIT)
 
         var stripped = 0
+        var morphNormalsStripped = 0
         root.optJSONArray("meshes")?.let { meshes ->
             for (m in 0 until meshes.length()) {
                 val prims = meshes.optJSONObject(m)?.optJSONArray("primitives") ?: continue
@@ -220,15 +223,27 @@ object VrmGlbPatcher {
                     prim.optJSONArray("targets")?.let { targets ->
                         for (t in 0 until targets.length()) {
                             val target = targets.optJSONObject(t) ?: continue
-                            target.keys().asSequence().filter { it.startsWith("COLOR_") }.toList()
-                                .forEach { target.remove(it) }
+                            // Morph targets keep POSITION only. Their NORMAL /
+                            // TANGENT deltas were the reason the face, fringe and
+                            // ears rendered dark and flat from the front while the
+                            // back of the head lit fine: gltfio builds morph tangent
+                            // frames from those deltas, and as soon as tracking
+                            // drives any expression (always — blink, mouth…) the
+                            // blended normals of every morphed mesh swing away
+                            // from the camera, so the lights stop reaching the
+                            // face. Base normals are the right ones for anime
+                            // faces anyway (MToon ignores morphed normals too).
+                            target.keys().asSequence()
+                                .filter { it.startsWith("COLOR_") || it == "NORMAL" || it == "TANGENT" }
+                                .toList()
+                                .forEach { target.remove(it); morphNormalsStripped++ }
                         }
                     }
                     if (touched) stripped++
                 }
             }
         }
-        return Stats(unlit, metallic, stripped, detached, litFromUnlit)
+        return Stats(unlit, metallic, stripped, detached, litFromUnlit, morphNormalsStripped)
     }
 
     private fun addExtensionUsed(root: JSONObject, name: String) {

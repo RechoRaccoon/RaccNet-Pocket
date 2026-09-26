@@ -4186,3 +4186,168 @@ private fun ShrinkToFitTitleBubble(text: String, liquidGlass: Boolean, tint: Col
         ) { Inner() }
     }
 }
+
+// ─── Shared with Search (Posts/Tagged) and the feed Grid ────────────────────
+// The same main-tab pills, content-type sub-tabs, per-sub-tab layouts and
+// Refresh/Grid interaction bar profile pages use, exposed for the two other
+// places that show lists of posts, so all three look and behave alike.
+
+/** Grid-layout choice per (screen, sub-tab), remembered for the session like
+ *  profiles' own [sharedGridModes]. */
+private val sharedResultGridModes = mutableStateMapOf<Pair<String, PostKindFilter>, Int>()
+
+fun resultsGridMode(screen: String, filter: PostKindFilter): Int = sharedResultGridModes[screen to filter] ?: 0
+fun cycleResultsGridMode(screen: String, filter: PostKindFilter) {
+    sharedResultGridModes[screen to filter] = (resultsGridMode(screen, filter) + 1) % 3
+}
+/** Whether the Grid button does anything for this sub-tab. */
+fun PostKindFilter.hasGridLayouts(): Boolean = isMasonryKind() || isListKind()
+
+/** Profile-style main tab row (the big pills), for arbitrary labels. */
+@Composable
+fun ProfileStyleTabRow(
+    labels: List<String>, selectedIndex: Int, liquidGlass: Boolean, tint: Color, onSelect: (Int) -> Unit
+) {
+    val tap = rememberHapticTap()
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        labels.forEachIndexed { index, label ->
+            val isSelected = index == selectedIndex
+            val shape = RoundedCornerShape(20.dp)
+            Box(
+                Modifier
+                    .then(
+                        if (liquidGlass) Modifier.glassPanel(true, tint = if (isSelected) tint else tint.copy(alpha = 0.4f), shape = shape)
+                        else Modifier.clip(shape).background(if (isSelected) Color.White.copy(0.15f) else Color.White.copy(0.06f))
+                    )
+                    .clickable { tap(); onSelect(index) }
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            ) {
+                Text(label, color = if (isSelected) Color.White else DimGray, fontSize = 13.sp,
+                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1)
+            }
+        }
+    }
+}
+
+/** Profile-style content-type sub-tabs (All / Images / Text Posts /
+ *  Horizontal Videos / Vertical Videos). A pill only appears once at least
+ *  one loaded post matches it (the selected one always stays). */
+@Composable
+fun PostKindSubTabRow(
+    items: List<MediaItem>, selected: PostKindFilter, liquidGlass: Boolean, tint: Color, onSelect: (PostKindFilter) -> Unit
+) {
+    val visible = remember(items, selected) {
+        PostKindFilter.entries.filter { it == selected || it == PostKindFilter.ALL || items.any { item -> it.matches(item) } }
+    }
+    if (visible.size > 1) {
+        ProfileSubFilterRow(
+            options = visible, selected = selected, liquidGlass = liquidGlass, tint = tint,
+            labelOf = { it.label() }, onSelect = onSelect
+        )
+    }
+}
+
+/** Posts rendered with the profile's per-sub-tab layouts (masonry, square
+ *  grid, text list, YouTube-style list, 9:16 grid). [onTapItem] gets the
+ *  tapped post itself. */
+fun LazyListScope.sharedPostResults(
+    items: List<MediaItem>,
+    loading: Boolean,
+    filter: PostKindFilter,
+    gridMode: Int,
+    tint: Color,
+    liquidGlass: Boolean,
+    roundedGridTiles: Boolean = false,
+    onTapItem: (MediaItem) -> Unit,
+    onSeedSubImageIndex: (String, Int) -> Unit = { _, _ -> },
+    onLoadMore: () -> Unit = {}
+) {
+    val tap: (List<MediaItem>, Int) -> Unit = { list, i -> list.getOrNull(i)?.let(onTapItem) }
+    val match: (MediaItem) -> Boolean = { filter.matches(it) }
+    when (filter) {
+        PostKindFilter.ALL, PostKindFilter.IMAGES -> when (gridMode) {
+            2 -> profileMediaGridRows(items, loading, tint, liquidGlass, tap, onLoadMore, match, roundedGridTiles, onSeedSubImageIndex)
+            1 -> postsPinterestGridRows(items, loading, tint, liquidGlass, tap, onSeedSubImageIndex, onLoadMore, match, columns = 3)
+            else -> postsPinterestGridRows(items, loading, tint, liquidGlass, tap, onSeedSubImageIndex, onLoadMore, match, columns = 2)
+        }
+        PostKindFilter.TEXT_POSTS -> when (gridMode) {
+            2 -> postsPinterestGridRows(items, loading, tint, liquidGlass, tap, onSeedSubImageIndex, onLoadMore, match, columns = 3)
+            1 -> postsPinterestGridRows(items, loading, tint, liquidGlass, tap, onSeedSubImageIndex, onLoadMore, match, columns = 2)
+            else -> postsTextRows(items, loading, liquidGlass, tint, tap, onLoadMore, match)
+        }
+        PostKindFilter.HORIZONTAL_VIDEOS -> postsHorizontalVideoRows(items, loading, tint, liquidGlass, tap, onLoadMore, match)
+        PostKindFilter.VERTICAL_VIDEOS -> postsVerticalVideoGridRows(items, loading, tint, liquidGlass, tap, onLoadMore, match)
+    }
+}
+
+/** The profile page's bottom interaction bar, trimmed to Refresh + Grid. */
+@Composable
+fun ResultsInteractionBar(
+    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
+    refreshing: Boolean, animateRefresh: Boolean, onRefresh: () -> Unit,
+    filter: PostKindFilter?, gridMode: Int, onGrid: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val shape = RoundedCornerShape(26.dp)
+    val iconSize = 20.dp
+    val pillHeight = if (liquidGlass) 44.dp else 36.dp
+    val tap = rememberHapticTap()
+    val showGrid = filter != null && filter.hasGridLayouts()
+    @Composable
+    fun BarContent() {
+        Row(
+            Modifier.height(pillHeight).wrapContentWidth().padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally)
+        ) {
+            Box(
+                Modifier.size(44.dp).clip(CircleShape).clickable { if (!refreshing) { tap(); onRefresh() } },
+                contentAlignment = Alignment.Center
+            ) {
+                val angle = if (refreshing && animateRefresh) {
+                    androidx.compose.animation.core.rememberInfiniteTransition(label = "resultsRefresh").animateFloat(
+                        initialValue = 0f, targetValue = 360f,
+                        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+                            androidx.compose.animation.core.tween(900, easing = androidx.compose.animation.core.LinearEasing)
+                        ),
+                        label = "resultsRefreshSpin"
+                    ).value
+                } else 0f
+                Icon(
+                    Icons.Filled.Refresh, contentDescription = "Refresh",
+                    tint = Color.White.copy(alpha = if (refreshing && !animateRefresh) 0.5f else 1f),
+                    modifier = Modifier.size(iconSize).rotate(angle)
+                )
+            }
+            if (showGrid) {
+                val listKind = filter!!.isListKind()
+                Box(
+                    Modifier.size(44.dp).clip(CircleShape).clickable { tap(); onGrid() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    when {
+                        listKind && gridMode == 0 -> ListModeIcon(Modifier.size(iconSize))
+                        listKind && gridMode == 1 -> UnevenColumnsIcon(2, Modifier.size(iconSize))
+                        listKind -> UnevenColumnsIcon(3, Modifier.size(iconSize))
+                        gridMode == 0 -> UnevenColumnsIcon(2, Modifier.size(iconSize))
+                        gridMode == 1 -> UnevenColumnsIcon(3, Modifier.size(iconSize))
+                        else -> Icon(Icons.Filled.GridOn, contentDescription = "Grid layout", tint = Color.White, modifier = Modifier.size(iconSize))
+                    }
+                }
+            }
+        }
+    }
+    Box(modifier.windowInsetsPadding(WindowInsets.navigationBars).height(if (liquidGlass) 60.dp else 52.dp).fillMaxWidth(), contentAlignment = Alignment.Center) {
+        if (liquidGlass) {
+            LiquidGlassSurface(modifier = Modifier.height(pillHeight), shape = shape, tint = tint, backdrop = backdrop) { BarContent() }
+        } else {
+            Box(Modifier.height(pillHeight).clip(shape).background(Color.Black.copy(alpha = 0.7f))) { BarContent() }
+        }
+    }
+}

@@ -145,6 +145,20 @@ fun SearchOverlay(
     val showSuggestions = isTagInputFilter && tagSuggestions.isNotEmpty()
     var barBottomLeft by remember { mutableStateOf(Offset.Zero) }
     var barWidthPx by remember { mutableStateOf(0) }
+    // Posts / Tagged: which content type is shown (profile-style sub-tabs)
+    // and, per sub-tab, which layout (the interaction bar's Grid button).
+    var postsKind by remember { mutableStateOf(PostKindFilter.ALL) }
+    var taggedKind by remember { mutableStateOf(PostKindFilter.ALL) }
+    val isPosts = state.filter == MainViewModel.SearchFilter.POSTS
+    val kindForTab = if (isLiked) taggedKind else postsKind
+    val gridScreen = if (isLiked) "search_tagged" else "search_posts"
+    val submitSearch: () -> Unit = {
+        when {
+            isE621Filter -> onE621SearchSubmit()
+            isLiked -> onLikedSearchSubmit()
+            else -> onQueryChange(state.query)
+        }
+    }
 
     Box(
         Modifier.fillMaxSize()
@@ -170,8 +184,9 @@ fun SearchOverlay(
                 )
         )
 
+        // The bar sits right under the camera cutout — the same line profile
+        // banners (and the Hub's search bar) start on.
         Column(Modifier.fillMaxSize().padding(top = rememberTopCutoutClearance())) {
-            Spacer(Modifier.height(16.dp))
 
             // ── Bar: close bubble + round search field ──────────────────────
             // Item 4 (rework #2): back to an overlay for the suggestions
@@ -219,11 +234,7 @@ fun SearchOverlay(
                             // action actually submits a query.
                             onSearch = {
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                when {
-                                    isE621Filter -> onE621SearchSubmit()
-                                    isLiked -> onLikedSearchSubmit()
-                                    else -> onQueryChange(state.query)
-                                }
+                                submitSearch()
                             }
                         )
                     }
@@ -253,29 +264,48 @@ fun SearchOverlay(
                         }
                         .opaqueMaskPanel(backdrop = searchBackdrop, tint = profileTint, shape = fieldShape)
                 ) { SearchFieldContent() }
+                // Round search button on the right — same as the Hub's.
+                val searchTap = rememberHapticTap()
+                @Composable
+                fun SearchCircleContent() {
+                    Box(Modifier.fillMaxSize().clickable { searchTap(); submitSearch() }, contentAlignment = Alignment.Center) {
+                        Icon(Icons.Default.Search, contentDescription = "Search", tint = Color.White, modifier = Modifier.size(18.dp))
+                    }
+                }
+                if (liquidGlass) {
+                    LiquidGlassSurface(Modifier.size(44.dp), shape = CircleShape, tint = profileTint, backdrop = searchBackdrop) { SearchCircleContent() }
+                } else {
+                    Box(Modifier.size(44.dp).clip(CircleShape).background(Color.White.copy(0.06f))) { SearchCircleContent() }
+                }
             }
 
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(10.dp))
 
             // ── Filter row ────────────────────────────────────────────────
             // Roadmap: restyled to match the Hub's "Feeds" row — rounder,
             // compact, horizontally scrollable pills that float over the
             // live backdrop, instead of a fixed SpaceEvenly row between two
             // dividers.
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 5.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                MainViewModel.SearchFilter.entries.forEach { filter ->
-                    // Item 14: e621 filter only shows once logged into e621.
-                    if (filter == MainViewModel.SearchFilter.E621 && !e621LoggedIn) return@forEach
+            // Main tabs — the same big pills as a profile's tab row, framed
+            // by the same thin dividers.
+            val tabs = MainViewModel.SearchFilter.entries.filter { filter ->
+                // Item 14: e621 filter only shows once logged into e621.
+                !(filter == MainViewModel.SearchFilter.E621 && !e621LoggedIn) &&
                     // The Tagged tab only exists once there's something tagged to search.
-                    if (filter == MainViewModel.SearchFilter.LIKED_TAGS && !hasTaggedDataset) return@forEach
-                    FilterChip(label = filter.label(), active = state.filter == filter, liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop) { onSelectFilter(filter) }
-                }
+                    !(filter == MainViewModel.SearchFilter.LIKED_TAGS && !hasTaggedDataset)
             }
-
-            Spacer(Modifier.height(10.dp))
+            HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
+            ProfileStyleTabRow(
+                labels = tabs.map { it.label() }, selectedIndex = tabs.indexOf(state.filter),
+                liquidGlass = liquidGlass, tint = profileTint, onSelect = { onSelectFilter(tabs[it]) }
+            )
+            HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
+            // Content-type sub-tabs — Posts and Tagged only.
+            if (isPosts && state.posts.isNotEmpty()) {
+                PostKindSubTabRow(state.posts, postsKind, liquidGlass, profileTint) { postsKind = it }
+            } else if (isLiked && hasTaggedDataset && likedTagResults.isNotEmpty()) {
+                PostKindSubTabRow(likedTagResults, taggedKind, liquidGlass, profileTint) { taggedKind = it }
+            }
 
             // ── Results ──────────────────────────────────────────────────
             Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -295,16 +325,12 @@ fun SearchOverlay(
                                 CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 1.5.dp)
                             }
                         } else if (likedTagResults.isEmpty()) EmptyResultsText() else {
-                            LazyVerticalGrid(
-                                columns = GridCells.Fixed(3),
-                                contentPadding = PaddingValues(0.dp),
-                                horizontalArrangement = Arrangement.spacedBy(0.dp),
-                                verticalArrangement = Arrangement.spacedBy(0.dp),
-                                modifier = Modifier.fillMaxSize()
-                            ) {
-                                itemsIndexed(likedTagResults, key = { i, item -> item.id + "_$i" }) { index, item ->
-                                    SearchPostCell(item = item, onClick = { onOpenLikedPost(index) })
-                                }
+                            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp)) {
+                                sharedPostResults(
+                                    items = likedTagResults, loading = false, filter = taggedKind,
+                                    gridMode = resultsGridMode(gridScreen, taggedKind), tint = profileTint, liquidGlass = liquidGlass,
+                                    onTapItem = { item -> likedTagResults.indexOf(item).takeIf { it >= 0 }?.let(onOpenLikedPost) }
+                                )
                             }
                         }
                     }
@@ -322,7 +348,7 @@ fun SearchOverlay(
                     }
                     state.filter == MainViewModel.SearchFilter.FEEDS -> {
                         if (state.feeds.isEmpty()) EmptyResultsText() else {
-                            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 4.dp)) {
+                            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp)) {
                                 items(state.feeds, key = { it.uri }) { feed ->
                                     FeedResultRow(feed = feed, liquidGlass = liquidGlass, onAdd = { onAddFeed(feed) })
                                 }
@@ -331,22 +357,18 @@ fun SearchOverlay(
                     }
                     state.filter == MainViewModel.SearchFilter.POSTS -> {
                         if (state.posts.isEmpty()) EmptyResultsText() else {
-                            LazyVerticalGrid(
-                                columns = GridCells.Fixed(3),
-                                contentPadding = PaddingValues(0.dp),
-                                horizontalArrangement = Arrangement.spacedBy(0.dp),
-                                verticalArrangement = Arrangement.spacedBy(0.dp),
-                                modifier = Modifier.fillMaxSize()
-                            ) {
-                                itemsIndexed(state.posts, key = { i, item -> item.id + "_$i" }) { index, item ->
-                                    SearchPostCell(item = item, onClick = { onOpenPost(index) })
-                                }
+                            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp)) {
+                                sharedPostResults(
+                                    items = state.posts, loading = false, filter = postsKind,
+                                    gridMode = resultsGridMode(gridScreen, postsKind), tint = profileTint, liquidGlass = liquidGlass,
+                                    onTapItem = { item -> state.posts.indexOf(item).takeIf { it >= 0 }?.let(onOpenPost) }
+                                )
                             }
                         }
                     }
                     state.filter == MainViewModel.SearchFilter.ACCOUNTS -> {
                         if (state.accounts.isEmpty()) EmptyResultsText() else {
-                            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 4.dp)) {
+                            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp)) {
                                 items(state.accounts, key = { it.author.did }) { result ->
                                     AccountResultRow(result = result, liquidGlass = liquidGlass, onClick = { onOpenAccount(result.author) })
                                 }
@@ -355,7 +377,7 @@ fun SearchOverlay(
                     }
                     state.filter == MainViewModel.SearchFilter.STARTER_PACKS -> {
                         if (state.starterPacks.isEmpty()) EmptyResultsText() else {
-                            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 4.dp)) {
+                            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp)) {
                                 items(state.starterPacks, key = { it.uri }) { pack ->
                                     StarterPackResultRow(pack = pack, liquidGlass = liquidGlass)
                                 }
@@ -364,6 +386,19 @@ fun SearchOverlay(
                     }
                 }
             }
+        }
+
+        // Profile-style interaction bar, trimmed to Refresh + Grid layout.
+        if (!isE621Filter && !(isLiked && !hasTaggedDataset)) {
+            ResultsInteractionBar(
+                liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop,
+                refreshing = state.loading, animateRefresh = true,
+                onRefresh = { if (state.query.isNotBlank() || isLiked) submitSearch() },
+                filter = if (isPosts || isLiked) kindForTab else null,
+                gridMode = resultsGridMode(gridScreen, kindForTab),
+                onGrid = { cycleResultsGridMode(gridScreen, kindForTab) },
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
+            )
         }
 
         // Item 4: the suggestions panel — a later sibling of the Column

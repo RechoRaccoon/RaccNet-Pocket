@@ -351,7 +351,7 @@ interface BlueskyVideoApi {
         @Query("did") did: String,
         @Query("name") name: String,
         @Body body: okhttp3.RequestBody
-    ): Response<BskyJobStatus>
+    ): Response<okhttp3.ResponseBody>
 
     @GET("xrpc/app.bsky.video.getJobStatus")
     suspend fun getJobStatus(

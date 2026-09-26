@@ -13,6 +13,7 @@ class VrmSettingsStore(context: Context) {
     fun float(key: String, default: Float) = prefs.getFloat(key, default)
     fun int(key: String, default: Int) = prefs.getInt(key, default)
     fun strings(key: String): Set<String> = prefs.getStringSet(key, emptySet())?.toSet() ?: emptySet()
+    fun string(key: String, default: String = ""): String = prefs.getString(key, default) ?: default
 
     fun put(key: String, value: Any) {
         prefs.edit().apply {
@@ -20,6 +21,7 @@ class VrmSettingsStore(context: Context) {
                 is Boolean -> putBoolean(key, value)
                 is Float -> putFloat(key, value)
                 is Int -> putInt(key, value)
+                is String -> putString(key, value)
                 is Set<*> -> putStringSet(key, value.filterIsInstance<String>().toSet())
                 else -> return
             }
@@ -42,5 +44,10 @@ class VrmSettingsStore(context: Context) {
         const val ARM_IK = "arm_ik"                // hands place the arms (IK)
         const val HIDDEN_PARTS = "hidden_parts"
         const val DEFAULT_SMOOTHING = 5
+        const val MIC_MUTED = "mic_muted"
+        const val LIGHT_LEVEL = "light_level"      // 0..10, 5 = default brightness
+        const val STREAM_URL = "stream_url"
+        const val STREAM_KEY = "stream_key"
+        const val STREAM_QUALITY = "stream_quality" // "" = auto, else StreamQuality.name
     }
 }

@@ -12,6 +12,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
@@ -89,11 +90,21 @@ class TaggingRepository(
         return parsed
     }
 
+    /** Serializes model loading: two callers racing here used to build two
+     *  ImageTagger instances (two copies of the model in memory) at once. */
+    private val taggerLoadLock = kotlinx.coroutines.sync.Mutex()
+
+    /** True once the model is loaded in memory (no "activating" wait). */
+    fun isTaggerLoaded(): Boolean = tagger != null
+
     private suspend fun ensureTagger(onModelProgress: (TaggerModelManager.State) -> Unit): ImageTagger {
         tagger?.let { return it }
-        modelManager.ensureReady(onModelProgress)
-        if (!modelManager.isReady()) error("Model not ready")
-        return ImageTagger(modelManager.modelFile, modelManager.tagsFile).also { tagger = it }
+        return taggerLoadLock.withLock {
+            tagger?.let { return@withLock it }
+            modelManager.ensureReady(onModelProgress)
+            if (!modelManager.isReady()) error("Model not ready")
+            ImageTagger(modelManager.modelFile, modelManager.tagsFile).also { tagger = it }
+        }
     }
 
     fun cancel() { cancelRequested = true }

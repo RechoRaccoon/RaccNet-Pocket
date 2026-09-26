@@ -2,7 +2,7 @@ package com.mediaviewer.ui
 
 import android.util.Log
 import android.view.Choreographer
-import android.view.SurfaceView
+import android.view.TextureView
 import android.view.View
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
@@ -123,7 +123,9 @@ fun VrmAvatarView(
     /** Bump to put the camera (drag-spin + pinch-zoom) back to default. */
     cameraResetKey: Int = 0,
     /** Photo/video capture of the rendered avatar. */
-    captureController: VrmCaptureController? = null
+    captureController: VrmCaptureController? = null,
+    /** Scales every light (0.4 … 1.6); 1 = the tuned default. */
+    lightLevel: Float = 1f
 ) {
     var session by remember { mutableStateOf<ViewerSession?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
@@ -134,6 +136,11 @@ fun VrmAvatarView(
     val currentOnTextures by rememberUpdatedState(onTexturesApplied)
     val currentOnPatched by rememberUpdatedState(onMaterialsPatched)
     val currentOnParts by rememberUpdatedState(onPartsReady)
+    // Read inside the gesture handler, which is set up once.
+    val followingNow by rememberUpdatedState(followTracking)
+    // "Follow my head" places the model itself, so manual spinning is off
+    // while it's on — and any earlier spin is undone when it turns on.
+    LaunchedEffect(followTracking) { if (followTracking) userYawDegrees = 0f }
     // Bumped per load so hidden parts are re-applied to a fresh model.
     var loadGeneration by remember { mutableStateOf(0) }
 
@@ -191,6 +198,11 @@ fun VrmAvatarView(
         }
     }
 
+    LaunchedEffect(session, lightLevel) {
+        val s = session ?: return@LaunchedEffect
+        s.onMain { s.applyLightLevel(it, lightLevel) }
+    }
+
     LaunchedEffect(session, hiddenParts, loadGeneration) {
         val s = session ?: return@LaunchedEffect
         s.onMain { s.applyHiddenParts(it.engine, hiddenParts) }
@@ -215,9 +227,11 @@ fun VrmAvatarView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
                 runCatching { Utils.init() }.onFailure { Log.e(TAG, "Filament Utils.init() failed", it) }
-                val surfaceView = SurfaceView(ctx).apply {
-                    holder.setFormat(android.graphics.PixelFormat.OPAQUE)
-                }
+                // TextureView, not SurfaceView: it composites like a normal
+                // View, so the glass buttons over it can blur the avatar
+                // behind them (a SurfaceView's pixels never reach Compose's
+                // backdrop layer). It also z-orders reliably with overlays.
+                val surfaceView = TextureView(ctx).apply { isOpaque = true }
                 val newSession = ViewerSession()
                 newSession.surfaceView = surfaceView
                 // MUST be added before ModelViewer(surfaceView) — listeners
@@ -243,9 +257,17 @@ fun VrmAvatarView(
                 addCameraLightRig(viewer.engine, viewer.scene).let { (entities, dirs) ->
                     newSession.lightEntities = entities
                     newSession.lightDirections = dirs
+                    newSession.baseLightIntensities = LIGHT_RIG_INTENSITIES.copyOf()
                 }
                 newSession.indirectLight = addFlatAmbientLight(viewer.engine, viewer.scene)
+                newSession.applyLightLevel(viewer, lightLevel)
                 newSession.colorGrading = applyLinearToneMapping(viewer)
+                // Screen-space ambient occlusion (on by default in ModelViewer)
+                // darkened the whole face under the fringe and costs a full-
+                // screen pass every frame — noticeable on low-end GPUs.
+                runCatching {
+                    viewer.view.ambientOcclusionOptions = viewer.view.ambientOcclusionOptions.apply { enabled = false }
+                }.onFailure { Log.e(TAG, "Couldn't turn off SSAO", it) }
                 applyBackgroundColor(viewer, newSession, backgroundTint)
                 newSession.startFrameLoop()
                 session = newSession
@@ -260,7 +282,7 @@ fun VrmAvatarView(
                 .fillMaxSize()
                 .pointerInput(Unit) {
                     detectTransformGestures { _, pan, gestureZoom, _ ->
-                        userYawDegrees += pan.x * DRAG_DEGREES_PER_PX
+                        if (!followingNow) userYawDegrees += pan.x * DRAG_DEGREES_PER_PX
                         if (gestureZoom != 1f) {
                             zoom = (zoom * gestureZoom).coerceIn(MIN_ZOOM, MAX_ZOOM)
                         }
@@ -299,9 +321,59 @@ private const val ZOOM_FOCUS_Y = 0.5f
  *  goes through [onMain], which refuses once [released] is set. */
 internal class ViewerSession {
     var viewer: ModelViewer? = null
-    var surfaceView: SurfaceView? = null
+    var surfaceView: TextureView? = null
     /** Active video recording, rendered into every frame (see [renderRecording]). */
     var recording: VrmRecording? = null
+    /** Active live stream output (encoder input surface), see [renderStream]. */
+    var stream: VrmStreamTarget? = null
+
+    /**
+     * Renders the current frame into the live-stream encoder's surface, at
+     * the stream's own frame rate and 9:16 size. The camera keeps its
+     * vertical field of view; only the horizontal extent adapts (via the
+     * camera's aspect scaling), so a tall phone screen and a 9:16 stream
+     * frame the avatar the same way — no stretching.
+     */
+    fun renderStream(v: ModelViewer, frameTimeNanos: Long) {
+        val st = stream ?: return
+        // Paced against a running schedule (not "time since last frame"),
+        // so e.g. a 24 fps stream fed by a 30 fps render loop really gets
+        // ~24 fps instead of every other frame.
+        if (st.nextDueNanos != 0L && frameTimeNanos < st.nextDueNanos - STREAM_SLACK_NANOS) return
+        st.nextDueNanos = if (st.nextDueNanos == 0L || frameTimeNanos - st.nextDueNanos > st.intervalNanos)
+            frameTimeNanos + st.intervalNanos else st.nextDueNanos + st.intervalNanos
+        val view = v.view
+        val saved = view.viewport
+        if (saved.width <= 0 || saved.height <= 0) return
+        val screenAspect = saved.width.toDouble() / saved.height
+        val streamAspect = st.width.toDouble() / st.height
+        try {
+            view.viewport = com.google.android.filament.Viewport(0, 0, st.width, st.height)
+            v.camera.setScaling(screenAspect / streamAspect, 1.0)
+            if (v.renderer.beginFrame(st.swapChain, frameTimeNanos)) {
+                v.renderer.render(view)
+                v.renderer.endFrame()
+            }
+        } finally {
+            v.camera.setScaling(1.0, 1.0)
+            view.viewport = saved
+        }
+    }
+
+    /** Base intensities of [lightEntities] and the ambient light, captured
+     *  when the rig is built, so [applyLightLevel] can scale them. */
+    var baseLightIntensities: FloatArray = FloatArray(0)
+
+    fun applyLightLevel(v: ModelViewer, level: Float) {
+        val k = level.coerceIn(0.4f, 1.6f)
+        val lm = v.engine.lightManager
+        for ((i, e) in lightEntities.withIndex()) {
+            val base = baseLightIntensities.getOrNull(i) ?: continue
+            val inst = lm.getInstance(e)
+            if (inst != 0) runCatching { lm.setIntensity(inst, base * k) }
+        }
+        runCatching { indirectLight?.intensity = AMBIENT_INTENSITY * k }
+    }
 
     /** Renders the current frame a second time, into the video encoder's
      *  surface. Same view/camera, viewport switched to the video size. */
@@ -468,6 +540,8 @@ internal class ViewerSession {
                 v.render(frameTimeNanos)
                 runCatching { renderRecording(v, frameTimeNanos) }
                     .onFailure { Log.e(TAG, "Recording frame failed", it) }
+                runCatching { renderStream(v, frameTimeNanos) }
+                    .onFailure { Log.e(TAG, "Stream frame failed", it) }
                 if (clearBreadcrumbAfterFrame && --breadcrumbFrames <= 0) {
                     clearBreadcrumbAfterFrame = false
                     com.mediaviewer.util.CrashBreadcrumbs.clearMark()
@@ -503,6 +577,10 @@ internal class ViewerSession {
             runCatching { rec.recorder.stop() }
             runCatching { rec.recorder.release() }
             runCatching { rec.file.delete() }
+        }
+        stream?.let { st ->
+            stream = null
+            runCatching { v.engine.destroySwapChain(st.swapChain); v.engine.flushAndWait() }
         }
         runCatching {
             val engine = v.engine
@@ -980,12 +1058,12 @@ private fun addCameraLightRig(engine: Engine, scene: com.google.android.filament
     // Front-heavy: the camera's exposure maps ~100k lux to full white, so the
     // old 34k key barely out-shone the flat ambient light (which reaches
     // every side equally) — the face read as no brighter than the back.
-    light(0.0f, -0.15f, -1.0f, 40_000f)   // headlight: straight from the viewer onto the face
+    light(0.0f, -0.15f, -1.0f, LIGHT_RIG_INTENSITIES[0])   // headlight: straight from the viewer onto the face
     // A direction is where the light TRAVELS: +x travels rightwards, so it
     // comes from the left. (These were swapped before.)
-    light(0.35f, -0.45f, -1.0f, 30_000f)  // key: from the viewer's upper-left, gives the face some shape
-    light(-0.55f, -0.15f, -1.0f, 10_000f) // fill: from the viewer's right
-    light(0.0f, -0.2f, 1.0f, 5_000f)      // rim: from behind, a faint silhouette edge
+    light(0.35f, -0.45f, -1.0f, LIGHT_RIG_INTENSITIES[1])  // key: from the viewer's upper-left, gives the face some shape
+    light(-0.55f, -0.15f, -1.0f, LIGHT_RIG_INTENSITIES[2]) // fill: from the viewer's right
+    light(0.0f, -0.2f, 1.0f, LIGHT_RIG_INTENSITIES[3])     // rim: from behind, a faint silhouette edge
     return entities.toIntArray() to dirs
 }
 
@@ -1017,13 +1095,30 @@ private fun addFlatAmbientLight(engine: Engine, scene: com.google.android.filame
     // Band-0 irradiance at this intensity does not blow out to white.
     val indirectLight = IndirectLight.Builder()
         .irradiance(1, floatArrayOf(0.65f, 0.65f, 0.68f))
-        .intensity(6_000f) // lower flat ambient, so front vs. back actually differs
+        .intensity(AMBIENT_INTENSITY)
         .build(engine)
     scene.indirectLight = indirectLight
     return indirectLight
 }
 
 private const val TAG = "VrmAvatarView"
+
+/** Headlight, key, fill, rim (lux) — see [addCameraLightRig]. */
+private val LIGHT_RIG_INTENSITIES = floatArrayOf(45_000f, 28_000f, 12_000f, 5_000f)
+/** Flat ambient: enough that no part of the face ever drops to near-black,
+ *  low enough that the front/back lighting still reads. */
+private const val AMBIENT_INTENSITY = 9_000f
+
+/** The live-stream encoder surface Filament renders into. */
+internal class VrmStreamTarget(
+    val swapChain: com.google.android.filament.SwapChain,
+    val width: Int,
+    val height: Int,
+    val intervalNanos: Long
+) {
+    var nextDueNanos = 0L
+}
+private const val STREAM_SLACK_NANOS = 8_000_000L
 
 
 internal class VrmRecording(
@@ -1048,17 +1143,11 @@ class VrmCaptureController {
     /** Grabs the current frame as a JPEG. Null if it couldn't. */
     suspend fun takePhoto(context: android.content.Context): android.net.Uri? {
         val sv = session?.surfaceView ?: return null
-        if (sv.width <= 0 || sv.height <= 0) return null
-        val bitmap = android.graphics.Bitmap.createBitmap(sv.width, sv.height, android.graphics.Bitmap.Config.ARGB_8888)
-        val result = kotlinx.coroutines.suspendCancellableCoroutine<Int> { cont ->
-            android.view.PixelCopy.request(sv, bitmap, { code -> if (cont.isActive) cont.resumeWith(Result.success(code)) },
-                android.os.Handler(android.os.Looper.getMainLooper()))
-        }
-        if (result != android.view.PixelCopy.SUCCESS) {
-            Log.e(TAG, "PixelCopy failed: $result")
-            bitmap.recycle()
-            return null
-        }
+        if (sv.width <= 0 || sv.height <= 0 || !sv.isAvailable) return null
+        // TextureView hands back its current frame directly (main thread).
+        val bitmap = runCatching { sv.getBitmap(sv.width, sv.height) }
+            .onFailure { Log.e(TAG, "TextureView.getBitmap failed", it) }
+            .getOrNull() ?: return null
         return withContext(Dispatchers.IO) {
             runCatching {
                 val file = newCaptureFile(context, "jpg")
@@ -1122,6 +1211,34 @@ class VrmCaptureController {
             false
         }
     }
+
+    /** Starts rendering into a live-stream encoder's input [surface]. */
+    fun startStreamOutput(surface: android.view.Surface, width: Int, height: Int, fps: Int): Boolean {
+        val s = session ?: return false
+        val v = s.viewer ?: return false
+        if (s.stream != null) return true
+        return try {
+            val swapChain = v.engine.createSwapChain(surface)
+            s.stream = VrmStreamTarget(swapChain, width, height, 1_000_000_000L / fps.coerceAtLeast(1))
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Couldn't render into the stream encoder", e)
+            false
+        }
+    }
+
+    /** Stops rendering into the stream encoder. Call BEFORE the encoder's
+     *  surface is released. */
+    fun stopStreamOutput() {
+        val s = session ?: return
+        val st = s.stream ?: return
+        s.stream = null
+        runCatching {
+            s.viewer?.engine?.let { e -> e.destroySwapChain(st.swapChain); e.flushAndWait() }
+        }.onFailure { Log.e(TAG, "Releasing stream surface failed", it) }
+    }
+
+    val isStreaming: Boolean get() = session?.stream != null
 
     /** Stops and finalises the video. Null if nothing usable was recorded. */
     suspend fun stopRecording(context: android.content.Context): android.net.Uri? {

@@ -18,6 +18,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.time.Instant
+import okio.source
 
 class BlueskyRepository {
 
@@ -36,6 +37,8 @@ class BlueskyRepository {
     // instances even when they log in via bsky.social). Regular repo writes
     // work fine through bsky.social directly, so this is scoped to chat only.
     private var chatApi: BlueskyApi = api
+    /** The account's real PDS (from its DID document), once resolved. */
+    @Volatile private var resolvedPdsEndpoint: String? = null
     private var chatPdsResolvedFor: String? = null
     // Bug fix ("From Friends works immediately, but says Feed Empty once the
     // background preload finishes"): ensureChatApi used to set
@@ -72,6 +75,7 @@ class BlueskyRepository {
                         val obj = s.asJsonObject
                         if (obj.get("id")?.asString == "#atproto_pds") {
                             val endpoint = obj.get("serviceEndpoint")?.asString ?: continue
+                            resolvedPdsEndpoint = endpoint.trimEnd('/')
                             chatApi = NetworkClient.buildBlueskyApi(endpoint.trimEnd('/') + "/")
                             return@runCatching
                         }
@@ -129,12 +133,16 @@ class BlueskyRepository {
      *  above. */
     suspend fun getPostsByUris(token: String, uris: List<String>): Result<List<MediaItem>> = runCatching {
         if (uris.isEmpty()) return@runCatching emptyList()
-        val items = mutableListOf<MediaItem>()
-        uris.chunked(25).forEach { batch ->
-            val body = runCatching { api.getPosts("Bearer $token", batch) }.getOrNull()?.takeIf { it.isSuccessful }?.body()
-            body?.posts?.forEach { post -> items.addAll(parseFeedItemSafe(BskyFeedItem(post = post))) }
+        // Batches fetched in parallel (was one after another — 8 round trips
+        // in a row for a 200-result tag search); order is kept per batch.
+        coroutineScope {
+            uris.chunked(25).map { batch ->
+                async {
+                    val body = runCatching { api.getPosts("Bearer $token", batch) }.getOrNull()?.takeIf { it.isSuccessful }?.body()
+                    body?.posts?.flatMap { post -> parseFeedItemSafe(BskyFeedItem(post = post)) } ?: emptyList()
+                }
+            }.awaitAll().flatten()
         }
-        items
     }
 
     // ── Saved Feeds — robust JSON parsing ────────────────────────────────────
@@ -1062,13 +1070,27 @@ class BlueskyRepository {
      *  video blobs (see BlueskyBlobResolver). */
     private suspend fun firstImageField(obj: com.google.gson.JsonObject?, ownerDid: String, vararg keys: String): String? {
         if (obj == null) return null
+        // Backdrop/banner-style fields get the larger rendition; posters,
+        // covers and inline images the lighter one (see ImageLoading).
+        val wide = keys.firstOrNull()?.let { it.startsWith("backdrop") || it.startsWith("banner") } == true
         for (k in keys) {
             val v = obj.get(k) ?: continue
-            if (v.isJsonPrimitive && v.asJsonPrimitive.isString && v.asString.isNotBlank()) return v.asString
+            if (v.isJsonPrimitive && v.asJsonPrimitive.isString && v.asString.isNotBlank()) {
+                return com.mediaviewer.util.ImageLoading.optimizeUrl(v.asString, wide)
+            }
             if (v.isJsonObject) {
                 val blob = v.asJsonObject
                 val cid = blob.getAsJsonObject("ref")?.get("\$link")?.takeIf { it.isJsonPrimitive }?.asString
                     ?: blob.get("cid")?.takeIf { it.isJsonPrimitive }?.asString
+                val mime = blob.get("mimeType")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
+                // Speed fix: image blobs load through Bluesky's image CDN
+                // (resized + edge-cached) instead of the owner's PDS getBlob
+                // — no DID-document lookup first, a fraction of the bytes,
+                // and cacheable. GIFs keep the original so they still animate.
+                if (!cid.isNullOrBlank() && ownerDid.startsWith("did:") && mime != "image/gif" &&
+                    (mime.isEmpty() || mime.startsWith("image/"))) {
+                    return com.mediaviewer.util.ImageLoading.bskyCdnUrl(ownerDid, cid, wide)
+                }
                 if (!cid.isNullOrBlank()) {
                     val resolved = runCatching { withContext(Dispatchers.IO) { BlueskyBlobResolver.resolveBlobUrl(ownerDid, cid) } }.getOrNull()
                     if (resolved != null) return resolved
@@ -1534,10 +1556,19 @@ class BlueskyRepository {
     // there isn't one — e.g. the chronological Following timeline), the
     // request just goes straight to the default AppView unproxied, same as
     // before.
-    suspend fun sendFeedInteraction(token: String, postUri: String, wantMore: Boolean, feedContext: String?, generatorDid: String?): Result<Unit> = runCatching {
+    //
+    // Bug fix (round 3 — "Couldn't send feedback: sendInteractions 501"):
+    // the proxy target was right, but the request still went to
+    // bsky.social. That's the *entryway*, not the account's PDS, and it
+    // doesn't act on atproto-proxy headers — it hands the call to the
+    // AppView, which doesn't implement sendInteractions (501). It's the
+    // same reason DMs have to go through the real PDS (see ensureChatApi),
+    // so this now goes through that same resolved-PDS client.
+    suspend fun sendFeedInteraction(token: String, myDid: String, postUri: String, wantMore: Boolean, feedContext: String?, generatorDid: String?): Result<Unit> = runCatching {
         val event = if (wantMore) "app.bsky.feed.defs#requestMore" else "app.bsky.feed.defs#requestLess"
         val proxy = generatorDid?.takeIf { it.startsWith("did:") }?.let { "$it#bsky_fg" }
-        val resp = api.sendInteractions(
+        if (myDid.isNotBlank()) ensureChatApi(myDid)
+        val resp = chatApi.sendInteractions(
             "Bearer $token",
             proxy,
             BskySendInteractionsRequest(listOf(BskyInteraction(item = postUri, event = event, feedContext = feedContext)))
@@ -1564,6 +1595,10 @@ class BlueskyRepository {
         val body = resp.body() ?: error("getFeedGenerators: empty body")
         body.feeds.firstOrNull { it.uri == feedUri } ?: error("Feed generator not found: $feedUri")
     }
+
+    /** Deletes one of the signed-in account's own posts. */
+    suspend fun deletePost(token: String, did: String, postUri: String): Result<Unit> =
+        deleteRecord(token, did, "app.bsky.feed.post", postUri.rkey())
 
     suspend fun blockUser(token: String, did: String, targetDid: String): Result<String> =
         createRecord(token, did, "app.bsky.graph.block", mapOf(
@@ -2182,29 +2217,68 @@ class BlueskyRepository {
                 runCatching { com.mediaviewer.util.VideoThumbnailStitcher.stitch(context, videoUri, thumbnailUri) }
                     .getOrDefault(videoUri)
             } else videoUri
-            val authResp = api.getServiceAuth(
+            // Bug fix ("posting videos loads for a bit then fails"): the
+            // service-auth token has to be minted FOR the account's real PDS
+            // (video.bsky.app uses it to put the finished blob there). This
+            // used `bsky.social`, which is only the login entryway for most
+            // accounts, so the upload was rejected. Resolve the real PDS from
+            // the DID document (same lookup DMs use) and ask it directly.
+            ensureChatApi(did)
+            val realPdsHost = resolvedPdsEndpoint?.let { runCatching { java.net.URI(it).host }.getOrNull() } ?: pdsHost
+            val authResp = chatApi.getServiceAuth(
                 "Bearer $token",
-                aud = "did:web:$pdsHost",
+                aud = "did:web:$realPdsHost",
                 lxm = "com.atproto.repo.uploadBlob",
                 exp = (System.currentTimeMillis() / 1000) + 60 * 30
             )
-            val serviceToken = authResp.body()?.token ?: error("getServiceAuth ${authResp.code()}")
+            val serviceToken = authResp.body()?.token
+                ?: error("Couldn't authorize the upload (${authResp.code()}: ${errorBodyText(authResp)})")
 
             val resolver = context.contentResolver
-            val bytes = resolver.openInputStream(uploadUri)?.use { it.readBytes() } ?: error("Couldn't read video")
             // Transformer always re-muxes to mp4, so once stitching has
             // happened the original content:// URI's declared type (mov,
             // etc.) no longer applies to the bytes we're actually sending.
             val mimeType = if (uploadUri != videoUri) "video/mp4" else (resolver.getType(videoUri) ?: "video/mp4")
             val fileName = "raccnet-${System.currentTimeMillis()}.mp4"
-            val body = bytes.toRequestBody(mimeType.toMediaType())
+            // Streamed from disk instead of read into one byte array — a long
+            // video no longer has to fit in memory at once.
+            val length = runCatching {
+                resolver.openAssetFileDescriptor(uploadUri, "r")?.use { it.length }
+            }.getOrNull()?.takeIf { it > 0 } ?: -1L
+            val body = object : okhttp3.RequestBody() {
+                override fun contentType() = mimeType.toMediaType()
+                override fun contentLength() = length
+                override fun writeTo(sink: okio.BufferedSink) {
+                    val input = resolver.openInputStream(uploadUri) ?: throw java.io.IOException("Couldn't read the video")
+                    input.use { stream -> sink.writeAll(stream.source()) }
+                }
+            }
 
-            var jobStatus: BskyJobStatus? = videoApi.uploadVideo("Bearer $serviceToken", mimeType, did, fileName, body).body()
-                ?: error("uploadVideo failed")
-            while (jobStatus?.state != "JOB_STATE_COMPLETED" && jobStatus?.blob == null) {
-                if (jobStatus?.state == "JOB_STATE_FAILED") error("Video processing failed: ${jobStatus?.error ?: jobStatus?.message}")
-                delay(2000)
-                jobStatus = videoApi.getJobStatus(jobStatus?.jobId ?: error("no jobId")).body()?.jobStatus
+            val uploadResp = videoApi.uploadVideo("Bearer $serviceToken", mimeType, did, fileName, body)
+            val uploadJson = runCatching {
+                (if (uploadResp.isSuccessful) uploadResp.body()?.string() else uploadResp.errorBody()?.string())
+                    ?.let { com.google.gson.JsonParser.parseString(it).asJsonObject }
+            }.getOrNull()
+            // The service answers with { jobStatus: {...} } (the lexicon's
+            // shape; older builds sent the job status bare), and with 409
+            // "already_exists" + the existing jobId when this exact video was
+            // uploaded before — which is fine, that job's blob is reusable.
+            val jobJson = uploadJson?.getAsJsonObject("jobStatus") ?: uploadJson
+            val jobId = jobJson?.get("jobId")?.takeIf { it.isJsonPrimitive }?.asString
+            if (jobId.isNullOrBlank()) {
+                val msg = uploadJson?.get("message")?.takeIf { it.isJsonPrimitive }?.asString
+                    ?: uploadJson?.get("error")?.takeIf { it.isJsonPrimitive }?.asString
+                error("Video upload failed (${uploadResp.code()}${if (msg != null) ": $msg" else ""})")
+            }
+            var jobStatus: BskyJobStatus? = runCatching {
+                com.google.gson.Gson().fromJson(jobJson, BskyJobStatus::class.java)
+            }.getOrNull()
+            val deadline = System.currentTimeMillis() + 10 * 60 * 1000L
+            while (jobStatus?.blob == null && jobStatus?.state != "JOB_STATE_COMPLETED") {
+                if (jobStatus?.state == "JOB_STATE_FAILED") error("Video processing failed: ${jobStatus?.error ?: jobStatus?.message ?: "unknown error"}")
+                if (System.currentTimeMillis() > deadline) error("Video processing timed out")
+                delay(1500)
+                jobStatus = runCatching { videoApi.getJobStatus(jobId!!).body()?.jobStatus }.getOrNull() ?: jobStatus
             }
             val blob = jobStatus?.blob ?: error("Video job completed with no blob")
 

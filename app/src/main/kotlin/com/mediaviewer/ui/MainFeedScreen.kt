@@ -289,6 +289,8 @@ fun MainFeedScreen(
     onShowMoreLikeThis: () -> Unit = {},
     onShowLessLikeThis: () -> Unit = {},
     onAddAccountToList: () -> Unit = {},
+    // Own posts only: "Delete" at the top of the More menu.
+    onDeletePost: () -> Unit = {},
     // Item 9: only a real feed-generator-backed feed can act on the
     // "Show more/less like this" signal — gates whether those two menu
     // items appear at all.
@@ -367,6 +369,17 @@ fun MainFeedScreen(
     // so we mirror the latest reported values here via onBackdropChanged below.
     var lastDominantColor by remember { mutableStateOf(NeutralGlassTint) }
     var lastBackdrop by remember { mutableStateOf<GlassBackdrop?>(null) }
+    // Comments slide up OVER the post (which stays put, blurred, its UI
+    // faded) rather than replacing it. commentsOpenAnim drives the blur/fade;
+    // the sheet's own drag-to-close eases it back off as it's pulled down.
+    val commentsOpen = screenState == ScreenState.COMMENTS
+    val commentsOpenAnim by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (commentsOpen) 1f else 0f,
+        animationSpec = if (reducedAnimations) androidx.compose.animation.core.snap() else tween(320, easing = FastOutSlowInEasing),
+        label = "commentsOpen"
+    )
+    var commentsDragFraction by remember { mutableFloatStateOf(0f) }
+    val commentsFraction = (commentsOpenAnim * (1f - commentsDragFraction)).coerceIn(0f, 1f)
 
     Box(Modifier.fillMaxSize().background(OledBlack)) {
         // In landscape while viewing the feed: fullscreen media only, no UI chrome
@@ -385,6 +398,10 @@ fun MainFeedScreen(
         } else {
             AnimatedContent(
                 targetState = screenState,
+                // FEED and COMMENTS are the same page now — the comments
+                // sheet is an overlay (below), so switching between them
+                // must not tear the post down or animate it.
+                contentKey = { if (it == ScreenState.COMMENTS) ScreenState.FEED else it },
                 transitionSpec = {
                     if (reducedAnimations) EnterTransition.None togetherWith ExitTransition.None
                     else when {
@@ -403,23 +420,14 @@ fun MainFeedScreen(
                         initialState == ScreenState.SETTINGS ->
                             slideInVertically(tween(220, easing = FastOutSlowInEasing)) { it } togetherWith
                             slideOutVertically(tween(220, easing = FastOutSlowInEasing)) { -it }
-                        targetState == ScreenState.COMMENTS ->
-                            (fadeIn(tween(180)) + scaleIn(tween(220, easing = FastOutSlowInEasing),
-                                initialScale = 0.92f, transformOrigin = TransformOrigin(0.5f, 0f))) togetherWith
-                            (fadeOut(tween(140)) + scaleOut(tween(180, easing = FastOutSlowInEasing),
-                                targetScale = 0.85f, transformOrigin = TransformOrigin(0.5f, 0f)))
-                        initialState == ScreenState.COMMENTS ->
-                            (fadeIn(tween(180)) + scaleIn(tween(220, easing = FastOutSlowInEasing),
-                                initialScale = 0.92f)) togetherWith
-                            (fadeOut(tween(140)) + scaleOut(tween(180, easing = FastOutSlowInEasing),
-                                targetScale = 0.92f, transformOrigin = TransformOrigin(0.5f, 0f)))
                         else -> fadeIn(FADE_ANIM) togetherWith fadeOut(FADE_ANIM)
                     }
                 },
                 label = "screen"
             ) { state ->
                 when (state) {
-                    ScreenState.FEED -> FeedView(
+                    ScreenState.FEED, ScreenState.COMMENTS -> FeedView(
+                        commentsFraction  = commentsFraction,
                         mediaItems        = mediaItems,
                         currentIndex      = currentIndex,
                         currentItem       = currentItem,
@@ -449,6 +457,8 @@ fun MainFeedScreen(
                         onShowMoreLikeThis = onShowMoreLikeThis,
                         onShowLessLikeThis = onShowLessLikeThis,
                         onAddAccountToList = onAddAccountToList,
+                        onDeletePost      = onDeletePost,
+                        selfDid           = selfDid,
                         supportsFeedInteractions = supportsFeedInteractions,
                         sentByExpanded         = sentByExpanded,
                         onToggleSentByExpanded = onToggleSentByExpanded,
@@ -468,23 +478,6 @@ fun MainFeedScreen(
                             onCurrentBackdropChanged(backdrop, color)
                         },
                         hateFunBlurNsfw        = hateFunBlurNsfw
-                    )
-                    ScreenState.COMMENTS -> CommentsSheet(
-                        currentItem     = currentItem,
-                        comments        = comments,
-                        commentsLoading = commentsLoading,
-                        appMode         = appMode,
-                        liquidGlass     = liquidGlass,
-                        onPostComment   = onPostComment,
-                        onLikeComment   = onLikeComment,
-                        onVoteComment   = onVoteComment,
-                        onSwipeDown     = { onSetScreen(ScreenState.FEED) },
-                        onTagClick      = onTagClick,
-                        onTagAdd        = onTagAdd,
-                        onTagExclude    = onTagExclude,
-                        dominantColor   = lastDominantColor,
-                        backdrop        = lastBackdrop,
-                        reducedAnimations = reducedAnimations
                     )
                     ScreenState.SETTINGS -> SettingsSheet(
                         appMode                   = appMode,
@@ -634,10 +627,43 @@ fun MainFeedScreen(
                         onLoadMore      = onLoadMore,
                         onSelectFeed    = onSelectFeed,
                         onSearchE621    = onSearchE621,
-                        onRefresh       = onRefresh
+                        onRefresh       = onRefresh,
+                        selfAvatarUrl   = selfAvatarUrl,
+                        isLoading       = isLoading,
+                        roundedGridTiles = squareGridRounded,
+                        reducedAnimations = reducedAnimations
                     )
                 }
             }
+        }
+
+        // The comments sheet, over the (blurred) post.
+        AnimatedVisibility(
+            visible = commentsOpen && !isLandscape,
+            enter = if (reducedAnimations) EnterTransition.None
+                else slideInVertically(tween(320, easing = FastOutSlowInEasing)) { it } + fadeIn(tween(200)),
+            exit = if (reducedAnimations) ExitTransition.None
+                else slideOutVertically(tween(260, easing = FastOutSlowInEasing)) { it } + fadeOut(tween(220)),
+            modifier = Modifier.fillMaxSize().zIndex(5f)
+        ) {
+            CommentsSheet(
+                currentItem     = currentItem,
+                comments        = comments,
+                commentsLoading = commentsLoading,
+                appMode         = appMode,
+                liquidGlass     = liquidGlass,
+                onPostComment   = onPostComment,
+                onLikeComment   = onLikeComment,
+                onVoteComment   = onVoteComment,
+                onSwipeDown     = { onSetScreen(ScreenState.FEED) },
+                onTagClick      = onTagClick,
+                onTagAdd        = onTagAdd,
+                onTagExclude    = onTagExclude,
+                dominantColor   = lastDominantColor,
+                backdrop        = lastBackdrop,
+                reducedAnimations = reducedAnimations,
+                onDragFractionChanged = { commentsDragFraction = it }
+            )
         }
 
         if (errorMessage != null) {
@@ -820,6 +846,8 @@ private fun FeedView(
     onShowMoreLikeThis: () -> Unit = {},
     onShowLessLikeThis: () -> Unit = {},
     onAddAccountToList: () -> Unit = {},
+    onDeletePost: () -> Unit = {},
+    selfDid: String = "",
     supportsFeedInteractions: Boolean = false,
     sentByExpanded: Boolean,
     onToggleSentByExpanded: () -> Unit,
@@ -835,12 +863,22 @@ private fun FeedView(
     translationStates: androidx.compose.runtime.snapshots.SnapshotStateMap<String, TranslationState> = remember { mutableStateMapOf() },
     onBackdropChanged: (GlassBackdrop?, Color) -> Unit = { _, _ -> },
     externallyPaused: Boolean = false,
-    hateFunBlurNsfw: Boolean = false
+    hateFunBlurNsfw: Boolean = false,
+    /** 0 = no comments; 1 = comments fully open (post blurred, UI faded). */
+    commentsFraction: Float = 0f
 ) {
     val context     = LocalContext.current
-    val imageLoader = remember { ImageLoader(context) }
+    // The app-wide loader (not a private one): prefetches land in the same
+    // memory cache the posts draw from, so the next post's image/poster is
+    // on screen the moment it's swiped to.
+    val imageLoader = remember { coil.Coil.imageLoader(context) }
 
-    LaunchedEffect(currentIndex) {
+    LaunchedEffect(currentIndex, mediaItems.size) {
+        // Videos: current, next two, previous — prepared in paused players.
+        val videoWindow = listOf(0, 1, 2, -1).mapNotNull { mediaItems.getOrNull(currentIndex + it) }
+            .filter { it.isVideo && !it.isBlocked }
+            .mapNotNull { it.videoPlaylistUrl }
+        com.mediaviewer.util.FeedVideoPool.preload(context, videoWindow)
         (1..3).mapNotNull { mediaItems.getOrNull(currentIndex + it) }.forEach { item ->
             if (!item.isVideo && item.mediaUrl.isNotBlank())
                 imageLoader.enqueue(ImageRequest.Builder(context).data(item.mediaUrl).build())
@@ -848,8 +886,16 @@ private fun FeedView(
                 imageLoader.enqueue(ImageRequest.Builder(context).data(item.thumbUrl).build())
         }
     }
+    DisposableEffect(Unit) { onDispose { com.mediaviewer.util.FeedVideoPool.releaseIdle() } }
 
-    Box(Modifier.fillMaxSize().background(OledBlack)) {
+    Box(
+        Modifier.fillMaxSize().background(OledBlack)
+            .then(
+                // Blur behind the comments sheet (API 31+; older phones get
+                // the sheet's dark wash only — Modifier.blur is a no-op there).
+                if (commentsFraction > 0.001f) Modifier.blur((26f * commentsFraction).dp) else Modifier
+            )
+    ) {
         if (isLoading && currentItem == null) {
             CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White, strokeWidth = 1.5.dp)
         } else {
@@ -890,6 +936,8 @@ private fun FeedView(
                     onShowMoreLikeThis = onShowMoreLikeThis,
                     onShowLessLikeThis = onShowLessLikeThis,
                     onAddAccountToList = onAddAccountToList,
+                    onDeletePost       = onDeletePost,
+                    isOwnPost          = appMode == AppMode.BLUESKY && selfDid.isNotBlank() && item.author.did == selfDid,
                     supportsFeedInteractions = supportsFeedInteractions,
                     sentByExpanded         = sentByExpanded,
                     onToggleSentByExpanded = onToggleSentByExpanded,
@@ -901,7 +949,7 @@ private fun FeedView(
                     textExpanded            = textExpanded,
                     onToggleTextExpanded    = onToggleTextExpanded,
                     reducedAnimations      = reducedAnimations,
-                    uiHidden               = uiHidden,
+                    uiHidden               = uiHidden || commentsFraction > 0.02f,
                     onSetUiHidden          = onSetUiHidden,
                     translationEnabled     = translationEnabled,
                     translationTargetLang  = translationTargetLang,
@@ -934,6 +982,8 @@ private fun PostContent(
     onShowMoreLikeThis: () -> Unit = {},
     onShowLessLikeThis: () -> Unit = {},
     onAddAccountToList: () -> Unit = {},
+    onDeletePost: () -> Unit = {},
+    isOwnPost: Boolean = false,
     // Item 9: only a real feed-generator-backed feed can act on the
     // "Show more/less like this" interaction signal (chronological
     // Following, profile grids, and search results have no feed generator
@@ -1717,7 +1767,9 @@ private fun PostContent(
                 onShowLessLikeThis = onShowLessLikeThis,
                 onAddAccountToList = onAddAccountToList,
                 onBlock = onBlockAccount,
-                supportsFeedInteractions = supportsFeedInteractions
+                supportsFeedInteractions = supportsFeedInteractions,
+                isOwnPost = isOwnPost,
+                onDelete = onDeletePost
             )
         }
     }
@@ -2421,16 +2473,26 @@ private fun MoreBubbleMenu(
     liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
     onShowMoreLikeThis: () -> Unit, onShowLessLikeThis: () -> Unit,
     onAddAccountToList: () -> Unit, onBlock: () -> Unit,
-    supportsFeedInteractions: Boolean
+    supportsFeedInteractions: Boolean,
+    isOwnPost: Boolean = false,
+    onDelete: () -> Unit = {}
 ) {
     val tap = rememberHapticTap()
+    // Delete is two taps: the first turns the bubble into a confirmation
+    // (the menu stays open), the second deletes.
+    var confirmDelete by remember { mutableStateOf(false) }
     val items = buildList {
+        if (isOwnPost) {
+            add(GlassMenuItem(if (confirmDelete) "Tap again to delete" else "Delete", keepOpen = !confirmDelete) {
+                if (confirmDelete) { onDelete() } else { confirmDelete = true }
+            })
+        }
         if (supportsFeedInteractions) {
             add(GlassMenuItem("Show more like this") { onShowMoreLikeThis() })
             add(GlassMenuItem("Show less like this") { onShowLessLikeThis() })
         }
         add(GlassMenuItem("Add account to list") { onAddAccountToList() })
-        add(GlassMenuItem("Block", destructive = true) { onBlock() })
+        add(GlassMenuItem("Block") { onBlock() })
     }
     val density = LocalDensity.current
     val bubbleHeightDp = 40.dp   // item 5: doubled from the old 20dp
@@ -2490,7 +2552,7 @@ private fun MoreBubbleMenu(
                 .fillMaxWidth()
                 .height(bubbleHeightDp)
                 .clip(shape)
-                .clickable { tap(); onDismissRequest(); item.onClick() }
+                .clickable { tap(); if (!item.keepOpen) onDismissRequest(); item.onClick() }
             val labelColor = if (item.destructive) Color(0xFFE0245E) else Color.White
             if (liquidGlass) {
                 LiquidGlassSurface(modifier = bubbleModifier, shape = shape, tint = tint, backdrop = backdrop) {
@@ -2572,28 +2634,21 @@ private fun VideoPlayer(
     externallyPaused: Boolean = false
 ) {
     val context = LocalContext.current
-    // Optimized for TikTok-style instant playback: the default LoadControl
-    // waits for 2.5s of buffered media before starting, which reads as
-    // "black screen for a few seconds" on every scroll. These values start
-    // playback after just 500ms is buffered, while keeping a reasonable
-    // max buffer to avoid rebuffering mid-play.
-    val loadControl = remember {
-        DefaultLoadControl.Builder()
-            .setBufferDurationsMs(
-                10_000,  // minBufferMs: keep 10s buffered during playback
-                30_000,  // maxBufferMs: cap total buffer at 30s
-                500,     // bufferForPlaybackMs: START after 500ms (was 2500ms)
-                1_000    // bufferForPlaybackAfterRebufferMs: resume after 1s
-            )
-            .build()
-    }
-    val player  = remember { ExoPlayer.Builder(context).setLoadControl(loadControl).build().apply { repeatMode = Player.REPEAT_MODE_ONE; volume = 1f } }
+    // Instant start: the player comes from FeedVideoPool, which usually
+    // already prepared this exact video (playlist parsed, first seconds
+    // buffered) while the previous post was on screen — see its doc.
+    val player = remember(url) { com.mediaviewer.util.FeedVideoPool.acquire(context, url) }
+    DisposableEffect(player) { onDispose { com.mediaviewer.util.FeedVideoPool.recycle(url, player) } }
     // Item 5: the transport controls are drawn over whatever bounds PlayerView
     // is given — so instead of stretching PlayerView across the whole screen
     // (which spreads controls across empty letterboxed space and lets them
     // overlap the rest of the UI), size it to the video's own aspect ratio and
     // center it, the same way the image posts are fit.
-    var aspectRatio by remember(url) { mutableStateOf(1f) }
+    var aspectRatio by remember(url) {
+        mutableStateOf(player.videoSize.let { v ->
+            if (v.width > 0 && v.height > 0) (v.width * v.pixelWidthHeightRatio) / v.height else 1f
+        })
+    }
     // Only reset via `d > 0` writes below — keeps the last known duration
     // visible instead of flickering back to 0 between polls/readiness checks.
     var lastKnownDuration by remember(url) { mutableStateOf(0L) }
@@ -2603,7 +2658,9 @@ private fun VideoPlayer(
     // These two drive a poster-image layer (fades out once real video pixels
     // are on screen) and a small buffering spinner over it.
     var firstFrameRendered by remember(url) { mutableStateOf(false) }
-    var isBuffering by remember(url) { mutableStateOf(true) }
+    var isBuffering by remember(url) {
+        mutableStateOf(player.playbackState == Player.STATE_BUFFERING || player.playbackState == Player.STATE_IDLE)
+    }
 
     LaunchedEffect(player) { onPlayerReady(player) }
 
@@ -2627,7 +2684,7 @@ private fun VideoPlayer(
         player.addListener(listener)
         onDispose { player.removeListener(listener) }
     }
-    LaunchedEffect(url) { player.setMediaItem(ExoMediaItem.fromUri(url)); player.prepare(); if (!isBlocked) player.play() }
+    LaunchedEffect(player) { if (!isBlocked && !externallyPaused) player.play() }
     // Blocking a post mid-playback (or scrolling to one that's already blocked)
     // should pause it immediately rather than letting it keep playing silently
     // behind the "Blocked"/blur overlay.
@@ -2639,7 +2696,6 @@ private fun VideoPlayer(
     LaunchedEffect(externallyPaused) {
         if (externallyPaused) player.pause() else if (!isBlocked) player.play()
     }
-    DisposableEffect(Unit) { onDispose { player.release() } }
 
     // Only poll playback position while the bar is actually visible — no
     // sense burning a coroutine tick for a seek bar nobody can see.
@@ -2690,6 +2746,9 @@ private fun VideoPlayer(
                     // show up in the live backdrop-blur capture.
                     (android.view.LayoutInflater.from(ctx).inflate(com.mediaviewer.R.layout.player_view_texture, null) as PlayerView).apply {
                         this.player = player; useController = false
+                        // The pooled player outlives this view; keep the
+                        // last frame instead of flashing black on reattach.
+                        setKeepContentOnPlayerReset(true)
                         // Item 10: PlayerView's own native buffering spinner
                         // used to show WHEN_PLAYING, stacked directly on top
                         // of the Compose-drawn white CircularProgressIndicator
@@ -2700,7 +2759,10 @@ private fun VideoPlayer(
                         setBackgroundColor(android.graphics.Color.TRANSPARENT)
                     }
                 },
-                modifier = Modifier.matchParentSize()
+                modifier = Modifier.matchParentSize(),
+                // Detach from the pooled player when this view goes away, so
+                // it can be handed to the next view cleanly.
+                onRelease = { it.player = null }
             )
             if (isBuffering && !isBlocked) {
                 CircularProgressIndicator(

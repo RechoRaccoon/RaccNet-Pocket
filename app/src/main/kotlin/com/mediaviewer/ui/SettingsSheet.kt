@@ -57,6 +57,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
@@ -362,7 +363,9 @@ fun SettingsSheet(
                 .padding(top = rememberTopCutoutClearance()),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(Modifier.height(8.dp))
+            // The main page's search bar sits right under the camera cutout
+            // (the same line profile banners start on); Settings keeps a gap.
+            if (hubPage == HubPage.SETTINGS) Spacer(Modifier.height(8.dp))
 
             // Item 14: the Settings/AT Protocol/e621 chip row is gone — the
             // Hub is a single page now (this Column's own scroll content
@@ -689,23 +692,10 @@ private fun AtProtocolPageContent(
     // below can layer on top of this scrollable Column instead of needing
     // its own separate screen/route.
     Box(Modifier.fillMaxSize()) {
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(bottom = 16.dp)
-    ) {
-
-        // Item: every setting that used to live below the 6-button grid
-        // (Download When Liked, Merge Lists & Packs, Show Add To After
-        // Following, Download All Liked Media, Logged in/Logout) has moved
-        // into the Settings page's "AT Protocol Settings" section — this
-        // page holds navigation: the feed row, quick-access buttons, and
-        // (item 8) the Friends and Livestreams sections below them.
-        // Item 7: round search bar + a separate circular glass search
-        // button, both open the full-screen SearchOverlay — this app has no
-        // inline search of its own, it's purely an entry point.
-        Spacer(Modifier.height(4.dp))
+    // The search bar is fixed (it no longer scrolls with the page); the rest
+    // of the Hub scrolls underneath it and is clipped at its bottom edge —
+    // the same way content stops at the Return to Feed bar below.
+    Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -744,6 +734,14 @@ private fun AtProtocolPageContent(
         }
 
         Spacer(Modifier.height(6.dp))
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .weight(1f)
+            .clipToBounds()
+            .verticalScroll(rememberScrollState())
+            .padding(bottom = 16.dp)
+    ) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
             Text("Feeds", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
@@ -964,7 +962,7 @@ private fun AtProtocolPageContent(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                friendOnlyReviews.take(20).forEach { fr -> MutualReviewCard(fr, liquidGlass, onOpenReview) }
+                friendOnlyReviews.take(20).forEach { fr -> MutualReviewCard(fr, liquidGlass, onOpenReview, onOpenProfile) }
             }
         }
 
@@ -1020,7 +1018,8 @@ private fun AtProtocolPageContent(
                         // height doubles as this bubble's width budget. It's
                         // exact for the common thumbnailless/square case and
                         // a reasonable cap for thumbnail cards otherwise.
-                        HubAuthorBubble(displayName = fb.author.displayName, avatarUrl = fb.author.avatarUrl, liquidGlass = liquidGlass, tint = blogTint, cardWidth = HUB_BLOG_CARD_HEIGHT)
+                        HubAuthorBubble(displayName = fb.author.displayName, avatarUrl = fb.author.avatarUrl, liquidGlass = liquidGlass, tint = blogTint, cardWidth = HUB_BLOG_CARD_HEIGHT,
+                            onClick = { onOpenProfile(fb.author) })
                         Spacer(Modifier.height(6.dp))
                         BlogBubble(
                             blog = fb.blog, liquidGlass = liquidGlass, fallbackAvatarUrl = fb.author.avatarUrl,
@@ -1160,6 +1159,7 @@ private fun AtProtocolPageContent(
         }
         Spacer(Modifier.height(8.dp))
     }
+    } // fixed search bar + scrolling content
 
     // Feature: auto-subscribe — the one-time follower scan's completion
     // popup, layered over everything else on this page while it's up.
@@ -1855,7 +1855,8 @@ private fun ShimmerBox(shape: androidx.compose.ui.graphics.Shape, modifier: Modi
 private fun MutualReviewCard(
     fr: com.mediaviewer.model.FriendPopfeedReview,
     liquidGlass: Boolean,
-    onOpenReview: (com.mediaviewer.model.FriendPopfeedReview) -> Unit
+    onOpenReview: (com.mediaviewer.model.FriendPopfeedReview) -> Unit,
+    onOpenProfile: (com.mediaviewer.model.AuthorInfo) -> Unit = {}
 ) {
     val shape = RoundedCornerShape(14.dp)
     val tint = rememberDominantColor(fr.review.mediaImageUrl ?: fr.author.avatarUrl ?: "")
@@ -1866,7 +1867,8 @@ private fun MutualReviewCard(
     // the card, exactly like Blogs' HubAuthorBubble treatment, and the star
     // rating moved into the room that freed up at the card's top-right.
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        HubAuthorBubble(displayName = fr.author.displayName, avatarUrl = fr.author.avatarUrl, liquidGlass = liquidGlass, tint = tint, cardWidth = REVIEW_CARD_WIDTH)
+        HubAuthorBubble(displayName = fr.author.displayName, avatarUrl = fr.author.avatarUrl, liquidGlass = liquidGlass, tint = tint, cardWidth = REVIEW_CARD_WIDTH,
+            onClick = { onOpenProfile(fr.author) })
         Spacer(Modifier.height(6.dp))
         Box(
             Modifier.width(REVIEW_CARD_WIDTH).aspectRatio(2f / 3f)
@@ -1916,8 +1918,13 @@ private fun MutualReviewCard(
  *  unaffected — they just render at the normal size, narrower than the
  *  card, exactly as before. */
 @Composable
-private fun HubAuthorBubble(displayName: String, avatarUrl: String?, liquidGlass: Boolean, tint: Color, cardWidth: Dp) {
+private fun HubAuthorBubble(
+    displayName: String, avatarUrl: String?, liquidGlass: Boolean, tint: Color, cardWidth: Dp,
+    // Tapping the bubble opens that person's profile.
+    onClick: (() -> Unit)? = null
+) {
     val shape = RoundedCornerShape(10.dp)
+    val tap = rememberHapticTap()
     val avatarSize = 14.dp
     val spacing = 5.dp
     val horizontalPad = 6.dp
@@ -1930,6 +1937,7 @@ private fun HubAuthorBubble(displayName: String, avatarUrl: String?, liquidGlass
     Row(
         Modifier
             .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.clip(shape).background(Color.Black.copy(0.55f)))
+            .then(if (onClick != null) Modifier.clickable { tap(); onClick() } else Modifier)
             .padding(horizontal = horizontalPad, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(spacing)

@@ -656,8 +656,11 @@ fun ComposePostScreen(
         else -> "New Post"
     }
 
+    // zIndex 10.5: above every other page and the loading overlays (10),
+    // but BELOW the camera-notch bubble (11) — it was 20, which buried the
+    // notch on the posting page.
     Box(
-        Modifier.fillMaxSize().zIndex(20f)
+        Modifier.fillMaxSize().zIndex(10.5f)
             .background(postBackgroundBrush(dominantColor))
             // Item 1: without this, blank space here (Spacers, dividers,
             // anything with no click handler of its own) isn't claimed by

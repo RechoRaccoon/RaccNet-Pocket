@@ -2,6 +2,8 @@ package com.mediaviewer.ui
 
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.imePadding
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -56,6 +58,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -197,13 +206,52 @@ fun VrmModeScreen(
     androidx.compose.runtime.LaunchedEffect(videoMode) { store.put(K.VIDEO_MODE, videoMode) }
     androidx.compose.runtime.LaunchedEffect(fullBright) { store.put(K.FULL_BRIGHT, fullBright) }
 
+    var captureError by remember { mutableStateOf<String?>(null) }
+    // Mic mute: applies to video recordings (no audio track) and, live,
+    // to the stream (silence is sent so the audio track never drops out).
+    var micMuted by remember { mutableStateOf(store.bool(K.MIC_MUTED, false)) }
+    androidx.compose.runtime.LaunchedEffect(micMuted) { store.put(K.MIC_MUTED, micMuted) }
+    var lightLevel by remember { mutableStateOf(store.int(K.LIGHT_LEVEL, 5).coerceIn(0, 10)) }
+    androidx.compose.runtime.LaunchedEffect(lightLevel) { store.put(K.LIGHT_LEVEL, lightLevel) }
+
     // ── Capture (photo / video of the rendered avatar) ──
     val captureController = remember { VrmCaptureController() }
+
+    // ── Live streaming (RTMP) ──
+    var liveDialogOpen by remember { mutableStateOf(false) }
+    var endLiveConfirmOpen by remember { mutableStateOf(false) }
+    var liveState by remember { mutableStateOf(com.mediaviewer.stream.LiveStreamer.State.IDLE) }
+    var liveStartMs by remember { mutableStateOf(0L) }
+    var liveElapsedS by remember { mutableStateOf(0L) }
+    var liveKbps by remember { mutableStateOf(0L) }
+    var streamUrl by remember { mutableStateOf(store.string(K.STREAM_URL)) }
+    var streamKey by remember { mutableStateOf(store.string(K.STREAM_KEY)) }
+    var streamQualityName by remember { mutableStateOf(store.string(K.STREAM_QUALITY)) }
+    val autoQuality = remember { com.mediaviewer.stream.StreamQuality.auto(context) }
+    val mainHandler = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
+    val liveStreamer = remember {
+        com.mediaviewer.stream.LiveStreamer(context, object : com.mediaviewer.stream.LiveStreamer.Listener {
+            override fun onStateChanged(state: com.mediaviewer.stream.LiveStreamer.State, message: String?) {
+                mainHandler.post {
+                    liveState = state
+                    if (state == com.mediaviewer.stream.LiveStreamer.State.FAILED ||
+                        state == com.mediaviewer.stream.LiveStreamer.State.ENDED) {
+                        captureController.stopStreamOutput()
+                    }
+                    if (state == com.mediaviewer.stream.LiveStreamer.State.FAILED && message != null) captureError = message
+                }
+            }
+        })
+    }
+    // "Live" covers connecting/reconnecting too: the UI stays in live mode.
+    val isLive = liveState == com.mediaviewer.stream.LiveStreamer.State.LIVE ||
+        liveState == com.mediaviewer.stream.LiveStreamer.State.RECONNECTING ||
+        liveState == com.mediaviewer.stream.LiveStreamer.State.CONNECTING
+    androidx.compose.runtime.SideEffect { liveStreamer.micMuted = micMuted }
     var recording by remember { mutableStateOf(false) }
     var recordingStartMs by remember { mutableStateOf(0L) }
     var recordingElapsedS by remember { mutableStateOf(0) }
     var captureBusy by remember { mutableStateOf(false) }
-    var captureError by remember { mutableStateOf<String?>(null) }
     val captureScope = androidx.compose.runtime.rememberCoroutineScope()
     fun finishRecording() {
         if (!recording) return
@@ -225,6 +273,69 @@ fun VrmModeScreen(
     val micPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
     ) { granted -> beginRecording(withAudio = granted) }
+
+    fun startLive(withMic: Boolean) {
+        val quality = com.mediaviewer.stream.StreamQuality.values().firstOrNull { it.name == streamQualityName }
+            ?.let { com.mediaviewer.stream.StreamQuality.supportedAtOrBelow(it) } ?: autoQuality
+        val cfg = quality.toConfig()
+        val url = streamUrl.trim()
+        val key = streamKey.trim()
+        liveState = com.mediaviewer.stream.LiveStreamer.State.CONNECTING
+        captureScope.launch {
+            val error = withContext(Dispatchers.IO) { liveStreamer.start(url, key, cfg, withMic) }
+            if (error != null) {
+                liveState = com.mediaviewer.stream.LiveStreamer.State.IDLE
+                if (error != "Cancelled") captureError = error
+                return@launch
+            }
+            val surface = liveStreamer.inputSurface
+            if (surface == null || !captureController.startStreamOutput(surface, cfg.width, cfg.height, cfg.fps)) {
+                withContext(Dispatchers.IO) { liveStreamer.stop() }
+                liveState = com.mediaviewer.stream.LiveStreamer.State.IDLE
+                captureError = "Couldn't start streaming the avatar"
+                return@launch
+            }
+            liveStartMs = android.os.SystemClock.elapsedRealtime()
+            liveElapsedS = 0
+        }
+    }
+    fun endLive() {
+        captureController.stopStreamOutput()
+        liveState = com.mediaviewer.stream.LiveStreamer.State.IDLE
+        captureScope.launch(Dispatchers.IO) { liveStreamer.stop() }
+    }
+    val liveMicPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { granted -> startLive(withMic = granted) }
+    fun onGoLive() {
+        liveDialogOpen = false
+        store.put(K.STREAM_URL, streamUrl.trim())
+        store.put(K.STREAM_KEY, streamKey.trim())
+        store.put(K.STREAM_QUALITY, streamQualityName)
+        val micGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (micGranted) startLive(withMic = true) else liveMicPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+    }
+    // Stream clock: counts up for as long as the stream runs (no limit).
+    androidx.compose.runtime.LaunchedEffect(isLive, liveStartMs) {
+        while (isLive) {
+            kotlinx.coroutines.delay(500)
+            if (liveStartMs > 0L) liveElapsedS = (android.os.SystemClock.elapsedRealtime() - liveStartMs) / 1000
+            liveKbps = liveStreamer.measuredBps / 1000
+        }
+    }
+    // Never let the screen sleep mid-stream.
+    val hostView = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.DisposableEffect(isLive) {
+        hostView.keepScreenOn = isLive
+        onDispose { hostView.keepScreenOn = false }
+    }
+    // Leaving VRM mode ends the stream.
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose {
+            captureController.stopStreamOutput()
+            Thread({ liveStreamer.stop() }, "live-stop").start()
+        }
+    }
     // Recording timer: 0:01 … 10:00, then it stops by itself.
     androidx.compose.runtime.LaunchedEffect(recording) {
         while (recording) {
@@ -239,6 +350,7 @@ fun VrmModeScreen(
     }
     fun onCapturePressed() {
         if (captureBusy) return
+        if (isLive) { endLiveConfirmOpen = true; return }
         if (!videoMode) {
             captureBusy = true
             captureScope.launch {
@@ -248,6 +360,8 @@ fun VrmModeScreen(
             }
         } else if (recording) {
             finishRecording()
+        } else if (micMuted) {
+            beginRecording(withAudio = false)
         } else {
             val micGranted = androidx.core.content.ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED
@@ -258,7 +372,7 @@ fun VrmModeScreen(
     // like the system camera. The key is swallowed so the volume doesn't
     // change; holding it down doesn't repeat. Not while settings are open.
     val onCapturePressedRef = androidx.compose.runtime.rememberUpdatedState { onCapturePressed() }
-    val settingsOpenRef = androidx.compose.runtime.rememberUpdatedState(settingsOpen)
+    val settingsOpenRef = androidx.compose.runtime.rememberUpdatedState(settingsOpen || liveDialogOpen || isLive)
     androidx.compose.runtime.DisposableEffect(Unit) {
         val handler: (android.view.KeyEvent) -> Boolean = handler@{ event ->
             if (event.keyCode != android.view.KeyEvent.KEYCODE_VOLUME_UP &&
@@ -562,6 +676,15 @@ fun VrmModeScreen(
         }
     }
 
+    // Live backdrop for the glass buttons: the avatar layer re-records itself
+    // into this every frame (the same technique the feed's glass uses), so
+    // every bubble can blur whatever part of the avatar sits behind it.
+    val backdropLayer = androidx.compose.ui.graphics.rememberGraphicsLayer()
+    var backdropOrigin by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
+    val backdrop = remember(liquidGlass, backdropLayer) {
+        if (liquidGlass) GlassBackdrop(backdropLayer) { backdropOrigin } else null
+    }
+
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (hasCameraPermission) {
             // Headless — see VrmCameraTracking's doc comment for why this
@@ -604,7 +727,17 @@ fun VrmModeScreen(
             // mode; there's no camera feed underneath it anymore.
             if (vrmBytes != null) {
                 VrmAvatarView(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .then(
+                            if (backdrop != null) Modifier
+                                .onGloballyPositioned { backdropOrigin = it.positionInRoot() }
+                                .drawWithContent {
+                                    backdropLayer.record { this@drawWithContent.drawContent() }
+                                    drawContent()
+                                }
+                            else Modifier
+                        ),
                     vrmBytes = vrmBytes,
                     parsedVrmData = parsedVrmData,
                     // Item: VRM background should be a flat fill of the
@@ -632,7 +765,8 @@ fun VrmModeScreen(
                     maxFps = if (fastTracking) 60 else 30,
                     fullBright = fullBright,
                     cameraResetKey = cameraResetKey,
-                    captureController = captureController
+                    captureController = captureController,
+                    lightLevel = 0.4f + lightLevel * 0.12f
                 )
             } else {
                 // Prominent, not a 12sp hint: a dead/missing avatar file is
@@ -713,34 +847,30 @@ fun VrmModeScreen(
         }
 
         // Close button, top — mirrors every other full-screen overlay's own
-        // top-left close affordance in this app. Tinted with the user's
-        // color so the VRM UI matches the rest of the app.
-        Box(
-            Modifier.align(Alignment.TopStart).windowInsetsPadding(WindowInsets.navigationBars).padding(16.dp)
-                .size(40.dp).clip(CircleShape)
-                .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = CircleShape) else Modifier.background(tint.copy(alpha = 0.25f)))
-                .clickable { tap(); onClose() },
-            contentAlignment = Alignment.Center
+        // top-left close affordance in this app. Tinted glass like the rest
+        // of VRM mode's buttons, blurring the avatar behind it.
+        VrmGlassBubble(
+            size = 40.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+            modifier = Modifier.align(Alignment.TopStart).windowInsetsPadding(WindowInsets.navigationBars).padding(16.dp),
+            onClick = { tap(); onClose() }
         ) {
             Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(20.dp))
         }
 
-        // Bottom bar: [photo/video mode]  [capture]  [settings]. The capture
-        // button shows what it will do (camera or video icon; stop while
-        // recording); the left bubble shows the OTHER mode and switches to
-        // it. The mode is remembered. While recording, a timer sits above.
-        val bubble = { m: Modifier ->
-            m.clip(CircleShape).then(
-                if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = CircleShape)
-                else Modifier.background(tint.copy(alpha = 0.25f))
-            )
-        }
+        // Bottom bar: [mic] [photo/video mode] [capture] [settings] [Live].
+        // The capture button shows what it will do (camera or video icon;
+        // stop while recording; "Live" while streaming); the second bubble
+        // shows the OTHER photo/video mode and switches to it. While
+        // recording or live, a timer sits above.
         androidx.compose.foundation.layout.Column(
             Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 28.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             val status = when {
                 captureError != null -> captureError
+                liveState == com.mediaviewer.stream.LiveStreamer.State.CONNECTING -> "Connecting…"
+                liveState == com.mediaviewer.stream.LiveStreamer.State.RECONNECTING -> "Reconnecting…"
+                isLive -> formatLiveClock(liveElapsedS) + if (liveKbps > 0) "  ·  ${"%.1f".format(liveKbps / 1000f)} Mbps" else ""
                 captureBusy -> if (videoMode) "Saving video…" else "Saving photo…"
                 recording -> "%d:%02d".format(maxOf(1, recordingElapsedS) / 60, maxOf(1, recordingElapsedS) % 60)
                 else -> null
@@ -752,7 +882,7 @@ fun VrmModeScreen(
                             .padding(horizontal = 12.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        if (recording) {
+                        if ((recording || liveState == com.mediaviewer.stream.LiveStreamer.State.LIVE) && captureError == null) {
                             Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFFFF3B30)))
                             Spacer(Modifier.width(6.dp))
                         }
@@ -761,29 +891,52 @@ fun VrmModeScreen(
                 }
             }
             Spacer(Modifier.height(8.dp))
+            val gap = 14.dp
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Left: switch photo ↔ video (disabled while recording/saving).
-                Box(
-                    bubble(Modifier.size(48.dp))
-                        .clickable(enabled = !recording && !captureBusy) { tap(); videoMode = !videoMode },
-                    contentAlignment = Alignment.Center
+                // Far left: mic mute. Locked mid-recording (a MediaRecorder
+                // can't add/drop its audio track once started); live, it
+                // mutes the stream instantly.
+                val micEnabled = !recording && !captureBusy
+                VrmGlassBubble(
+                    size = 48.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                    enabled = micEnabled,
+                    onClick = { tap(); micMuted = !micMuted }
+                ) {
+                    Icon(
+                        if (micMuted) Icons.Default.MicOff else Icons.Default.Mic,
+                        contentDescription = if (micMuted) "Unmute microphone" else "Mute microphone",
+                        tint = (if (micMuted) Color(0xFFFF6B61) else Color.White).copy(alpha = if (micEnabled) 1f else 0.35f),
+                        modifier = Modifier.size(21.dp)
+                    )
+                }
+                Spacer(Modifier.width(gap))
+                // Switch photo ↔ video (disabled while recording/saving/live).
+                val swapEnabled = !recording && !captureBusy && !isLive
+                VrmGlassBubble(
+                    size = 48.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                    enabled = swapEnabled,
+                    onClick = { tap(); videoMode = !videoMode }
                 ) {
                     Icon(
                         if (videoMode) Icons.Default.PhotoCamera else Icons.Default.Videocam,
                         contentDescription = if (videoMode) "Switch to photo" else "Switch to video",
-                        tint = Color.White.copy(alpha = if (recording || captureBusy) 0.35f else 1f),
+                        tint = Color.White.copy(alpha = if (swapEnabled) 1f else 0.35f),
                         modifier = Modifier.size(22.dp)
                     )
                 }
-                Spacer(Modifier.width(24.dp))
-                // Centre: capture.
-                Box(
-                    bubble(Modifier.size(72.dp))
-                        .then(if (recording) Modifier.border(3.dp, Color(0xFFFF3B30), CircleShape) else Modifier)
-                        .clickable(enabled = !captureBusy) { tap(); onCapturePressed() },
-                    contentAlignment = Alignment.Center
+                Spacer(Modifier.width(gap))
+                // Centre: capture — or, while streaming, the Live button.
+                VrmGlassBubble(
+                    size = 72.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                    enabled = !captureBusy,
+                    border = if (recording || isLive) Color(0xFFFF3B30) else null,
+                    onClick = { tap(); onCapturePressed() }
                 ) {
                     when {
+                        liveState == com.mediaviewer.stream.LiveStreamer.State.CONNECTING -> androidx.compose.material3.CircularProgressIndicator(
+                            color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(26.dp)
+                        )
+                        isLive -> Text("Live", color = Color(0xFFFF3B30), fontSize = 17.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
                         captureBusy -> androidx.compose.material3.CircularProgressIndicator(
                             color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(26.dp)
                         )
@@ -792,21 +945,59 @@ fun VrmModeScreen(
                         else -> Icon(Icons.Default.PhotoCamera, contentDescription = "Take photo", tint = Color.White, modifier = Modifier.size(30.dp))
                     }
                 }
-                Spacer(Modifier.width(24.dp))
-                // Right: settings.
-                Box(
-                    bubble(Modifier.size(48.dp)).clickable { tap(); settingsOpen = true },
-                    contentAlignment = Alignment.Center
+                Spacer(Modifier.width(gap))
+                // Settings.
+                VrmGlassBubble(
+                    size = 48.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                    onClick = { tap(); settingsOpen = true }
                 ) {
                     Icon(Icons.Default.Settings, contentDescription = "VRM Settings", tint = Color.White, modifier = Modifier.size(20.dp))
                 }
+                Spacer(Modifier.width(gap))
+                // Far right: Live (opens the stream setup popup).
+                val liveEnabled = !recording && !captureBusy && !isLive && vrmBytes != null
+                VrmGlassBubble(
+                    size = 48.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                    enabled = liveEnabled,
+                    onClick = { tap(); liveDialogOpen = true }
+                ) {
+                    Text(
+                        "Live", color = Color.White.copy(alpha = if (liveEnabled) 1f else 0.35f),
+                        fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                    )
+                }
             }
+        }
+
+        if (liveDialogOpen) {
+            VrmLiveDialog(
+                liquidGlass = liquidGlass,
+                tint = tint,
+                backdrop = backdrop,
+                url = streamUrl, onUrl = { streamUrl = it },
+                key = streamKey, onKey = { streamKey = it },
+                qualityName = streamQualityName, onQuality = { streamQualityName = it },
+                autoQuality = autoQuality,
+                onGoLive = { onGoLive() },
+                onDismiss = { liveDialogOpen = false }
+            )
+        }
+        if (endLiveConfirmOpen) {
+            VrmConfirmDialog(
+                liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                title = "End stream?",
+                message = "You've been live for ${formatLiveClock(liveElapsedS)}.",
+                confirmLabel = "End stream",
+                onConfirm = { endLiveConfirmOpen = false; endLive() },
+                onDismiss = { endLiveConfirmOpen = false }
+            )
         }
 
         if (settingsOpen) {
             VrmSettingsSheet(
                 liquidGlass = liquidGlass,
                 tint = tint,
+                backdrop = backdrop,
                 ui = VrmSettingsUi(
                     trackUpperBody = trackUpperBody, onToggleUpperBody = { trackUpperBody = it },
                     trackFullBody = trackFullBody, onToggleFullBody = { trackFullBody = it },
@@ -820,6 +1011,7 @@ fun VrmModeScreen(
                     showDebug = showDebug, onToggleDebug = { showDebug = it },
                     fullBright = fullBright, onToggleFullBright = { fullBright = it },
                     armIk = armIk, onToggleArmIk = { armIk = it },
+                    lightLevel = lightLevel, onLightLevel = { lightLevel = it },
                     onResetCamera = { cameraResetKey++ },
                     avatarParts = avatarParts,
                     hiddenParts = hiddenParts,
@@ -1487,6 +1679,7 @@ private class VrmSettingsUi(
     val showDebug: Boolean, val onToggleDebug: (Boolean) -> Unit,
     val fullBright: Boolean, val onToggleFullBright: (Boolean) -> Unit,
     val armIk: Boolean, val onToggleArmIk: (Boolean) -> Unit,
+    val lightLevel: Int, val onLightLevel: (Int) -> Unit,
     val onResetCamera: () -> Unit,
     val avatarParts: List<AvatarPart>,
     val hiddenParts: Set<String>,
@@ -1503,6 +1696,7 @@ private class VrmSettingsUi(
 private fun VrmSettingsSheet(
     liquidGlass: Boolean,
     tint: Color,
+    backdrop: GlassBackdrop?,
     ui: VrmSettingsUi,
     onDismiss: () -> Unit
 ) {
@@ -1512,13 +1706,13 @@ private fun VrmSettingsSheet(
     // Flat mode: the tint mixed into near-black, so it reads as "your color".
     val flatPanel = androidx.compose.ui.graphics.lerp(Color(0xFF121212), tint, 0.22f)
     Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f)).clickable { tap(); onDismiss() }) {
+    VrmGlassPanel(
+        liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, flatColor = flatPanel,
+        modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navigationBars)
+            .padding(16.dp)
+    ) {
     Box(
-        Modifier.fillMaxWidth().align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(16.dp).clip(RoundedCornerShape(20.dp))
-            .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = RoundedCornerShape(20.dp)) else Modifier.background(flatPanel))
-            .border(1.dp, tint.copy(alpha = 0.45f), RoundedCornerShape(20.dp))
-            // Swallow taps on the sheet itself so they don't dismiss it.
-            .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null) {}
+        Modifier
             .heightIn(max = 560.dp)
             .verticalScroll(androidx.compose.foundation.rememberScrollState())
             .padding(18.dp)
@@ -1603,6 +1797,13 @@ private fun VrmSettingsSheet(
             VrmSettingsSection("Display", tint)
             VrmSettingsToggleRow("Full bright", ui.fullBright, tint,
                 hint = "No lighting or shadows — every texture shown at full brightness.") { ui.onToggleFullBright(it) }
+            if (!ui.fullBright) {
+                VrmSettingsSlider(
+                    label = "Brightness", valueText = if (ui.lightLevel == 5) "default" else "${ui.lightLevel}",
+                    value = ui.lightLevel.toFloat(), range = 0f..10f, steps = 9, tint = tint,
+                    hint = "How strongly the lights hit the avatar's face and body."
+                ) { ui.onLightLevel(kotlin.math.round(it).toInt()) }
+            }
             Row(
                 Modifier.fillMaxWidth().padding(vertical = 10.dp).clickable { tap(); ui.onResetCamera() },
                 verticalAlignment = Alignment.CenterVertically
@@ -1615,6 +1816,7 @@ private fun VrmSettingsSheet(
             VrmSettingsToggleRow("Tracking preview", ui.showPreview, tint) { ui.onTogglePreview(it) }
             VrmSettingsToggleRow("Debug info", ui.showDebug, tint) { ui.onToggleDebug(it) }
         }
+    }
     }
     }
 }
@@ -1753,6 +1955,294 @@ private fun TrackingPreview(
                 val a = body.getOrNull(POSE_CONNECTIONS[i]); val b = body.getOrNull(POSE_CONNECTIONS[i + 1])
                 if (a != null && b != null) drawLine(poseColor, px(a.x(), a.y()), px(b.x(), b.y()), strokeWidth = 1.5.dp.toPx())
                 i += 2
+            }
+        }
+    }
+}
+
+/** Stream clock: m:ss, then h:mm:ss — it just keeps counting. */
+private fun formatLiveClock(totalSeconds: Long): String {
+    val s = totalSeconds.coerceAtLeast(0)
+    val h = s / 3600; val m = (s % 3600) / 60; val sec = s % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec)
+}
+
+/**
+ * A round VRM-mode button. With liquid glass on it's the app's real glass:
+ * the avatar behind it is blurred through [backdrop] (API 31+), tinted with
+ * the user's color and rimmed like every other glass button in the app.
+ */
+@Composable
+private fun VrmGlassBubble(
+    size: androidx.compose.ui.unit.Dp,
+    liquidGlass: Boolean,
+    tint: Color,
+    backdrop: GlassBackdrop?,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    border: Color? = null,
+    onClick: () -> Unit,
+    content: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit
+) {
+    val base = modifier.size(size).clip(CircleShape)
+    val ring = if (border != null) Modifier.border(3.dp, border, CircleShape) else Modifier
+    val click = Modifier.clickable(enabled = enabled, onClick = onClick)
+    if (liquidGlass) {
+        LiquidGlassSurface(
+            modifier = base.then(ring).then(click),
+            shape = CircleShape,
+            tint = tint,
+            backdrop = backdrop,
+            contentAlignment = Alignment.Center,
+            content = content
+        )
+    } else {
+        Box(base.background(tint.copy(alpha = 0.25f)).then(ring).then(click), contentAlignment = Alignment.Center, content = content)
+    }
+}
+
+/** A VRM-mode sheet/popup surface: blurred glass (or the flat tint-mixed
+ *  panel), and it swallows taps so they don't dismiss what's behind it. */
+@Composable
+private fun VrmGlassPanel(
+    liquidGlass: Boolean,
+    tint: Color,
+    backdrop: GlassBackdrop?,
+    flatColor: Color,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    val shape = RoundedCornerShape(20.dp)
+    val swallow = Modifier.clickable(
+        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+        indication = null
+    ) {}
+    if (liquidGlass) {
+        LiquidGlassSurface(modifier = modifier.then(swallow), shape = shape, tint = tint, backdrop = backdrop) {
+            // The page behind is dimmed, but the blurred crop isn't — this
+            // keeps the panel's text as readable as the old flat sheet.
+            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.38f)))
+            content()
+        }
+    } else {
+        Box(
+            modifier.clip(shape).background(flatColor).border(1.dp, tint.copy(alpha = 0.45f), shape).then(swallow)
+        ) { content() }
+    }
+}
+
+@Composable
+private fun VrmTextField(
+    value: String,
+    onValue: (String) -> Unit,
+    placeholder: String,
+    tint: Color,
+    secret: Boolean = false,
+    keyboardType: androidx.compose.ui.text.input.KeyboardType = androidx.compose.ui.text.input.KeyboardType.Text,
+    imeAction: androidx.compose.ui.text.input.ImeAction = androidx.compose.ui.text.input.ImeAction.Next,
+    trailing: (@Composable () -> Unit)? = null
+) {
+    val shape = RoundedCornerShape(12.dp)
+    Row(
+        Modifier.fillMaxWidth().clip(shape).background(Color.White.copy(alpha = 0.08f))
+            .border(1.dp, tint.copy(alpha = 0.35f), shape)
+            .padding(start = 12.dp, end = if (trailing != null) 4.dp else 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        androidx.compose.foundation.text.BasicTextField(
+            value = value,
+            onValueChange = onValue,
+            singleLine = true,
+            textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp),
+            cursorBrush = androidx.compose.ui.graphics.SolidColor(tint),
+            visualTransformation = if (secret) androidx.compose.ui.text.input.PasswordVisualTransformation()
+                else androidx.compose.ui.text.input.VisualTransformation.None,
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                keyboardType = keyboardType, imeAction = imeAction, autoCorrect = false
+            ),
+            modifier = Modifier.weight(1f).padding(vertical = 12.dp),
+            decorationBox = { inner ->
+                Box {
+                    if (value.isEmpty()) Text(placeholder, color = Color.White.copy(alpha = 0.35f), fontSize = 14.sp, maxLines = 1)
+                    inner()
+                }
+            }
+        )
+        trailing?.invoke()
+    }
+}
+
+/**
+ * The Live button's popup: server URL + stream key (remembered), a quality
+ * choice (Auto picks what this phone sustains — see StreamQuality.auto),
+ * and "Go Live". Compact and centered; it rides up above the keyboard.
+ */
+@Composable
+private fun VrmLiveDialog(
+    liquidGlass: Boolean,
+    tint: Color,
+    backdrop: GlassBackdrop?,
+    url: String, onUrl: (String) -> Unit,
+    key: String, onKey: (String) -> Unit,
+    qualityName: String, onQuality: (String) -> Unit,
+    autoQuality: com.mediaviewer.stream.StreamQuality,
+    onGoLive: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val tap = rememberHapticTap()
+    val dim = Color.White.copy(alpha = 0.6f)
+    var showKey by remember { mutableStateOf(false) }
+    val urlError = remember(url, key) {
+        if (url.isBlank()) null
+        else runCatching { com.mediaviewer.stream.RtmpPublisher.parseEndpoint(url, key); null }.getOrElse { it.message }
+    }
+    val canGo = url.isNotBlank() && urlError == null
+    Box(
+        Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f))
+            .clickable(
+                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                indication = null
+            ) { onDismiss() }
+            .imePadding(),
+        contentAlignment = Alignment.Center
+    ) {
+        VrmGlassPanel(
+            liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+            flatColor = androidx.compose.ui.graphics.lerp(Color(0xFF121212), tint, 0.22f),
+            modifier = Modifier.padding(horizontal = 28.dp).widthIn(max = 380.dp).fillMaxWidth()
+        ) {
+            Column(Modifier.padding(18.dp)) {
+                Text("Go Live", color = Color.White, fontSize = 17.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "Stream your avatar to YouTube, Twitch, Kick or any RTMP server. Copy both from your platform's stream settings.",
+                    color = dim, fontSize = 12.sp
+                )
+                Spacer(Modifier.height(14.dp))
+                Text("SERVER URL", color = tint, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, letterSpacing = 1.sp)
+                Spacer(Modifier.height(4.dp))
+                VrmTextField(
+                    value = url, onValue = onUrl, placeholder = "rtmp://a.rtmp.youtube.com/live2", tint = tint,
+                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Uri
+                )
+                Spacer(Modifier.height(10.dp))
+                Text("STREAM KEY", color = tint, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, letterSpacing = 1.sp)
+                Spacer(Modifier.height(4.dp))
+                VrmTextField(
+                    value = key, onValue = onKey, placeholder = "xxxx-xxxx-xxxx-xxxx", tint = tint,
+                    secret = !showKey,
+                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
+                    imeAction = androidx.compose.ui.text.input.ImeAction.Done,
+                    trailing = {
+                        Box(
+                            Modifier.size(36.dp).clip(CircleShape).clickable { tap(); showKey = !showKey },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                if (showKey) Icons.Default.VisibilityOff
+                                else Icons.Default.Visibility,
+                                contentDescription = if (showKey) "Hide key" else "Show key",
+                                tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                )
+                if (urlError != null) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(urlError, color = Color(0xFFFF8A80), fontSize = 11.sp)
+                }
+                Spacer(Modifier.height(12.dp))
+                Text("QUALITY", color = tint, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, letterSpacing = 1.sp)
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp)) {
+                    val options = listOf("" to "Auto") + com.mediaviewer.stream.StreamQuality.values().map { it.name to it.label }
+                    for ((id, label) in options) {
+                        val selected = qualityName == id
+                        Box(
+                            Modifier.weight(1f).clip(RoundedCornerShape(10.dp))
+                                .background(if (selected) tint else Color.White.copy(alpha = 0.08f))
+                                .border(1.dp, tint.copy(alpha = if (selected) 0f else 0.35f), RoundedCornerShape(10.dp))
+                                .clickable { tap(); onQuality(id) }
+                                .padding(vertical = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(label, color = Color.White, fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, maxLines = 1)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                val shown = com.mediaviewer.stream.StreamQuality.values().firstOrNull { it.name == qualityName } ?: autoQuality
+                Text(
+                    (if (qualityName.isEmpty()) "Auto picked ${autoQuality.label} for this phone · " else "") +
+                        "${shown.width}×${shown.height}, ${shown.fps} fps, ${"%.1f".format(shown.bitrate / 1_000_000f)} Mbps. " +
+                        "Lowers itself automatically if your connection struggles.",
+                    color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
+                )
+                Spacer(Modifier.height(16.dp))
+                Box(
+                    Modifier.fillMaxWidth().height(46.dp).clip(RoundedCornerShape(14.dp))
+                        .background(if (canGo) tint else Color.White.copy(alpha = 0.12f))
+                        .clickable(enabled = canGo) { tap(); onGoLive() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(8.dp).clip(CircleShape).background(if (canGo) Color(0xFFFF3B30) else Color.White.copy(alpha = 0.3f)))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Go Live", color = Color.White.copy(alpha = if (canGo) 1f else 0.4f),
+                            fontSize = 15.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VrmConfirmDialog(
+    liquidGlass: Boolean,
+    tint: Color,
+    backdrop: GlassBackdrop?,
+    title: String,
+    message: String,
+    confirmLabel: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val tap = rememberHapticTap()
+    Box(
+        Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f))
+            .clickable(
+                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                indication = null
+            ) { onDismiss() },
+        contentAlignment = Alignment.Center
+    ) {
+        VrmGlassPanel(
+            liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+            flatColor = androidx.compose.ui.graphics.lerp(Color(0xFF121212), tint, 0.22f),
+            modifier = Modifier.padding(horizontal = 40.dp).widthIn(max = 340.dp).fillMaxWidth()
+        ) {
+            Column(Modifier.padding(18.dp)) {
+                Text(title, color = Color.White, fontSize = 16.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
+                Text(message, color = Color.White.copy(alpha = 0.6f), fontSize = 13.sp)
+                Spacer(Modifier.height(16.dp))
+                Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp)) {
+                    Box(
+                        Modifier.weight(1f).height(42.dp).clip(RoundedCornerShape(12.dp))
+                            .border(1.dp, tint.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                            .clickable { tap(); onDismiss() },
+                        contentAlignment = Alignment.Center
+                    ) { Text("Cancel", color = Color.White, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold) }
+                    Box(
+                        Modifier.weight(1f).height(42.dp).clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFFFF3B30))
+                            .clickable { tap(); onConfirm() },
+                        contentAlignment = Alignment.Center
+                    ) { Text(confirmLabel, color = Color.White, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold) }
+                }
             }
         }
     }

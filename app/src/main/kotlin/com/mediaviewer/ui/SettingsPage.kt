@@ -352,6 +352,12 @@ internal fun SettingsPageContent(
 
         ToggleBubble("Reduced Animations", reducedAnimations, onToggleReducedAnimations, liquidGlass, tint, backdrop)
         ToggleBubble("Rounded Grid Tiles", squareGridRounded, onToggleSquareGridRounded, liquidGlass, tint, backdrop)
+        // Skips the pixel loading screen/transition everywhere: pages open
+        // instantly and fill in as their data arrives.
+        ToggleBubble(
+            "Disable Loading Screens", !com.mediaviewer.util.UiToggles.loadingScreens,
+            { com.mediaviewer.util.UiToggles.setLoadingScreens(!it) }, liquidGlass, tint, backdrop
+        )
 
         // Glass Theme + its Background/Outline dials + the highlight toggle
         // share one bubble; none of the rows inside draws its own outline.
@@ -415,6 +421,12 @@ internal fun SettingsPageContent(
 
         ToggleBubble("Hide Text Only Posts", hideTextOnlyPosts, onToggleHideTextOnlyPosts, liquidGlass, tint, backdrop)
         ToggleBubble("I Hate Fun (Blur NSFW Content)", hateFunBlurNsfw, onToggleHateFunBlurNsfw, liquidGlass, tint, backdrop)
+        // Frame rate (top right) + AI tag-on-like queue (top left) beside the
+        // camera cutout — see DebugOverlay.
+        ToggleBubble(
+            "Debug Overlay", com.mediaviewer.util.UiToggles.debugOverlay,
+            { com.mediaviewer.util.UiToggles.setDebugOverlay(it) }, liquidGlass, tint, backdrop
+        )
 
         if (bskyLoggedIn) {
             // Runs the follower scan from scratch — for picking up accounts
@@ -909,7 +921,7 @@ internal fun CreditsPageContent() {
             Body(buildAnnotatedString {
                 append("Created by ")
                 withStyle(SpanStyle(color = recho)) { append("Recho Raccoon") }
-                append(", coded with Claude Sonnet and Muse by Meta")
+                append(", coded with Claude Sonnet, Claude Opus 5.5 and Muse by Meta")
             })
         }
         Column {
@@ -933,6 +945,14 @@ internal fun CreditsPageContent() {
         Column {
             Header("Other Integrations")
             Body(buildAnnotatedString { append("e621 - Content Browsing.") })
+        }
+        Column {
+            Header("On-Device AI Models")
+            Body(buildAnnotatedString {
+                append("AI Tagging - Z3D-E621-Convnext (Zack3D), via ONNX Runtime.\n")
+                append("VRM Tracking - MediaPipe Face, Hand & Pose Landmarkers (Google).\n")
+                append("Translation - ML Kit Translate & Language ID (Google).")
+            })
         }
         Spacer(Modifier.height(8.dp))
     }

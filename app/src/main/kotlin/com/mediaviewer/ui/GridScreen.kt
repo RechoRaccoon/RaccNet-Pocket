@@ -16,6 +16,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.ContentScale
@@ -33,6 +38,14 @@ import com.mediaviewer.util.rememberHapticTap
 import com.mediaviewer.viewmodel.MainViewModel
 import kotlinx.coroutines.withTimeoutOrNull
 
+/**
+ * The feed's grid mode (pinch in on a post). Laid out like a profile page:
+ * the feeds as a row of profile-style main tabs, the content-type sub-tabs
+ * under them, the posts in the profile's own layouts (masonry / square
+ * grid / text list / video lists), and the profile's interaction bar with
+ * Refresh + Grid layout. Everything wears the signed-in user's own profile
+ * color. Pinch out anywhere to go back to the post you were on.
+ */
 @Composable
 fun GridScreen(
     items: List<MediaItem>,
@@ -54,158 +67,157 @@ fun GridScreen(
     onLoadMore: () -> Unit,
     onSelectFeed: (String?) -> Unit,
     onSearchE621: (String) -> Unit,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    /** The signed-in user's avatar — the grid's UI wears its color. */
+    selfAvatarUrl: String? = null,
+    isLoading: Boolean = false,
+    roundedGridTiles: Boolean = false,
+    reducedAnimations: Boolean = false
 ) {
     val tap = rememberHapticTap()
-    val gridState  = rememberLazyGridState()
     var localTags  by remember(e621SearchTags) { mutableStateOf(e621SearchTags) }
+    val tint = if (!selfAvatarUrl.isNullOrBlank()) rememberDominantColor(selfAvatarUrl) else NeutralGlassTint
+    var kind by remember { mutableStateOf(PostKindFilter.ALL) }
+    val gridScreen = "feed_grid"
+    val listState = rememberLazyListState()
+    // A swipeable multi-image tile reports which image it's showing just
+    // before its click lands; carried into onItemClick as the sub-image.
+    val pendingSeed = remember { arrayOfNulls<Pair<String, Int>>(1) }
 
-    LaunchedEffect(currentIndex) {
-        if (currentIndex > 0) gridState.scrollToItem(maxOf(0, currentIndex - 3))
+    // Live glass backdrop: this page's own background gradient, recorded so
+    // the tab pills and the interaction bar can blur it like the profile's.
+    val backdropLayer = androidx.compose.ui.graphics.rememberGraphicsLayer()
+    var backdropOrigin by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
+    val backdrop = remember(liquidGlass, backdropLayer) {
+        if (liquidGlass) GlassBackdrop(backdropLayer) { backdropOrigin } else null
     }
 
-    val shouldLoadMore by remember {
-        derivedStateOf {
-            val lastVisible = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            lastVisible >= items.size - 12
-        }
-    }
-    // Keyed on items.size too, not just the boolean — if a page comes back
-    // short enough that shouldLoadMore is already true, and the next page is
-    // *also* short, the boolean itself never flips (stays true the whole
-    // time), so a LaunchedEffect keyed on shouldLoadMore alone would only
-    // fire once and then silently stop asking for more, even though the
-    // screen still isn't full. Re-including items.size makes it refire every
-    // time the list actually grows, so it keeps requesting more until either
-    // the viewport is full or the feed truly runs out.
-    LaunchedEffect(shouldLoadMore, items.size) {
-        if (shouldLoadMore && items.isNotEmpty()) onLoadMore()
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(OledBlack)
-            .padding(top = rememberTopCutoutClearance())
-    ) {
-        // ── Feed selector / search bar ─────────────────────────────────────────
-        if (appMode == AppMode.BLUESKY) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // Author chip when viewing a specific account
+    Box(Modifier.fillMaxSize()) {
+        Box(
+            Modifier.fillMaxSize()
+                .onGloballyPositioned { backdropOrigin = it.positionInRoot() }
+                .then(
+                    if (liquidGlass) Modifier.background(postBackgroundBrush(tint)).drawWithContent {
+                        backdropLayer.record { this@drawWithContent.drawContent() }
+                        drawContent()
+                    } else Modifier.background(OledBlack)
+                )
+        )
+        Column(Modifier.fillMaxSize().padding(top = rememberTopCutoutClearance())) {
+            // ── Feeds (profile-style main tabs) / e621 tag search ─────────────
+            if (appMode == AppMode.BLUESKY) {
                 val saved = authorFeedState
-                if (saved != null) AuthorChip(author = saved.author, liquidGlass = liquidGlass)
-
-                availableFeeds.forEach { feed ->
-                    FeedChip(feed.displayName, feed.avatarUrl,
-                        selectedFeedUri == feed.uri && saved == null, liquidGlass = liquidGlass) { onSelectFeed(feed.uri) }
+                val labels = buildList {
+                    if (saved != null) add(saved.author.displayName.ifBlank { "@" + saved.author.handle })
+                    availableFeeds.forEach { add(it.displayName) }
+                }
+                val offset = if (saved != null) 1 else 0
+                val selected = if (saved != null) 0 else availableFeeds.indexOfFirst { it.uri == selectedFeedUri }.let { if (it >= 0) it + offset else -1 }
+                HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
+                ProfileStyleTabRow(labels = labels, selectedIndex = selected, liquidGlass = liquidGlass, tint = tint) { i ->
+                    if (i >= offset) availableFeeds.getOrNull(i - offset)?.let { onSelectFeed(it.uri) }
+                }
+            } else {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = localTags, onValueChange = { localTags = it },
+                        placeholder = { Text("Search tags…", color = DimGray, fontSize = 13.sp) },
+                        singleLine = true,
+                        textStyle = LocalTextStyle.current.copy(fontSize = 13.sp, color = Color.White),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = tint.copy(0.6f), unfocusedBorderColor = Color.White.copy(0.1f),
+                            cursorColor = Color.White, focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
+                            focusedTextColor = Color.White, unfocusedTextColor = Color.White
+                        ),
+                        modifier = Modifier.weight(1f).height(54.dp)
+                    )
+                    Button(
+                        onClick = { tap(); onSearchE621(localTags) },
+                        colors = ButtonDefaults.buttonColors(containerColor = tint.copy(0.35f), contentColor = Color.White),
+                        contentPadding = PaddingValues(horizontal = 14.dp),
+                        modifier = Modifier.height(54.dp)
+                    ) { Text("Go", fontSize = 13.sp) }
                 }
             }
-        } else {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedTextField(
-                    value = localTags, onValueChange = { localTags = it },
-                    placeholder = { Text("Search tags…", color = DimGray, fontSize = 13.sp) },
-                    singleLine = true,
-                    textStyle = LocalTextStyle.current.copy(fontSize = 13.sp, color = Color.White),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = Color.White.copy(0.3f), unfocusedBorderColor = Color.White.copy(0.1f),
-                        cursorColor = Color.White, focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
-                        focusedTextColor = Color.White, unfocusedTextColor = Color.White
-                    ),
-                    modifier = Modifier.weight(1f).height(54.dp)
-                )
-                Button(
-                    onClick = { tap(); onSearchE621(localTags) },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(0.1f), contentColor = Color.White),
-                    contentPadding = PaddingValues(horizontal = 14.dp),
-                    modifier = Modifier.height(54.dp)
-                ) { Text("Go", fontSize = 13.sp) }
+            HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
+            // ── Content-type sub-tabs ──────────────────────────────────────
+            if (items.isNotEmpty()) {
+                PostKindSubTabRow(items, kind, liquidGlass, tint) { kind = it }
             }
-        }
 
-        HorizontalDivider(color = Color.White.copy(alpha = 0.07f), thickness = 0.5.dp)
-
-        if (items.isEmpty()) {
-            Box(Modifier.weight(1f).fillMaxWidth()) {
-                CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White, strokeWidth = 1.5.dp)
-            }
-        } else {
-            // Item 4: the feed groups multi-image posts into one MediaItem (so
-            // liking/following is shared across its images), but the grid should
-            // still show every individual image as its own cell.
-            // Bug fix: each flattened cell now also carries its own sub-image
-            // index within that post's mediaGroup (0 for single-image/text
-            // posts), not just which post it belongs to — see onItemClick above.
-            val flattened = remember(items) {
-                items.mapIndexed { postIndex, item ->
-                    if (item.mediaGroup.size > 1) item.mediaGroup.mapIndexed { subIndex, img ->
-                        Triple(postIndex, subIndex, img.thumbUrl.ifBlank { img.mediaUrl })
-                    }
-                    else listOf(Triple(postIndex, 0, item.thumbUrl.ifBlank { item.mediaUrl }))
-                }.flatten()
-            }
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(3),
-                state = gridState,
-                modifier = Modifier
-                    .fillMaxSize()
-                    // Item 5: pinch OUT (fingers spreading apart) — the opposite
-                    // gesture from the pinch-IN that enters grid mode — jumps back
-                    // to the specific post the user was viewing before entering grid.
-                    .pointerInput(currentIndex) {
-                        awaitEachGesture {
-                            awaitFirstDown(requireUnconsumed = false)
-                            var armDist = -1f
-                            var prevDist = -1f
-                            while (true) {
-                                val event = withTimeoutOrNull(16L) { awaitPointerEvent(PointerEventPass.Main) } ?: continue
-                                val pressed = event.changes.filter { it.pressed }
-                                if (pressed.isEmpty()) break
-                                if (pressed.size >= 2) {
-                                    val p1 = pressed[0].position; val p2 = pressed[1].position
-                                    val dist = (p1 - p2).getDistance()
-                                    if (armDist < 0f) armDist = dist
-                                    if (prevDist > 0f && dist > armDist * 1.4f) {
-                                        // Pinch-out returns to whichever post/
-                                        // sub-image was already showing before
-                                        // grid mode — -1 tells the caller "don't
-                                        // touch the sub-image index", unlike a
-                                        // real grid-cell tap which always passes
-                                        // the specific sub-image it represents.
-                                        onItemClick(currentIndex, -1)
+            if (items.isEmpty()) {
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White, strokeWidth = 1.5.dp)
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        // Item 5: pinch OUT (fingers spreading apart) — the opposite
+                        // gesture from the pinch-IN that enters grid mode — jumps back
+                        // to the specific post the user was viewing before entering grid.
+                        .pointerInput(currentIndex) {
+                            awaitEachGesture {
+                                awaitFirstDown(requireUnconsumed = false)
+                                var armDist = -1f
+                                var prevDist = -1f
+                                while (true) {
+                                    val event = withTimeoutOrNull(16L) { awaitPointerEvent(PointerEventPass.Initial) } ?: continue
+                                    val pressed = event.changes.filter { it.pressed }
+                                    if (pressed.isEmpty()) break
+                                    if (pressed.size >= 2) {
+                                        val p1 = pressed[0].position; val p2 = pressed[1].position
+                                        val dist = (p1 - p2).getDistance()
+                                        if (armDist < 0f) armDist = dist
+                                        if (prevDist > 0f && dist > armDist * 1.4f) {
+                                            onItemClick(currentIndex, -1)
+                                            pressed.forEach { it.consume() }
+                                            break
+                                        }
+                                        prevDist = dist
                                         pressed.forEach { it.consume() }
-                                        break
+                                    } else {
+                                        prevDist = -1f
                                     }
-                                    prevDist = dist
-                                    pressed.forEach { it.consume() }
-                                } else {
-                                    prevDist = -1f
                                 }
                             }
                         }
-                    },
-                contentPadding = PaddingValues(0.dp),
-                horizontalArrangement = Arrangement.spacedBy(0.dp),
-                verticalArrangement = Arrangement.spacedBy(0.dp)
-            ) {
-                itemsIndexed(flattened, key = { i, triple -> "${triple.first}_$i" }) { _, (postIndex, subIndex, thumbUrl) ->
-                    val item = items[postIndex]
-                    GridCell(item, thumbUrl, postIndex == currentIndex) { onItemClick(postIndex, subIndex) }
+                ) {
+                    sharedPostResults(
+                        items = items, loading = isLoading, filter = kind,
+                        gridMode = resultsGridMode(gridScreen, kind), tint = tint, liquidGlass = liquidGlass,
+                        roundedGridTiles = roundedGridTiles,
+                        onTapItem = { item ->
+                            val idx = items.indexOf(item)
+                            if (idx >= 0) {
+                                val seed = pendingSeed[0]?.takeIf { it.first == item.id }?.second ?: 0
+                                pendingSeed[0] = null
+                                onItemClick(idx, seed)
+                            }
+                        },
+                        onSeedSubImageIndex = { id, page -> pendingSeed[0] = id to page },
+                        onLoadMore = onLoadMore
+                    )
                 }
             }
         }
+        ResultsInteractionBar(
+            liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+            refreshing = isLoading, animateRefresh = !reducedAnimations,
+            onRefresh = onRefresh,
+            filter = kind, gridMode = resultsGridMode(gridScreen, kind),
+            onGrid = { cycleResultsGridMode(gridScreen, kind) },
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
+        )
     }
 }
 

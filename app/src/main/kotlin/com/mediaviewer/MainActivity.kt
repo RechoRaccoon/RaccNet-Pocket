@@ -162,6 +162,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {        super.onCreate(savedInstanceState)
         installCrashHandler(applicationContext)
         com.mediaviewer.util.CrashBreadcrumbs.init(applicationContext)
+        com.mediaviewer.util.UiToggles.init(applicationContext)
+        com.mediaviewer.util.ImageLoading.install(applicationContext)
         enableEdgeToEdge()
         hideSystemStatusBar()
         // Bug fix: lets the background/media draw all the way up under the
@@ -340,6 +342,10 @@ private fun AppRoot(viewModel: MainViewModel) {
     val translationEnabled     by viewModel.translationEnabled.collectAsState()
     val translationTargetLang  by viewModel.translationTargetLang.collectAsState()
     val customFontName         by viewModel.customFontName.collectAsState()
+    val likeTagPhase           by viewModel.likeTagPhase.collectAsState()
+    val likeTagPending         by viewModel.likeTagPending.collectAsState()
+    // Settings → UI Customization → loading screens on/off (see UiToggles).
+    val loadingScreens = com.mediaviewer.util.UiToggles.loadingScreens
 
     // Big Update #10: the currently-on-screen post's live backdrop + dominant
     // color, reported up from inside the pager (see PostContent's onBackdropChanged)
@@ -373,7 +379,7 @@ private fun AppRoot(viewModel: MainViewModel) {
     // covering the whole screen (phase advancing past WIPE_IN), at which
     // point the pixel grid's own full-opacity LOADING coverage takes over
     // seamlessly with no gap in between.
-    var coldLaunchCovered by remember { mutableStateOf(true) }
+    var coldLaunchCovered by remember { mutableStateOf(com.mediaviewer.util.UiToggles.loadingScreens) }
     LaunchedEffect(pixelController.phase) {
         if (coldLaunchCovered && pixelController.phase != PixelPhase.HIDDEN && pixelController.phase != PixelPhase.WIPE_IN) {
             coldLaunchCovered = false
@@ -412,7 +418,7 @@ private fun AppRoot(viewModel: MainViewModel) {
         // means the "swiping in and covering it with white pixels" motion
         // is actually visible against the black scrim, before it hue-shifts
         // into the user's profile color once that's fetched.
-        pixelController.start(Color.White)
+        if (com.mediaviewer.util.UiToggles.loadingScreens) pixelController.start(Color.White)
     }
     LaunchedEffect(appInitialized, bskyLoggedIn, selfProfile) {
         if (!appInitialized) return@LaunchedEffect
@@ -513,6 +519,12 @@ private fun AppRoot(viewModel: MainViewModel) {
         val avatarUrl = overlay.author.avatarUrl
         val stillLoading = overlay.loadingProfile
         rootScope.launch {
+            if (!com.mediaviewer.util.UiToggles.loadingScreens) {
+                // Loading screens off: show the profile right away; it fills
+                // in as its data arrives.
+                revealedProfileDids = revealedProfileDids + overlay.author.did
+                return@launch
+            }
             if (isNewProfile) {
                 pixelController.start(selfThemeColor)
                 // Wipe-in has now genuinely reached full coverage (start()
@@ -552,6 +564,13 @@ private fun AppRoot(viewModel: MainViewModel) {
     // and should stay instant.
     val handleSelectFeed: (String?) -> Unit = { uri ->
         rootScope.launch {
+            if (!com.mediaviewer.util.UiToggles.loadingScreens) {
+                // Loading screens off: straight into the feed, which shows
+                // its posts as they load.
+                viewModel.selectFeedFromAnyContext(uri)
+                viewModel.setScreen(ScreenState.FEED)
+                return@launch
+            }
             // Bug fix (item 4): this used to start from `currentDominantColor`
             // — the live backdrop color of whatever post happens to be on
             // screen right now, which is essentially "the color the *previous*
@@ -777,6 +796,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             onSendPost                = viewModel::openSendPopup,
             onQuoteRepost             = viewModel::openQuoteRepost,
             onBlockAccount            = viewModel::toggleBlockCurrentAuthor,
+            onDeletePost              = viewModel::deleteCurrentPost,
             onDownloadGif             = viewModel::downloadCurrentItemAsGif,
             // Item 4: "More" menu on the interaction bar.
             onShowMoreLikeThis        = viewModel::sendShowMoreLikeThisForCurrentItem,
@@ -789,7 +809,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             // Item 27: tapping the sender's avatar in the "Sent by" header
             // (From Friends feed) opens their profile.
             onTapSentByAuthor         = { author -> viewModel.openProfile(author) },
-            friendsFeedLoadingOverlay = friendsFeedLoadingOverlay,
+            friendsFeedLoadingOverlay = friendsFeedLoadingOverlay && loadingScreens,
             onCurrentBackdropChanged  = { backdrop, color -> currentBackdrop = backdrop; currentDominantColor = color },
             selfProfile               = selfProfile,
             hideTextOnlyPosts         = hideTextOnlyPosts,
@@ -849,7 +869,7 @@ private fun AppRoot(viewModel: MainViewModel) {
 
         // Item 12 follow-up: shown only while fetching a DM thread's shared-
         // posts feed — same pattern as the "From Friends" loading overlay.
-        if (dmFeedLoadingOverlay) {
+        if (dmFeedLoadingOverlay && loadingScreens) {
             Box(
                 modifier = Modifier.fillMaxSize().background(Color.Black).zIndex(10f),
                 contentAlignment = Alignment.Center
@@ -1085,7 +1105,22 @@ private fun AppRoot(viewModel: MainViewModel) {
             val notchInteractive = !vrmModeOpen && (composePostOpen || (
                 !searchOpen && !dmInboxOpen && !taggingOverlayOpen && playingLive == null &&
                     (profileVisible || screenState == ScreenState.SETTINGS)))
-            val notchTint = if (screenState == ScreenState.SETTINGS || vrmModeOpen || composePostOpen) {
+            val openProfile = profileOverlay
+            val notchTint = if (vrmModeOpen || composePostOpen) {
+                val selfAvatar = selfProfile?.author?.avatarUrl
+                if (!selfAvatar.isNullOrBlank()) rememberDominantColor(selfAvatar) else currentDominantColor
+            } else if (profileVisible && openProfile != null) {
+                // On a profile page the notch wears that profile's own color —
+                // the same banner/avatar blend the page's glass uses.
+                val bannerColor = rememberDominantColor(openProfile.profile?.bannerUrl ?: openProfile.author.avatarUrl ?: "")
+                val avatarColor = rememberDominantColor(openProfile.author.avatarUrl ?: "")
+                Color(
+                    red = (bannerColor.red + avatarColor.red) / 2f,
+                    green = (bannerColor.green + avatarColor.green) / 2f,
+                    blue = (bannerColor.blue + avatarColor.blue) / 2f,
+                    alpha = 1f
+                )
+            } else if (screenState == ScreenState.SETTINGS) {
                 val selfAvatar = selfProfile?.author?.avatarUrl
                 if (!selfAvatar.isNullOrBlank()) rememberDominantColor(selfAvatar) else currentDominantColor
             } else {
@@ -1140,6 +1175,19 @@ private fun AppRoot(viewModel: MainViewModel) {
         // above every other layer (feed, Hub, profile, dialogs) while a
         // transition is in progress; renders nothing once HIDDEN.
         PixelMatrixOverlay(controller = pixelController, modifier = Modifier.fillMaxSize().zIndex(13f))
+
+        // Settings → App Functionality → "Debug Overlay".
+        if (com.mediaviewer.util.UiToggles.debugOverlay) {
+            val selfAvatar = selfProfile?.author?.avatarUrl
+            val debugTint = if (!selfAvatar.isNullOrBlank()) rememberDominantColor(selfAvatar) else Color.White
+            com.mediaviewer.ui.DebugOverlay(
+                tint = debugTint,
+                taggingEnabled = tagPostWhenLiked,
+                tagPhase = likeTagPhase,
+                tagPending = likeTagPending,
+                modifier = Modifier.align(Alignment.TopCenter).zIndex(14f)
+            )
+        }
     }
     }
 
