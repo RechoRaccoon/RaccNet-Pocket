@@ -356,7 +356,7 @@ internal fun SettingsPageContent(
         // instantly and fill in as their data arrives.
         ToggleBubble(
             "Disable Loading Screens", !com.mediaviewer.util.UiToggles.loadingScreens,
-            { com.mediaviewer.util.UiToggles.setLoadingScreens(!it) }, liquidGlass, tint, backdrop
+            { com.mediaviewer.util.UiToggles.updateLoadingScreens(!it) }, liquidGlass, tint, backdrop
         )
 
         // Glass Theme + its Background/Outline dials + the highlight toggle
@@ -425,7 +425,7 @@ internal fun SettingsPageContent(
         // camera cutout — see DebugOverlay.
         ToggleBubble(
             "Debug Overlay", com.mediaviewer.util.UiToggles.debugOverlay,
-            { com.mediaviewer.util.UiToggles.setDebugOverlay(it) }, liquidGlass, tint, backdrop
+            { com.mediaviewer.util.UiToggles.updateDebugOverlay(it) }, liquidGlass, tint, backdrop
         )
 
         if (bskyLoggedIn) {

@@ -36,12 +36,12 @@ object UiToggles {
         loadingScreens = p.getBoolean(KEY_LOADING_SCREENS, true)
     }
 
-    fun setDebugOverlay(enabled: Boolean) {
+    fun updateDebugOverlay(enabled: Boolean) {
         debugOverlay = enabled
         prefs?.edit()?.putBoolean(KEY_DEBUG_OVERLAY, enabled)?.apply()
     }
 
-    fun setLoadingScreens(enabled: Boolean) {
+    fun updateLoadingScreens(enabled: Boolean) {
         loadingScreens = enabled
         prefs?.edit()?.putBoolean(KEY_LOADING_SCREENS, enabled)?.apply()
     }

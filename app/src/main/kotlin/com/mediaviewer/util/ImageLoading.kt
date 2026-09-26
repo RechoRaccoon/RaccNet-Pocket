@@ -71,6 +71,46 @@ object ImageLoading {
         }
     }
 
+    // ── Age limit ────────────────────────────────────────────────────────
+    // Because cache headers are ignored above, nothing else would ever
+    // expire a stored image; it would only leave when the size cap pushed
+    // it out. TMDB's API terms (§1.C) forbid caching their content for more
+    // than 6 months, and TMDB posters/backdrops show up here via Popfeed
+    // reviews, so the whole image cache (disk + memory) is wiped every
+    // 30 days — well inside that limit. It's checked every time the app
+    // starts AND by a once-a-day background job (ImageCacheExpiryWorker),
+    // so it still happens for someone who doesn't open the app for months.
+    private const val META_PREFS = "image_cache_meta"
+    private const val KEY_LAST_WIPE = "last_wipe_ms"
+    const val MAX_AGE_MS = 30L * 24 * 60 * 60 * 1000
+
+    /** Wipes the image cache if it's been [MAX_AGE_MS] since the last wipe.
+     *  Safe from any thread; safe to call often. */
+    @Synchronized
+    fun wipeIfDue(context: Context) {
+        val app = context.applicationContext
+        val prefs = app.getSharedPreferences(META_PREFS, Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        val last = prefs.getLong(KEY_LAST_WIPE, 0L)
+        if (last == 0L) {
+            // First run with the age limit: anything already cached came
+            // from older builds with no start date — clear it once.
+            wipe(app)
+            prefs.edit().putLong(KEY_LAST_WIPE, now).apply()
+            return
+        }
+        if (now - last < MAX_AGE_MS && now >= last) return
+        wipe(app)
+        prefs.edit().putLong(KEY_LAST_WIPE, now).apply()
+    }
+
+    private fun wipe(app: Context) {
+        install(app)
+        val loader = Coil.imageLoader(app)
+        runCatching { loader.memoryCache?.clear() }
+        runCatching { loader.diskCache?.clear() }
+    }
+
     /**
      * Rewrites known image URLs to a size that fits a phone screen:
      * TMDB `original` (often 3000–4000 px, several MB) → w780 posters /

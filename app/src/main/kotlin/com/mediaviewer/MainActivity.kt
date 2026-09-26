@@ -164,6 +164,11 @@ class MainActivity : ComponentActivity() {
         com.mediaviewer.util.CrashBreadcrumbs.init(applicationContext)
         com.mediaviewer.util.UiToggles.init(applicationContext)
         com.mediaviewer.util.ImageLoading.install(applicationContext)
+        // 30-day image cache age limit: checked now, and daily in the
+        // background for when the app isn't opened (see ImageLoading).
+        // Off the main thread: clearing a large disk cache is file I/O.
+        Thread({ runCatching { com.mediaviewer.util.ImageLoading.wipeIfDue(applicationContext) } }, "image-cache-expiry").start()
+        runCatching { com.mediaviewer.worker.ImageCacheExpiryWorker.schedule(applicationContext) }
         enableEdgeToEdge()
         hideSystemStatusBar()
         // Bug fix: lets the background/media draw all the way up under the
