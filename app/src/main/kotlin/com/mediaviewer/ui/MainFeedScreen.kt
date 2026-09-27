@@ -390,268 +390,256 @@ fun MainFeedScreen(
     val commentsFraction = (commentsOpenAnim * (1f - commentsDragFraction)).coerceIn(0f, 1f)
 
     Box(Modifier.fillMaxSize().background(OledBlack)) {
-        // In landscape while viewing the feed: fullscreen media only, no UI chrome
-        if (isLandscape && screenState == ScreenState.FEED) {
-            LandscapeMediaView(
-                mediaItems        = mediaItems,
-                currentIndex      = currentIndex,
-                currentItem       = currentItem,
-                reducedAnimations = reducedAnimations,
-                isLoading         = isLoading,
-                onSwipeLeft       = onNavigateNext,
-                onSwipeRight      = onNavigatePrev,
-                externallyPaused  = externallyPaused,
-                navDirection      = navDirection
-            )
-        } else {
-            AnimatedContent(
-                targetState = screenState,
-                // FEED and COMMENTS are the same page now — the comments
-                // sheet is an overlay (below), so switching between them
-                // must not tear the post down or animate it.
-                contentKey = { if (it == ScreenState.COMMENTS) ScreenState.FEED else it },
-                transitionSpec = {
-                    if (reducedAnimations) EnterTransition.None togetherWith ExitTransition.None
-                    else when {
-                        targetState == ScreenState.SETTINGS ->
-                            slideInVertically(tween(220, easing = FastOutSlowInEasing)) { -it } togetherWith
-                            slideOutVertically(tween(220, easing = FastOutSlowInEasing)) { it }
-                        // Item 12: picking a feed from the Feeds row switches
-                        // SETTINGS -> FEED while the pixel curtain already
-                        // fully covers the screen, so the normal slide here
-                        // would just be silent wasted motion (or worse,
-                        // bleed through the wipe) — skip it for just this
-                        // one switch. The explicit "Return to Feed" button
-                        // never sets this flag, so it keeps the slide below.
-                        initialState == ScreenState.SETTINGS && (targetState == ScreenState.FEED || targetState == ScreenState.GRID) && skipFeedEntryAnim ->
-                            EnterTransition.None togetherWith ExitTransition.None
-                        initialState == ScreenState.SETTINGS ->
-                            slideInVertically(tween(220, easing = FastOutSlowInEasing)) { it } togetherWith
-                            slideOutVertically(tween(220, easing = FastOutSlowInEasing)) { -it }
-                        else -> fadeIn(FADE_ANIM) togetherWith fadeOut(FADE_ANIM)
-                    }
-                },
-                label = "screen"
-            ) { state ->
-                when (state) {
-                    ScreenState.FEED, ScreenState.COMMENTS -> FeedView(
-                        commentsFraction  = commentsFraction,
-                        mediaItems        = mediaItems,
-                        currentIndex      = currentIndex,
-                        currentItem       = currentItem,
-                        appMode           = appMode,
-                        isLoading         = isLoading,
-                        reducedAnimations = reducedAnimations,
-                        liquidGlass       = liquidGlass,
-                        navDirection      = navDirection,
-                        onSwipeLeft       = onNavigateNext,
-                        onSwipeRight      = onNavigatePrev,
-                        onSwipeUp         = { onSetScreen(ScreenState.COMMENTS) },
-                        onSwipeDown       = { onSetScreen(ScreenState.SETTINGS) },
-                        onPinchToGrid     = onPinchIn,
-                        externallyPaused  = externallyPaused,
-                        onDoubleTap       = { haptic(context); if (appMode == AppMode.BLUESKY) onToggleLike() else onToggleBookmark() },
-                        onToggleLike      = onToggleLike,
-                        onToggleRepost    = onToggleRepost,
-                        onToggleBookmark  = onToggleBookmark,
-                        onToggleFollow    = onToggleFollow,
-                        onE621Vote        = onE621Vote,
-                        onDownload        = onDownloadCurrent,
-                        onTapAuthor       = onTapAuthor,
-                        onSendPost        = onSendPost,
-                        onQuoteRepost     = onQuoteRepost,
-                        onBlockAccount    = onBlockAccount,
-                        onDownloadGif     = onDownloadGif,
-                        onShowMoreLikeThis = onShowMoreLikeThis,
-                        onShowLessLikeThis = onShowLessLikeThis,
-                        onAddAccountToList = onAddAccountToList,
-                        onDeletePost      = onDeletePost,
-                        selfDid           = selfDid,
-                        supportsFeedInteractions = supportsFeedInteractions,
-                        sentByExpanded         = sentByExpanded,
-                        onToggleSentByExpanded = onToggleSentByExpanded,
-                        onOpenReplyToSender    = onOpenReplyToSender,
-                        onTapSentByAuthor      = onTapSentByAuthor,
-                        subImageIndices        = subImageIndices,
-                        textExpanded           = textExpanded,
-                        onToggleTextExpanded    = { textExpanded = !textExpanded },
-                        uiHidden               = uiHidden,
-                        onSetUiHidden           = { uiHidden = it },
-                        translationEnabled      = translationEnabled,
-                        translationTargetLang   = translationTargetLang,
-                        translationStates       = translationStates,
-                        onBackdropChanged      = { backdrop, color ->
-                            lastDominantColor = color
-                            lastBackdrop = backdrop
-                            onCurrentBackdropChanged(backdrop, color)
-                        },
-                        hateFunBlurNsfw        = hateFunBlurNsfw
-                    )
-                    ScreenState.SETTINGS -> SettingsSheet(
-                        appMode                   = appMode,
-                        hasVisitedFeed            = hasVisitedFeed,
-                        bskyLoggedIn              = bskyLoggedIn,
-                        e621LoggedIn              = e621LoggedIn,
-                        bskyHandle                = bskyHandle,
-                        e621Username              = e621Username,
-                        availableFeeds            = availableFeeds,
-                        selectedFeedUri           = selectedFeedUri,
-                        authorFeedState           = authorFeedState,
-                        downloadOnLike            = downloadOnLike,
-                        downloadProgress          = downloadProgress,
-                        reducedAnimations         = reducedAnimations,
-                        liquidGlass               = liquidGlass,
-                        onToggleLiquidGlass       = onToggleLiquidGlass,
-                        liquidGlassIntensity      = liquidGlassIntensity,
-                        onSetLiquidGlassIntensity = onSetLiquidGlassIntensity,
-                        glassRimIntensity         = glassRimIntensity,
-                        onSetGlassRimIntensity    = onSetGlassRimIntensity,
-                        glassRimVibrantSecondary  = glassRimVibrantSecondary,
-                        onToggleGlassRimVibrantSecondary = onToggleGlassRimVibrantSecondary,
-                        e621SearchTags            = e621SearchTags,
-                        isLoading                 = isLoading,
-                        onLoginBluesky            = onLoginBluesky,
-                        onLogoutBluesky           = onLogoutBluesky,
-                        onSaveE621Credentials     = onSaveE621Credentials,
-                        onLogoutE621              = onLogoutE621,
-                        // Bug fix (item 4 — feed opened before it had
-                        // loaded): this used to call onSetScreen(FEED)
-                        // immediately, scrolling into the feed pager before
-                        // any of its data existed. onSelectFeed (wired from
-                        // AppRoot as handleSelectFeed) now owns the whole
-                        // sequence itself — start the pixel transition,
-                        // load, THEN switch to FEED once that's actually
-                        // done — so this is just a passthrough now.
-                        onSelectFeed              = onSelectFeed,
-                        onToggleDownloadOnLike    = onToggleDownloadOnLike,
-                        onDownloadAllLiked        = onDownloadAllLiked,
-                        onCancelDownload          = onCancelDownload,
-                        tagPostWhenLiked          = tagPostWhenLiked,
-                        onToggleTagPostWhenLiked  = onToggleTagPostWhenLiked,
-                        taggingRunning            = taggingRunning,
-                        taggingScanned            = taggingScanned,
-                        taggingTagged             = taggingTagged,
-                        onLocallyTagAllLiked      = onLocallyTagAllLiked,
-                        onDeleteTaggedDatabase    = onDeleteTaggedDatabase,
-                        settingsExtras            = settingsExtras,
-                        importedDatasets          = importedDatasets,
-                        onExportDataset           = onExportDataset,
-                        onImportDataset           = onImportDataset,
-                        onDeleteImportedDataset   = onDeleteImportedDataset,
-                        // Opens your own profile's Likes tab (an overlay), so
-                        // the Hub stays underneath it.
-                        onShowLikes               = onShowLikes,
-                        onShowFriends             = { onShowFriends(); onSetScreen(ScreenState.FEED) },
-                        onShowE621Following       = { onShowE621Following(); onSetScreen(ScreenState.FEED) },
-                        onToggleReducedAnimations = onToggleReducedAnimations,
-                        classicProfileTabRow      = classicProfileTabRow,
-                        onToggleClassicProfileTabRow = onToggleClassicProfileTabRow,
-                        squareGridRounded         = squareGridRounded,
-                        onToggleSquareGridRounded = onToggleSquareGridRounded,
-                        pinterestThreeColumns     = pinterestThreeColumns,
-                        onTogglePinterestThreeColumns = onTogglePinterestThreeColumns,
-                        hateFunBlurNsfw           = hateFunBlurNsfw,
-                        onToggleHateFunBlurNsfw   = onToggleHateFunBlurNsfw,
-                        selfDid                   = selfDid,
-                        subscribedReviewDids      = subscribedReviewDids,
-                        subscribedBlogDids        = subscribedBlogDids,
-                        followerScanState         = followerScanState,
-                        followerScanCompletedOnce = followerScanCompletedOnce,
-                        onStartFollowerScan       = onStartFollowerScan,
-                        onRescanFollowersFromScratch = onRescanFollowersFromScratch,
-                        onDismissFollowerScanResult = onDismissFollowerScanResult,
-                        combineListsAndPacks      = combineListsAndPacks,
-                        onToggleCombineListsPacks = onToggleCombineListsPacks,
-                        autoAddToOnFollow         = autoAddToOnFollow,
-                        onToggleAutoAddToOnFollow = onToggleAutoAddToOnFollow,
-                        onSearchE621              = { tags -> onSearchE621(tags); onSetScreen(ScreenState.FEED) },
-                        onShowE621Favorites       = { onShowE621Favorites(); onSetScreen(ScreenState.FEED) },
-                        onSwitchMode              = onSwipeToMode,
-                        onSwipeToFeed             = onReturnToFeed,
-                        onOpenFeed                = onOpenFeed,
-                        onEnterFeedView           = { explore -> onSetScreen(if (explore) ScreenState.GRID else ScreenState.FEED) },
-                        selfProfile               = selfProfile,
-                        hideTextOnlyPosts         = hideTextOnlyPosts,
-                        onToggleHideTextOnlyPosts = onToggleHideTextOnlyPosts,
-                        onOpenOwnProfile          = onOpenOwnProfile,
-                        onShowSaves               = { onShowSaves(); onSetScreen(ScreenState.FEED) },
-                        onShowHistory             = { onShowHistory(); onSetScreen(ScreenState.FEED) },
-                        onOpenDmInbox             = onOpenDmInbox,
-                        onOpenComposePost         = onOpenComposePost,
-                        onOpenSearch              = onOpenSearch,
-                        translationEnabled          = translationEnabled,
-                        translationTargetLang       = translationTargetLang,
-                        onToggleTranslation         = onToggleTranslation,
-                        onSelectTranslationLanguage = onSelectTranslationLanguage,
-                        customFontName              = customFontName,
-                        onPickFontFile              = onPickFontFile,
-                        onResetFont                 = onResetFont,
-                        dominantColor             = lastDominantColor,
-                        backdrop                  = lastBackdrop,
-                        dmConversations           = dmConversations,
-                        dmConversationsLoading    = dmConversationsLoading,
-                        friendsReviews            = friendsReviews,
-                        friendsReviewsLoading     = friendsReviewsLoading,
-                        onLoadFriendsReviews      = onLoadFriendsReviews,
-                        onOpenReview              = onOpenReview,
-                        onOpenProfile             = onOpenProfile,
-                        friendsBlogs              = friendsBlogs,
-                        onOpenBlog                = onOpenBlog,
-                        onRefreshHub              = onRefreshHub,
-                        liveFriends               = liveFriends,
-                        liveFriendsLoading        = liveFriendsLoading,
-                        onLoadLiveFriends         = onLoadLiveFriends,
-                        blueskyLiveNow            = blueskyLiveNow,
-                        blueskyLiveNowLoading     = blueskyLiveNowLoading,
-                        onLoadBlueskyLiveNow      = onLoadBlueskyLiveNow,
-                        onOpenLivePlayer          = onOpenLivePlayer,
-                        onEnsureFriends           = onEnsureFriends,
-                        selfAvatarUrl             = selfAvatarUrl,
-                        liveTwitchUrl             = liveLinkState.twitchUrl,
-                        liveYoutubeUrl            = liveLinkState.youtubeUrl,
-                        liveActivePlatform        = liveLinkState.activePlatform,
-                        onSaveLiveTwitchUrl       = onSaveLiveTwitchUrl,
-                        onSaveLiveYoutubeUrl      = onSaveLiveYoutubeUrl,
-                        onCreateLiveLinkWidget    = onCreateLiveLinkWidget,
-                        onToggleLiveLink          = onToggleLiveLink,
-                        onEndLiveLink             = onEndLiveLink,
-                        onMoveFeed                = onMoveFeed,
-                        onRemoveFeed              = onRemoveFeed
-                    )
-                    ScreenState.GRID -> GridScreen(
-                        items           = mediaItems,
-                        currentIndex    = currentIndex,
-                        appMode         = appMode,
-                        availableFeeds  = availableFeeds,
-                        selectedFeedUri = selectedFeedUri,
-                        authorFeedState = authorFeedState,
-                        e621SearchTags  = e621SearchTags,
-                        liquidGlass     = liquidGlass,
-                        onItemClick     = { idx, subIdx ->
-                            // Bug fix: seed the target sub-image index before
-                            // navigating, so a tap on (say) the 2nd of 4 grid
-                            // cells for a post opens directly to that image
-                            // instead of always index 0. -1 (pinch-out back to
-                            // whatever was already showing) leaves it alone.
-                            if (subIdx >= 0) {
-                                mediaItems.getOrNull(idx)?.let { subImageIndices[it.id] = subIdx }
-                            }
-                            onNavigateTo(idx)
-                        },
-                        onLoadMore      = onLoadMore,
-                        onSelectFeed    = onSelectFeed,
-                        onSearchE621    = onSearchE621,
-                        onRefresh       = onRefresh,
-                        selfAvatarUrl   = selfAvatarUrl,
-                        isLoading       = isLoading,
-                        roundedGridTiles = squareGridRounded,
-                        reducedAnimations = reducedAnimations,
-                        // Pulling down while already at the top opens the Hub.
-                        onSwipeDown     = { onSetScreen(ScreenState.SETTINGS) }
-                    )
+        // Sideways, the timeline is just the normal page rotated (the old
+        // media-only landscape view is no longer used).
+        AnimatedContent(
+            targetState = screenState,
+            // FEED and COMMENTS are the same page now — the comments
+            // sheet is an overlay (below), so switching between them
+            // must not tear the post down or animate it.
+            contentKey = { if (it == ScreenState.COMMENTS) ScreenState.FEED else it },
+            transitionSpec = {
+                if (reducedAnimations) EnterTransition.None togetherWith ExitTransition.None
+                else when {
+                    targetState == ScreenState.SETTINGS ->
+                        slideInVertically(tween(220, easing = FastOutSlowInEasing)) { -it } togetherWith
+                        slideOutVertically(tween(220, easing = FastOutSlowInEasing)) { it }
+                    // Item 12: picking a feed from the Feeds row switches
+                    // SETTINGS -> FEED while the pixel curtain already
+                    // fully covers the screen, so the normal slide here
+                    // would just be silent wasted motion (or worse,
+                    // bleed through the wipe) — skip it for just this
+                    // one switch. The explicit "Return to Feed" button
+                    // never sets this flag, so it keeps the slide below.
+                    initialState == ScreenState.SETTINGS && (targetState == ScreenState.FEED || targetState == ScreenState.GRID) && skipFeedEntryAnim ->
+                        EnterTransition.None togetherWith ExitTransition.None
+                    initialState == ScreenState.SETTINGS ->
+                        slideInVertically(tween(220, easing = FastOutSlowInEasing)) { it } togetherWith
+                        slideOutVertically(tween(220, easing = FastOutSlowInEasing)) { -it }
+                    else -> fadeIn(FADE_ANIM) togetherWith fadeOut(FADE_ANIM)
                 }
+            },
+            label = "screen"
+        ) { state ->
+            when (state) {
+                ScreenState.FEED, ScreenState.COMMENTS -> FeedView(
+                    commentsFraction  = commentsFraction,
+                    mediaItems        = mediaItems,
+                    currentIndex      = currentIndex,
+                    currentItem       = currentItem,
+                    appMode           = appMode,
+                    isLoading         = isLoading,
+                    reducedAnimations = reducedAnimations,
+                    liquidGlass       = liquidGlass,
+                    navDirection      = navDirection,
+                    onSwipeLeft       = onNavigateNext,
+                    onSwipeRight      = onNavigatePrev,
+                    onSwipeUp         = { onSetScreen(ScreenState.COMMENTS) },
+                    onSwipeDown       = { onSetScreen(ScreenState.SETTINGS) },
+                    onPinchToGrid     = onPinchIn,
+                    externallyPaused  = externallyPaused,
+                    onDoubleTap       = { haptic(context); if (appMode == AppMode.BLUESKY) onToggleLike() else onToggleBookmark() },
+                    onToggleLike      = onToggleLike,
+                    onToggleRepost    = onToggleRepost,
+                    onToggleBookmark  = onToggleBookmark,
+                    onToggleFollow    = onToggleFollow,
+                    onE621Vote        = onE621Vote,
+                    onDownload        = onDownloadCurrent,
+                    onTapAuthor       = onTapAuthor,
+                    onSendPost        = onSendPost,
+                    onQuoteRepost     = onQuoteRepost,
+                    onBlockAccount    = onBlockAccount,
+                    onDownloadGif     = onDownloadGif,
+                    onShowMoreLikeThis = onShowMoreLikeThis,
+                    onShowLessLikeThis = onShowLessLikeThis,
+                    onAddAccountToList = onAddAccountToList,
+                    onDeletePost      = onDeletePost,
+                    selfDid           = selfDid,
+                    supportsFeedInteractions = supportsFeedInteractions,
+                    sentByExpanded         = sentByExpanded,
+                    onToggleSentByExpanded = onToggleSentByExpanded,
+                    onOpenReplyToSender    = onOpenReplyToSender,
+                    onTapSentByAuthor      = onTapSentByAuthor,
+                    subImageIndices        = subImageIndices,
+                    textExpanded           = textExpanded,
+                    onToggleTextExpanded    = { textExpanded = !textExpanded },
+                    uiHidden               = uiHidden,
+                    onSetUiHidden           = { uiHidden = it },
+                    translationEnabled      = translationEnabled,
+                    translationTargetLang   = translationTargetLang,
+                    translationStates       = translationStates,
+                    onBackdropChanged      = { backdrop, color ->
+                        lastDominantColor = color
+                        lastBackdrop = backdrop
+                        onCurrentBackdropChanged(backdrop, color)
+                    },
+                    hateFunBlurNsfw        = hateFunBlurNsfw
+                )
+                ScreenState.SETTINGS -> SettingsSheet(
+                    appMode                   = appMode,
+                    hasVisitedFeed            = hasVisitedFeed,
+                    bskyLoggedIn              = bskyLoggedIn,
+                    e621LoggedIn              = e621LoggedIn,
+                    bskyHandle                = bskyHandle,
+                    e621Username              = e621Username,
+                    availableFeeds            = availableFeeds,
+                    selectedFeedUri           = selectedFeedUri,
+                    authorFeedState           = authorFeedState,
+                    downloadOnLike            = downloadOnLike,
+                    downloadProgress          = downloadProgress,
+                    reducedAnimations         = reducedAnimations,
+                    liquidGlass               = liquidGlass,
+                    onToggleLiquidGlass       = onToggleLiquidGlass,
+                    liquidGlassIntensity      = liquidGlassIntensity,
+                    onSetLiquidGlassIntensity = onSetLiquidGlassIntensity,
+                    glassRimIntensity         = glassRimIntensity,
+                    onSetGlassRimIntensity    = onSetGlassRimIntensity,
+                    glassRimVibrantSecondary  = glassRimVibrantSecondary,
+                    onToggleGlassRimVibrantSecondary = onToggleGlassRimVibrantSecondary,
+                    e621SearchTags            = e621SearchTags,
+                    isLoading                 = isLoading,
+                    onLoginBluesky            = onLoginBluesky,
+                    onLogoutBluesky           = onLogoutBluesky,
+                    onSaveE621Credentials     = onSaveE621Credentials,
+                    onLogoutE621              = onLogoutE621,
+                    // Bug fix (item 4 — feed opened before it had
+                    // loaded): this used to call onSetScreen(FEED)
+                    // immediately, scrolling into the feed pager before
+                    // any of its data existed. onSelectFeed (wired from
+                    // AppRoot as handleSelectFeed) now owns the whole
+                    // sequence itself — start the pixel transition,
+                    // load, THEN switch to FEED once that's actually
+                    // done — so this is just a passthrough now.
+                    onSelectFeed              = onSelectFeed,
+                    onToggleDownloadOnLike    = onToggleDownloadOnLike,
+                    onDownloadAllLiked        = onDownloadAllLiked,
+                    onCancelDownload          = onCancelDownload,
+                    tagPostWhenLiked          = tagPostWhenLiked,
+                    onToggleTagPostWhenLiked  = onToggleTagPostWhenLiked,
+                    taggingRunning            = taggingRunning,
+                    taggingScanned            = taggingScanned,
+                    taggingTagged             = taggingTagged,
+                    onLocallyTagAllLiked      = onLocallyTagAllLiked,
+                    onDeleteTaggedDatabase    = onDeleteTaggedDatabase,
+                    settingsExtras            = settingsExtras,
+                    importedDatasets          = importedDatasets,
+                    onExportDataset           = onExportDataset,
+                    onImportDataset           = onImportDataset,
+                    onDeleteImportedDataset   = onDeleteImportedDataset,
+                    // Opens your own profile's Likes tab (an overlay), so
+                    // the Hub stays underneath it.
+                    onShowLikes               = onShowLikes,
+                    onShowFriends             = { onShowFriends(); onSetScreen(ScreenState.FEED) },
+                    onShowE621Following       = { onShowE621Following(); onSetScreen(ScreenState.FEED) },
+                    onToggleReducedAnimations = onToggleReducedAnimations,
+                    classicProfileTabRow      = classicProfileTabRow,
+                    onToggleClassicProfileTabRow = onToggleClassicProfileTabRow,
+                    squareGridRounded         = squareGridRounded,
+                    onToggleSquareGridRounded = onToggleSquareGridRounded,
+                    pinterestThreeColumns     = pinterestThreeColumns,
+                    onTogglePinterestThreeColumns = onTogglePinterestThreeColumns,
+                    hateFunBlurNsfw           = hateFunBlurNsfw,
+                    onToggleHateFunBlurNsfw   = onToggleHateFunBlurNsfw,
+                    selfDid                   = selfDid,
+                    subscribedReviewDids      = subscribedReviewDids,
+                    subscribedBlogDids        = subscribedBlogDids,
+                    followerScanState         = followerScanState,
+                    followerScanCompletedOnce = followerScanCompletedOnce,
+                    onStartFollowerScan       = onStartFollowerScan,
+                    onRescanFollowersFromScratch = onRescanFollowersFromScratch,
+                    onDismissFollowerScanResult = onDismissFollowerScanResult,
+                    combineListsAndPacks      = combineListsAndPacks,
+                    onToggleCombineListsPacks = onToggleCombineListsPacks,
+                    autoAddToOnFollow         = autoAddToOnFollow,
+                    onToggleAutoAddToOnFollow = onToggleAutoAddToOnFollow,
+                    onSearchE621              = { tags -> onSearchE621(tags); onSetScreen(ScreenState.FEED) },
+                    onShowE621Favorites       = { onShowE621Favorites(); onSetScreen(ScreenState.FEED) },
+                    onSwitchMode              = onSwipeToMode,
+                    onSwipeToFeed             = onReturnToFeed,
+                    onOpenFeed                = onOpenFeed,
+                    onEnterFeedView           = { explore -> onSetScreen(if (explore) ScreenState.GRID else ScreenState.FEED) },
+                    selfProfile               = selfProfile,
+                    hideTextOnlyPosts         = hideTextOnlyPosts,
+                    onToggleHideTextOnlyPosts = onToggleHideTextOnlyPosts,
+                    onOpenOwnProfile          = onOpenOwnProfile,
+                    onShowSaves               = { onShowSaves(); onSetScreen(ScreenState.FEED) },
+                    onShowHistory             = { onShowHistory(); onSetScreen(ScreenState.FEED) },
+                    onOpenDmInbox             = onOpenDmInbox,
+                    onOpenComposePost         = onOpenComposePost,
+                    onOpenSearch              = onOpenSearch,
+                    translationEnabled          = translationEnabled,
+                    translationTargetLang       = translationTargetLang,
+                    onToggleTranslation         = onToggleTranslation,
+                    onSelectTranslationLanguage = onSelectTranslationLanguage,
+                    customFontName              = customFontName,
+                    onPickFontFile              = onPickFontFile,
+                    onResetFont                 = onResetFont,
+                    dominantColor             = lastDominantColor,
+                    backdrop                  = lastBackdrop,
+                    dmConversations           = dmConversations,
+                    dmConversationsLoading    = dmConversationsLoading,
+                    friendsReviews            = friendsReviews,
+                    friendsReviewsLoading     = friendsReviewsLoading,
+                    onLoadFriendsReviews      = onLoadFriendsReviews,
+                    onOpenReview              = onOpenReview,
+                    onOpenProfile             = onOpenProfile,
+                    friendsBlogs              = friendsBlogs,
+                    onOpenBlog                = onOpenBlog,
+                    onRefreshHub              = onRefreshHub,
+                    liveFriends               = liveFriends,
+                    liveFriendsLoading        = liveFriendsLoading,
+                    onLoadLiveFriends         = onLoadLiveFriends,
+                    blueskyLiveNow            = blueskyLiveNow,
+                    blueskyLiveNowLoading     = blueskyLiveNowLoading,
+                    onLoadBlueskyLiveNow      = onLoadBlueskyLiveNow,
+                    onOpenLivePlayer          = onOpenLivePlayer,
+                    onEnsureFriends           = onEnsureFriends,
+                    selfAvatarUrl             = selfAvatarUrl,
+                    liveTwitchUrl             = liveLinkState.twitchUrl,
+                    liveYoutubeUrl            = liveLinkState.youtubeUrl,
+                    liveActivePlatform        = liveLinkState.activePlatform,
+                    onSaveLiveTwitchUrl       = onSaveLiveTwitchUrl,
+                    onSaveLiveYoutubeUrl      = onSaveLiveYoutubeUrl,
+                    onCreateLiveLinkWidget    = onCreateLiveLinkWidget,
+                    onToggleLiveLink          = onToggleLiveLink,
+                    onEndLiveLink             = onEndLiveLink,
+                    onMoveFeed                = onMoveFeed,
+                    onRemoveFeed              = onRemoveFeed
+                )
+                ScreenState.GRID -> GridScreen(
+                    items           = mediaItems,
+                    currentIndex    = currentIndex,
+                    appMode         = appMode,
+                    availableFeeds  = availableFeeds,
+                    selectedFeedUri = selectedFeedUri,
+                    authorFeedState = authorFeedState,
+                    e621SearchTags  = e621SearchTags,
+                    liquidGlass     = liquidGlass,
+                    onItemClick     = { idx, subIdx ->
+                        // Bug fix: seed the target sub-image index before
+                        // navigating, so a tap on (say) the 2nd of 4 grid
+                        // cells for a post opens directly to that image
+                        // instead of always index 0. -1 (pinch-out back to
+                        // whatever was already showing) leaves it alone.
+                        if (subIdx >= 0) {
+                            mediaItems.getOrNull(idx)?.let { subImageIndices[it.id] = subIdx }
+                        }
+                        onNavigateTo(idx)
+                    },
+                    onLoadMore      = onLoadMore,
+                    onSelectFeed    = onSelectFeed,
+                    onSearchE621    = onSearchE621,
+                    onRefresh       = onRefresh,
+                    selfAvatarUrl   = selfAvatarUrl,
+                    isLoading       = isLoading,
+                    roundedGridTiles = squareGridRounded,
+                    reducedAnimations = reducedAnimations,
+                    // Pulling down while already at the top opens the Hub.
+                    onSwipeDown     = { onSetScreen(ScreenState.SETTINGS) }
+                )
             }
         }
+
 
         // The dark wash behind the comments: the whole screen at once, fading
         // in together with the blur (it used to be painted on the sheet and
@@ -662,7 +650,7 @@ fun MainFeedScreen(
 
         // The comments sheet, over the (blurred) post.
         AnimatedVisibility(
-            visible = commentsOpen && !isLandscape,
+            visible = commentsOpen,
             enter = if (reducedAnimations) EnterTransition.None
                 else slideInVertically(tween(320, easing = FastOutSlowInEasing)) { it },
             exit = if (reducedAnimations) ExitTransition.None

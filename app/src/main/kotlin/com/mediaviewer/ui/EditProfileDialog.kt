@@ -241,7 +241,9 @@ private fun EditField(
         }
         Spacer(Modifier.height(3.dp))
         Row(verticalAlignment = Alignment.Top) {
-            if (prefix != null) Text(prefix, color = Color.White.copy(0.5f), fontSize = 14.sp)
+            // Same text style as the field itself, so the prefix ("@") sits
+            // on the handle's own baseline instead of dropping below it.
+            if (prefix != null) Text(prefix, style = TextStyle(color = Color.White.copy(0.5f), fontSize = 14.sp, lineHeight = 19.sp))
             BasicTextField(
                 value = value, onValueChange = onValue, singleLine = singleLine, enabled = enabled,
                 textStyle = TextStyle(color = Color.White, fontSize = 14.sp, lineHeight = 19.sp),
