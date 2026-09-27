@@ -70,6 +70,10 @@ object AudioVisualizerEngine {
     private var audioManager: AudioManager? = null
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var inCall = false
+    /** True while spectra should be ignored: on a call, unless "Keep going
+     *  during calls" is on AND we're attached to a music app's own session
+     *  (which carries only the music, never the call). */
+    @Volatile private var muted = false
     private val smoothed = FloatArray(BAR_COUNT)
     private val peak = FloatArray(BAR_COUNT) { 1f }
 
@@ -132,11 +136,14 @@ object AudioVisualizerEngine {
         override fun run() {
             if (users <= 0) return
             val am = audioManager
-            inCall = am != null && runCatching {
+            val onCall = am != null && runCatching {
                 val mode = am.mode
                 mode == AudioManager.MODE_IN_CALL || mode == AudioManager.MODE_IN_COMMUNICATION ||
                     mode == AudioManager.MODE_RINGTONE
             }.getOrDefault(false)
+            val callMode = UiToggles.visualizerCallMode
+            // "All Audio" during calls: carry on exactly as if there were no call.
+            inCall = onCall && callMode != UiToggles.VisualizerCallMode.ALL_AUDIO
             val now = SystemClock.uptimeMillis()
             val ctx = appContext
             if (ctx == null || !hasPermission(ctx)) {
@@ -146,13 +153,26 @@ object AudioVisualizerEngine {
                 main.postDelayed(this, 1_000)
                 return
             }
+            // On a call with "Keep going during calls": the phone's overall
+            // output would carry the call's voices too, so only a music
+            // app's own session is allowed.
+            val callSafe = inCall && callMode == UiToggles.VisualizerCallMode.MUSIC_ONLY
+            if (callSafe && attachedSession == MIX) teardownVisualizer()
+            if (callSafe && visualizer == null && pickPlayerSession(now) == null) {
+                muted = true
+                status = "On a call — waiting for your music app's own audio. Try pausing and playing your music."
+                decay()
+                main.postDelayed(this, 400)
+                return
+            }
+            muted = inCall && !(callSafe && attachedSession > 0)
             val v = visualizer
             val enabled = v != null && runCatching { v.getEnabled() }.getOrDefault(false)
             val playing = am != null && runCatching { am.isMusicActive }.getOrDefault(false)
             val sinceCreate = now - createdAtMs
             // Attached, music is playing, but nothing's coming through: this
             // source is a dud on this phone (or the output changed under it).
-            val stalled = v != null && playing && !inCall && sinceCreate > 2_500 &&
+            val stalled = v != null && playing && (!inCall || callSafe) && sinceCreate > 2_500 &&
                 (now - lastCallbackMs > 2_500 || now - lastSignalMs > 3_000)
             if (stalled) {
                 silentSessions[attachedSession] = now
@@ -160,16 +180,21 @@ object AudioVisualizerEngine {
             }
             if ((v == null || !enabled || stalled) && now >= nextCreateAttemptMs) {
                 teardownVisualizer()
-                createVisualizer(pickSession(now))
+                val next = if (callSafe) pickPlayerSession(now) else pickSession(now)
+                if (next != null) createVisualizer(next)
             }
+            muted = inCall && !(callSafe && attachedSession > 0)
             status = when {
-                inCall -> "Paused during calls."
+                inCall && !callSafe -> "Paused during calls."
+                callSafe && visualizer == null -> "On a call — waiting for your music app's own audio. Try pausing and playing your music."
+                callSafe && now - lastSignalMs < 1_500 -> "Listening to your music app only (on a call)."
+                onCall && now - lastSignalMs < 1_500 -> "Listening to all audio, call included."
                 visualizer == null -> "Couldn't reach your phone's audio. Try pausing and playing your music."
                 now - lastSignalMs < 1_500 -> "Listening."
                 playing -> "Music is playing but no sound is reaching the bars yet…"
                 else -> "Waiting for music."
             }
-            if (inCall || visualizer == null) decay()
+            if (muted || visualizer == null) decay()
             main.postDelayed(this, 400)
         }
     }
@@ -184,6 +209,13 @@ object AudioVisualizerEngine {
         if (candidate != null) return candidate
         silentSessions.clear()
         return MIX
+    }
+
+    /** The newest announced music-app session that hasn't proved silent. */
+    private fun pickPlayerSession(now: Long): Int? {
+        silentSessions.entries.removeAll { now - it.value > 30_000 }
+        return playerSessions.keys.reversed().firstOrNull { it !in silentSessions }
+            ?: playerSessions.keys.lastOrNull()?.also { silentSessions.remove(it) }
     }
 
     fun hasPermission(context: Context) =
@@ -282,7 +314,7 @@ object AudioVisualizerEngine {
     private fun onWaveform(wave: ByteArray) {
         val now = SystemClock.uptimeMillis()
         lastCallbackMs = now
-        if (inCall || wave.isEmpty()) return
+        if (muted || wave.isEmpty()) return
         // 8-bit PCM. Judged by the spread of the samples, not their offset
         // from 128, because some phones hand back a flat all-zero buffer
         // when nothing is actually coming through.
@@ -305,7 +337,7 @@ object AudioVisualizerEngine {
         if (users <= 0) return
         val now = SystemClock.uptimeMillis()
         lastCallbackMs = now
-        if (inCall) return
+        if (muted) return
         val bins = fft.size / 2
         if (bins < 8) return
         val out = FloatArray(BAR_COUNT)

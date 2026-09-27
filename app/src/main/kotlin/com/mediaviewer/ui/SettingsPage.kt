@@ -391,13 +391,43 @@ internal fun SettingsPageContent(
                 RowLabel(
                     "Audio Visualizer", Modifier.weight(1f),
                     sub = if (com.mediaviewer.util.UiToggles.audioVisualizer && visualizerStatus.isNotBlank())
-                        "Bars on the timeline that move to your music. Not calls.\nLast check: $visualizerStatus"
-                    else "Bars on the timeline that move to your music. Not calls."
+                        "Bars on the timeline that move to your music.\nLast check: $visualizerStatus"
+                    else "Bars on the timeline that move to your music."
                 )
                 CompactSwitch(com.mediaviewer.util.UiToggles.audioVisualizer) { on ->
                     if (!on) com.mediaviewer.util.UiToggles.updateAudioVisualizer(false)
                     else if (com.mediaviewer.util.AudioVisualizerEngine.hasPermission(visualizerContext)) com.mediaviewer.util.UiToggles.updateAudioVisualizer(true)
                     else visualizerPermission.launch(android.Manifest.permission.RECORD_AUDIO)
+                }
+            }
+            if (com.mediaviewer.util.UiToggles.audioVisualizer) {
+                var callMenuExpanded by remember { mutableStateOf(false) }
+                val callMode = com.mediaviewer.util.UiToggles.visualizerCallMode
+                BubbleDivider()
+                BubbleRow {
+                    RowLabel(
+                        "During Calls", Modifier.weight(1f),
+                        sub = when (callMode) {
+                            com.mediaviewer.util.UiToggles.VisualizerCallMode.PAUSE -> "The bars rest while you're on a call (phone, Discord…)."
+                            com.mediaviewer.util.UiToggles.VisualizerCallMode.MUSIC_ONLY -> "Only your music app, so voices on the call don't move the bars. Works with apps that share their audio, like Spotify or YouTube Music."
+                            com.mediaviewer.util.UiToggles.VisualizerCallMode.ALL_AUDIO -> "Everything your phone plays, the call's voices included."
+                        }
+                    )
+                    Box {
+                        Text(
+                            callMode.label,
+                            color = VoteGreen, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.clickable { callMenuExpanded = true }
+                        )
+                        DropdownMenu(expanded = callMenuExpanded, onDismissRequest = { callMenuExpanded = false }) {
+                            com.mediaviewer.util.UiToggles.VisualizerCallMode.entries.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option.label, fontWeight = if (option == callMode) FontWeight.SemiBold else FontWeight.Normal) },
+                                    onClick = { com.mediaviewer.util.UiToggles.updateVisualizerCallMode(option); callMenuExpanded = false }
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }

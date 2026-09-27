@@ -16,6 +16,8 @@ object UiToggles {
     private const val KEY_DEBUG_OVERLAY = "debug_overlay"
     private const val KEY_LOADING_ANIMATION = "loading_animation"
     private const val KEY_AUDIO_VISUALIZER = "audio_visualizer"
+    private const val KEY_VISUALIZER_DURING_CALLS = "audio_visualizer_during_calls" // old on/off switch
+    private const val KEY_VISUALIZER_CALL_MODE = "audio_visualizer_call_mode"
 
     /** Settings → UI Customization → "Loading Animation". */
     enum class LoadingAnimation(val label: String) {
@@ -43,6 +45,19 @@ object UiToggles {
     var audioVisualizer by mutableStateOf(false)
         private set
 
+    /** Settings → Audio Visualizer → "During Calls". */
+    enum class VisualizerCallMode(val label: String) {
+        /** The bars rest while you're on a call. */
+        PAUSE("Pause"),
+        /** Only the music app's own audio, so the call never moves the bars. */
+        MUSIC_ONLY("Music Only"),
+        /** Everything the phone plays, the call included. */
+        ALL_AUDIO("All Audio")
+    }
+
+    var visualizerCallMode by mutableStateOf(VisualizerCallMode.PAUSE)
+        private set
+
     /** Whether any loading transition/screen plays at all. */
     val loadingScreens: Boolean get() = loadingAnimation != LoadingAnimation.NONE
 
@@ -55,6 +70,14 @@ object UiToggles {
             ?.let { name -> LoadingAnimation.entries.firstOrNull { it.name == name } }
             ?: LoadingAnimation.NONE
         audioVisualizer = p.getBoolean(KEY_AUDIO_VISUALIZER, false)
+        visualizerCallMode = p.getString(KEY_VISUALIZER_CALL_MODE, null)
+            ?.let { name -> VisualizerCallMode.entries.firstOrNull { it.name == name } }
+            ?: if (p.getBoolean(KEY_VISUALIZER_DURING_CALLS, false)) VisualizerCallMode.MUSIC_ONLY else VisualizerCallMode.PAUSE
+    }
+
+    fun updateVisualizerCallMode(value: VisualizerCallMode) {
+        visualizerCallMode = value
+        prefs?.edit()?.putString(KEY_VISUALIZER_CALL_MODE, value.name)?.apply()
     }
 
     fun updateAudioVisualizer(enabled: Boolean) {
