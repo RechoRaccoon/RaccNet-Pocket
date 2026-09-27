@@ -362,6 +362,67 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
         }
     }
 
+    /** Settings → Data → Export: only the on-device (main/default) dataset. */
+    fun localPostsForExport(): List<ExportedPost> {
+        val posts = LinkedHashMap<String, ExportedPost>()
+        readableDatabase.rawQuery(
+            "SELECT post_uri, cid, media_url FROM liked_media WHERE dataset_id = ?", arrayOf(LOCAL_DATASET_ID)
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val uri = cursor.getString(0)
+                posts[uri] = ExportedPost(uri, cursor.getString(1), cursor.getString(2), emptyList())
+            }
+        }
+        val tagsByPost = HashMap<String, MutableList<Pair<String, Float>>>()
+        readableDatabase.rawQuery(
+            "SELECT t.post_uri, t.tag_name, t.confidence FROM media_tags t JOIN liked_media m ON m.post_uri = t.post_uri " +
+                "WHERE m.dataset_id = ? ORDER BY t.confidence DESC", arrayOf(LOCAL_DATASET_ID)
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                tagsByPost.getOrPut(cursor.getString(0)) { mutableListOf() }.add(cursor.getString(1) to cursor.getFloat(2))
+            }
+        }
+        return posts.values.map { it.copy(tags = tagsByPost[it.postUri] ?: emptyList()) }
+    }
+
+    /** Settings → Data → Import: [posts] BECOME the on-device (main) dataset
+     *  — the old local rows are replaced, not merged, and nothing is added
+     *  as a separate imported dataset. Imported datasets are left alone. */
+    fun replaceLocalDataset(posts: List<ExportedPost>) {
+        val db = writableDatabase
+        val now = System.currentTimeMillis()
+        db.beginTransaction()
+        try {
+            db.execSQL("DELETE FROM media_tags WHERE post_uri IN (SELECT post_uri FROM liked_media WHERE dataset_id = ?)", arrayOf(LOCAL_DATASET_ID))
+            db.execSQL("DELETE FROM liked_media WHERE dataset_id = ?", arrayOf(LOCAL_DATASET_ID))
+            val insert = db.compileStatement(
+                "INSERT OR REPLACE INTO liked_media (post_uri, cid, media_url, indexed_timestamp, dataset_id) VALUES (?, ?, ?, ?, ?)"
+            )
+            try {
+                for (post in posts) {
+                    if (post.postUri.isBlank()) continue
+                    // A post also present in an imported dataset moves into the main one.
+                    db.execSQL("DELETE FROM media_tags WHERE post_uri = ?", arrayOf(post.postUri))
+                    insert.clearBindings()
+                    insert.bindString(1, post.postUri)
+                    insert.bindString(2, post.cid)
+                    insert.bindString(3, post.mediaUrl)
+                    insert.bindLong(4, now)
+                    insert.bindString(5, LOCAL_DATASET_ID)
+                    insert.executeInsert()
+                    for ((tag, confidence) in post.tags) {
+                        db.execSQL("INSERT INTO media_tags (post_uri, tag_name, confidence) VALUES (?, ?, ?)", arrayOf(post.postUri, tag, confidence))
+                    }
+                }
+            } finally {
+                insert.close()
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     /** Settings' imported-datasets list. Only ever contains entries created
      *  by [importDataset] — the local on-device dataset isn't listed here
      *  (see the `datasets` table's own doc comment in [onCreate]). */

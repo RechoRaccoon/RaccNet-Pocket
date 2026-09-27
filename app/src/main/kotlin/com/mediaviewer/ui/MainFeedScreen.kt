@@ -644,9 +644,9 @@ fun MainFeedScreen(
         // The dark wash behind the comments: the whole screen at once, fading
         // in together with the blur (it used to be painted on the sheet and
         // slide up with it). Drag-to-close fades it back out with the finger.
-        if (commentsFraction > 0.001f && !isLandscape) {
-            Box(Modifier.fillMaxSize().zIndex(4.9f).background(Color.Black.copy(alpha = 0.45f * commentsFraction)))
-        }
+        // Item 5: no full-screen dark wash or media blur behind the comments
+        // anymore — the post stays exactly as it was, and only the comment
+        // bubbles themselves blur what's behind each of them.
 
         // The comments sheet, over the (blurred) post.
         AnimatedVisibility(
@@ -901,11 +901,7 @@ private fun FeedView(
 
     Box(
         Modifier.fillMaxSize().background(OledBlack)
-            .then(
-                // Blur behind the comments sheet (API 31+; older phones get
-                // the sheet's dark wash only — Modifier.blur is a no-op there).
-                if (commentsFraction > 0.001f) Modifier.blur((26f * commentsFraction).dp) else Modifier
-            )
+
     ) {
         if (isLoading && currentItem == null) {
             CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White, strokeWidth = 1.5.dp)
@@ -1401,6 +1397,12 @@ private fun PostContent(
             val mediaModifier = Modifier.fillMaxSize().graphicsLayer {
                 scaleX = scale; scaleY = scale; translationX = offset.x; translationY = offset.y
             }.let { if (item.isBlocked || nsfwBlurred) it.blur(90.dp) else it }
+            // Item 10: Ambient Light — the media's top/bottom edge pixels
+            // stretched out behind it to fill the letterbox bars.
+            if (com.mediaviewer.util.UiToggles.ambientLight && !item.isTextOnly && !item.isBlocked && !nsfwBlurred) {
+                val ambientUrl = (item.mediaGroup.getOrNull(subImageIndex)?.thumbUrl ?: item.thumbUrl).ifBlank { item.mediaUrl }
+                AmbientEdgeFill(ambientUrl, Modifier.fillMaxSize())
+            }
             if (item.isTextOnly) {
                 // Big Update #3: text-only posts get a liquid-glass card shaped
                 // like a piece of media, centered where an image would sit.
@@ -1739,6 +1741,14 @@ private fun PostContent(
                             }
                         }
                     }
+                }
+                // Item 8: audio visualizer bars, right on top of the bar.
+                if (com.mediaviewer.util.UiToggles.audioVisualizer) {
+                    val barsColor = if (liquidGlass) dominantColor else rememberDominantColor(glassBackdropUrl)
+                    AudioVisualizerBars(
+                        color = barsColor,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp).height(30.dp)
+                    )
                 }
                 ActionRow(item, appMode, onToggleLike, onToggleRepost, onToggleBookmark, onE621Vote,
                     onQuoteRepost, onDownload, onDownloadGif, onBlockAccount, onSendPost,

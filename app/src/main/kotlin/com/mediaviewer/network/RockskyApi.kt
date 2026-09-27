@@ -66,7 +66,10 @@ data class RockskyScrobbleDto(
     // RockskyRepository.toModel()).
     val track: RockskyTrackDto? = null,
     val date: String? = null,
-    val createdAt: String? = null
+    val createdAt: String? = null,
+    // Track length — used to guess whether the latest scrobble is still
+    // playing (see RockskyRepository.inferNowPlaying). Rocksky reports ms.
+    val duration: Long? = null
 )
 
 data class RockskyTrackDto(

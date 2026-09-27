@@ -35,6 +35,7 @@ import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
 import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.launch
 
 /**
  * The feed's grid mode (pinch in on a post). Laid out like a profile page:
@@ -51,6 +52,13 @@ import kotlinx.coroutines.flow.filter
  * exactly back in place, whatever the layout.
  */
 private object GridScrollMemory {
+    /** The grid's own scroll state, kept alive while the grid is closed.
+     *  A staggered grid only knows which column each post sat in while
+     *  its state lives; recreating it and jumping to a post re-deals the
+     *  columns from that post onward, which is what flipped a post you'd
+     *  tapped from one side of the grid to the other on the way back. */
+    var state: LazyStaggeredGridState? = null
+    var stateScope: String? = null
     var scope: String? = null
     var anchorId: String? = null
     var anchorDelta: Int = 0
@@ -119,12 +127,22 @@ fun GridScreen(
 ) {
     val tap = rememberHapticTap()
     var localTags  by remember(e621SearchTags) { mutableStateOf(e621SearchTags) }
-    val tint = if (!selfAvatarUrl.isNullOrBlank()) rememberDominantColor(selfAvatarUrl) else NeutralGlassTint
+    val tint = if (!selfAvatarUrl.isNullOrBlank()) rememberSelfProfileTint(selfAvatarUrl) else NeutralGlassTint
     var kind by remember { mutableStateOf(PostKindFilter.ALL) }
     val gridScreen = "feed_grid"
     val gridMode = resultsGridMode(gridScreen, kind)
     val spec = resultsLayoutSpec(kind, gridMode, roundedGridTiles)
-    val gridState = rememberLazyStaggeredGridState()
+    val memoryScope = "$appMode|${authorFeedState?.author?.did ?: selectedFeedUri}"
+    val freshGridState = rememberLazyStaggeredGridState()
+    val keptState = remember(memoryScope) {
+        GridScrollMemory.state?.takeIf { GridScrollMemory.stateScope == memoryScope } != null
+    }
+    val gridState = remember(memoryScope) {
+        GridScrollMemory.state?.takeIf { GridScrollMemory.stateScope == memoryScope }
+            ?: freshGridState.also { GridScrollMemory.state = it; GridScrollMemory.stateScope = memoryScope }
+    }
+    val gridScope = androidx.compose.runtime.rememberCoroutineScope()
+    val showScrollTop by remember(gridState) { androidx.compose.runtime.derivedStateOf { gridState.firstVisibleItemIndex >= 6 } }
     // A swipeable multi-image tile reports which image it's showing just
     // before its click lands; carried into onItemClick as the sub-image.
     val pendingSeed = remember { arrayOfNulls<Pair<String, Int>>(1) }
@@ -135,7 +153,6 @@ fun GridScreen(
     // crash on duplicate keys, and feeds can repeat a post.
     val matched = remember(items, kind) { items.filter { kind.matches(it) }.distinctBy { it.id } }
     val indexById = remember(matched) { HashMap<String, Int>(matched.size * 2).also { m -> matched.forEachIndexed { i, it -> m[it.id] = i } } }
-    val memoryScope = "$appMode|${authorFeedState?.author?.did ?: selectedFeedUri}"
 
     // ── Keeping its place ─────────────────────────────────────────────────
     // (a) across the grid closing and reopening (see GridScrollMemory);
@@ -149,6 +166,8 @@ fun GridScreen(
         restored = true
         val mem = GridScrollMemory
         val sameSpot = mem.scope == memoryScope && mem.feedIndex == currentIndex && mem.anchorId != null
+        // Same grid, same post: the kept state is still exactly where it was.
+        if (sameSpot && keptState) return@LaunchedEffect
         if (sameSpot) {
             val idx = indexById[mem.anchorId!!]
             if (idx != null) { centreOn(gridState, idx, mem.anchorDelta); return@LaunchedEffect }
@@ -340,5 +359,18 @@ fun GridScreen(
             },
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
         )
+        // Back-to-top arrow, same as on profiles (glass that blurs the grid).
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showScrollTop,
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = rememberTopCutoutClearance() + 8.dp),
+            enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.scaleIn(initialScale = 0.8f),
+            exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.scaleOut(targetScale = 0.8f)
+        ) {
+            ScrollToTopGlassBubble(liquidGlass = liquidGlass, tint = tint, backdrop = backdrop) {
+                gridScope.launch {
+                    if (reducedAnimations) gridState.scrollToItem(0) else gridState.animateScrollToItem(0)
+                }
+            }
+        }
     }
 }

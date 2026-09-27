@@ -28,6 +28,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
@@ -74,6 +76,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.platform.LocalConfiguration
@@ -389,6 +392,9 @@ fun ProfileOverlay(
     onSeedSubImageIndex: (String, Int) -> Unit,
     onOpenBlog: (LeafletBlog) -> Unit,
     onCloseBlog: () -> Unit,
+    // Item 12: the blog reader's pen/trash buttons (own blogs).
+    onEditBlog: (LeafletBlog) -> Unit = {},
+    onDeleteBlog: (LeafletBlog) -> Unit = {},
     onOpenReview: (PopfeedReview) -> Unit,
     onCloseReview: () -> Unit,
     // Backlog cards' "full info menu" (Titles feature) — see
@@ -447,7 +453,10 @@ fun ProfileOverlay(
     pinterestThreeColumns: Boolean = false,
     // Feature request #8: "I hate fun" — blur Bluesky-labeled sexual/adult
     // content behind a tap-to-reveal cover.
-    hateFunBlurNsfw: Boolean = false
+    hateFunBlurNsfw: Boolean = false,
+    // Item 19: own profile's edit popup → Save.
+    onSaveOwnProfile: (displayName: String, bio: String, handle: String, avatar: android.net.Uri?, banner: android.net.Uri?, onDone: (String?) -> Unit) -> Unit =
+        { _, _, _, _, _, done -> done("Editing isn't available here") }
 ) {
     val author  = state.author
     val profile = state.profile
@@ -639,8 +648,11 @@ fun ProfileOverlay(
     var backdropOrigin by remember { mutableStateOf(Offset.Zero) }
     val backdrop = if (liquidGlass) remember(backdropLayer) { GlassBackdrop(backdropLayer) { backdropOrigin } } else null
 
+    var editingProfile by remember { mutableStateOf(false) }
     CompositionLocalProvider(LocalHateFunBlurNsfw provides hateFunBlurNsfw) {
     Box(Modifier.fillMaxSize()) {
+    // Item 19: the whole page blurs behind the edit popup.
+    Box(Modifier.fillMaxSize().then(if (editingProfile) Modifier.blur(18.dp) else Modifier)) {
         // Bug fix: this recording box must wrap *only* the scrollable
         // content (the LazyColumn) — not the interaction bar or anything
         // else on this page that itself reads [backdrop] to render. The
@@ -705,8 +717,15 @@ fun ProfileOverlay(
             // inset, plus a small fixed buffer so it's not flush even
             // against that — keeps the last item fully visible and clear
             // of it once scrolled all the way down.
-            contentPadding = PaddingValues(bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 16.dp + 76.dp),
-            modifier = Modifier.fillMaxSize().padding(top = rememberTopCutoutClearance())
+            // Item 22: the notch-row gap above the banner is CONTENT padding,
+            // not layout padding — so it's there at rest, but once you scroll
+            // the banner slides up behind the notch and off the top instead
+            // of being cut off at the gap's edge.
+            contentPadding = PaddingValues(
+                top = rememberTopCutoutClearance(),
+                bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 16.dp + 76.dp
+            ),
+            modifier = Modifier.fillMaxSize()
         ) {
             item(key = "profile_header") {
                 ProfileHeaderSection(
@@ -720,7 +739,8 @@ fun ProfileOverlay(
                     linkColor = blended,
                     onToggleFollow = onToggleFollow,
                     onClose = onClose,
-                    nowPlaying = state.nowPlaying
+                    nowPlaying = state.nowPlaying,
+                    onEditProfile = { editingProfile = true }
                 )
             }
 
@@ -929,7 +949,7 @@ fun ProfileOverlay(
             enter = fadeIn(tween(if (reducedAnimations) 0 else 180)) + scaleIn(initialScale = 0.8f),
             exit = fadeOut(tween(if (reducedAnimations) 0 else 180)) + scaleOut(targetScale = 0.8f)
         ) {
-            ScrollToTopBubble(liquidGlass = liquidGlass, tint = blended) {
+            ScrollToTopBubble(liquidGlass = liquidGlass, tint = blended, backdrop = backdrop) {
                 coroutineScope.launch {
                     if (reducedAnimations) listState.scrollToItem(0) else listState.animateScrollToItem(0)
                 }
@@ -937,7 +957,11 @@ fun ProfileOverlay(
         }
 
         state.openBlog?.let { blog ->
-            BlogDetailOverlay(blog = blog, author = author, liquidGlass = liquidGlass, tint = blended, onClose = onCloseBlog)
+            BlogDetailOverlay(
+                blog = blog, author = author, liquidGlass = liquidGlass, tint = blended,
+                isOwn = selfDid.isNotBlank() && author.did == selfDid,
+                onClose = onCloseBlog, onEdit = onEditBlog, onDelete = onDeleteBlog
+            )
         }
         state.openReview?.let { review ->
             ReviewDetailOverlay(review = review, author = author, liquidGlass = liquidGlass, onClose = onCloseReview)
@@ -968,6 +992,14 @@ fun ProfileOverlay(
                 reviewSocial = reviewSocial, onLoadReviewSocial = onLoadReviewSocial,
                 onToggleReviewLike = onToggleReviewLike, onPostReviewComment = onPostReviewComment,
                 selfDid = selfDid, onDeleteReview = onDeleteReview
+            )
+        }
+    }
+        if (editingProfile) {
+            EditProfileDialog(
+                author = author, profile = profile, tint = blended, liquidGlass = liquidGlass,
+                onDismiss = { editingProfile = false },
+                onSave = onSaveOwnProfile
             )
         }
     }
@@ -1114,23 +1146,8 @@ private fun ProfileInteractionBar(
 }
 
 @Composable
-private fun ScrollToTopBubble(liquidGlass: Boolean, tint: Color, onClick: () -> Unit) {
-    val shape = CircleShape
-    // Fix 9: the shared light tap, via the shared helper.
-    val tap = rememberHapticTap()
-    Box(
-        Modifier
-            .size(38.dp)
-            .then(
-                if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
-                else Modifier.clip(shape).background(Color.Black.copy(0.6f))
-            )
-            .clickable(onClick = { tap(); onClick() }),
-        contentAlignment = Alignment.Center
-    ) {
-        Icon(Icons.Filled.ArrowUpward, contentDescription = "Scroll to top", tint = Color.White, modifier = Modifier.size(18.dp))
-    }
-}
+private fun ScrollToTopBubble(liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop? = null, onClick: () -> Unit) =
+    ScrollToTopGlassBubble(liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, onClick = onClick)
 
 /** Intercepts the system back gesture/button while the overlay is up. */
 @Composable
@@ -1156,7 +1173,8 @@ private fun ProfileHeaderSection(
     onClose: () -> Unit,
     // Item 16: Rocksky "Listening to ..." bio line — see openProfile()'s
     // own doc comment on where this is fetched from.
-    nowPlaying: RockskyTrack? = null
+    nowPlaying: RockskyTrack? = null,
+    onEditProfile: () -> Unit = {}
 ) {
     Column(Modifier.fillMaxWidth()) {
         // ── Banner ──
@@ -1222,7 +1240,8 @@ private fun ProfileHeaderSection(
                 isOwnProfile = isOwnProfile,
                 backdrop = bannerBackdrop,
                 onToggleFollow = onToggleFollow,
-                onClose = onClose
+                onClose = onClose,
+                onEditProfile = onEditProfile
             )
         }
 
@@ -1349,7 +1368,8 @@ private fun ProfileBannerOverlayLayout(
     // AuthorRow/FollowButton sample a post's media.
     backdrop: GlassBackdrop?,
     onToggleFollow: () -> Unit,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    onEditProfile: () -> Unit = {}
 ) {
     val inset = 16.dp
     val gap = 8.dp
@@ -1374,7 +1394,9 @@ private fun ProfileBannerOverlayLayout(
 
         val followPlaceable = subcompose("follow") {
             if (isOwnProfile) {
-                EditProfileButton(liquidGlass = liquidGlass, tint = bannerColor, backdrop = backdrop)
+                // Item 19: the same pencil the blog editor uses, as a round
+                // bubble the size of the X on the left (and level with it).
+                EditGlassBubble(liquidGlass = liquidGlass, tint = bannerColor, onClick = onEditProfile, backdrop = backdrop)
             } else {
                 FollowButton(isFollowing = author.isFollowing, liquidGlass = liquidGlass, tint = bannerColor, onClick = onToggleFollow, backdrop = backdrop)
             }
@@ -1426,6 +1448,29 @@ private fun formatCount(n: Int): String = when {
     n >= 1_000_000 -> "%.1fM".format(n / 1_000_000f)
     n >= 1_000     -> "%.1fK".format(n / 1_000f)
     else           -> n.toString()
+}
+
+@Composable
+private fun EditGlassBubble(liquidGlass: Boolean, tint: Color, onClick: () -> Unit, backdrop: GlassBackdrop? = null) {
+    val shape = CircleShape
+    val tap = rememberHapticTap()
+    if (liquidGlass) {
+        LiquidGlassSurface(
+            modifier = Modifier.size(30.dp).clickable(onClick = { tap(); onClick() }),
+            shape = shape, tint = tint, backdrop = backdrop
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Icon(Icons.Default.Edit, contentDescription = "Edit profile", tint = Color.White, modifier = Modifier.size(15.dp))
+            }
+        }
+    } else {
+        Box(
+            Modifier.size(30.dp).clip(shape).background(Color.White.copy(0.14f)).clickable(onClick = { tap(); onClick() }),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.Default.Edit, contentDescription = "Edit profile", tint = Color.White, modifier = Modifier.size(15.dp))
+        }
+    }
 }
 
 @Composable
@@ -3033,60 +3078,177 @@ private fun ByAndDateRow(author: AuthorInfo, createdAt: String, liquidGlass: Boo
 }
 
 @Composable
-private fun BlogDetailOverlay(blog: LeafletBlog, author: AuthorInfo, liquidGlass: Boolean, tint: Color, onClose: () -> Unit) {
+private fun BlogDetailOverlay(
+    blog: LeafletBlog, author: AuthorInfo, liquidGlass: Boolean, tint: Color,
+    isOwn: Boolean = false,
+    onClose: () -> Unit,
+    onEdit: (LeafletBlog) -> Unit = {},
+    onDelete: (LeafletBlog) -> Unit = {}
+) {
+    // Item 12: the reader's page is a soft, dark version of the author's own
+    // color — white text stays crisp on it — instead of flat black.
+    val soft = remember(tint) { androidx.compose.ui.graphics.lerp(Color(0xFF141418), tint, 0.30f) }
+    val pageBrush = remember(soft) {
+        Brush.verticalGradient(listOf(
+            androidx.compose.ui.graphics.lerp(soft, Color.White, 0.05f), soft,
+            androidx.compose.ui.graphics.lerp(soft, Color.Black, 0.35f)
+        ))
+    }
+    val tap = rememberHapticTap()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var confirmDelete by remember { mutableStateOf(false) }
+    val density = LocalDensity.current
+    var headerHeight by remember { mutableStateOf(0.dp) }
+    // Live backdrop: the scrolling text is recorded so every header bubble
+    // and the bottom bar blur exactly what's passing behind each of them
+    // (the text is no longer cut off under a solid header).
+    val layer = rememberGraphicsLayer()
+    var layerOrigin by remember { mutableStateOf(Offset.Zero) }
+    val backdrop = if (liquidGlass) remember(layer) { GlassBackdrop(layer) { layerOrigin } } else null
+    val bubbleTint = remember(tint) { androidx.compose.ui.graphics.lerp(tint, Color.Black, 0.1f) }
+
     Box(
-        Modifier.fillMaxSize().background(Color.Black.copy(0.94f))
-            // Consumes all touches so they can't fall through to the tabs/
-            // results underneath while this popup is open — a plain
-            // .background() alone doesn't register as a hit-testable pointer
-            // target in Compose, so without this a tap would pass straight
-            // through to whatever's rendered beneath the popup.
+        Modifier.fillMaxSize().background(pageBrush)
             .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null) {}
     ) {
-        Column(Modifier.fillMaxSize().padding(top = rememberTopCutoutClearance())) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                CloseGlassBubble(liquidGlass = liquidGlass, tint = tint, onClick = onClose)
-                Spacer(Modifier.width(10.dp))
-                ProfileGlassPill(text = blog.title, liquidGlass = liquidGlass, tint = tint, fontSize = 15.sp, bold = true)
-            }
-            ByAndDateRow(
-                author = author, createdAt = blog.createdAt, liquidGlass = liquidGlass, tint = tint,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-            )
-            HorizontalDivider(color = Color.White.copy(0.08f), thickness = 0.5.dp)
-            // Horizontal padding matches the 12dp used by the header row
-            // above so the body text's edges line up with the buttons.
-            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 20.dp)) {
-                // Cover image at the top of the reader too, if the blog has
-                // one — same banner treatment ReviewDetailOverlay gives its
-                // poster/backdrop art, so opening a blog with a thumbnail
-                // doesn't feel like it lost that art the moment you tap in.
-                if (blog.thumbnailUrl != null) {
+        Box(
+            Modifier.fillMaxSize()
+                .onGloballyPositioned { layerOrigin = it.positionInRoot() }
+                .drawWithContent {
+                    if (liquidGlass) layer.record { this@drawWithContent.drawContent() }
+                    drawContent()
+                }
+                .background(pageBrush)
+        ) {
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
+                Spacer(Modifier.height(headerHeight + 14.dp))
+                if (!blog.description.isNullOrBlank()) {
+                    Text(
+                        blog.description, color = Color.White.copy(0.78f), fontSize = 15.sp, lineHeight = 21.sp,
+                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 14.dp)
+                    )
+                }
+                // A Stellar blog's cover is its first inline image, so it
+                // isn't repeated as a banner.
+                if (blog.thumbnailUrl != null && !blog.isStellar) {
                     val bannerShape = RoundedCornerShape(16.dp)
-                    Box(
-                        Modifier.fillMaxWidth().height(200.dp)
-                            .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = bannerShape) else Modifier.clip(bannerShape))
-                    ) {
-                        AsyncImage(model = blog.thumbnailUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize().clip(bannerShape))
-                    }
+                    AsyncImage(model = blog.thumbnailUrl, contentDescription = null, contentScale = ContentScale.FillWidth,
+                        modifier = Modifier.fillMaxWidth().clip(bannerShape))
                     Spacer(Modifier.height(16.dp))
                 }
                 if (blog.blocks.isNotEmpty()) {
-                    // Item 8: real formatting — headers, bold text,
-                    // checklists, and inline images — instead of the
-                    // flattened plain-text fallback below. See
-                    // BlueskyRepository.parseLeafletBlocks' doc comment for
-                    // what block types this recognizes and how.
                     LeafletBlocksContent(blocks = blog.blocks, liquidGlass = liquidGlass, tint = tint)
                 } else {
                     Text(blog.bodyText.ifBlank { "This blog has no readable text content." },
-                        color = Color.White.copy(0.92f), fontSize = 14.sp, lineHeight = 21.sp)
+                        color = Color.White.copy(0.92f), fontSize = 15.sp, lineHeight = 23.sp)
                 }
-                Spacer(Modifier.height(40.dp))
+                Spacer(Modifier.height(120.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()))
+            }
+        }
+
+        // ── Floating header: each bubble blurs what's behind it ──
+        Column(
+            Modifier.fillMaxWidth().padding(top = rememberTopCutoutClearance())
+                .onSizeChanged { headerHeight = with(density) { it.height.toDp() } }
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CloseGlassBubble(liquidGlass = liquidGlass, tint = bubbleTint, onClick = onClose, backdrop = backdrop)
+                Spacer(Modifier.width(10.dp))
+                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
+                    ProfileGlassPill(text = blog.title, liquidGlass = liquidGlass, tint = bubbleTint, fontSize = 15.sp, bold = true, backdrop = backdrop)
+                }
+            }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                ProfileGlassPill(text = "By @${author.handle}", liquidGlass = liquidGlass, tint = bubbleTint, fontSize = 11.sp, bold = false, backdrop = backdrop)
+                Spacer(Modifier.weight(1f))
+                val dateText = formatCreatedAt(blog.createdAt)
+                if (dateText.isNotBlank()) {
+                    ProfileGlassPill(text = dateText, liquidGlass = liquidGlass, tint = bubbleTint, fontSize = 11.sp, bold = false, backdrop = backdrop)
+                }
+            }
+        }
+
+        // ── Interaction bar (like the profile's) ──
+        val barShape = RoundedCornerShape(26.dp)
+        val pillHeight = if (liquidGlass) 44.dp else 36.dp
+        @Composable
+        fun BarIcon(onClick: () -> Unit, content: @Composable () -> Unit) {
+            Box(Modifier.size(44.dp).clip(CircleShape).clickable { tap(); onClick() }, contentAlignment = Alignment.Center) { content() }
+        }
+        val barContent: @Composable () -> Unit = {
+            Row(
+                Modifier.height(pillHeight).padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                BarIcon(onClick = {
+                    runCatching {
+                        val web = "https://bsky.app/profile/${author.did}"
+                        context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(web)))
+                    }
+                }) { BlueskyLogoIcon(Modifier.size(20.dp), tint = Color.White) }
+                if (isOwn) {
+                    BarIcon(onClick = { onEdit(blog) }) {
+                        Icon(Icons.Default.Edit, contentDescription = "Edit blog", tint = Color.White, modifier = Modifier.size(20.dp))
+                    }
+                    BarIcon(onClick = { confirmDelete = true }) {
+                        Icon(Icons.Default.Delete, contentDescription = "Delete blog", tint = Color(0xFFFF8A80), modifier = Modifier.size(21.dp))
+                    }
+                }
+            }
+        }
+        Box(
+            Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navigationBars)
+                .height(if (liquidGlass) 60.dp else 52.dp).fillMaxWidth(),
+            contentAlignment = Alignment.Center
+        ) {
+            if (liquidGlass) {
+                LiquidGlassSurface(modifier = Modifier.height(pillHeight), shape = barShape, tint = bubbleTint, backdrop = backdrop) { barContent() }
+            } else {
+                Box(Modifier.height(pillHeight).clip(barShape).background(Color.Black.copy(alpha = 0.7f))) { barContent() }
+            }
+        }
+
+        if (confirmDelete) {
+            Box(
+                Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f))
+                    .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null) { confirmDelete = false },
+                contentAlignment = Alignment.Center
+            ) {
+                val shape = RoundedCornerShape(20.dp)
+                Column(
+                    Modifier.padding(horizontal = 36.dp).widthIn(max = 340.dp).fillMaxWidth().clip(shape)
+                        .background(androidx.compose.ui.graphics.lerp(Color(0xFF111114), tint, 0.25f))
+                        .border(1.dp, tint.copy(alpha = 0.5f), shape)
+                        .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null) {}
+                        .padding(18.dp)
+                ) {
+                    Text("Delete this blog?", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        if (blog.isStellar) "\"${blog.title}\" will be removed for good."
+                        else "\"${blog.title}\" is a Leaflet blog — it'll be removed from Leaflet too.",
+                        color = Color.White.copy(alpha = 0.65f), fontSize = 13.sp
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Box(
+                            Modifier.weight(1f).height(42.dp).clip(RoundedCornerShape(12.dp))
+                                .border(1.dp, tint.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                                .clickable { tap(); confirmDelete = false },
+                            contentAlignment = Alignment.Center
+                        ) { Text("Cancel", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+                        Box(
+                            Modifier.weight(1f).height(42.dp).clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xFFE5484D))
+                                .clickable { tap(); confirmDelete = false; onDelete(blog) },
+                            contentAlignment = Alignment.Center
+                        ) { Text("Delete", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                    }
+                }
             }
         }
     }
@@ -3174,15 +3336,20 @@ private fun LeafletBlocksContent(blocks: List<LeafletBlock>, liquidGlass: Boolea
                     // as an internal gap between the image and the panel's
                     // own bottom outline rather than real spacing between
                     // blocks.
+                    // Item 12: no glass fill behind images any more — it showed
+                    // through transparent PNGs as a white-ish box. Aligned
+                    // like the row it came from.
                     val shape = RoundedCornerShape(14.dp)
                     Box(
-                        Modifier
-                            .padding(bottom = 10.dp)
-                            .fillMaxWidth()
-                            .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.clip(shape))
+                        Modifier.padding(bottom = 10.dp).fillMaxWidth(),
+                        contentAlignment = when (block.alignment) {
+                            LeafletAlign.START -> Alignment.CenterStart
+                            LeafletAlign.CENTER -> Alignment.Center
+                            LeafletAlign.END -> Alignment.CenterEnd
+                        }
                     ) {
                         AsyncImage(model = block.url, contentDescription = block.alt, contentScale = ContentScale.FillWidth,
-                            modifier = Modifier.fillMaxWidth())
+                            modifier = Modifier.fillMaxWidth().clip(shape))
                     }
                     i++
                 }

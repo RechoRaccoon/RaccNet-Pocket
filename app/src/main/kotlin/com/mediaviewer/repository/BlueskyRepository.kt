@@ -384,6 +384,30 @@ class BlueskyRepository {
     // doc comment); racing 2-3 requests per account on top of that would
     // multiply its carefully-sized burst size by 2-3x.
     suspend fun getLeafletBlogs(did: String, probeConcurrently: Boolean = false): List<LeafletBlog> {
+        // Item 12: Stellar blogs are standard.site documents, which can sit
+        // alongside someone's older pub.leaflet.document records — so both
+        // collections are read and merged (one copy per blog when a Leaflet
+        // migration left the same post in both).
+        val merged = coroutineScope {
+            LEAFLET_COLLECTIONS.map { c ->
+                async {
+                    val resp = runCatching { api.listRecords(null, did, c, 50, null) }.getOrNull()
+                    val body = resp?.takeIf { it.isSuccessful }?.body() ?: return@async emptyList<LeafletBlog>()
+                    body.records.mapNotNull { rec ->
+                        val obj = rec.value?.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+                        parseLeafletBlogRecord(did, rec.uri, obj)
+                    }
+                }
+            }.awaitAll()
+        }
+        val seen = HashSet<String>()
+        val all = merged.flatten().filter { b -> seen.add(b.title.trim().lowercase() + "|" + b.createdAt.take(16)) }
+        return all.sortedByDescending { it.createdAt }
+    }
+
+    @Suppress("unused")
+
+    private suspend fun getLeafletBlogsLegacyProbe(did: String, probeConcurrently: Boolean): List<LeafletBlog> {
         // Same known-collection fast path as getPopfeedReviews below — once
         // any account's blogs are found under one of the two candidate
         // collection names, try that one first for every other account,
@@ -442,10 +466,13 @@ class BlueskyRepository {
             ?: obj.get("createdAt")?.takeIf { it.isJsonPrimitive }?.asString ?: ""
         val description = firstStringField(obj, "description", "subtitle", "summary")
         val thumbnailUrl = firstImageField(obj, did, "coverImage", "cover", "image", "thumb", "icon")
+        val contentType = obj.getAsJsonObject("content")?.get("\$type")?.takeIf { it.isJsonPrimitive }?.asString
+            ?: if (uri.contains("/pub.leaflet.document/")) "pub.leaflet.document" else null
         return LeafletBlog(
             uri = uri, title = title, bodyText = extractLeafletBodyText(obj), createdAt = createdAt,
             description = description, thumbnailUrl = thumbnailUrl,
-            blocks = runCatching { parseLeafletBlocks(did, obj) }.getOrDefault(emptyList())
+            blocks = runCatching { parseLeafletBlocks(did, obj) }.getOrDefault(emptyList()),
+            contentType = contentType
         )
     }
 
@@ -527,7 +554,8 @@ class BlueskyRepository {
                     LeafletBlock.Header(text, level.coerceIn(1, 4), alignment)
                 }
                 type.contains("image", ignoreCase = true) -> {
-                    val url = firstImageField(block, did, "image", "src", "media", "thumb") ?: return null
+                    // Full-size rendition: blog images are read large.
+                    val url = firstImageField(block, did, "image", "src", "media", "thumb", wideOverride = true) ?: return null
                     val alt = firstStringField(block, "alt", "caption", "altText")
                     LeafletBlock.ImageBlock(url, alt, alignment)
                 }
@@ -1068,11 +1096,11 @@ class BlueskyRepository {
      *  a direct URL string, or a blob to resolve via the account's own PDS
      *  (com.atproto.sync.getBlob), the same way this app already resolves
      *  video blobs (see BlueskyBlobResolver). */
-    private suspend fun firstImageField(obj: com.google.gson.JsonObject?, ownerDid: String, vararg keys: String): String? {
+    private suspend fun firstImageField(obj: com.google.gson.JsonObject?, ownerDid: String, vararg keys: String, wideOverride: Boolean? = null): String? {
         if (obj == null) return null
         // Backdrop/banner-style fields get the larger rendition; posters,
         // covers and inline images the lighter one (see ImageLoading).
-        val wide = keys.firstOrNull()?.let { it.startsWith("backdrop") || it.startsWith("banner") } == true
+        val wide = wideOverride ?: (keys.firstOrNull()?.let { it.startsWith("backdrop") || it.startsWith("banner") } == true)
         for (k in keys) {
             val v = obj.get(k) ?: continue
             if (v.isJsonPrimitive && v.asJsonPrimitive.isString && v.asString.isNotBlank()) {
@@ -1089,7 +1117,9 @@ class BlueskyRepository {
                 // and cacheable. GIFs keep the original so they still animate.
                 if (!cid.isNullOrBlank() && ownerDid.startsWith("did:") && mime != "image/gif" &&
                     (mime.isEmpty() || mime.startsWith("image/"))) {
-                    return com.mediaviewer.util.ImageLoading.bskyCdnUrl(ownerDid, cid, wide)
+                    return com.mediaviewer.util.ImageLoading.bskyCdnUrl(
+                        ownerDid, cid, wide, keepAlpha = mime == "image/png" || mime == "image/webp"
+                    )
                 }
                 if (!cid.isNullOrBlank()) {
                     val resolved = runCatching { withContext(Dispatchers.IO) { BlueskyBlobResolver.resolveBlobUrl(ownerDid, cid) } }.getOrNull()
@@ -1925,7 +1955,7 @@ class BlueskyRepository {
     // posts" feed include posts *I* shared too, not just ones the other
     // person shared with me — the "From Friends" feed (default false) still
     // only wants what friends shared with you, unchanged.
-    suspend fun getFriendsSharedPosts(token: String, myDid: String, convos: List<DmConversation>, includeSelfSent: Boolean = false): Result<List<MediaItem>> = runCatching {
+    suspend fun getFriendsSharedPosts(token: String, myDid: String, convos: List<DmConversation>, includeSelfSent: Boolean = false, selfAuthor: AuthorInfo? = null): Result<List<MediaItem>> = runCatching {
         ensureChatApi(myDid)
         // Never surface posts shared by an account the user has blocked.
         val blockedDids = getBlockedDids(token).getOrDefault(emptySet())
@@ -1947,11 +1977,13 @@ class BlueskyRepository {
                                 val recordObj = embedObj?.getAsJsonObject("record")
                                 val uri = recordObj?.get("uri")?.takeIf { it.isJsonPrimitive }?.asString
                                 val cid = recordObj?.get("cid")?.takeIf { it.isJsonPrimitive }?.asString
-                                // Shown in the feed as "shared by @x" context
-                                // either way, using the other side of the DM
-                                // (the conversation's member) as that author —
-                                // relevant regardless of who actually sent it.
-                                if (uri != null && cid != null) raw.add(Raw(uri, cid, msg.text, msg.sentAt, convo.member, convo.convoId))
+                                // "Sent by" names whoever actually sent the
+                                // message: the other person, or you (item 15 —
+                                // it used to always name the other person).
+                                val sender = if (senderDid == myDid) {
+                                    selfAuthor ?: AuthorInfo(did = myDid, handle = msg.sender?.did ?: myDid, displayName = "You", avatarUrl = null)
+                                } else convo.member
+                                if (uri != null && cid != null) raw.add(Raw(uri, cid, msg.text, msg.sentAt, sender, convo.convoId))
                             }
                         }
                         cursor = body?.cursor
@@ -2083,6 +2115,61 @@ class BlueskyRepository {
             android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
             UploadedImage(blob, bounds.outWidth, bounds.outHeight)
         }
+    }
+
+    /**
+     * Item 19: saves the signed-in user's profile (app.bsky.actor.profile,
+     * rkey "self"). The existing record is read first and every field this
+     * doesn't touch (pinned post, labels, …) is kept as-is. [avatarUri] /
+     * [bannerUri] are new pictures picked on the phone (null = unchanged).
+     * A changed [handle] goes through com.atproto.identity.updateHandle.
+     */
+    suspend fun updateOwnProfile(
+        token: String, context: android.content.Context, did: String,
+        displayName: String, description: String,
+        avatarUri: android.net.Uri?, bannerUri: android.net.Uri?,
+        newHandle: String?
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val existing = api.getRecord("Bearer $token", did, "app.bsky.actor.profile", "self")
+            val record = LinkedHashMap<String, Any>()
+            existing.body()?.value?.takeIf { it.isJsonObject }?.asJsonObject?.entrySet()?.forEach { (k, v) -> record[k] = v }
+            record["\$type"] = "app.bsky.actor.profile"
+            record["displayName"] = displayName.take(64)
+            record["description"] = description.take(256)
+            if (avatarUri != null) record["avatar"] = uploadProfileImage(token, context, avatarUri, 1000, 1000)
+            if (bannerUri != null) record["banner"] = uploadProfileImage(token, context, bannerUri, 3000, 1000)
+            val resp = api.putRecord("Bearer $token", BskyPutRecordRequest(did, "app.bsky.actor.profile", "self", record))
+            if (!resp.isSuccessful) error("Saving the profile failed (${resp.code()}): ${resp.errorBody()?.string()?.take(160)}")
+            if (!newHandle.isNullOrBlank()) {
+                val h = newHandle.trim().removePrefix("@")
+                val r = api.updateHandle("Bearer $token", mapOf("handle" to h))
+                if (!r.isSuccessful) error("Profile saved, but the handle couldn't change: ${r.errorBody()?.string()?.take(160) ?: r.code()}")
+            }
+        }
+    }
+
+    /** Avatar/banner upload: Bluesky caps these at 1,000,000 bytes, so the
+     *  picture is scaled to fit [maxW]×[maxH] and JPEG-compressed under that. */
+    private suspend fun uploadProfileImage(
+        token: String, context: android.content.Context, uri: android.net.Uri, maxW: Int, maxH: Int
+    ): BskyBlob {
+        val original = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: error("Couldn't read the picture")
+        var bitmap = android.graphics.BitmapFactory.decodeByteArray(original, 0, original.size) ?: error("Couldn't decode the picture")
+        val scale = minOf(1f, maxW.toFloat() / bitmap.width, maxH.toFloat() / bitmap.height)
+        if (scale < 1f) {
+            bitmap = android.graphics.Bitmap.createScaledBitmap(
+                bitmap, (bitmap.width * scale).toInt().coerceAtLeast(1), (bitmap.height * scale).toInt().coerceAtLeast(1), true
+            )
+        }
+        var quality = 90
+        var bytes: ByteArray
+        do {
+            bytes = java.io.ByteArrayOutputStream().also { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, it) }.toByteArray()
+            quality -= 10
+        } while (bytes.size > 950_000 && quality > 20)
+        val resp = api.uploadBlob("Bearer $token", "image/jpeg", bytes.toRequestBody("image/jpeg".toMediaType()))
+        return resp.body()?.blob ?: error("Picture upload failed (${resp.code()})")
     }
 
     /** An image blob that was just uploaded, plus the exact pixel dimensions
@@ -2297,7 +2384,7 @@ class BlueskyRepository {
             // happened the original content:// URI's declared type (mov,
             // etc.) no longer applies to the bytes we're actually sending.
             val mimeType = if (uploadUri != videoUri) "video/mp4" else (resolver.getType(videoUri) ?: "video/mp4")
-            val fileName = "raccnet-${System.currentTimeMillis()}.mp4"
+            val fileName = "stellar-${System.currentTimeMillis()}.mp4"
             // Streamed from disk instead of read into one byte array — a long
             // video no longer has to fit in memory at once.
             val length = runCatching {
@@ -2737,17 +2824,305 @@ class BlueskyRepository {
                     // fields Gson did/didn't populate whenever an embed
                     // exists but isn't recognized, specifically flagging the
                     // 5+ media items case bsky.app's own carousel targets.
-                    // Filtering logcat for "RaccNet-Embed" on a real 5-10
+                    // Filtering logcat for "Stellar-Embed" on a real 5-10
                     // image post will show the literal wire shape instead of
                     // another guess — that's the fastest way to get this
                     // right on the next round.
                     if (post.embed != null) {
-                        Log.w("RaccNet-Embed", "Unrecognized embed on ${post.uri}: type='${embed.type}' " +
+                        Log.w("Stellar-Embed", "Unrecognized embed on ${post.uri}: type='${embed.type}' " +
                             "images=${embed.images?.size ?: -1} items=${embed.items?.size ?: -1} " +
                             "hasMedia=${embed.media != null} hasRecord=${embed.record != null} " +
                             "textLen=${text.length}")
                     }
                     textOnlyItem()
+                }
+            }
+        }
+    }
+
+    // ── Item 12: Stellar blogs ───────────────────────────────────────────
+    //
+    // A Stellar blog is a standard.site document (site.standard.document —
+    // the shared long-form lexicon Leaflet and other apps use), so every
+    // standard.site reader can list it, with Stellar's own content type
+    // inside: com.rechoraccoon.stellar.blog.content. Its blocks deliberately
+    // use the same wrapper/field shapes Leaflet does ({block, alignment},
+    // plaintext, level, image blob) so parseLeafletBlocks reads both.
+    //
+    // Every document points at a site.standard.publication: Stellar keeps
+    // one per account at rkey "stellar", created on first publish.
+
+    private fun blogRkey(uri: String) = uri.substringAfterLast('/')
+    private fun blogCollection(uri: String) = uri.removePrefix("at://").split('/').getOrNull(1) ?: "site.standard.document"
+
+    /** Timestamp id (TID) record key — the same sortable key format
+     *  createRecord would pick, generated here so the document's `path`
+     *  can name its own key. */
+    private fun newTid(): String {
+        val chars = "234567abcdefghijklmnopqrstuvwxyz"
+        val micros = System.currentTimeMillis() * 1000 + (System.nanoTime() / 1000) % 1000
+        var v = (micros shl 10) or kotlin.random.Random.nextLong(0, 1024)
+        val out = CharArray(13)
+        for (i in 12 downTo 0) { out[i] = chars[(v and 31).toInt()]; v = v ushr 5 }
+        return String(out)
+    }
+
+    private fun alignValue(a: LeafletAlign) = when (a) {
+        LeafletAlign.START -> "text-align-left"
+        LeafletAlign.CENTER -> "text-align-center"
+        LeafletAlign.END -> "text-align-right"
+    }
+
+    private suspend fun ensureStellarPublication(token: String, did: String, handle: String, displayName: String): String {
+        val uri = "at://$did/site.standard.publication/stellar"
+        val existing = runCatching { api.getRecord("Bearer $token", did, "site.standard.publication", "stellar") }.getOrNull()
+        if (existing?.isSuccessful == true && existing.body()?.value != null) return uri
+        val name = displayName.ifBlank { handle }.let { "$it's blog" }
+        val record = mapOf(
+            "\$type" to "site.standard.publication",
+            "url" to "https://bsky.app/profile/$did",
+            "name" to name,
+            "description" to "Written with Stellar"
+        )
+        val resp = api.putRecord("Bearer $token", BskyPutRecordRequest(did, "site.standard.publication", "stellar", record))
+        if (!resp.isSuccessful) error("Couldn't set up your blog (${resp.code()}): ${resp.errorBody()?.string()?.take(160)}")
+        return uri
+    }
+
+    /** Uploads a blog image. PNG/WebP keep their format (transparency);
+     *  everything else goes through the normal post-image path. */
+    private suspend fun uploadBlogImage(token: String, context: android.content.Context, uri: android.net.Uri): Triple<BskyBlob, Int, Int> {
+        val type = context.contentResolver.getType(uri).orEmpty()
+        if (type == "image/png" || type == "image/webp") {
+            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: error("Couldn't read an image")
+            if (bytes.size <= 1_000_000) {
+                val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                val resp = api.uploadBlob("Bearer $token", type, bytes.toRequestBody(type.toMediaType()))
+                val blob = resp.body()?.blob ?: error("Image upload failed (${resp.code()})")
+                return Triple(blob, bounds.outWidth, bounds.outHeight)
+            }
+        }
+        val up = uploadImageBlob(token, context, uri).getOrThrow()
+        return Triple(up.blob, up.width, up.height)
+    }
+
+    private fun blobJson(blob: BskyBlob): com.google.gson.JsonObject = com.google.gson.Gson().toJsonTree(blob).asJsonObject
+
+    /**
+     * Publishes [draft] as a new Stellar blog, or — with [BlogDraft.editingUri]
+     * — saves the changes over an existing blog. An existing Leaflet blog is
+     * written back in Leaflet's own block format (so Leaflet still renders
+     * it); Stellar blogs and new ones use Stellar's content type.
+     */
+    suspend fun publishBlog(
+        token: String, did: String, handle: String, displayName: String,
+        context: android.content.Context, draft: BlogDraft, selfLabels: List<String>
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            // Existing record (editing): keep everything we don't manage.
+            val editing = draft.editingUri
+            val collection = editing?.let { blogCollection(it) } ?: "site.standard.document"
+            val rkey = editing?.let { blogRkey(it) } ?: newTid()
+            val existing: com.google.gson.JsonObject? = if (editing != null) {
+                api.getRecord("Bearer $token", did, collection, rkey).body()?.value?.takeIf { it.isJsonObject }?.asJsonObject
+                    ?: error("Couldn't load that blog to update it")
+            } else null
+            val existingContentType = existing?.getAsJsonObject("content")?.get("\$type")?.takeIf { it.isJsonPrimitive }?.asString
+            val leafletFormat = collection == "pub.leaflet.document" || existingContentType?.startsWith("pub.leaflet") == true
+
+            // Images first.
+            data class Img(val blob: com.google.gson.JsonObject, val w: Int, val h: Int)
+            val images = HashMap<Int, Img>()
+            draft.rows.forEachIndexed { i, row ->
+                if (row.kind != BlogRowKind.IMAGE) return@forEachIndexed
+                val img = when {
+                    row.imageUri != null -> uploadBlogImage(token, context, row.imageUri).let { (b, w, h) -> Img(blobJson(b), w, h) }
+                    row.existingBlob != null -> Img(row.existingBlob, row.imageWidth, row.imageHeight)
+                    else -> null
+                }
+                if (img != null) images[i] = img
+            }
+
+            // Blocks.
+            val nsid = LeafletBlog.STELLAR_BLOG_NSID
+            val blocks = com.google.gson.JsonArray()
+            val plain = StringBuilder()
+            draft.rows.forEachIndexed { i, row ->
+                val inner = com.google.gson.JsonObject()
+                when (row.kind) {
+                    BlogRowKind.IMAGE -> {
+                        val img = images[i] ?: return@forEachIndexed
+                        inner.addProperty("\$type", if (leafletFormat) "pub.leaflet.blocks.image" else "$nsid.content#image")
+                        inner.add("image", img.blob)
+                        if (img.w > 0 && img.h > 0) {
+                            inner.add("aspectRatio", com.google.gson.JsonObject().apply { addProperty("width", img.w); addProperty("height", img.h) })
+                        }
+                        inner.addProperty("alt", row.alt)
+                    }
+                    BlogRowKind.TEXT -> {
+                        if (row.text.isBlank()) return@forEachIndexed
+                        inner.addProperty("\$type", if (leafletFormat) "pub.leaflet.blocks.text" else "$nsid.content#text")
+                        inner.addProperty("plaintext", row.text)
+                        inner.add("facets", com.google.gson.JsonArray())
+                        plain.append(row.text).append("\n\n")
+                    }
+                    else -> {
+                        if (row.text.isBlank()) return@forEachIndexed
+                        val level = when (row.kind) { BlogRowKind.H1 -> 1; BlogRowKind.H2 -> 2; else -> 3 }
+                        inner.addProperty("\$type", if (leafletFormat) "pub.leaflet.blocks.header" else "$nsid.content#header")
+                        inner.addProperty("plaintext", row.text)
+                        inner.addProperty("level", level)
+                        inner.add("facets", com.google.gson.JsonArray())
+                        plain.append(row.text).append("\n\n")
+                    }
+                }
+                val wrapper = com.google.gson.JsonObject()
+                wrapper.addProperty("\$type", if (leafletFormat) "pub.leaflet.pages.linearDocument#block" else "$nsid.content#block")
+                wrapper.add("block", inner)
+                if (row.align != LeafletAlign.START) wrapper.addProperty("alignment", alignValue(row.align))
+                blocks.add(wrapper)
+            }
+
+            val now = java.time.Instant.now().toString()
+            val record = LinkedHashMap<String, Any>()
+            existing?.entrySet()?.forEach { (k, v) -> record[k] = v }
+            record["title"] = draft.title.trim().take(300)
+            if (draft.description.isNotBlank()) record["description"] = draft.description.trim().take(3000) else record.remove("description")
+            if (editing != null) record["updatedAt"] = now
+
+            if (leafletFormat) {
+                val page = com.google.gson.JsonObject().apply {
+                    addProperty("\$type", "pub.leaflet.pages.linearDocument")
+                    add("blocks", blocks)
+                }
+                if (collection == "pub.leaflet.document") {
+                    record["pages"] = com.google.gson.JsonArray().apply { add(page) }
+                } else {
+                    record["content"] = com.google.gson.JsonObject().apply {
+                        addProperty("\$type", existingContentType ?: "pub.leaflet.content")
+                        add("pages", com.google.gson.JsonArray().apply { add(page) })
+                    }
+                    record["textContent"] = plain.toString().trim()
+                }
+            } else {
+                record["\$type"] = "site.standard.document"
+                record["site"] = (existing?.get("site")?.takeIf { it.isJsonPrimitive }?.asString)
+                    ?: ensureStellarPublication(token, did, handle, displayName)
+                record["path"] = existing?.get("path")?.takeIf { it.isJsonPrimitive }?.asString ?: "/$rkey"
+                record["content"] = com.google.gson.JsonObject().apply {
+                    addProperty("\$type", "$nsid.content")
+                    add("blocks", blocks)
+                }
+                record["textContent"] = plain.toString().trim()
+                if (existing == null) record["publishedAt"] = now
+                // The first image is the blog's cover (what cards and the
+                // reader's banner show).
+                val cover = images.entries.minByOrNull { it.key }?.value?.blob
+                if (cover != null) record["coverImage"] = cover else record.remove("coverImage")
+            }
+            // Content warnings: the standard atproto self-label shape.
+            if (selfLabels.isNotEmpty()) {
+                record["labels"] = mapOf(
+                    "\$type" to "com.atproto.label.defs#selfLabels",
+                    "values" to selfLabels.map { mapOf("val" to it) }
+                )
+            } else record.remove("labels")
+
+            val resp = api.putRecord("Bearer $token", BskyPutRecordRequest(did, collection, rkey, record))
+            if (!resp.isSuccessful) error("Publishing the blog failed (${resp.code()}): ${resp.errorBody()?.string()?.take(200)}")
+            "at://$did/$collection/$rkey"
+        }
+    }
+
+    /** Item 12: reads one of your blogs back into editor rows (pen icon in
+     *  the reader). Works for Stellar and Leaflet blogs alike. */
+    suspend fun loadBlogForEditing(token: String, did: String, uri: String): Result<Pair<BlogDraft, List<String>>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val collection = blogCollection(uri)
+            val obj = api.getRecord("Bearer $token", did, collection, blogRkey(uri)).body()?.value
+                ?.takeIf { it.isJsonObject }?.asJsonObject ?: error("Couldn't load that blog")
+            val rows = ArrayList<BlogRowDraft>()
+            fun alignOf(o: com.google.gson.JsonObject): LeafletAlign {
+                val raw = o.get("alignment")?.takeIf { it.isJsonPrimitive }?.asString ?: return LeafletAlign.START
+                return when {
+                    raw.contains("center", true) -> LeafletAlign.CENTER
+                    raw.contains("right", true) || raw.contains("end", true) -> LeafletAlign.END
+                    else -> LeafletAlign.START
+                }
+            }
+            fun textOf(o: com.google.gson.JsonObject): String? =
+                listOf("plaintext", "plainText", "text").firstNotNullOfOrNull { k ->
+                    o.get(k)?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
+                }
+            suspend fun leaf(o: com.google.gson.JsonObject, align: LeafletAlign): Boolean {
+                val type = o.get("\$type")?.takeIf { it.isJsonPrimitive }?.asString ?: ""
+                when {
+                    type.contains("image", true) -> {
+                        val blob = o.get("image")?.takeIf { it.isJsonObject }?.asJsonObject ?: return false
+                        val ar = o.getAsJsonObject("aspectRatio")
+                        rows += BlogRowDraft(
+                            kind = BlogRowKind.IMAGE, align = align, existingBlob = blob,
+                            existingUrl = firstImageField(o, did, "image", wideOverride = true),
+                            imageWidth = ar?.get("width")?.asInt ?: 0, imageHeight = ar?.get("height")?.asInt ?: 0,
+                            alt = o.get("alt")?.takeIf { it.isJsonPrimitive }?.asString ?: ""
+                        )
+                    }
+                    type.contains("header", true) -> {
+                        val t = textOf(o) ?: return false
+                        val kind = when (o.get("level")?.takeIf { it.isJsonPrimitive }?.asInt ?: 2) { 1 -> BlogRowKind.H1; 2 -> BlogRowKind.H2; else -> BlogRowKind.H3 }
+                        rows += BlogRowDraft(kind = kind, text = t, align = align)
+                    }
+                    else -> {
+                        val t = textOf(o) ?: return false
+                        rows += BlogRowDraft(kind = BlogRowKind.TEXT, text = t, align = align)
+                    }
+                }
+                return true
+            }
+            suspend fun walk(el: com.google.gson.JsonElement?) {
+                if (el == null || el.isJsonNull) return
+                if (el.isJsonArray) { for (e in el.asJsonArray) walk(e); return }
+                if (!el.isJsonObject) return
+                val o = el.asJsonObject
+                val wrapped = o.get("block")?.takeIf { it.isJsonObject }?.asJsonObject
+                if (wrapped != null && leaf(wrapped, alignOf(o))) return
+                val type = o.get("\$type")?.takeIf { it.isJsonPrimitive }?.asString ?: ""
+                if ((type.contains("image", true) || type.contains("header", true) || textOf(o) != null) && leaf(o, LeafletAlign.START)) return
+                for ((_, v) in o.entrySet()) walk(v)
+            }
+            walk(obj.get("content") ?: obj.get("pages"))
+            val labels = obj.getAsJsonObject("labels")?.getAsJsonArray("values")
+                ?.mapNotNull { it.takeIf { v -> v.isJsonObject }?.asJsonObject?.get("val")?.asString } ?: emptyList()
+            BlogDraft(
+                title = obj.get("title")?.takeIf { it.isJsonPrimitive }?.asString ?: "",
+                description = firstStringField(obj, "description", "subtitle", "summary") ?: "",
+                rows = rows.ifEmpty { listOf(BlogRowDraft()) },
+                editingUri = uri
+            ) to labels
+        }
+    }
+
+    /**
+     * Item 12: deletes one of your blogs. A Stellar blog is one document
+     * record. A Leaflet blog can exist twice — the standard.site document
+     * and the older pub.leaflet.document it was migrated from — so the
+     * matching record under the other collection (same key, same title)
+     * goes too, otherwise the "deleted" blog would reappear from it.
+     */
+    suspend fun deleteBlog(token: String, did: String, blog: LeafletBlog): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val collection = blogCollection(blog.uri)
+            val rkey = blogRkey(blog.uri)
+            val resp = api.deleteRecord("Bearer $token", BskyDeleteRecordRequest(did, collection, rkey))
+            if (!resp.isSuccessful && resp.code() != 404) error("Couldn't delete the blog (${resp.code()})")
+            if (!blog.isStellar) {
+                for (other in LEAFLET_COLLECTIONS.filter { it != collection }) {
+                    val twin = runCatching { api.getRecord("Bearer $token", did, other, rkey) }.getOrNull()
+                    val twinTitle = twin?.body()?.value?.takeIf { it.isJsonObject }?.asJsonObject?.get("title")?.takeIf { it.isJsonPrimitive }?.asString
+                    if (twin?.isSuccessful == true && twinTitle?.trim() == blog.title.trim()) {
+                        runCatching { api.deleteRecord("Bearer $token", BskyDeleteRecordRequest(did, other, rkey)) }
+                    }
                 }
             }
         }

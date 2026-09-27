@@ -296,7 +296,7 @@ fun SettingsSheet(
     // picks up the profile color with no per-call-site changes needed, and
     // no risk of missing one across a file this size. Falls back to the
     // post color if there's no avatar yet (e.g. profile hasn't loaded).
-    val dominantColor = selfAvatarUrl?.let { rememberDominantColor(it) } ?: dominantColor
+    val dominantColor = selfAvatarUrl?.let { rememberSelfProfileTint(it) } ?: dominantColor
     var hubPage by remember { mutableStateOf(HubPage.MAIN) }
     // Settings/Credits switch at the right end of the bottom bar — only
     // meaningful while the Settings page is showing, and always starts on

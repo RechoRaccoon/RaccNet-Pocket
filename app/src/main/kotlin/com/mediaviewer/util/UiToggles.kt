@@ -15,6 +15,8 @@ object UiToggles {
     private const val PREFS = "ui_toggles"
     private const val KEY_DEBUG_OVERLAY = "debug_overlay"
     private const val KEY_LOADING_ANIMATION = "loading_animation"
+    private const val KEY_AMBIENT_LIGHT = "ambient_light"
+    private const val KEY_AUDIO_VISUALIZER = "audio_visualizer"
 
     /** Settings → UI Customization → "Loading Animation". */
     enum class LoadingAnimation(val label: String) {
@@ -37,6 +39,17 @@ object UiToggles {
     var loadingAnimation by mutableStateOf(LoadingAnimation.NONE)
         private set
 
+    /** Settings → UI Customization → "Ambient Light": letterboxed images
+     *  and videos have their top/bottom edge pixels stretched out to fill
+     *  the rest of the screen. */
+    var ambientLight by mutableStateOf(false)
+        private set
+
+    /** Settings → UI Customization → "Audio Visualizer": bars above the
+     *  feed's interaction bar that move to whatever music is playing. */
+    var audioVisualizer by mutableStateOf(false)
+        private set
+
     /** Whether any loading transition/screen plays at all. */
     val loadingScreens: Boolean get() = loadingAnimation != LoadingAnimation.NONE
 
@@ -48,6 +61,18 @@ object UiToggles {
         loadingAnimation = p.getString(KEY_LOADING_ANIMATION, null)
             ?.let { name -> LoadingAnimation.entries.firstOrNull { it.name == name } }
             ?: LoadingAnimation.NONE
+        ambientLight = p.getBoolean(KEY_AMBIENT_LIGHT, false)
+        audioVisualizer = p.getBoolean(KEY_AUDIO_VISUALIZER, false)
+    }
+
+    fun updateAmbientLight(enabled: Boolean) {
+        ambientLight = enabled
+        prefs?.edit()?.putBoolean(KEY_AMBIENT_LIGHT, enabled)?.apply()
+    }
+
+    fun updateAudioVisualizer(enabled: Boolean) {
+        audioVisualizer = enabled
+        prefs?.edit()?.putBoolean(KEY_AUDIO_VISUALIZER, enabled)?.apply()
     }
 
     fun updateDebugOverlay(enabled: Boolean) {

@@ -18,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -377,6 +378,29 @@ internal fun SettingsPageContent(
             }
         }
 
+        // Item 10: letterboxed media's edges stretched to fill the screen.
+        ToggleBubble(
+            "Ambient Light", com.mediaviewer.util.UiToggles.ambientLight,
+            { com.mediaviewer.util.UiToggles.updateAmbientLight(it) }, liquidGlass, tint, backdrop
+        )
+        // Item 8: audio visualizer above the feed's interaction bar. It needs
+        // the microphone permission to read the phone's audio output
+        // (nothing is recorded), so turning it on asks for that first.
+        val visualizerContext = androidx.compose.ui.platform.LocalContext.current
+        val visualizerPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            com.mediaviewer.util.UiToggles.updateAudioVisualizer(granted)
+        }
+        SettingsBubble(liquidGlass, tint, backdrop) {
+            BubbleRow {
+                RowLabel("Audio Visualizer", Modifier.weight(1f), sub = "Bars on the timeline that move to your music. Not calls.")
+                CompactSwitch(com.mediaviewer.util.UiToggles.audioVisualizer) { on ->
+                    if (!on) com.mediaviewer.util.UiToggles.updateAudioVisualizer(false)
+                    else if (com.mediaviewer.util.AudioVisualizerEngine.hasPermission(visualizerContext)) com.mediaviewer.util.UiToggles.updateAudioVisualizer(true)
+                    else visualizerPermission.launch(android.Manifest.permission.RECORD_AUDIO)
+                }
+            }
+        }
+
         // Glass Theme + its Background/Outline dials + the highlight toggle
         // share one bubble; none of the rows inside draws its own outline.
         SettingsBubble(liquidGlass, tint, backdrop) {
@@ -673,8 +697,8 @@ internal fun SettingsPageContent(
         }
 
         // ── Data ────────────────────────────────────────────────────────
+        SectionHeader("Data", tint)
         if (anyLoggedIn) {
-            SectionHeader("Data", tint)
 
             if (bskyLoggedIn) {
                 val prog = downloadProgress.takeIf { !extras.downloadIsE621 }
@@ -712,6 +736,66 @@ internal fun SettingsPageContent(
             // single shared preference) — new likes/saves get downloaded as
             // they happen, on top of the one-time buttons above.
             ToggleBubble("Auto-Download New Likes and Saves", downloadOnLike, onToggleDownloadOnLike, liquidGlass, tint, backdrop)
+        }
+
+        // Item 7: everything local in one file — settings, VRM + Live
+        // settings, the main AI-tagged dataset, Blog/Review subscriptions.
+        // Importing replaces them (the tagged dataset becomes the main one)
+        // and restarts the app so every screen reloads with them.
+        val backupContext = androidx.compose.ui.platform.LocalContext.current
+        val backupScope = rememberCoroutineScope()
+        var backupBusy by remember { mutableStateOf(false) }
+        var confirmingImport by remember { mutableStateOf(false) }
+        LaunchedEffect(confirmingImport) {
+            if (confirmingImport) { kotlinx.coroutines.delay(4000); confirmingImport = false }
+        }
+        val backupExportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+            if (uri != null) {
+                backupBusy = true
+                backupScope.launch {
+                    val msg = runCatching { com.mediaviewer.util.AppBackup.export(backupContext, uri) }
+                        .getOrElse { "Export failed: ${it.message}" }
+                    backupBusy = false
+                    android.widget.Toast.makeText(backupContext, msg, android.widget.Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        val backupImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) {
+                backupBusy = true
+                backupScope.launch {
+                    val result = runCatching { com.mediaviewer.util.AppBackup.import(backupContext, uri) }
+                    backupBusy = false
+                    result.onSuccess { msg ->
+                        android.widget.Toast.makeText(backupContext, "$msg — restarting…", android.widget.Toast.LENGTH_LONG).show()
+                        kotlinx.coroutines.delay(900)
+                        com.mediaviewer.RestartActivity.restartApp(backupContext)
+                    }.onFailure {
+                        android.widget.Toast.makeText(backupContext, "Import failed: ${it.message}", android.widget.Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+        SettingsBubble(liquidGlass, tint, backdrop) {
+            BubbleRow {
+                RowLabel("Export App Data", Modifier.weight(1f), sub = "Settings, VRM & Live settings, tagged posts and subscriptions, in one file.")
+                PillButton(if (backupBusy) "…" else "Export", {
+                    val date = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+                    backupExportLauncher.launch("Stellar-backup-$date.json")
+                }, enabled = !backupBusy)
+            }
+            BubbleDivider()
+            BubbleRow {
+                RowLabel("Import App Data", Modifier.weight(1f), sub = "Replaces your settings and main tagged dataset, then restarts.")
+                PillButton(
+                    if (backupBusy) "…" else if (confirmingImport) "Replace?" else "Import",
+                    {
+                        if (confirmingImport) { confirmingImport = false; backupImportLauncher.launch(arrayOf("application/json", "*/*")) }
+                        else confirmingImport = true
+                    },
+                    enabled = !backupBusy, color = if (confirmingImport) DangerRed else Color.White
+                )
+            }
         }
 
         Spacer(Modifier.height(16.dp))

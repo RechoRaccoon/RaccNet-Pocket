@@ -76,6 +76,48 @@ object LiveLinkManager {
         result
     }
 
+    /** VRM mode's own stream: sets the Bluesky Live badge to [streamUrl]
+     *  while the RTMP stream runs. Kept separate from [goLive] on purpose —
+     *  it doesn't touch the widget's saved platform state or schedule the
+     *  periodic checker (VRM mode knows exactly when its own stream starts
+     *  and ends, and re-bumps the expiry itself while it's still live). */
+    suspend fun setStreamLive(context: Context, streamUrl: String, title: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            withFreshToken(context) { repo, token, did ->
+                repo.setLiveNowStatus(token, did, streamUrl, title, MAX_DURATION_MINUTES)
+            }.map { Unit }
+        }
+
+    /** Ends VRM mode's Live badge (see [setStreamLive]). */
+    suspend fun clearStreamLive(context: Context): Result<Unit> = withContext(Dispatchers.IO) {
+        withFreshToken(context) { repo, token, did -> repo.clearLiveNowStatus(token, did) }
+    }
+
+    /**
+     * Turns whatever the person typed in the Live popup's "Stream link"
+     * field into a full URL — full or "essential" input both work:
+     *  - `https://twitch.tv/name`, `twitch.tv/name`, `www.youtube.com/@name`
+     *    → https:// added where missing;
+     *  - a bare channel name (`name` or `@name`) → the platform is taken
+     *    from the RTMP server the stream goes to (Twitch, YouTube, Kick),
+     *    defaulting to Twitch.
+     * Returns null for blank input.
+     */
+    fun normalizeStreamLink(input: String, rtmpServer: String): String? {
+        val raw = input.trim()
+        if (raw.isBlank()) return null
+        if (raw.startsWith("http://", true) || raw.startsWith("https://", true)) return raw
+        if (raw.contains('.') && !raw.startsWith("@")) return "https://$raw"
+        val name = raw.removePrefix("@").trim('/')
+        if (name.isBlank()) return null
+        val server = rtmpServer.lowercase()
+        return when {
+            "youtube" in server -> "https://www.youtube.com/@$name/live"
+            "kick" in server -> "https://kick.com/$name"
+            else -> "https://twitch.tv/$name"
+        }
+    }
+
     /** Called by the periodic worker only. If the saved channel is
      *  confirmed no longer live, ends it; otherwise re-bumps the Bluesky
      *  status back out to the full [MAX_DURATION_MINUTES] window so "live

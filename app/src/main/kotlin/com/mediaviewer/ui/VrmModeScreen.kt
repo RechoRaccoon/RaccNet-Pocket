@@ -1,6 +1,7 @@
 package com.mediaviewer.ui
 
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.imePadding
@@ -213,6 +214,22 @@ fun VrmModeScreen(
     androidx.compose.runtime.LaunchedEffect(micMuted) { store.put(K.MIC_MUTED, micMuted) }
     var lightLevel by remember { mutableStateOf(store.int(K.LIGHT_LEVEL, 5).coerceIn(0, 10)) }
     androidx.compose.runtime.LaunchedEffect(lightLevel) { store.put(K.LIGHT_LEVEL, lightLevel) }
+    // Background: 0 = the default (your profile color), else an ARGB color.
+    var backgroundColor by remember { mutableStateOf(store.int(K.BACKGROUND_COLOR, 0)) }
+    androidx.compose.runtime.LaunchedEffect(backgroundColor) { store.put(K.BACKGROUND_COLOR, backgroundColor) }
+    // Voice pitch for recordings and streams, in semitones (0 = natural).
+    var voicePitch by remember { mutableStateOf(store.int(K.VOICE_PITCH, 0).coerceIn(-8, 8)) }
+    androidx.compose.runtime.LaunchedEffect(voicePitch) { store.put(K.VOICE_PITCH, voicePitch) }
+    // When the face tracker loses you (hair over your face, turning away),
+    // the body tracker keeps the head placed and turned.
+    var headFallback by remember { mutableStateOf(store.bool(K.HEAD_FALLBACK, true)) }
+    androidx.compose.runtime.LaunchedEffect(headFallback) { store.put(K.HEAD_FALLBACK, headFallback) }
+    // Browser overlays (chat, alerts …) — see VrmBrowserOverlays.kt.
+    var overlaysEnabled by remember { mutableStateOf(BrowserOverlayStore.enabled(store)) }
+    androidx.compose.runtime.LaunchedEffect(overlaysEnabled) { BrowserOverlayStore.setEnabled(store, overlaysEnabled) }
+    var browserOverlays by remember { mutableStateOf(BrowserOverlayStore.load(store)) }
+    androidx.compose.runtime.LaunchedEffect(browserOverlays) { BrowserOverlayStore.save(store, browserOverlays) }
+    val overlayRegistry = remember { BrowserOverlayRegistry() }
 
     // ── Capture (photo / video of the rendered avatar) ──
     val captureController = remember { VrmCaptureController() }
@@ -227,6 +244,9 @@ fun VrmModeScreen(
     var streamUrl by remember { mutableStateOf(store.string(K.STREAM_URL)) }
     var streamKey by remember { mutableStateOf(store.string(K.STREAM_KEY)) }
     var streamQualityName by remember { mutableStateOf(store.string(K.STREAM_QUALITY)) }
+    var streamLink by remember { mutableStateOf(store.string(K.STREAM_LINK)) }
+    // The Bluesky Live badge this stream set, if any — cleared when it ends.
+    var liveBadgeUrl by remember { mutableStateOf<String?>(null) }
     val autoQuality = remember { com.mediaviewer.stream.StreamQuality.auto(context) }
     val mainHandler = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
     val liveStreamer = remember {
@@ -247,7 +267,25 @@ fun VrmModeScreen(
     val isLive = liveState == com.mediaviewer.stream.LiveStreamer.State.LIVE ||
         liveState == com.mediaviewer.stream.LiveStreamer.State.RECONNECTING ||
         liveState == com.mediaviewer.stream.LiveStreamer.State.CONNECTING
-    androidx.compose.runtime.SideEffect { liveStreamer.micMuted = micMuted }
+    androidx.compose.runtime.SideEffect {
+        liveStreamer.micMuted = micMuted
+        liveStreamer.pitchSemitones = voicePitch.toFloat()
+    }
+    val appContext = context.applicationContext
+    // Browser overlays that should appear in captures/streams.
+    val captureOverlayIds = if (overlaysEnabled) browserOverlays.filter { it.inCapture }.map { it.id } else emptyList()
+    val rootView = androidx.compose.ui.platform.LocalView.current
+    fun refreshCaptureOverlays() {
+        captureController.overlays = if (captureOverlayIds.isEmpty()) emptyList()
+            else overlayRegistry.snapshot(captureOverlayIds, rootView.width, rootView.height)
+    }
+    fun clearLiveBadge() {
+        if (liveBadgeUrl == null) return
+        liveBadgeUrl = null
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            com.mediaviewer.util.LiveLinkManager.clearStreamLive(appContext)
+        }
+    }
     var recording by remember { mutableStateOf(false) }
     var recordingStartMs by remember { mutableStateOf(0L) }
     var recordingElapsedS by remember { mutableStateOf(0) }
@@ -264,7 +302,8 @@ fun VrmModeScreen(
         }
     }
     fun beginRecording(withAudio: Boolean) {
-        if (captureController.startRecording(context, withAudio)) {
+        refreshCaptureOverlays()
+        if (captureController.startRecording(context, withAudio, voicePitch.toFloat(), captureOverlayIds.isNotEmpty())) {
             recording = true
             recordingStartMs = android.os.SystemClock.elapsedRealtime()
             recordingElapsedS = 0
@@ -289,7 +328,8 @@ fun VrmModeScreen(
                 return@launch
             }
             val surface = liveStreamer.inputSurface
-            if (surface == null || !captureController.startStreamOutput(surface, cfg.width, cfg.height, cfg.fps)) {
+            refreshCaptureOverlays()
+            if (surface == null || !captureController.startStreamOutput(surface, cfg.width, cfg.height, cfg.fps, captureOverlayIds.isNotEmpty())) {
                 withContext(Dispatchers.IO) { liveStreamer.stop() }
                 liveState = com.mediaviewer.stream.LiveStreamer.State.IDLE
                 captureError = "Couldn't start streaming the avatar"
@@ -297,12 +337,22 @@ fun VrmModeScreen(
             }
             liveStartMs = android.os.SystemClock.elapsedRealtime()
             liveElapsedS = 0
+            // Bluesky Live badge, pointing at the stream link (if one was given).
+            val link = com.mediaviewer.util.LiveLinkManager.normalizeStreamLink(streamLink, url)
+            if (link != null) {
+                liveBadgeUrl = link
+                launch(Dispatchers.IO) {
+                    com.mediaviewer.util.LiveLinkManager.setStreamLive(appContext, link, "Live now")
+                        .onFailure { e -> withContext(Dispatchers.Main) { captureError = "Live badge: ${e.message?.take(60)}" } }
+                }
+            }
         }
     }
     fun endLive() {
         captureController.stopStreamOutput()
         liveState = com.mediaviewer.stream.LiveStreamer.State.IDLE
         captureScope.launch(Dispatchers.IO) { liveStreamer.stop() }
+        clearLiveBadge()
     }
     val liveMicPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
@@ -312,15 +362,35 @@ fun VrmModeScreen(
         store.put(K.STREAM_URL, streamUrl.trim())
         store.put(K.STREAM_KEY, streamKey.trim())
         store.put(K.STREAM_QUALITY, streamQualityName)
+        store.put(K.STREAM_LINK, streamLink.trim())
         val micGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         if (micGranted) startLive(withMic = true) else liveMicPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
     }
     // Stream clock: counts up for as long as the stream runs (no limit).
     androidx.compose.runtime.LaunchedEffect(isLive, liveStartMs) {
+        var lastBadgeBump = android.os.SystemClock.elapsedRealtime()
         while (isLive) {
             kotlinx.coroutines.delay(500)
             if (liveStartMs > 0L) liveElapsedS = (android.os.SystemClock.elapsedRealtime() - liveStartMs) / 1000
             liveKbps = liveStreamer.measuredBps / 1000
+            // The badge expires after 4 hours; renew it hourly while live.
+            val badge = liveBadgeUrl
+            if (badge != null && android.os.SystemClock.elapsedRealtime() - lastBadgeBump > 60 * 60_000L) {
+                lastBadgeBump = android.os.SystemClock.elapsedRealtime()
+                launch(Dispatchers.IO) { com.mediaviewer.util.LiveLinkManager.setStreamLive(appContext, badge, "Live now") }
+            }
+        }
+    }
+    // A stream that failed or dropped for good takes its badge down too.
+    androidx.compose.runtime.LaunchedEffect(liveState) {
+        if (liveState == com.mediaviewer.stream.LiveStreamer.State.FAILED ||
+            liveState == com.mediaviewer.stream.LiveStreamer.State.ENDED) clearLiveBadge()
+    }
+    // Overlays shown in captures: fresh snapshots while recording/streaming.
+    androidx.compose.runtime.LaunchedEffect(recording, isLive, captureOverlayIds) {
+        while ((recording || isLive) && captureOverlayIds.isNotEmpty()) {
+            refreshCaptureOverlays()
+            kotlinx.coroutines.delay(250)
         }
     }
     // Never let the screen sleep mid-stream.
@@ -330,10 +400,16 @@ fun VrmModeScreen(
         onDispose { hostView.keepScreenOn = false }
     }
     // Leaving VRM mode ends the stream.
+    val liveBadgeRef = androidx.compose.runtime.rememberUpdatedState(liveBadgeUrl)
     androidx.compose.runtime.DisposableEffect(Unit) {
         onDispose {
             captureController.stopStreamOutput()
             Thread({ liveStreamer.stop() }, "live-stop").start()
+            if (liveBadgeRef.value != null) {
+                kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                    com.mediaviewer.util.LiveLinkManager.clearStreamLive(appContext)
+                }
+            }
         }
     }
     // Recording timer: 0:01 … 10:00, then it stops by itself.
@@ -353,6 +429,7 @@ fun VrmModeScreen(
         if (isLive) { endLiveConfirmOpen = true; return }
         if (!videoMode) {
             captureBusy = true
+            refreshCaptureOverlays()
             captureScope.launch {
                 val uri = captureController.takePhoto(context)
                 captureBusy = false
@@ -562,7 +639,9 @@ fun VrmModeScreen(
     // swing is ~1-2 m/s), so beta 8 opens the filter to ~10-17 Hz during
     // fast moves — the old 0.3 left it at ~1.5 Hz, i.e. visible lag.
     val poseFilters = remember { OneEuroFilterBank(minCutoff = 1.0, beta = 8.0, dCutoff = 1.0) }
-    val smoothedBodyLandmarks = remember(latestPoseResult) { smoothedBodyWorldLandmarks(latestPoseResult, poseFilters) }
+    val smoothedBodyLandmarks = remember(latestPoseResult, trackUpperBody) {
+        if (trackUpperBody) smoothedBodyWorldLandmarks(latestPoseResult, poseFilters) else emptyMap()
+    }
     // Finger curls, keyed by the AVATAR's side (mirroring already applied).
     // Hand world landmarks are hand-centred metres (small, slower numbers).
     val handFilters = remember { OneEuroFilterBank(minCutoff = 1.5, beta = 20.0, dCutoff = 1.0) }
@@ -587,8 +666,19 @@ fun VrmModeScreen(
         framingFilters.strength = strength
         AvatarRetargeter.smoothingScale = strength.toFloat()
     }
-    val framing = remember(latestFaceResult, trackingFrameWidth, trackingFrameHeight) {
-        faceFraming(latestFaceResult, trackingFrameWidth, trackingFrameHeight, framingFilters)
+    // Head fallback: no face this frame (hair, a hand, turning away) → the
+    // body tracker's nose/eyes/ears still say where the head is and which
+    // way it's turned. The pose landmarker runs only while it's needed.
+    val faceMissing = trackersReady && faceResultCount > 0 &&
+        latestFaceResult?.faceLandmarks()?.isEmpty() != false
+    val poseForHead = headFallback && faceMissing
+    val headFallbackFilters = remember { OneEuroFilterBank(minCutoff = 1.0, beta = 1.5, dCutoff = 1.0) }
+    val poseHead = remember(latestPoseResult, poseForHead, trackingFrameWidth, trackingFrameHeight) {
+        if (poseForHead) poseHeadEstimate(latestPoseResult, trackingFrameWidth, trackingFrameHeight, headFallbackFilters)
+        else { headFallbackFilters.resetPrefixed("phead."); null }
+    }
+    val framing = remember(latestFaceResult, poseHead, trackingFrameWidth, trackingFrameHeight) {
+        (faceFraming(latestFaceResult, trackingFrameWidth, trackingFrameHeight, framingFilters) ?: poseHead?.framing)
             ?.also { lastFraming[0] = it } ?: lastFraming[0]
     }
 
@@ -666,7 +756,7 @@ fun VrmModeScreen(
             AvatarRetargeter.applyPose(
                 target,
                 TrackingFrame(
-                    faceMatrix = headMatrix,
+                    faceMatrix = headMatrix ?: poseHead?.matrix,
                     body = if (trackUpperBody) smoothedBodyLandmarks else null,
                     trackLegs = trackFullBody,
                     hands = handPoints,
@@ -700,7 +790,7 @@ fun VrmModeScreen(
                     faceHelper = faceHelper,
                     handHelper = handHelper,
                     poseHelper = poseHelper,
-                    trackPose = trackUpperBody,
+                    trackPose = trackUpperBody || poseForHead,
                     gate = trackerGate,
                     frameIntervalMs = if (fastTracking) 33L else 66L,
                     onFrame = { w, h ->
@@ -746,7 +836,7 @@ fun VrmModeScreen(
                     // MainActivity's vrmTint: the logged-in user's own
                     // avatar dominant color), same color the X button and
                     // bottom bar already wear.
-                    backgroundTint = tint,
+                    backgroundTint = if (backgroundColor != 0) Color(backgroundColor) else tint,
                     onRetargetTargetReady = { retargetTarget = it },
                     onTexturesApplied = { texturesApplied = it },
                     onMaterialsPatched = { materialsPatched = it },
@@ -813,7 +903,7 @@ fun VrmModeScreen(
                 poseResult = latestPoseResult,
                 parsedVrmData = parsedVrmData,
                 retargetTarget = retargetTarget,
-                headTrackingActive = headMatrix != null,
+                headTrackingActive = headMatrix != null || poseHead != null,
                 armTrackingActive = smoothedBodyLandmarks.isNotEmpty(),
                 legTrackingActive = smoothedBodyLandmarks.isNotEmpty(),
                 modifier = Modifier.fillMaxSize()
@@ -830,13 +920,12 @@ fun VrmModeScreen(
                 tint = tint,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .windowInsetsPadding(WindowInsets.statusBars)
-                    .padding(end = 12.dp, top = 12.dp)
+                    .padding(top = rememberTopCutoutClearance(), end = 16.dp)
             )
         } else {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
-                    "RaccNet needs the camera to track your face for VRM mode.",
+                    "Stellar needs the camera to track your face for VRM mode.",
                     color = Color.White, fontSize = 14.sp,
                     modifier = Modifier
                         .padding(32.dp)
@@ -851,13 +940,13 @@ fun VrmModeScreen(
         // of VRM mode's buttons, blurring the avatar behind it.
         VrmGlassBubble(
             size = 40.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
-            modifier = Modifier.align(Alignment.TopStart).windowInsetsPadding(WindowInsets.navigationBars).padding(16.dp),
+            modifier = Modifier.align(Alignment.TopStart).padding(top = rememberTopCutoutClearance(), start = 16.dp),
             onClick = { tap(); onClose() }
         ) {
             Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(20.dp))
         }
 
-        // Bottom bar: [mic] [photo/video mode] [capture] [settings] [Live].
+        // Bottom bar: [mic] [photo/video mode] [capture] [Live] [settings].
         // The capture button shows what it will do (camera or video icon;
         // stop while recording; "Live" while streaming); the second bubble
         // shows the OTHER photo/video mode and switches to it. While
@@ -946,15 +1035,7 @@ fun VrmModeScreen(
                     }
                 }
                 Spacer(Modifier.width(gap))
-                // Settings.
-                VrmGlassBubble(
-                    size = 48.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
-                    onClick = { tap(); settingsOpen = true }
-                ) {
-                    Icon(Icons.Default.Settings, contentDescription = "VRM Settings", tint = Color.White, modifier = Modifier.size(20.dp))
-                }
-                Spacer(Modifier.width(gap))
-                // Far right: Live (opens the stream setup popup).
+                // Live (opens the stream setup popup) — right of capture.
                 val liveEnabled = !recording && !captureBusy && !isLive && vrmBytes != null
                 VrmGlassBubble(
                     size = 48.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
@@ -966,7 +1047,28 @@ fun VrmModeScreen(
                         fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
                     )
                 }
+                Spacer(Modifier.width(gap))
+                // Far right: Settings.
+                VrmGlassBubble(
+                    size = 48.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                    onClick = { tap(); settingsOpen = true }
+                ) {
+                    Icon(Icons.Default.Settings, contentDescription = "VRM Settings", tint = Color.White, modifier = Modifier.size(20.dp))
+                }
             }
+        }
+
+        // Browser overlays float over everything in VRM mode except its
+        // own popups. Never part of captures unless set to be (see
+        // captureOverlayIds).
+        if (overlaysEnabled && browserOverlays.isNotEmpty()) {
+            VrmBrowserOverlays(
+                overlays = browserOverlays,
+                tint = tint,
+                registry = overlayRegistry,
+                onChange = { updated -> browserOverlays = browserOverlays.map { if (it.id == updated.id) updated else it } },
+                onRemove = { id -> browserOverlays = browserOverlays.filterNot { it.id == id } }
+            )
         }
 
         if (liveDialogOpen) {
@@ -977,6 +1079,7 @@ fun VrmModeScreen(
                 url = streamUrl, onUrl = { streamUrl = it },
                 key = streamKey, onKey = { streamKey = it },
                 qualityName = streamQualityName, onQuality = { streamQualityName = it },
+                link = streamLink, onLink = { streamLink = it },
                 autoQuality = autoQuality,
                 onGoLive = { onGoLive() },
                 onDismiss = { liveDialogOpen = false }
@@ -1012,6 +1115,23 @@ fun VrmModeScreen(
                     fullBright = fullBright, onToggleFullBright = { fullBright = it },
                     armIk = armIk, onToggleArmIk = { armIk = it },
                     lightLevel = lightLevel, onLightLevel = { lightLevel = it },
+                    backgroundColor = backgroundColor, onBackgroundColor = { backgroundColor = it },
+                    voicePitch = voicePitch, onVoicePitch = { voicePitch = it },
+                    headFallback = headFallback, onToggleHeadFallback = { headFallback = it },
+                    overlaysEnabled = overlaysEnabled, onToggleOverlays = { overlaysEnabled = it },
+                    browserOverlays = browserOverlays,
+                    onAddOverlay = { url ->
+                        val u = BrowserOverlayStore.normalizeUrl(url)
+                        if (u.isNotBlank()) {
+                            val n = browserOverlays.size
+                            browserOverlays = browserOverlays + BrowserOverlaySpec(
+                                id = java.util.UUID.randomUUID().toString(), url = u,
+                                x = (0.06f + 0.05f * n).coerceAtMost(0.4f), y = (0.16f + 0.05f * n).coerceAtMost(0.5f)
+                            )
+                        }
+                    },
+                    onUpdateOverlay = { updated -> browserOverlays = browserOverlays.map { if (it.id == updated.id) updated else it } },
+                    onRemoveOverlay = { id -> browserOverlays = browserOverlays.filterNot { it.id == id } },
                     onResetCamera = { cameraResetKey++ },
                     avatarParts = avatarParts,
                     hiddenParts = hiddenParts,
@@ -1680,6 +1800,14 @@ private class VrmSettingsUi(
     val fullBright: Boolean, val onToggleFullBright: (Boolean) -> Unit,
     val armIk: Boolean, val onToggleArmIk: (Boolean) -> Unit,
     val lightLevel: Int, val onLightLevel: (Int) -> Unit,
+    val backgroundColor: Int, val onBackgroundColor: (Int) -> Unit,
+    val voicePitch: Int, val onVoicePitch: (Int) -> Unit,
+    val headFallback: Boolean, val onToggleHeadFallback: (Boolean) -> Unit,
+    val overlaysEnabled: Boolean, val onToggleOverlays: (Boolean) -> Unit,
+    val browserOverlays: List<BrowserOverlaySpec>,
+    val onAddOverlay: (String) -> Unit,
+    val onUpdateOverlay: (BrowserOverlaySpec) -> Unit,
+    val onRemoveOverlay: (String) -> Unit,
     val onResetCamera: () -> Unit,
     val avatarParts: List<AvatarPart>,
     val hiddenParts: Set<String>,
@@ -1705,15 +1833,22 @@ private fun VrmSettingsSheet(
     val dim = Color.White.copy(alpha = 0.6f)
     // Flat mode: the tint mixed into near-black, so it reads as "your color".
     val flatPanel = androidx.compose.ui.graphics.lerp(Color(0xFF121212), tint, 0.22f)
-    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f)).clickable { tap(); onDismiss() }) {
+    Box(
+        Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f))
+            .clickable(
+                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                indication = null
+            ) { tap(); onDismiss() }
+            .imePadding(),
+        contentAlignment = Alignment.Center
+    ) {
     VrmGlassPanel(
         liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, flatColor = flatPanel,
-        modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(16.dp)
+        modifier = Modifier.padding(horizontal = 20.dp).widthIn(max = 420.dp).fillMaxWidth()
     ) {
     Box(
         Modifier
-            .heightIn(max = 560.dp)
+            .heightIn(max = 600.dp)
             .verticalScroll(androidx.compose.foundation.rememberScrollState())
             .padding(18.dp)
     ) {
@@ -1730,6 +1865,8 @@ private fun VrmSettingsSheet(
             VrmSettingsToggleRow("Full Body", ui.trackFullBody, tint, enabled = ui.trackUpperBody) { ui.onToggleFullBody(it) }
             VrmSettingsToggleRow("Hand IK (experimental)", ui.armIk, tint,
                 hint = "Your tracked hands place the avatar's arms, even with body tracking off.") { ui.onToggleArmIk(it) }
+            VrmSettingsToggleRow("Head fallback", ui.headFallback, tint,
+                hint = "When your face is hidden (hair, hands), the body tracker keeps your head placed and turned.") { ui.onToggleHeadFallback(it) }
             VrmSettingsToggleRow("Fast tracking (30 fps)", ui.fastTracking, tint,
                 hint = "Keeps up with quick movements. Uses more battery and warms the phone.") { ui.onToggleFastTracking(it) }
             VrmSettingsSlider(
@@ -1804,6 +1941,7 @@ private fun VrmSettingsSheet(
                     hint = "How strongly the lights hit the avatar's face and body."
                 ) { ui.onLightLevel(kotlin.math.round(it).toInt()) }
             }
+            VrmBackgroundColorRow(ui.backgroundColor, tint) { ui.onBackgroundColor(it) }
             Row(
                 Modifier.fillMaxWidth().padding(vertical = 10.dp).clickable { tap(); ui.onResetCamera() },
                 verticalAlignment = Alignment.CenterVertically
@@ -1815,6 +1953,31 @@ private fun VrmSettingsSheet(
             }
             VrmSettingsToggleRow("Tracking preview", ui.showPreview, tint) { ui.onTogglePreview(it) }
             VrmSettingsToggleRow("Debug info", ui.showDebug, tint) { ui.onToggleDebug(it) }
+
+            VrmSettingsSection("Voice", tint)
+            VrmSettingsSlider(
+                label = "Voice pitch",
+                valueText = when {
+                    ui.voicePitch == 0 -> "natural"
+                    ui.voicePitch > 0 -> "+${ui.voicePitch} higher"
+                    else -> "${ui.voicePitch} deeper"
+                },
+                value = ui.voicePitch.toFloat(), range = -8f..8f, steps = 15, tint = tint,
+                startLabel = "Deeper", endLabel = "Higher",
+                hint = "For recordings and streams. Takes effect on the next recording; live streams change instantly."
+            ) { ui.onVoicePitch(kotlin.math.round(it).toInt()) }
+
+            VrmSettingsSection("Overlays", tint)
+            VrmBrowserOverlaySettings(
+                enabled = ui.overlaysEnabled,
+                onToggleEnabled = ui.onToggleOverlays,
+                overlays = ui.browserOverlays,
+                tint = tint,
+                onAdd = ui.onAddOverlay,
+                onUpdate = ui.onUpdateOverlay,
+                onRemove = ui.onRemoveOverlay,
+                toggleRow = { label, checked, hint, onToggle -> VrmSettingsToggleRow(label, checked, tint, hint = hint, onToggle = onToggle) }
+            )
         }
     }
     }
@@ -2085,6 +2248,7 @@ private fun VrmLiveDialog(
     url: String, onUrl: (String) -> Unit,
     key: String, onKey: (String) -> Unit,
     qualityName: String, onQuality: (String) -> Unit,
+    link: String, onLink: (String) -> Unit,
     autoQuality: com.mediaviewer.stream.StreamQuality,
     onGoLive: () -> Unit,
     onDismiss: () -> Unit
@@ -2151,6 +2315,18 @@ private fun VrmLiveDialog(
                     Spacer(Modifier.height(6.dp))
                     Text(urlError, color = Color(0xFFFF8A80), fontSize = 11.sp)
                 }
+                Spacer(Modifier.height(10.dp))
+                Text("STREAM LINK", color = tint, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, letterSpacing = 1.sp)
+                Spacer(Modifier.height(4.dp))
+                VrmTextField(
+                    value = link, onValue = onLink, placeholder = "twitch.tv/you  ·  or just your channel name", tint = tint,
+                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Uri
+                )
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    "Optional. Shows Bluesky's Live badge on your profile, linking here, while you're live — ending the stream ends it.",
+                    color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
+                )
                 Spacer(Modifier.height(12.dp))
                 Text("QUALITY", color = tint, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, letterSpacing = 1.sp)
                 Spacer(Modifier.height(6.dp))
@@ -2247,3 +2423,125 @@ private fun VrmConfirmDialog(
         }
     }
 }
+
+/** Head placement/rotation estimated from the BODY tracker, used while the
+ *  face tracker has lost the face (see "Head fallback"). */
+private class PoseHead(val matrix: FloatArray, val framing: AvatarFraming)
+
+/**
+ * Where the head is and which way it's turned, from BlazePose's face points
+ * (nose 0, eyes 2/5, ears 7/8) — these keep tracking when hair or a hand
+ * hides the face from FaceLandmarker. Returns a rotation in the same
+ * camera-space convention as MediaPipe's facial transformation matrix
+ * (x = image right, y up, z toward the camera; identity = facing the
+ * camera), so [AvatarRetargeter.applyPose] treats it exactly like a face
+ * matrix. Rougher than real face tracking — good enough to keep the
+ * avatar's head where yours is instead of freezing.
+ */
+private fun poseHeadEstimate(
+    pose: PoseLandmarkerResult?,
+    frameWidth: Int,
+    frameHeight: Int,
+    filters: OneEuroFilterBank
+): PoseHead? {
+    val p = pose ?: return null
+    val lm = p.landmarks().firstOrNull()?.takeIf { it.size > 8 } ?: return null
+    fun vis(i: Int) = lm[i].visibility().orElse(1f)
+    if (vis(0) < 0.4f) return null
+    val W = frameWidth.toFloat().coerceAtLeast(1f)
+    val H = frameHeight.toFloat().coerceAtLeast(1f)
+    val nose = lm[0]
+    val lEye = lm[2]; val rEye = lm[5]
+    val lEar = lm[7]; val rEar = lm[8]
+    val t = p.timestampMs() / 1000.0
+
+    // Eye line: roll, plus framing (anchor + spacing).
+    val ex = (lEye.x() - rEye.x()) * W
+    val ey = (lEye.y() - rEye.y()) * H
+    val eyeSpacing = kotlin.math.hypot(ex, ey)
+    if (eyeSpacing < 2f) return null
+    val roll = kotlin.math.atan2(-ey, ex)
+
+    // Ears → yaw/pitch. Falls back to the eyes when an ear isn't seen.
+    val earsSeen = vis(7) > 0.3f && vis(8) > 0.3f
+    val midX = if (earsSeen) (lEar.x() + rEar.x()) / 2f else (lEye.x() + rEye.x()) / 2f
+    val midY = if (earsSeen) (lEar.y() + rEar.y()) / 2f else (lEye.y() + rEye.y()) / 2f
+    val span2d = if (earsSeen) kotlin.math.hypot((lEar.x() - rEar.x()) * W, (lEar.y() - rEar.y()) * H) else eyeSpacing * 2.2f
+    if (span2d < 2f) return null
+    val yaw = kotlin.math.atan(((nose.x() - midX) * W / span2d) / 0.55f).coerceIn(-1.2f, 1.2f)
+    val fullSpan = span2d / kotlin.math.cos(yaw).coerceAtLeast(0.35f)
+    // Nose sits a little below the ear/eye line when looking straight ahead.
+    val neutral = if (earsSeen) 0.12f else 0.22f
+    val pitch = kotlin.math.atan(((nose.y() - midY) * H / fullSpan - neutral) / 0.55f).coerceIn(-0.6f, 0.6f)
+
+    val sYaw = filters.filter("phead.yaw", yaw, t)
+    val sPitch = filters.filter("phead.pitch", pitch, t)
+    val sRoll = filters.filter("phead.roll", roll, t)
+    fun axis(x: Float, y: Float, z: Float, a: Float): com.mediaviewer.util.Quaternion {
+        val s = kotlin.math.sin(a / 2f)
+        return com.mediaviewer.util.Quaternion(x * s, y * s, z * s, kotlin.math.cos(a / 2f))
+    }
+    val q = axis(0f, 1f, 0f, sYaw) * axis(1f, 0f, 0f, sPitch) * axis(0f, 0f, 1f, sRoll)
+
+    val cx = (lEye.x() + rEye.x()) / 2f
+    val cy = (lEye.y() + rEye.y()) / 2f
+    val framing = AvatarFraming(
+        anchorX = filters.filter("phead.x", if (AvatarRetargeter.MIRROR) 1f - cx else cx, t),
+        anchorY = filters.filter("phead.y", cy, t),
+        eyeDistancePx = filters.filter("phead.d", eyeSpacing / kotlin.math.cos(sYaw).coerceAtLeast(0.35f), t),
+        frameWidth = frameWidth,
+        frameHeight = frameHeight
+    )
+    return PoseHead(q.normalized().toColumnMajorMatrix(), framing)
+}
+
+/** Background swatches: the default (your profile color) plus a few
+ *  handy flat colors — green/blue screen for keying, black, white … */
+@Composable
+private fun VrmBackgroundColorRow(current: Int, tint: Color, onPick: (Int) -> Unit) {
+    val tap = rememberHapticTap()
+    val presets = listOf(
+        0xFF00B140.toInt(), 0xFF0047BB.toInt(), 0xFF000000.toInt(), 0xFFFFFFFF.toInt(),
+        0xFF808080.toInt(), 0xFFFF00FF.toInt(), 0xFFF6C6D8.toInt(), 0xFF9AD0F5.toInt(), 0xFFB9D7A8.toInt()
+    )
+    androidx.compose.foundation.layout.Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Background", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Text(
+                if (current == 0) "Default" else "Reset to default",
+                color = if (current == 0) Color.White.copy(0.5f) else tint, fontSize = 13.sp,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                modifier = Modifier.clickable(enabled = current != 0) { tap(); onPick(0) }
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(androidx.compose.foundation.rememberScrollState()),
+            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)
+        ) {
+            // Default swatch: your profile color.
+            val swatches = listOf(0) + presets
+            for (c in swatches) {
+                val selected = c == current
+                Box(
+                    Modifier.size(28.dp).clip(CircleShape)
+                        .background(if (c == 0) tint else Color(c))
+                        .border(if (selected) 2.5.dp else 1.dp, if (selected) Color.White else Color.White.copy(0.3f), CircleShape)
+                        .clickable { tap(); onPick(c) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (c == 0) Text("↺", color = Color.White, fontSize = 12.sp)
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        // Any color: hue slider (full saturation, medium brightness).
+        val hsv = FloatArray(3)
+        android.graphics.Color.colorToHSV(if (current == 0) android.graphics.Color.GRAY else current, hsv)
+        VrmSettingsSlider(
+            label = "Custom hue", valueText = "${hsv[0].toInt()}°",
+            value = hsv[0], range = 0f..359f, steps = 0, tint = tint
+        ) { h -> onPick(android.graphics.Color.HSVToColor(floatArrayOf(h, 0.65f, 0.85f))) }
+    }
+}
+

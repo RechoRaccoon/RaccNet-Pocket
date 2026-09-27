@@ -99,9 +99,13 @@ class FaceLandmarkerHelper private constructor(
                     .setNumFaces(1)
                     .setOutputFaceBlendshapes(true)
                     .setOutputFacialTransformationMatrixes(true)
-                    .setMinFaceDetectionConfidence(0.5f)
-                    .setMinFacePresenceConfidence(0.5f)
-                    .setMinTrackingConfidence(0.5f)
+                    // Lower than MediaPipe's 0.5 defaults: hair over the
+                    // eyes/forehead used to drop the face entirely. The
+                    // body-tracker fallback (see VrmModeScreen) covers the
+                    // frames where even this loses it.
+                    .setMinFaceDetectionConfidence(0.35f)
+                    .setMinFacePresenceConfidence(0.35f)
+                    .setMinTrackingConfidence(0.35f)
                     .setResultListener { result, _ -> onResult(result) }
                     .setErrorListener { e -> Log.e(TAG, "MediaPipe runtime error", e) }
                     .build()

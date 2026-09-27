@@ -83,7 +83,7 @@ object NetworkClient {
     fun buildRockskyApi(): RockskyApi {
         return Retrofit.Builder()
             .baseUrl("https://api.rocksky.app/")
-            .client(buildOkHttp("MediaViewer/1.0 (RaccNet Pocket)"))
+            .client(buildOkHttp("Stellar/1.0"))
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(RockskyApi::class.java)

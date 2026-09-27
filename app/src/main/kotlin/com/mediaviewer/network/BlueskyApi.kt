@@ -135,6 +135,22 @@ interface BlueskyApi {
         @Body request: BskyPutRecordRequest
     ): Response<BskyPutRecordResponse>
 
+    // Profile editing / blog editing: read one record back.
+    @GET("xrpc/com.atproto.repo.getRecord")
+    suspend fun getRecord(
+        @Header("Authorization") token: String,
+        @Query("repo") repo: String,
+        @Query("collection") collection: String,
+        @Query("rkey") rkey: String
+    ): Response<com.mediaviewer.model.BskyRecordEnvelope>
+
+    // Profile editing: changing your handle.
+    @POST("xrpc/com.atproto.identity.updateHandle")
+    suspend fun updateHandle(
+        @Header("Authorization") token: String,
+        @Body body: Map<String, String>
+    ): Response<Unit>
+
     @GET("xrpc/app.bsky.actor.getPreferences")
     suspend fun getPreferences(
         @Header("Authorization") token: String

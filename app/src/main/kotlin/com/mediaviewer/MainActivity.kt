@@ -134,7 +134,7 @@ private fun CrashLogScreen(log: String, onDismiss: () -> Unit) {
     Column(
         Modifier.fillMaxSize().background(Color.Black).windowInsetsPadding(WindowInsets.systemBars).padding(16.dp)
     ) {
-        Text("RaccNetLite crashed last time it ran", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        Text("Stellar crashed last time it ran", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(4.dp))
         Text("Copy this and send it back for a fix.", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
         Spacer(Modifier.height(14.dp))
@@ -302,10 +302,12 @@ private fun AppRoot(viewModel: MainViewModel) {
     val composePostOpen        by viewModel.composePostOpen.collectAsState()
     val composePostSubmitting  by viewModel.composePostSubmitting.collectAsState()
     val reviewComposeTarget    by viewModel.reviewComposeTarget.collectAsState()
+    val blogEditDraft          by viewModel.blogEditDraft.collectAsState()
     // Item 8: camera-notch button — pending capture + VRM mode.
     val initialComposeImageUri by viewModel.initialComposeImageUri.collectAsState()
     val initialComposeVideoUri by viewModel.initialComposeVideoUri.collectAsState()
     val vrmModeOpen            by viewModel.vrmModeOpen.collectAsState()
+    val capturePreview         by viewModel.capturePreview.collectAsState()
     // Item 12 follow-up: DM-thread "shared posts" feed loading overlay.
     val dmFeedLoadingOverlay   by viewModel.dmFeedLoadingOverlay.collectAsState()
     // Item 8: Hub Friends/Livestreams sections.
@@ -360,6 +362,11 @@ private fun AppRoot(viewModel: MainViewModel) {
     // same real-time reflection the in-post glass panels do, instead of a plain
     // static tint.
     var currentBackdrop by remember { mutableStateOf<GlassBackdrop?>(null) }
+    // Item 16: "your color" everywhere = the same banner/avatar blend your
+    // profile page uses.
+    SideEffect { com.mediaviewer.ui.SelfProfileColors.bannerUrl = selfProfile?.bannerUrl }
+    val selfProfileTint = selfProfile?.author?.avatarUrl?.takeIf { it.isNotBlank() }
+        ?.let { com.mediaviewer.ui.rememberSelfProfileTint(it) } ?: NeutralGlassTint
     var currentDominantColor by remember { mutableStateOf(NeutralGlassTint) }
 
     // ── Retro pixel-matrix transition/loading overlay ──────────────────────
@@ -853,6 +860,7 @@ private fun AppRoot(viewModel: MainViewModel) {
                 reviewTarget   = reviewComposeTarget,
                 initialImageUri = initialComposeImageUri,
                 initialVideoUri = initialComposeVideoUri,
+                editBlog       = blogEditDraft,
                 onClose        = viewModel::closeComposePost,
                 onSubmit       = viewModel::submitComposePost
             )
@@ -864,16 +872,33 @@ private fun AppRoot(viewModel: MainViewModel) {
             // bottom bar match the rest of the app instead of generic green.
             val vrmTint = run {
                 val selfAvatar = selfProfile?.author?.avatarUrl
-                if (!selfAvatar.isNullOrBlank()) rememberDominantColor(selfAvatar) else currentDominantColor
+                if (!selfAvatar.isNullOrBlank()) com.mediaviewer.ui.rememberSelfProfileTint(selfAvatar) else currentDominantColor
             }
             VrmModeScreen(
                 liquidGlass = liquidGlass,
                 tint = vrmTint,
                 onClose = viewModel::closeVrmMode,
                 onCapture = { imageUri, videoUri ->
-                    viewModel.closeVrmMode()
-                    viewModel.openComposePostWithCapturedMedia(imageUri, videoUri)
+                    // Item 13: captures go to their own review page first
+                    // (VRM mode closes to free the camera/GPU) instead of
+                    // straight into the composer.
+                    val uri = videoUri ?: imageUri
+                    if (uri != null) viewModel.openCapturePreview(uri, isVideo = videoUri != null)
+                    else viewModel.closeVrmMode()
                 }
+            )
+        }
+
+        val currentCapturePreview = capturePreview
+        if (currentCapturePreview != null) {
+            val selfAvatar = selfProfile?.author?.avatarUrl
+            com.mediaviewer.ui.CapturePreviewScreen(
+                uri = currentCapturePreview.uri,
+                isVideo = currentCapturePreview.isVideo,
+                liquidGlass = liquidGlass,
+                tint = selfProfileTint,
+                onClose = viewModel::returnToVrmFromPreview,
+                onCreatePost = { uri -> viewModel.createPostFromPreview(uri, currentCapturePreview.isVideo) }
             )
         }
 
@@ -964,6 +989,8 @@ private fun AppRoot(viewModel: MainViewModel) {
                     onSeedSubImageIndex = { postId, idx -> subImageIndices[postId] = idx },
                     onOpenBlog        = viewModel::openProfileBlog,
                     onCloseBlog       = viewModel::closeProfileBlog,
+                    onEditBlog        = viewModel::openBlogEditor,
+                    onDeleteBlog      = viewModel::deleteBlog,
                     onOpenReview      = viewModel::openProfileReview,
                     onCloseReview     = viewModel::closeProfileReview,
                     onOpenTitle       = viewModel::openProfileTitle,
@@ -987,7 +1014,8 @@ private fun AppRoot(viewModel: MainViewModel) {
                     onSelectPostKindFilter = viewModel::selectPostKindFilter,
                     onSelectReviewKindFilter = viewModel::selectReviewKindFilter,
                     pinterestThreeColumns = pinterestThreeColumns,
-                    hateFunBlurNsfw   = hateFunBlurNsfw
+                    hateFunBlurNsfw   = hateFunBlurNsfw,
+                    onSaveOwnProfile  = viewModel::updateOwnProfile
                 )
             }
         }
@@ -1118,7 +1146,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             val openProfile = profileOverlay
             val notchTint = if (vrmModeOpen || composePostOpen) {
                 val selfAvatar = selfProfile?.author?.avatarUrl
-                if (!selfAvatar.isNullOrBlank()) rememberDominantColor(selfAvatar) else currentDominantColor
+                if (!selfAvatar.isNullOrBlank()) com.mediaviewer.ui.rememberSelfProfileTint(selfAvatar) else currentDominantColor
             } else if (profileVisible && openProfile != null) {
                 // On a profile page the notch wears that profile's own color —
                 // the same banner/avatar blend the page's glass uses.
@@ -1132,7 +1160,7 @@ private fun AppRoot(viewModel: MainViewModel) {
                 )
             } else if (screenState == ScreenState.SETTINGS) {
                 val selfAvatar = selfProfile?.author?.avatarUrl
-                if (!selfAvatar.isNullOrBlank()) rememberDominantColor(selfAvatar) else currentDominantColor
+                if (!selfAvatar.isNullOrBlank()) com.mediaviewer.ui.rememberSelfProfileTint(selfAvatar) else currentDominantColor
             } else {
                 currentDominantColor
             }
@@ -1191,7 +1219,7 @@ private fun AppRoot(viewModel: MainViewModel) {
         // Settings → App Functionality → "Debug Overlay".
         if (com.mediaviewer.util.UiToggles.debugOverlay) {
             val selfAvatar = selfProfile?.author?.avatarUrl
-            val debugTint = if (!selfAvatar.isNullOrBlank()) rememberDominantColor(selfAvatar) else Color.White
+            val debugTint = if (!selfAvatar.isNullOrBlank()) com.mediaviewer.ui.rememberSelfProfileTint(selfAvatar) else Color.White
             com.mediaviewer.ui.DebugOverlay(
                 tint = debugTint,
                 taggingEnabled = tagPostWhenLiked,

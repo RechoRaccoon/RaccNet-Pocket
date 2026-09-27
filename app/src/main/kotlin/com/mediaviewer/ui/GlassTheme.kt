@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -97,6 +98,35 @@ suspend fun fetchDominantColor(context: android.content.Context, url: String): C
     } catch (_: Exception) { /* fall through to default below */ }
     return Color(0xFF2A2A2E)
 }
+
+/** The signed-in account's banner, set once from AppRoot, so every
+ *  "your color" surface outside the profile page can use the exact same
+ *  banner/avatar blend the profile page itself uses. */
+object SelfProfileColors {
+    var bannerUrl by mutableStateOf<String?>(null)
+}
+
+/** A profile's UI color — identical to ProfileOverlay's own: the average of
+ *  the banner's dominant color (avatar when there's no banner) and the
+ *  avatar's. */
+@Composable
+fun rememberProfileTint(bannerUrl: String?, avatarUrl: String?): Color {
+    val bannerColor = rememberDominantColor(bannerUrl ?: avatarUrl ?: "")
+    val avatarColor = rememberDominantColor(avatarUrl ?: "")
+    return remember(bannerColor, avatarColor) {
+        Color(
+            red = (bannerColor.red + avatarColor.red) / 2f,
+            green = (bannerColor.green + avatarColor.green) / 2f,
+            blue = (bannerColor.blue + avatarColor.blue) / 2f,
+            alpha = 1f
+        )
+    }
+}
+
+/** The signed-in user's own color, matching their profile page exactly. */
+@Composable
+fun rememberSelfProfileTint(selfAvatarUrl: String): Color =
+    rememberProfileTint(SelfProfileColors.bannerUrl, selfAvatarUrl)
 
 /** Samples a low-res copy of the given media URL and returns its average
  *  color. This is the "color of the post" used to tint that post's
@@ -680,5 +710,26 @@ fun GlassDropdownMenu(
                 }
             }
         }
+    }
+}
+
+
+/** The round "back to top" arrow (profiles and the feed's grid mode): real
+ *  glass that blurs whatever is scrolling behind it (via [backdrop]). */
+@Composable
+fun ScrollToTopGlassBubble(liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, onClick: () -> Unit) {
+    val tap = com.mediaviewer.util.rememberHapticTap()
+    val shape = androidx.compose.foundation.shape.CircleShape
+    val base = Modifier.size(38.dp).clip(shape).clickable { tap(); onClick() }
+    val icon: @Composable () -> Unit = {
+        androidx.compose.material3.Icon(
+            Icons.Filled.ArrowUpward,
+            contentDescription = "Scroll to top", tint = Color.White, modifier = Modifier.size(18.dp)
+        )
+    }
+    if (liquidGlass) {
+        LiquidGlassSurface(modifier = base, shape = shape, tint = tint, backdrop = backdrop, contentAlignment = Alignment.Center) { icon() }
+    } else {
+        Box(base.background(Color.Black.copy(0.6f)), contentAlignment = Alignment.Center) { icon() }
     }
 }

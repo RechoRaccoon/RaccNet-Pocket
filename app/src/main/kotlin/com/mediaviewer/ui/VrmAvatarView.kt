@@ -585,13 +585,17 @@ internal class ViewerSession {
         recording?.let { rec ->
             recording = null
             runCatching { v.engine.destroySwapChain(rec.swapChain); v.engine.flushAndWait() }
+            runCatching { rec.compositor?.release() }
             runCatching { rec.recorder.stop() }
             runCatching { rec.recorder.release() }
+            runCatching { rec.pitched?.stop() }
             runCatching { rec.file.delete() }
+            runCatching { rec.audioFile?.delete() }
         }
         stream?.let { st ->
             stream = null
             runCatching { v.engine.destroySwapChain(st.swapChain); v.engine.flushAndWait() }
+            runCatching { st.compositor?.release() }
         }
         runCatching {
             val engine = v.engine
@@ -1134,7 +1138,9 @@ internal class VrmStreamTarget(
     val swapChain: com.google.android.filament.SwapChain,
     val width: Int,
     val height: Int,
-    val intervalNanos: Long
+    val intervalNanos: Long,
+    /** Set when browser overlays are shown in the stream (see [OverlayCompositor]). */
+    val compositor: OverlayCompositor? = null
 ) {
     var nextDueNanos = 0L
 }
@@ -1146,8 +1152,105 @@ internal class VrmRecording(
     val swapChain: com.google.android.filament.SwapChain,
     val width: Int,
     val height: Int,
-    val file: java.io.File
+    val file: java.io.File,
+    /** Pitch-shifted mic track recorded separately (see PitchedAudioRecorder). */
+    val pitched: com.mediaviewer.stream.PitchedAudioRecorder? = null,
+    val audioFile: java.io.File? = null,
+    val compositor: OverlayCompositor? = null
 )
+
+/**
+ * A browser overlay the person chose to show in captures and streams: its
+ * latest snapshot and where it sits, as fractions of the VRM screen.
+ */
+class CaptureOverlay(
+    val bitmap: android.graphics.Bitmap,
+    val left: Float, val top: Float, val right: Float, val bottom: Float
+)
+
+/** Maps [o] (screen fractions) into a [frameW]×[frameH] frame rendered with
+ *  the same vertical field of view as a [screenW]×[screenH] screen — the
+ *  camera keeps its vertical FOV and only the horizontal extent changes
+ *  (see [ViewerSession.renderStream]), so positions scale around the centre
+ *  by frameH/screenH. */
+internal fun overlayRectInFrame(o: CaptureOverlay, screenW: Int, screenH: Int, frameW: Int, frameH: Int): android.graphics.RectF {
+    val sw = screenW.coerceAtLeast(1).toFloat(); val sh = screenH.coerceAtLeast(1).toFloat()
+    val k = frameH / sh
+    fun mx(fx: Float) = frameW / 2f + (fx * sw - sw / 2f) * k
+    fun my(fy: Float) = frameH / 2f + (fy * sh - sh / 2f) * k
+    return android.graphics.RectF(mx(o.left), my(o.top), mx(o.right), my(o.bottom))
+}
+
+/**
+ * Puts browser overlays into recorded/streamed video (API 29+). Filament
+ * renders into an [android.media.ImageReader] instead of straight into the
+ * encoder; every frame that arrives is drawn onto the encoder's surface with
+ * a hardware canvas, followed by each overlay's latest snapshot. Without
+ * overlays in capture this class isn't used at all and Filament renders
+ * directly into the encoder, exactly as before.
+ */
+@androidx.annotation.RequiresApi(29)
+internal class OverlayCompositor(
+    private val encoderSurface: android.view.Surface,
+    private val width: Int,
+    private val height: Int,
+    private val screenSize: () -> Pair<Int, Int>,
+    private val overlays: () -> List<CaptureOverlay>
+) {
+    private val thread = android.os.HandlerThread("vrm-overlay-compositor").also { it.start() }
+    private val handler = android.os.Handler(thread.looper)
+    @Volatile private var released = false
+    private val reader: android.media.ImageReader
+    val inputSurface: android.view.Surface
+
+    init {
+        reader = android.media.ImageReader.newInstance(
+            width, height, android.graphics.PixelFormat.RGBA_8888, 3,
+            android.hardware.HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE or android.hardware.HardwareBuffer.USAGE_GPU_COLOR_OUTPUT
+        )
+        inputSurface = reader.surface
+        reader.setOnImageAvailableListener({ r -> drawFrame(r) }, handler)
+    }
+
+    private val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+    private val full = android.graphics.Rect(0, 0, width, height)
+
+    private fun drawFrame(r: android.media.ImageReader) {
+        if (released) return
+        val image = runCatching { r.acquireLatestImage() }.getOrNull() ?: return
+        try {
+            val hb = image.hardwareBuffer ?: return
+            try {
+                val frame = android.graphics.Bitmap.wrapHardwareBuffer(hb, android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB)) ?: return
+                val canvas = encoderSurface.lockHardwareCanvas()
+                try {
+                    canvas.drawBitmap(frame, null, full, paint)
+                    val (sw, sh) = screenSize()
+                    for (o in overlays()) {
+                        if (o.bitmap.isRecycled) continue
+                        canvas.drawBitmap(o.bitmap, null, overlayRectInFrame(o, sw, sh, width, height), paint)
+                    }
+                } finally {
+                    encoderSurface.unlockCanvasAndPost(canvas)
+                }
+            } finally {
+                hb.close()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Compositing a frame failed", e)
+        } finally {
+            image.close()
+        }
+    }
+
+    fun release() {
+        released = true
+        handler.post {
+            runCatching { reader.close() }
+            thread.quitSafely()
+        }
+    }
+}
 
 /**
  * Photo and video capture of the RENDERED avatar (never the camera): only
@@ -1157,6 +1260,14 @@ internal class VrmRecording(
  */
 class VrmCaptureController {
     internal var session: ViewerSession? = null
+
+    /** Browser overlays shown in captures/streams (latest snapshots). */
+    @Volatile var overlays: List<CaptureOverlay> = emptyList()
+
+    private fun screenSize(): Pair<Int, Int> {
+        val sv = session?.surfaceView
+        return (sv?.width ?: 1) to (sv?.height ?: 1)
+    }
 
     val isRecording: Boolean get() = session?.recording != null
 
@@ -1168,6 +1279,15 @@ class VrmCaptureController {
         val bitmap = runCatching { sv.getBitmap(sv.width, sv.height) }
             .onFailure { Log.e(TAG, "TextureView.getBitmap failed", it) }
             .getOrNull() ?: return null
+        // Browser overlays marked "show in captures" go onto the photo too.
+        val shown = overlays
+        if (shown.isNotEmpty()) runCatching {
+            val canvas = android.graphics.Canvas(bitmap)
+            val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+            for (o in shown) if (!o.bitmap.isRecycled) {
+                canvas.drawBitmap(o.bitmap, null, overlayRectInFrame(o, sv.width, sv.height, bitmap.width, bitmap.height), paint)
+            }
+        }.onFailure { Log.e(TAG, "Drawing overlays onto the photo failed", it) }
         return withContext(Dispatchers.IO) {
             runCatching {
                 val file = newCaptureFile(context, "jpg")
@@ -1180,7 +1300,12 @@ class VrmCaptureController {
 
     /** Starts recording what's rendered (plus the mic when [withAudio]).
      *  Returns false if the encoder couldn't be set up. */
-    fun startRecording(context: android.content.Context, withAudio: Boolean): Boolean {
+    fun startRecording(
+        context: android.content.Context,
+        withAudio: Boolean,
+        pitchSemitones: Float = 0f,
+        withOverlays: Boolean = false
+    ): Boolean {
         val s = session ?: return false
         val v = s.viewer ?: return false
         val sv = s.surfaceView ?: return false
@@ -1218,14 +1343,31 @@ class VrmCaptureController {
                 null
             }
         }
-        val (recorder, file) = (if (withAudio) build(true) else null) ?: build(false) ?: return false
+        // A changed voice pitch: MediaRecorder records the video silent and
+        // the mic goes through PitchedAudioRecorder, joined on stop.
+        val pitched = withAudio && kotlin.math.abs(pitchSemitones) >= 0.05f
+        val (recorder, file) = (if (withAudio && !pitched) build(true) else null) ?: build(false) ?: return false
+        var compositor: OverlayCompositor? = null
+        var audio: com.mediaviewer.stream.PitchedAudioRecorder? = null
+        var audioFile: java.io.File? = null
         return try {
-            val swapChain = v.engine.createSwapChain(recorder.surface)
+            val target = if (withOverlays && android.os.Build.VERSION.SDK_INT >= 29) {
+                OverlayCompositor(recorder.surface, w, h, ::screenSize) { overlays }.also { compositor = it }.inputSurface
+            } else recorder.surface
+            val swapChain = v.engine.createSwapChain(target)
             recorder.start()
-            s.recording = VrmRecording(recorder, swapChain, w, h, file)
+            if (pitched) {
+                val af = newCaptureFile(context, "m4a")
+                val a = com.mediaviewer.stream.PitchedAudioRecorder(af, pitchSemitones)
+                if (a.start()) { audio = a; audioFile = af } else af.delete()
+            }
+            s.recording = VrmRecording(recorder, swapChain, w, h, file, audio, audioFile, compositor)
             true
         } catch (e: Exception) {
             Log.e(TAG, "Starting recording failed", e)
+            runCatching { compositor?.release() }
+            runCatching { audio?.stop() }
+            audioFile?.delete()
             runCatching { recorder.release() }
             file.delete()
             false
@@ -1233,16 +1375,21 @@ class VrmCaptureController {
     }
 
     /** Starts rendering into a live-stream encoder's input [surface]. */
-    fun startStreamOutput(surface: android.view.Surface, width: Int, height: Int, fps: Int): Boolean {
+    fun startStreamOutput(surface: android.view.Surface, width: Int, height: Int, fps: Int, withOverlays: Boolean = false): Boolean {
         val s = session ?: return false
         val v = s.viewer ?: return false
         if (s.stream != null) return true
+        var compositor: OverlayCompositor? = null
         return try {
-            val swapChain = v.engine.createSwapChain(surface)
-            s.stream = VrmStreamTarget(swapChain, width, height, 1_000_000_000L / fps.coerceAtLeast(1))
+            val target = if (withOverlays && android.os.Build.VERSION.SDK_INT >= 29) {
+                OverlayCompositor(surface, width, height, ::screenSize) { overlays }.also { compositor = it }.inputSurface
+            } else surface
+            val swapChain = v.engine.createSwapChain(target)
+            s.stream = VrmStreamTarget(swapChain, width, height, 1_000_000_000L / fps.coerceAtLeast(1), compositor)
             true
         } catch (e: Exception) {
             Log.e(TAG, "Couldn't render into the stream encoder", e)
+            runCatching { compositor?.release() }
             false
         }
     }
@@ -1256,6 +1403,7 @@ class VrmCaptureController {
         runCatching {
             s.viewer?.engine?.let { e -> e.destroySwapChain(st.swapChain); e.flushAndWait() }
         }.onFailure { Log.e(TAG, "Releasing stream surface failed", it) }
+        runCatching { st.compositor?.release() }
     }
 
     val isStreaming: Boolean get() = session?.stream != null
@@ -1268,13 +1416,25 @@ class VrmCaptureController {
         runCatching {
             s.viewer?.engine?.let { e -> e.destroySwapChain(rec.swapChain); e.flushAndWait() }
         }.onFailure { Log.e(TAG, "Releasing recording surface failed", it) }
+        runCatching { rec.compositor?.release() }
+        var finalFile = rec.file
         val ok = withContext(Dispatchers.IO) {
             val stopped = runCatching { rec.recorder.stop() }.onFailure { Log.e(TAG, "MediaRecorder.stop failed", it) }.isSuccess
             runCatching { rec.recorder.release() }
-            stopped && rec.file.length() > 0
+            val audioOk = rec.pitched?.stop() == true
+            val audioFile = rec.audioFile
+            if (stopped && audioOk && audioFile != null) {
+                val merged = newCaptureFile(context, "mp4")
+                if (com.mediaviewer.stream.PitchedAudioRecorder.muxVideoAndAudio(rec.file, audioFile, merged)) {
+                    rec.file.delete()
+                    finalFile = merged
+                }
+            }
+            audioFile?.delete()
+            stopped && finalFile.length() > 0
         }
-        if (!ok) { rec.file.delete(); return null }
-        return runCatching { captureUri(context, rec.file) }.getOrNull()
+        if (!ok) { finalFile.delete(); return null }
+        return runCatching { captureUri(context, finalFile) }.getOrNull()
     }
 
     companion object {

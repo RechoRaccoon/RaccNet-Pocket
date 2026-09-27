@@ -678,6 +678,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Item 19: the profile page's edit popup → Save. [onDone] gets null on
+     *  success (popup closes, page reloads) or a message to show. */
+    fun updateOwnProfile(
+        displayName: String, description: String, handle: String,
+        avatarUri: android.net.Uri?, bannerUri: android.net.Uri?,
+        onDone: (String?) -> Unit
+    ) {
+        if (!_bskyLoggedIn.value) { onDone("Not signed in"); return }
+        val newHandle = handle.trim().removePrefix("@").takeIf { it.isNotBlank() && !it.equals(bskyHandle, ignoreCase = true) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val context = getApplication<Application>()
+            var result = bskyRepo.updateOwnProfile(bskyToken, context, _bskyDid.value, displayName, description, avatarUri, bannerUri, newHandle)
+            if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
+                if (refreshBskyTokenIfPossible()) {
+                    result = bskyRepo.updateOwnProfile(bskyToken, context, _bskyDid.value, displayName, description, avatarUri, bannerUri, newHandle)
+                }
+            }
+            val error = result.exceptionOrNull()?.message
+            if (error == null && newHandle != null) bskyHandle = newHandle
+            withContext(Dispatchers.Main) {
+                onDone(error)
+                if (error == null) {
+                    loadSelfProfile()
+                    // Give the AppView a moment to index the new record.
+                    viewModelScope.launch { kotlinx.coroutines.delay(1200); refreshProfile() }
+                }
+            }
+        }
+    }
+
     /** Opens the logged-in user's own Profile Overlay — used by the Settings
      *  "Profile" button. */
     fun openOwnProfile() {
@@ -878,7 +908,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _reviewComposeTarget = MutableStateFlow<TitleSearchResult?>(null)
     val reviewComposeTarget: StateFlow<TitleSearchResult?> = _reviewComposeTarget
 
-    fun openComposePost() { _composePostOpen.value = true }
+    fun openComposePost() { _blogEditDraft.value = null; _composePostOpen.value = true }
+
+    // ── Item 12: blog editing ───────────────────────────────────────────
+    /** Non-null while the composer is editing an existing blog (opened from
+     *  the reader's pen button): it opens straight into Blog mode, filled
+     *  in, and its Post button reads "Save". Second = the blog's labels. */
+    private val _blogEditDraft = MutableStateFlow<Pair<BlogDraft, List<String>>?>(null)
+    val blogEditDraft: StateFlow<Pair<BlogDraft, List<String>>?> = _blogEditDraft
+
+    fun openBlogEditor(blog: LeafletBlog) {
+        viewModelScope.launch(Dispatchers.IO) {
+            var result = bskyRepo.loadBlogForEditing(bskyToken, _bskyDid.value, blog.uri)
+            if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
+                if (refreshBskyTokenIfPossible()) result = bskyRepo.loadBlogForEditing(bskyToken, _bskyDid.value, blog.uri)
+            }
+            result.onSuccess { draft ->
+                _blogEditDraft.value = draft
+                _profileOverlay.value = _profileOverlay.value?.copy(openBlog = null)
+                _composePostOpen.value = true
+            }.onFailure { _errorMessage.value = it.message ?: "Couldn't open that blog for editing" }
+        }
+    }
+
+    /** Reader's trash button (after its "are you sure?"). */
+    fun deleteBlog(blog: LeafletBlog) {
+        viewModelScope.launch(Dispatchers.IO) {
+            var result = bskyRepo.deleteBlog(bskyToken, _bskyDid.value, blog)
+            if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
+                if (refreshBskyTokenIfPossible()) result = bskyRepo.deleteBlog(bskyToken, _bskyDid.value, blog)
+            }
+            result.onSuccess {
+                showToast("Blog deleted")
+                val cur = _profileOverlay.value
+                if (cur != null) {
+                    val tab = cur.tabStates[ProfileTab.BLOGS]
+                    _profileOverlay.value = cur.copy(
+                        openBlog = null,
+                        tabStates = if (tab != null) cur.tabStates + (ProfileTab.BLOGS to tab.copy(blogs = tab.blogs.filterNot { it.uri == blog.uri })) else cur.tabStates
+                    )
+                }
+                _friendsBlogs.value = _friendsBlogs.value.filterNot { it.blog.uri == blog.uri }
+            }.onFailure { _errorMessage.value = it.message ?: "Couldn't delete the blog" }
+        }
+    }
     fun openReviewCompose(target: TitleSearchResult) {
         _reviewComposeTarget.value = target
         _composePostOpen.value = true
@@ -905,12 +978,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun openVrmMode() { _vrmModeOpen.value = true }
     fun closeVrmMode() { _vrmModeOpen.value = false }
 
+    /** A photo/video just taken in VRM mode, shown on its own review page
+     *  (CapturePreviewScreen) with VRM mode closed — see [openCapturePreview]. */
+    data class CapturePreview(val uri: android.net.Uri, val isVideo: Boolean)
+    private val _capturePreview = MutableStateFlow<CapturePreview?>(null)
+    val capturePreview: StateFlow<CapturePreview?> = _capturePreview
+    /** Closes VRM mode (camera, trackers and renderer all shut down) and
+     *  opens the review page for the capture. */
+    fun openCapturePreview(uri: android.net.Uri, isVideo: Boolean) {
+        _vrmModeOpen.value = false
+        _capturePreview.value = CapturePreview(uri, isVideo)
+    }
+    /** Review page's X: back into VRM mode. */
+    fun returnToVrmFromPreview() {
+        _capturePreview.value = null
+        _vrmModeOpen.value = true
+    }
+    /** Review page's "Create Post": into the composer with the (cropped) capture. */
+    fun createPostFromPreview(uri: android.net.Uri, isVideo: Boolean) {
+        _capturePreview.value = null
+        openComposePostWithCapturedMedia(if (isVideo) null else uri, if (isVideo) uri else null)
+    }
+
     fun closeComposePost() {
         if (_composePostSubmitting.value) return
         _composePostOpen.value = false
         _reviewComposeTarget.value = null
         _initialComposeImageUri.value = null
         _initialComposeVideoUri.value = null
+        _blogEditDraft.value = null
     }
 
     /** Routes a finished [com.mediaviewer.ui.ComposePostDraft] to the right
@@ -930,7 +1026,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             result.onFailure { _errorMessage.value = it.message }
             _composePostSubmitting.value = false
-            if (result.isSuccess) { _composePostOpen.value = false; _reviewComposeTarget.value = null }
+            if (result.isSuccess) { _composePostOpen.value = false; _reviewComposeTarget.value = null; _blogEditDraft.value = null }
         }
     }
 
@@ -978,6 +1074,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // never on *this* account's own backlog in the first place, so
             // there's nothing there to remove — that's expected, not an
             // error, and shouldn't fail the review post itself.
+            com.mediaviewer.ui.ComposeMode.BLOG -> {
+                val blog = draft.blog
+                if (blog == null) Result.failure(IllegalStateException("Empty blog"))
+                else runCatching {
+                    val selfName = _selfProfile.value?.author?.displayName.orEmpty()
+                    val uri = bskyRepo.publishBlog(bskyToken, did, bskyHandle, selfName, context, blog, draft.selfLabels).getOrElse { throw it }
+                    // Show it: refresh the open profile's Blogs tab (if it's yours).
+                    viewModelScope.launch {
+                        kotlinx.coroutines.delay(800)
+                        if (_profileOverlay.value?.author?.did == did) refreshProfile()
+                    }
+                    uri
+                }
+            }
             com.mediaviewer.ui.ComposeMode.REVIEW -> {
                 val target = draft.reviewTarget
                 if (target == null) Result.failure(IllegalStateException("No title to review"))
@@ -1291,7 +1401,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val convo = _dmThread.value?.convo ?: return
         viewModelScope.launch(Dispatchers.IO) {
             _dmFeedLoadingOverlay.value = true
-            bskyRepo.getFriendsSharedPosts(bskyToken, _bskyDid.value, listOf(convo), includeSelfSent = true)
+            bskyRepo.getFriendsSharedPosts(bskyToken, _bskyDid.value, listOf(convo), includeSelfSent = true, selfAuthor = _selfProfile.value?.author)
                 .onSuccess { items ->
                     if (items.isEmpty()) {
                         showToast("No Shared Posts")
@@ -2311,7 +2421,7 @@ _bskyDid.value          = session.did
         // setMode()'s matching Log.d for why this is here. Logs a stack
         // trace too since loadFeed() has many call sites and knowing which
         // one fired during a repro is the whole point.
-        Log.d("RaccNet-FeedState", "loadFeed(reset=$reset)", Exception("trace"))
+        Log.d("Stellar-FeedState", "loadFeed(reset=$reset)", Exception("trace"))
         if (_appMode.value == AppMode.E621) { loadE621Posts(reset); return }
         if (!_bskyLoggedIn.value) return
         viewModelScope.launch(Dispatchers.IO) {
@@ -2692,9 +2802,21 @@ _bskyDid.value          = session.did
         // now-playing state, if any (most accounts have nothing playing, or
         // no Rocksky connection at all — both are a normal null result).
         viewModelScope.launch(Dispatchers.IO) {
-            val track = rockskyRepo.getNowPlaying(author.did)
-            val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
-            _profileOverlay.value = cur.copy(nowPlaying = track)
+            // Item 20: official now-playing first; otherwise inferred from
+            // the latest scrobble's start time + song length. An inferred
+            // status is re-checked when that song should end (the next song
+            // may have started), for as long as this profile stays open.
+            var track = rockskyRepo.getNowPlaying(author.did) ?: rockskyRepo.inferNowPlaying(author.did)
+            var checks = 0
+            while (true) {
+                val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
+                _profileOverlay.value = cur.copy(nowPlaying = track)
+                val endsAt = track?.endsAtMs ?: 0L
+                if (endsAt <= 0L || ++checks > 40) return@launch
+                delay((endsAt - System.currentTimeMillis()).coerceIn(5_000L, 15 * 60_000L))
+                if (_profileOverlay.value?.author?.did != author.did) return@launch
+                track = rockskyRepo.inferNowPlaying(author.did)
+            }
         }
     }
 
@@ -3300,7 +3422,7 @@ _bskyDid.value          = session.did
     fun loadE621Posts(reset: Boolean = true) {
         // Bug fix (Outstanding Issue #1 — diagnostic, temporary): see
         // loadFeed()'s matching Log.d above.
-        Log.d("RaccNet-FeedState", "loadE621Posts(reset=$reset)", Exception("trace"))
+        Log.d("Stellar-FeedState", "loadE621Posts(reset=$reset)", Exception("trace"))
         if (!_e621LoggedIn.value) return
         viewModelScope.launch(Dispatchers.IO) {
             if (reset) { e621Page = 1; _isLoading.value = true; _currentIndex.value = 0 }
@@ -4036,7 +4158,7 @@ _bskyDid.value          = session.did
         // only fires on genuine switches) so a logcat capture during a
         // repro can show exactly when/how often this fires. Safe to leave
         // in — remove once the bug's fully confirmed fixed.
-        Log.d("RaccNet-FeedState", "setMode: ${_appMode.value} -> $mode")
+        Log.d("Stellar-FeedState", "setMode: ${_appMode.value} -> $mode")
         if (_appMode.value == mode) return // already there — nothing to switch, nothing to reload
         // Snapshot whichever mode we're leaving before touching anything.
         when (_appMode.value) {

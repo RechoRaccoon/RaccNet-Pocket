@@ -49,5 +49,9 @@ class VrmSettingsStore(context: Context) {
         const val STREAM_URL = "stream_url"
         const val STREAM_KEY = "stream_key"
         const val STREAM_QUALITY = "stream_quality" // "" = auto, else StreamQuality.name
+        const val STREAM_LINK = "stream_link"      // shown on Bluesky's Live badge while streaming
+        const val BACKGROUND_COLOR = "background_color" // ARGB int, 0 = default (profile color)
+        const val VOICE_PITCH = "voice_pitch"      // semitones, 0 = natural
+        const val HEAD_FALLBACK = "head_fallback"  // body tracker places the head when the face is lost
     }
 }

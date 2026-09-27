@@ -160,7 +160,7 @@ class RtmpPublisher(private val listener: Listener) {
             "audiosamplesize" to 16.0,
             "stereo" to stereo,
             "audiocodecid" to 10.0,
-            "encoder" to "RaccNet Pocket"
+            "encoder" to "Stellar"
         ))
         enqueue(Packet(TYPE_DATA_AMF0, 4, 0, body.toByteArray(), false, false, 0))
     }

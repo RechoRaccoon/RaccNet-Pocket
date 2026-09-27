@@ -709,8 +709,21 @@ data class LeafletBlog(
     // replaces them with a properly-constructed object, instead of ever
     // holding a not-really-non-null null.
     @Transient
-    val blocks: List<LeafletBlock> = emptyList()
-)
+    val blocks: List<LeafletBlock> = emptyList(),
+    /** Item 12: the document's content `$type` (e.g. Stellar's
+     *  com.rechoraccoon.stellar.blog.content, or pub.leaflet.content) —
+     *  null for legacy/cached entries. Nullable on purpose (see above). */
+    val contentType: String? = null
+) {
+    /** Written in Stellar (vs. Leaflet or another standard.site app). */
+    val isStellar: Boolean get() = contentType?.startsWith(STELLAR_BLOG_NSID) == true
+
+    companion object {
+        /** Stellar's own blog content lexicon namespace (standard.site
+         *  documents with this content type are Stellar blogs). */
+        const val STELLAR_BLOG_NSID = "com.rechoraccoon.stellar.blog"
+    }
+}
 
 /** One inline styled run of text within a [LeafletBlock.Paragraph] or
  *  [LeafletBlock.Header] — currently only bold is modeled (Leaflet's
@@ -735,6 +748,33 @@ data class LeafletTextSpan(val text: String, val bold: Boolean = false)
  *  reusing Compose's TextAlign directly here) so the model layer doesn't
  *  need a Compose UI dependency; UI code maps it to a real TextAlign. */
 enum class LeafletAlign { START, CENTER, END }
+
+/** Item 12 (blog editor): what one row of the blog editor is. */
+enum class BlogRowKind { TEXT, H1, H2, H3, IMAGE }
+
+/** One row of a blog being written/edited. A text row carries [text]; an
+ *  image row either a freshly picked [imageUri] or, when editing, the
+ *  [existingBlob] (raw blob JSON, re-referenced as-is) + [existingUrl]. */
+data class BlogRowDraft(
+    val kind: BlogRowKind = BlogRowKind.TEXT,
+    val text: String = "",
+    val align: LeafletAlign = LeafletAlign.START,
+    val imageUri: android.net.Uri? = null,
+    val existingBlob: com.google.gson.JsonObject? = null,
+    val existingUrl: String? = null,
+    val imageWidth: Int = 0,
+    val imageHeight: Int = 0,
+    val alt: String = ""
+)
+
+/** A whole blog from the editor. [editingUri] is set when saving changes
+ *  to an existing blog (Stellar or Leaflet) instead of publishing a new one. */
+data class BlogDraft(
+    val title: String,
+    val description: String,
+    val rows: List<BlogRowDraft>,
+    val editingUri: String? = null
+)
 
 sealed class LeafletBlock {
     data class Header(val text: String, val level: Int, val alignment: LeafletAlign = LeafletAlign.START) : LeafletBlock()
@@ -1151,5 +1191,9 @@ data class RockskyTrack(
     // never collide into the same key. Blank only for a cached/old entry
     // from before this field existed; the list falls back to the old
     // composite key for those (see profileMusicHistoryRows).
-    val uri: String = ""
+    val uri: String = "",
+    /** Item 20: when an *inferred* "Listening to" status should disappear
+     *  (song start + length + a minute of scrobbling slack), epoch ms; 0 =
+     *  not inferred. */
+    val endsAtMs: Long = 0L
 )

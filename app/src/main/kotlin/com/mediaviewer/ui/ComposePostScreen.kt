@@ -26,6 +26,9 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FormatAlignCenter
+import androidx.compose.material.icons.automirrored.filled.FormatAlignLeft
+import androidx.compose.material.icons.automirrored.filled.FormatAlignRight
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Screenshot
@@ -140,7 +143,7 @@ import kotlinx.coroutines.withContext
 private const val POST_CHAR_LIMIT = 300
 private const val MAX_IMAGES = 10
 
-enum class ComposeMode { SINGLE, THREAD, TEXTSHOT, VIDEO, REVIEW }
+enum class ComposeMode { SINGLE, THREAD, TEXTSHOT, VIDEO, REVIEW, BLOG }
 
 /** The three mutually-exclusive "Adult Content" self-labels from Bluesky's
  *  own content-warning menu, in Bluesky's order. [value] is the exact
@@ -202,8 +205,28 @@ data class ComposePostDraft(
     // Bluesky self-label values picked via the composer's "Labels" popup
     // (e.g. "sexual", "nudity", "porn", "graphic-media"). Empty = no labels.
     // Applied to every post the draft produces (all posts of a thread).
-    val selfLabels: List<String> = emptyList()
+    val selfLabels: List<String> = emptyList(),
+    // Item 12: ComposeMode.BLOG — the whole blog (title, description, rows).
+    val blog: com.mediaviewer.model.BlogDraft? = null
 )
+
+/** Item 12: one live row of the blog editor. [id] is stable for the row's
+ *  whole life (keys its focus requester and list position). */
+private data class BlogEditorRow(
+    val id: Long,
+    val kind: com.mediaviewer.model.BlogRowKind = com.mediaviewer.model.BlogRowKind.TEXT,
+    val text: TextFieldValue = TextFieldValue(""),
+    val align: com.mediaviewer.model.LeafletAlign = com.mediaviewer.model.LeafletAlign.START,
+    val imageUri: Uri? = null,
+    val existingBlob: com.google.gson.JsonObject? = null,
+    val existingUrl: String? = null,
+    val imageWidth: Int = 0,
+    val imageHeight: Int = 0,
+    val alt: String = ""
+)
+
+private var blogRowIds = 0L
+private fun nextBlogRowId() = ++blogRowIds
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
@@ -225,6 +248,9 @@ fun ComposePostScreen(
     // from the media picker themselves. At most one of these is ever set.
     initialImageUri: Uri? = null,
     initialVideoUri: Uri? = null,
+    // Item 12: set when editing an existing blog — opens in Blog mode,
+    // filled in, with "Save" instead of "Post". Second = its labels.
+    editBlog: Pair<com.mediaviewer.model.BlogDraft, List<String>>? = null,
     onClose: () -> Unit,
     onSubmit: (ComposePostDraft) -> Unit
 ) {
@@ -241,13 +267,14 @@ fun ComposePostScreen(
     // the title being reviewed is far more the visual subject here than the
     // reviewer's own avatar is.
     val dominantColor = reviewTarget?.posterUrl?.let { rememberDominantColor(it) }
-        ?: selfProfile?.avatarUrl?.let { rememberDominantColor(it) } ?: dominantColor
+        ?: selfProfile?.avatarUrl?.let { rememberSelfProfileTint(it) } ?: dominantColor
 
     // ── Core state ───────────────────────────────────────────────────────
     var mode by remember {
         mutableStateOf(
             when {
                 reviewTarget != null -> ComposeMode.REVIEW
+                editBlog != null -> ComposeMode.BLOG
                 initialVideoUri != null -> ComposeMode.VIDEO
                 else -> ComposeMode.SINGLE
             }
@@ -304,7 +331,30 @@ fun ComposePostScreen(
     // Item 7/9: Blog is a standalone status toggle (not a full mode with its
     // own editor — the composer keeps using the same single-field editor
     // underneath it), separate from the Thread/Textshot mode switch below.
-    var isBlogMode by remember { mutableStateOf(false) }
+    var isBlogMode by remember { mutableStateOf(editBlog != null) }
+    // ── Item 12: blog editor state ──────────────────────────────────────
+    // Row 1 = title, row 2 = description/tagline, then the body rows, each
+    // a paragraph, a header (H1–H3) or an image, with its own alignment.
+    var blogTitle by remember { mutableStateOf(TextFieldValue(editBlog?.first?.title ?: "")) }
+    var blogDescription by remember { mutableStateOf(TextFieldValue(editBlog?.first?.description ?: "")) }
+    var blogRows by remember {
+        mutableStateOf(
+            editBlog?.first?.rows?.map { r ->
+                BlogEditorRow(
+                    id = nextBlogRowId(), kind = r.kind, text = TextFieldValue(r.text), align = r.align,
+                    imageUri = r.imageUri, existingBlob = r.existingBlob, existingUrl = r.existingUrl,
+                    imageWidth = r.imageWidth, imageHeight = r.imageHeight, alt = r.alt
+                )
+            }?.ifEmpty { null } ?: listOf(BlogEditorRow(nextBlogRowId()))
+        )
+    }
+    // Which row the buttons act on: -2 = title, -1 = description, 0+ = body row.
+    var blogSelected by remember { mutableStateOf(0) }
+    val blogFocusRequesters = remember { HashMap<Long, FocusRequester>() }
+    fun blogRequester(id: Long) = blogFocusRequesters.getOrPut(id) { FocusRequester() }
+    val blogTitleFocus = remember { FocusRequester() }
+    val blogDescriptionFocus = remember { FocusRequester() }
+    var blogFocusTarget by remember { mutableStateOf<Long?>(null) }
     // Item 3/6/7: whether the thread re-flows text across posts as a single
     // continuous stream (greedy-packing every post full before spilling into
     // the next) or leaves each post exactly as the person typed it. On by
@@ -317,8 +367,8 @@ fun ComposePostScreen(
     var autoFormat by remember { mutableStateOf(true) }
     // Bluesky self-labels: at most one of the three Adult Content options,
     // plus an independent Graphic Media toggle.
-    var adultLabel by remember { mutableStateOf<AdultContentLabel?>(null) }
-    var graphicMedia by remember { mutableStateOf(false) }
+    var adultLabel by remember { mutableStateOf(editBlog?.second?.let { l -> AdultContentLabel.values().firstOrNull { it.value in l } }) }
+    var graphicMedia by remember { mutableStateOf(editBlog?.second?.contains(GRAPHIC_MEDIA_LABEL) == true) }
     var labelsOpen by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
 
@@ -397,6 +447,12 @@ fun ComposePostScreen(
                 ComposeMode.SINGLE, ComposeMode.TEXTSHOT, ComposeMode.REVIEW -> singleFocusRequester.requestFocus()
                 ComposeMode.THREAD -> threadFocusRequesters.getOrNull(activeThreadIndex)?.requestFocus()
                 ComposeMode.VIDEO -> videoTitleFocusRequester.requestFocus()
+                ComposeMode.BLOG -> when (blogSelected) {
+                    -2 -> blogTitleFocus.requestFocus()
+                    -1 -> blogDescriptionFocus.requestFocus()
+                    else -> blogRows.getOrNull(blogSelected)?.takeIf { it.kind != com.mediaviewer.model.BlogRowKind.IMAGE }
+                        ?.let { blogRequester(it.id).requestFocus() }
+                }
             }
         } catch (_: IllegalStateException) {
             // Field not attached to the composition yet — nothing to focus.
@@ -513,11 +569,79 @@ fun ComposePostScreen(
     // back up later is just re-enabling that button.
     fun enableBlogMode() {
         if (mode == ComposeMode.TEXTSHOT) emojiTokensToShortcodes()
-        if (mode == ComposeMode.THREAD) {
-            singleText = TextFieldValue(threadPosts.joinToString("\n\n") { it.text.text.trimEnd() })
-        }
+        val seed = if (mode == ComposeMode.THREAD) threadPosts.joinToString("\n\n") { it.text.text.trimEnd() } else singleText.text
+        // Whatever was typed becomes the blog's body, one paragraph per
+        // blank-line-separated chunk; attached images follow it.
+        val paragraphs = seed.split(Regex("\n\\s*\n")).map { it.trim() }.filter { it.isNotEmpty() }
+        blogRows = (paragraphs.map { BlogEditorRow(nextBlogRowId(), text = TextFieldValue(it)) } +
+            images.map { BlogEditorRow(nextBlogRowId(), kind = com.mediaviewer.model.BlogRowKind.IMAGE, imageUri = it) })
+            .ifEmpty { listOf(BlogEditorRow(nextBlogRowId())) }
+        images = emptyList()
+        blogSelected = -2
         isBlogMode = true
-        mode = ComposeMode.SINGLE
+        mode = ComposeMode.BLOG
+        refocusTick++
+    }
+
+    /** Blog → plain post: the body text comes back as the post's text. */
+    fun disableBlogMode() {
+        val body = blogRows.filter { it.kind != com.mediaviewer.model.BlogRowKind.IMAGE }.joinToString("\n\n") { it.text.text.trim() }.trim()
+        val text = listOf(blogTitle.text.trim(), body).filter { it.isNotEmpty() }.joinToString("\n\n")
+        images = blogRows.mapNotNull { it.imageUri }.take(MAX_IMAGES)
+        isBlogMode = false
+        if (text.length > POST_CHAR_LIMIT) {
+            singleText = TextFieldValue(text)
+            switchToTextshot(TextFieldValue(text))
+        } else {
+            singleText = TextFieldValue(text, TextRange(text.length))
+            mode = ComposeMode.SINGLE
+        }
+    }
+
+    // ── Blog row editing ─────────────────────────────────────────────────
+    fun updateBlogRow(index: Int, transform: (BlogEditorRow) -> BlogEditorRow) {
+        blogRows = blogRows.toMutableList().also { list -> list.getOrNull(index)?.let { list[index] = transform(it) } }
+    }
+    /** Typing Enter in a body row starts a new paragraph row there. */
+    fun onBlogRowText(index: Int, value: TextFieldValue) {
+        val nl = value.text.indexOf('\n')
+        if (nl < 0) { updateBlogRow(index) { it.copy(text = value) }; return }
+        val before = value.text.substring(0, nl)
+        val after = value.text.substring(nl + 1)
+        val current = blogRows.getOrNull(index) ?: return
+        val newRow = BlogEditorRow(nextBlogRowId(), text = TextFieldValue(after, TextRange(0)), align = current.align)
+        blogRows = blogRows.toMutableList().also {
+            it[index] = current.copy(text = TextFieldValue(before, TextRange(before.length)))
+            it.add(index + 1, newRow)
+        }
+        blogSelected = index + 1
+        blogFocusTarget = newRow.id
+    }
+    /** An emptied text row goes away once you leave it (there's always at
+     *  least one row). */
+    fun pruneEmptyBlogRows(keepIndex: Int) {
+        val keepId = blogRows.getOrNull(keepIndex)?.id
+        val pruned = blogRows.filter { r ->
+            r.id == keepId || r.kind == com.mediaviewer.model.BlogRowKind.IMAGE || r.text.text.isNotEmpty()
+        }.ifEmpty { listOf(BlogEditorRow(nextBlogRowId())) }
+        if (pruned.size != blogRows.size) {
+            blogRows = pruned
+            blogSelected = pruned.indexOfFirst { it.id == keepId }.let { if (it < 0) blogSelected.coerceAtMost(pruned.lastIndex) else it }
+        }
+    }
+    fun cycleBlogAlignment() {
+        if (blogSelected < 0) return
+        updateBlogRow(blogSelected) {
+            it.copy(align = when (it.align) {
+                com.mediaviewer.model.LeafletAlign.START -> com.mediaviewer.model.LeafletAlign.CENTER
+                com.mediaviewer.model.LeafletAlign.CENTER -> com.mediaviewer.model.LeafletAlign.END
+                com.mediaviewer.model.LeafletAlign.END -> com.mediaviewer.model.LeafletAlign.START
+            })
+        }
+    }
+    fun setBlogRowKind(kind: com.mediaviewer.model.BlogRowKind) {
+        if (blogSelected < 0) return
+        updateBlogRow(blogSelected) { if (it.kind == com.mediaviewer.model.BlogRowKind.IMAGE) it else it.copy(kind = kind) }
     }
 
     // Tapping an emoji in the menu drops it into the Textshot text at the caret
@@ -575,6 +699,16 @@ fun ComposePostScreen(
             images = (images + uris.take(room)).take(MAX_IMAGES)
         }
     }
+    // Item 12: blog images (no videos) land right after the selected row,
+    // in picked order.
+    val blogImagePicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(MAX_IMAGES)) { uris ->
+        val picked = uris.filterNot { isVideoUri(context, it) }
+        if (picked.isEmpty()) return@rememberLauncherForActivityResult
+        val at = (blogSelected + 1).coerceIn(0, blogRows.size)
+        val newRows = picked.map { BlogEditorRow(nextBlogRowId(), kind = com.mediaviewer.model.BlogRowKind.IMAGE, imageUri = it) }
+        blogRows = blogRows.toMutableList().also { it.addAll(at, newRows) }
+        blogSelected = at + newRows.size - 1
+    }
     val thumbnailPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) videoThumbUri = uri
     }
@@ -594,6 +728,11 @@ fun ComposePostScreen(
         // unlimited treatment as Textshot above.
         ComposeMode.REVIEW -> singleText.text.length to Int.MAX_VALUE
         ComposeMode.SINGLE -> singleText.text.length to POST_CHAR_LIMIT
+        ComposeMode.BLOG -> when (blogSelected) {
+            -2 -> blogTitle.text.length to 300
+            -1 -> blogDescription.text.length to 3000
+            else -> (blogRows.getOrNull(blogSelected)?.text?.text?.length ?: 0) to Int.MAX_VALUE
+        }
     }
 
     val canPost = when (mode) {
@@ -606,6 +745,8 @@ fun ComposePostScreen(
         // a rating and optionally type out a review").
         ComposeMode.REVIEW -> reviewTarget != null && reviewRating > 0
         ComposeMode.SINGLE -> singleText.text.isNotBlank() && singleText.text.length <= POST_CHAR_LIMIT
+        ComposeMode.BLOG -> blogTitle.text.isNotBlank() && blogTitle.text.length <= 300 &&
+            blogRows.any { it.kind == com.mediaviewer.model.BlogRowKind.IMAGE || it.text.text.isNotBlank() }
     }
 
     fun handlePost() {
@@ -636,10 +777,26 @@ fun ComposePostScreen(
                 mode = ComposeMode.SINGLE,
                 posts = listOf(ThreadPostDraft(text = singleText.text, images = images, video = null))
             )
+            ComposeMode.BLOG -> ComposePostDraft(
+                mode = ComposeMode.BLOG,
+                blog = com.mediaviewer.model.BlogDraft(
+                    title = blogTitle.text.trim(),
+                    description = blogDescription.text.trim(),
+                    rows = blogRows.map { r ->
+                        com.mediaviewer.model.BlogRowDraft(
+                            kind = r.kind, text = r.text.text.trimEnd(), align = r.align,
+                            imageUri = r.imageUri, existingBlob = r.existingBlob, existingUrl = r.existingUrl,
+                            imageWidth = r.imageWidth, imageHeight = r.imageHeight, alt = r.alt
+                        )
+                    },
+                    editingUri = editBlog?.first?.editingUri
+                )
+            )
         }
         val selfLabels = listOfNotNull(adultLabel?.value, if (graphicMedia) GRAPHIC_MEDIA_LABEL else null)
         // Reviews are Popfeed records, not Bluesky posts — labels don't apply.
         onSubmit(if (mode == ComposeMode.REVIEW || selfLabels.isEmpty()) draft else draft.copy(selfLabels = selfLabels))
+        focusManager.clearFocus()
     }
 
     // Item 9: this is now always a plain label — Thread/Textshot are no
@@ -647,6 +804,7 @@ fun ComposePostScreen(
     // only from the dedicated bottom-bar buttons.
     val statusLabel = when {
         mode == ComposeMode.REVIEW -> "Review"
+        mode == ComposeMode.BLOG -> if (editBlog != null) "Editing Blog" else "Blog"
         mode == ComposeMode.VIDEO -> "Video"
         mode == ComposeMode.THREAD -> "Thread"
         mode == ComposeMode.TEXTSHOT -> "Textshot"
@@ -730,6 +888,7 @@ fun ComposePostScreen(
                     )
                     PostButton(
                         enabled = canPost && !submitting, submitting = submitting,
+                        label = if (editBlog != null && mode == ComposeMode.BLOG) "Save" else "Post",
                         liquidGlass = liquidGlass, tint = dominantColor,
                         modifier = Modifier.align(Alignment.CenterEnd), onClick = ::handlePost
                     )
@@ -936,6 +1095,83 @@ fun ComposePostScreen(
                             ImageGrid(images = images, onRemove = { uri -> images = images - uri })
                         }
                     }
+
+                    // Item 12: Blog — title, then description, then the body
+                    // rows. Tapping a row selects it for the bottom bar's
+                    // header/alignment/image buttons.
+                    ComposeMode.BLOG -> {
+                        LaunchedEffect(blogFocusTarget) {
+                            val id = blogFocusTarget ?: return@LaunchedEffect
+                            withFrameNanos { }
+                            runCatching { blogRequester(id).requestFocus() }
+                            blogFocusTarget = null
+                        }
+                        GrowingTextField(
+                            value = blogTitle,
+                            onValueChange = { v -> blogTitle = if (v.text.contains('\n')) v.copy(text = v.text.replace("\n", " ")) else v },
+                            placeholder = "Title",
+                            onFocus = { blogSelected = -2 },
+                            focusRequester = blogTitleFocus,
+                            textStyle = TextStyle(color = Color.White, fontSize = 24.sp, lineHeight = 30.sp, fontWeight = FontWeight.Bold)
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        GrowingTextField(
+                            value = blogDescription,
+                            onValueChange = { blogDescription = it },
+                            placeholder = "Description / tagline",
+                            onFocus = { blogSelected = -1 },
+                            focusRequester = blogDescriptionFocus,
+                            textStyle = TextStyle(color = Color.White.copy(alpha = 0.75f), fontSize = 15.sp, lineHeight = 21.sp, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
+                        )
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = Color.White.copy(alpha = 0.12f))
+                        blogRows.forEachIndexed { index, row ->
+                            androidx.compose.runtime.key(row.id) {
+                                val selected = index == blogSelected
+                                val textAlign = when (row.align) {
+                                    com.mediaviewer.model.LeafletAlign.START -> androidx.compose.ui.text.style.TextAlign.Start
+                                    com.mediaviewer.model.LeafletAlign.CENTER -> androidx.compose.ui.text.style.TextAlign.Center
+                                    com.mediaviewer.model.LeafletAlign.END -> androidx.compose.ui.text.style.TextAlign.End
+                                }
+                                val rowShape = RoundedCornerShape(10.dp)
+                                Box(
+                                    Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                                        .clip(rowShape)
+                                        .then(if (selected) Modifier.background(Color.White.copy(alpha = 0.05f)) else Modifier)
+                                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                                ) {
+                                    if (row.kind == com.mediaviewer.model.BlogRowKind.IMAGE) {
+                                        BlogEditorImage(
+                                            model = row.imageUri ?: row.existingUrl,
+                                            align = row.align, selected = selected,
+                                            onSelect = { focusManager.clearFocus(); blogSelected = index },
+                                            onRemove = {
+                                                blogRows = blogRows.filterNot { it.id == row.id }.ifEmpty { listOf(BlogEditorRow(nextBlogRowId())) }
+                                                blogSelected = blogSelected.coerceAtMost(blogRows.lastIndex)
+                                            }
+                                        )
+                                    } else {
+                                        val style = when (row.kind) {
+                                            com.mediaviewer.model.BlogRowKind.H1 -> TextStyle(color = Color.White, fontSize = 24.sp, lineHeight = 30.sp, fontWeight = FontWeight.Bold, textAlign = textAlign)
+                                            com.mediaviewer.model.BlogRowKind.H2 -> TextStyle(color = Color.White, fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.Bold, textAlign = textAlign)
+                                            com.mediaviewer.model.BlogRowKind.H3 -> TextStyle(color = Color.White, fontSize = 17.sp, lineHeight = 23.sp, fontWeight = FontWeight.SemiBold, textAlign = textAlign)
+                                            else -> TextStyle(color = Color.White, fontSize = 16.sp, lineHeight = 22.sp, textAlign = textAlign)
+                                        }
+                                        GrowingTextField(
+                                            value = row.text,
+                                            onValueChange = { onBlogRowText(index, it) },
+                                            placeholder = if (index == 0 && blogRows.size == 1) "Write your blog…" else "",
+                                            onFocus = {
+                                                if (blogSelected != index) pruneEmptyBlogRows(index)
+                                                blogSelected = blogRows.indexOfFirst { it.id == row.id }.coerceAtLeast(0)
+                                            },
+                                            focusRequester = blogRequester(row.id),
+                                            textStyle = style
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Room for the floating bottom bar so the last field/image
@@ -982,7 +1218,26 @@ fun ComposePostScreen(
                         )
                     }
                 } else {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                        // Item 12: header-type buttons for the selected blog
+                        // row, as short as the counter beside them.
+                        if (mode == ComposeMode.BLOG) {
+                            val selectedKind = blogRows.getOrNull(blogSelected)?.kind
+                            val rowEditable = blogSelected >= 0 && selectedKind != com.mediaviewer.model.BlogRowKind.IMAGE
+                            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                for ((label, kind) in listOf(
+                                    "Text" to com.mediaviewer.model.BlogRowKind.TEXT,
+                                    "H1" to com.mediaviewer.model.BlogRowKind.H1,
+                                    "H2" to com.mediaviewer.model.BlogRowKind.H2,
+                                    "H3" to com.mediaviewer.model.BlogRowKind.H3
+                                )) {
+                                    BlogKindChip(
+                                        label = label, selected = rowEditable && selectedKind == kind, enabled = rowEditable,
+                                        tint = dominantColor, onClick = { setBlogRowKind(kind) }
+                                    )
+                                }
+                            }
+                        }
                         val (used, limit) = activeBudget
                         val overLimit = used > limit
                         Text(
@@ -1004,12 +1259,16 @@ fun ComposePostScreen(
                             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically
                         ) {
                             GlassCircleButton(
-                                icon = Icons.Default.Image, contentDescription = "Attach image or video",
+                                icon = Icons.Default.Image, contentDescription = if (mode == ComposeMode.BLOG) "Add image" else "Attach image or video",
                                 liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop, size = 40.dp,
                                 enabled = mode != ComposeMode.TEXTSHOT && mode != ComposeMode.REVIEW &&
                                     (mode != ComposeMode.THREAD || threadPosts.getOrNull(activeThreadIndex)?.let { it.video == null && it.images.size < MAX_IMAGES } != false),
                                 onClick = {
-                                    mediaPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                                    if (mode == ComposeMode.BLOG) {
+                                        blogImagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                    } else {
+                                        mediaPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                                    }
                                 }
                             )
                             // Item 2: Blog and Textshot are text buttons, not
@@ -1021,14 +1280,15 @@ fun ComposePostScreen(
                             TextToggleButton(
                                 label = "Blog",
                                 liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
-                                enabled = false,
-                                selected = false,
-                                onClick = {}
+                                // Editing an existing blog stays a blog.
+                                enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW && editBlog == null,
+                                selected = mode == ComposeMode.BLOG,
+                                onClick = { if (mode == ComposeMode.BLOG) disableBlogMode() else enableBlogMode() }
                             )
                             TextToggleButton(
                                 label = "Textshot",
                                 liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
-                                enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW,
+                                enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW && mode != ComposeMode.BLOG,
                                 selected = mode == ComposeMode.TEXTSHOT,
                                 onClick = {
                                     if (mode == ComposeMode.TEXTSHOT) {
@@ -1089,6 +1349,21 @@ fun ComposePostScreen(
                                 contentDescription = if (emojiPanelOpen) "Show keyboard" else "Open emoji menu",
                                 liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop, size = 36.dp,
                                 onClick = { toggleEmojiPanel() }
+                            )
+                        } else if (mode == ComposeMode.BLOG) {
+                            // Item 12: in Blog mode the new-thread button is
+                            // the selected row's alignment: left → centre → right.
+                            val align = blogRows.getOrNull(blogSelected)?.align ?: com.mediaviewer.model.LeafletAlign.START
+                            GlassCircleButton(
+                                icon = when (align) {
+                                    com.mediaviewer.model.LeafletAlign.START -> Icons.AutoMirrored.Filled.FormatAlignLeft
+                                    com.mediaviewer.model.LeafletAlign.CENTER -> Icons.Default.FormatAlignCenter
+                                    com.mediaviewer.model.LeafletAlign.END -> Icons.AutoMirrored.Filled.FormatAlignRight
+                                },
+                                contentDescription = "Change alignment",
+                                liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop, size = 36.dp,
+                                enabled = blogSelected >= 0,
+                                onClick = { cycleBlogAlignment() }
                             )
                         } else {
                             GlassCircleButton(
@@ -1463,6 +1738,7 @@ private fun StatusBubble(
 @Composable
 private fun PostButton(
     enabled: Boolean, submitting: Boolean,
+    label: String = "Post",
     liquidGlass: Boolean, tint: Color,
     modifier: Modifier = Modifier, onClick: () -> Unit
 ) {
@@ -1477,7 +1753,7 @@ private fun PostButton(
                 CircularProgressIndicator(Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
             } else {
                 Text(
-                    "Post", color = Color.White.copy(alpha = if (enabled) 1f else 0.4f),
+                    label, color = Color.White.copy(alpha = if (enabled) 1f else 0.4f),
                     fontSize = 13.sp, fontWeight = FontWeight.SemiBold
                 )
             }
@@ -1487,6 +1763,51 @@ private fun PostButton(
         LiquidGlassSurface(clickMod, shape = shape, tint = tint) { Content() }
     } else {
         Box(clickMod.background(Color.White.copy(0.10f))) { Content() }
+    }
+}
+
+/** Item 12: the short header-type chips beside the blog editor's counter. */
+@Composable
+private fun BlogKindChip(label: String, selected: Boolean, enabled: Boolean, tint: Color, onClick: () -> Unit) {
+    val tap = rememberHapticTap()
+    val shape = RoundedCornerShape(8.dp)
+    Box(
+        Modifier.height(20.dp).clip(shape)
+            .background(if (selected) tint.copy(alpha = 0.85f) else Color.White.copy(alpha = if (enabled) 0.12f else 0.05f))
+            .clickable(enabled = enabled) { tap(); onClick() }
+            .padding(horizontal = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(label, color = Color.White.copy(alpha = if (enabled) 1f else 0.35f), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, lineHeight = 11.sp)
+    }
+}
+
+/** Item 12: an image row in the blog editor — shown at its own aspect
+ *  ratio (transparent PNGs stay transparent), aligned like the row, with a
+ *  remove button while selected. */
+@Composable
+private fun BlogEditorImage(model: Any?, align: com.mediaviewer.model.LeafletAlign, selected: Boolean, onSelect: () -> Unit, onRemove: () -> Unit) {
+    val tap = rememberHapticTap()
+    val alignment = when (align) {
+        com.mediaviewer.model.LeafletAlign.START -> Alignment.CenterStart
+        com.mediaviewer.model.LeafletAlign.CENTER -> Alignment.Center
+        com.mediaviewer.model.LeafletAlign.END -> Alignment.CenterEnd
+    }
+    Box(Modifier.fillMaxWidth(), contentAlignment = alignment) {
+        Box(
+            Modifier.fillMaxWidth(0.92f).clip(RoundedCornerShape(12.dp))
+                .then(if (selected) Modifier.border(2.dp, Color.White.copy(alpha = 0.7f), RoundedCornerShape(12.dp)) else Modifier)
+                .clickable { tap(); onSelect() }
+        ) {
+            AsyncImage(model = model, contentDescription = null, contentScale = ContentScale.FillWidth, modifier = Modifier.fillMaxWidth())
+            if (selected) {
+                Box(
+                    Modifier.align(Alignment.TopEnd).padding(6.dp).size(28.dp).clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.6f)).clickable { tap(); onRemove() },
+                    contentAlignment = Alignment.Center
+                ) { Icon(Icons.Default.Close, contentDescription = "Remove image", tint = Color.White, modifier = Modifier.size(16.dp)) }
+            }
+        }
     }
 }
 
@@ -1521,8 +1842,11 @@ private fun GrowingTextField(
     visualTransformation: VisualTransformation = VisualTransformation.None,
     // Textshot mode only: draws custom emoji (each stored as one private-use
     // character) as pictures over their spot in the text.
-    emojiStore: EmojiStore? = null
+    emojiStore: EmojiStore? = null,
+    // Item 12: blog rows (title/description/headers) use their own style.
+    textStyle: TextStyle? = null
 ) {
+    val fieldStyle = textStyle ?: TextStyle(color = Color.White, fontSize = 16.sp, lineHeight = 22.sp)
     // The scroll area now extends behind the floating bottom bar, so the
     // default "scroll the caret into view" would park it right under the
     // buttons. Ask for the caret's rect plus the bar's height instead.
@@ -1544,7 +1868,7 @@ private fun GrowingTextField(
     Box(Modifier.fillMaxWidth().defaultMinSize(minHeight = 28.dp)) {
         BasicTextField(
             value = value, onValueChange = onValueChange,
-            textStyle = TextStyle(color = Color.White, fontSize = 16.sp, lineHeight = 22.sp),
+            textStyle = fieldStyle,
             cursorBrush = SolidColor(Color.White),
             visualTransformation = effectiveTransformation,
             onTextLayout = { layout = it },
@@ -1571,8 +1895,9 @@ private fun GrowingTextField(
                 )
             }
         }
-        if (value.text.isEmpty()) {
-            Text(placeholder, color = DimGray, fontSize = 16.sp)
+        if (value.text.isEmpty() && placeholder.isNotEmpty()) {
+            Text(placeholder, color = DimGray, fontSize = fieldStyle.fontSize, fontWeight = fieldStyle.fontWeight,
+                textAlign = fieldStyle.textAlign, modifier = Modifier.fillMaxWidth())
         }
     }
 }

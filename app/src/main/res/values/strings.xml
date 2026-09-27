@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">RaccNet Lite</string>
+    <string name="app_name">Stellar</string>
 
     <!-- Live Link widget -->
     <string name="widget_live_link_description">Toggle your Bluesky Live Now badge for Twitch/YouTube</string>

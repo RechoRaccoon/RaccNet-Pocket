@@ -69,6 +69,38 @@ class RockskyRepository {
             }
         }
 
+    /**
+     * Item 20: Rocksky's live now-playing endpoints rarely answer, so this
+     * works it out from the scrobble history instead: take the most recent
+     * scrobble, when it started and how long the song is — if now is still
+     * inside that window (plus up to a minute after the song ends, to allow
+     * for scrobbling delay), treat it as what the person is listening to.
+     * Null when the latest scrobble doesn't carry both a time and a length.
+     */
+    suspend fun inferNowPlaying(did: String): RockskyTrack? = withContext(Dispatchers.IO) {
+        runCatching {
+            val resp = api.getScrobbles(did, 1, 0)
+            val dto = resp.body()?.scrobbles?.firstOrNull()
+                ?.takeIf { d -> d.uri?.startsWith("at://$did/") != false } ?: return@runCatching null
+            val startMs = parseTimeMs(dto.date ?: dto.createdAt) ?: return@runCatching null
+            var lengthMs = dto.duration ?: dto.track?.duration ?: return@runCatching null
+            if (lengthMs in 1L..10_000L) lengthMs *= 1000L // reported in seconds
+            if (lengthMs <= 0) return@runCatching null
+            val endsAt = startMs + lengthMs + 60_000L
+            val now = System.currentTimeMillis()
+            if (now < startMs - 60_000L || now > endsAt) return@runCatching null
+            dto.toModel()?.copy(endsAtMs = endsAt)
+        }.getOrNull()
+    }
+
+    private fun parseTimeMs(raw: String?): Long? {
+        if (raw.isNullOrBlank()) return null
+        raw.toLongOrNull()?.let { n -> return if (n < 10_000_000_000L) n * 1000 else n }
+        return runCatching { java.time.Instant.parse(raw).toEpochMilli() }.getOrNull()
+            ?: runCatching { java.time.OffsetDateTime.parse(raw).toInstant().toEpochMilli() }.getOrNull()
+            ?: runCatching { java.time.LocalDateTime.parse(raw).toInstant(java.time.ZoneOffset.UTC).toEpochMilli() }.getOrNull()
+    }
+
     /** [did]'s live now-playing track, or null if nothing is currently
      *  playing (or the account has no scrobbler connected at all) — the
      *  "Listening to ..." bio line. Tries the general player endpoint

@@ -52,13 +52,14 @@ object VrmGlbPatcher {
         val vertexColorsStripped: Int = 0,
         val texturesDetached: Int = 0,
         val unlitToLit: Int = 0,
-        val morphNormalsStripped: Int = 0
+        val morphNormalsStripped: Int = 0,
+        val morphWeightsAdded: Int = 0
     ) {
-        val changedAnything get() = unlitMaterials + metallicFixed + vertexColorsStripped + texturesDetached + unlitToLit + morphNormalsStripped > 0
+        val changedAnything get() = unlitMaterials + metallicFixed + vertexColorsStripped + texturesDetached + unlitToLit + morphNormalsStripped + morphWeightsAdded > 0
         override fun toString() =
             "$unlitMaterials made unlit, $unlitToLit unlit→lit, $metallicFixed metallic fixed, " +
                 "$vertexColorsStripped vertex-color prims stripped, $texturesDetached texture refs taken over, " +
-                "$morphNormalsStripped morph normal/tangent sets dropped"
+                "$morphNormalsStripped morph normal/tangent sets dropped, $morphWeightsAdded meshes given morph weights"
     }
 
     private val TEXTURE_KEYS = listOf("normalTexture", "occlusionTexture", "emissiveTexture")
@@ -209,9 +210,37 @@ object VrmGlbPatcher {
 
         var stripped = 0
         var morphNormalsStripped = 0
+        var morphWeightsAdded = 0
         root.optJSONArray("meshes")?.let { meshes ->
             for (m in 0 until meshes.length()) {
-                val prims = meshes.optJSONObject(m)?.optJSONArray("primitives") ?: continue
+                val mesh = meshes.optJSONObject(m) ?: continue
+                val prims = mesh.optJSONArray("primitives") ?: continue
+                // THE lighting bug ("light hits the back of the model"):
+                // gltfio only builds the per-morph-target tangent frames
+                // (the normals Filament blends while a blendshape is active)
+                // for meshes that declare default `weights` — see
+                // ResourceLoader::computeTangents, `if (0 == mesh.weights_count)
+                // continue;`. VRM exporters usually omit `weights` (it's
+                // optional in glTF), so those frames were left all-zero, and
+                // Filament decodes a zero quaternion as the normal (0,0,1)
+                // in MODEL space. The moment tracking drove any expression
+                // (always — blink, mouth, brows) every vertex of the face/body
+                // mesh had its normal dragged toward model +Z. VRM 0.x models
+                // face -Z, so +Z is their BACK: the lights appeared to hit
+                // the back of the avatar and the whole front went dark.
+                // Declaring zero default weights makes gltfio compute proper
+                // frames for every target.
+                var maxTargets = 0
+                for (p in 0 until prims.length()) {
+                    maxTargets = maxOf(maxTargets, prims.optJSONObject(p)?.optJSONArray("targets")?.length() ?: 0)
+                }
+                val existing = mesh.optJSONArray("weights")
+                if (maxTargets > 0 && (existing == null || existing.length() != maxTargets)) {
+                    val w = JSONArray()
+                    for (i in 0 until maxTargets) w.put(existing?.optDouble(i, 0.0)?.takeIf { !it.isNaN() } ?: 0.0)
+                    mesh.put("weights", w)
+                    morphWeightsAdded++
+                }
                 for (p in 0 until prims.length()) {
                     val prim = prims.optJSONObject(p) ?: continue
                     var touched = false
@@ -243,7 +272,7 @@ object VrmGlbPatcher {
                 }
             }
         }
-        return Stats(unlit, metallic, stripped, detached, litFromUnlit, morphNormalsStripped)
+        return Stats(unlit, metallic, stripped, detached, litFromUnlit, morphNormalsStripped, morphWeightsAdded)
     }
 
     private fun addExtensionUsed(root: JSONObject, name: String) {

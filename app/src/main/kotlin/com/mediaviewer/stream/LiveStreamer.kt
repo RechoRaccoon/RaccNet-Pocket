@@ -66,6 +66,8 @@ class LiveStreamer(
     @Volatile var state = State.IDLE
         private set
     @Volatile var micMuted = false
+    /** VRM settings' "Voice pitch" (semitones, 0 = natural voice). */
+    @Volatile var pitchSemitones = 0f
 
     /** Encoder input surface; valid between a successful [start] and [stop]. */
     var inputSurface: Surface? = null
@@ -300,6 +302,7 @@ class LiveStreamer(
         val record = audioRecord
         val mono = ShortArray(1024)
         val stereo = ByteArray(1024 * 4)
+        val shifter = com.mediaviewer.util.PitchShifter(cfg.sampleRate)
         val info = MediaCodec.BufferInfo()
         var samples = 0L
         val t0 = System.nanoTime() / 1000
@@ -309,6 +312,8 @@ class LiveStreamer(
                 if (record != null) {
                     n = record.read(mono, 0, 1024)
                     if (n <= 0) { Thread.sleep(5); continue }
+                    shifter.semitones = pitchSemitones
+                    shifter.process(mono, n)
                 } else {
                     // No mic: pace silence in real time.
                     val due = t0 + samples * 1_000_000L / cfg.sampleRate

@@ -125,6 +125,8 @@ object ImageLoading {
 
     /** Bluesky's image CDN for a blob: resized, cached at the edge, and far
      *  faster than pulling the original from the owner's PDS. */
-    fun bskyCdnUrl(did: String, cid: String, wide: Boolean): String =
-        "https://cdn.bsky.app/img/${if (wide) "feed_fullsize" else "feed_thumbnail"}/plain/$did/$cid@jpeg"
+    fun bskyCdnUrl(did: String, cid: String, wide: Boolean, keepAlpha: Boolean = false): String =
+        // @jpeg flattens transparency onto white — PNG/WebP blobs (which may
+        // be transparent) are asked for as @png instead.
+        "https://cdn.bsky.app/img/${if (wide) "feed_fullsize" else "feed_thumbnail"}/plain/$did/$cid@${if (keepAlpha) "png" else "jpeg"}"
 }
