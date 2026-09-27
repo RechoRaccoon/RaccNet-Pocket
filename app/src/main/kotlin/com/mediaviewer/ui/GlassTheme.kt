@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import coil.request.ImageRequest
+import kotlinx.coroutines.async
 import com.mediaviewer.ui.theme.DimGray
 import com.mediaviewer.util.rememberHapticTap
 
@@ -117,34 +118,174 @@ private val dominantColorCache = object : LinkedHashMap<String, Color>(64, 0.75f
 
 private fun cachedDominantColor(url: String): Color? = synchronized(dominantColorCache) { dominantColorCache[url] }
 
-/** The signed-in account's banner, set once from AppRoot, so every
- *  "your color" surface outside the profile page can use the exact same
- *  banner/avatar blend the profile page itself uses. */
+/** The signed-in account, set from AppRoot, so every "your color" surface
+ *  outside the profile page can use the exact same banner/avatar blend the
+ *  profile page itself uses. [loaded] = the profile (and so its banner, or
+ *  the lack of one) is actually known yet. */
 object SelfProfileColors {
     var bannerUrl by mutableStateOf<String?>(null)
+    var did by mutableStateOf<String?>(null)
+    var loaded by mutableStateOf(false)
+}
+
+private val PlaceholderGrey = Color(0xFF2A2A2E)
+
+/** A profile's two source colors: its banner's (the avatar's again when it
+ *  has no banner) and its avatar's. [blended] is the profile's UI color. */
+data class ProfileColors(val banner: Color, val avatar: Color) {
+    val blended: Color get() = Color(
+        red = (banner.red + avatar.red) / 2f,
+        green = (banner.green + avatar.green) / 2f,
+        blue = (banner.blue + avatar.blue) / 2f,
+        alpha = 1f
+    )
+}
+
+/**
+ * Every account's real profile colors, remembered by DID — in memory and on
+ * disk — once they've been worked out from the real banner + avatar.
+ *
+ * Why: a profile's color needs its banner, and the banner only arrives with
+ * the profile itself. Until then everything used to fall back to the avatar
+ * alone (the old formula), so each profile opened in a slightly-off color
+ * and then shifted to the real one; imageless blog cards never got the real
+ * one at all. Now the last real color is used straight away, and accounts
+ * seen for the first time get their banner looked up ([bannerResolver]).
+ */
+object ProfileColorStore {
+    private var prefs: android.content.SharedPreferences? = null
+    private val mem = HashMap<String, ProfileColors>()
+    private val banners = HashMap<String, String?>()
+    private val inFlight = HashMap<String, kotlinx.coroutines.Deferred<String?>>()
+
+    /** Looks up an account's banner URL (null = it has none); a failure
+     *  means "unknown". Set once from AppRoot. */
+    @Volatile var bannerResolver: (suspend (did: String) -> Result<String?>)? = null
+
+    fun init(context: android.content.Context) {
+        if (prefs == null) prefs = context.applicationContext.getSharedPreferences("profile_colors", android.content.Context.MODE_PRIVATE)
+    }
+
+    fun get(did: String): ProfileColors? {
+        if (did.isBlank()) return null
+        synchronized(mem) { mem[did]?.let { return it } }
+        val p = prefs ?: return null
+        val b = p.getInt("b:$did", 0); val a = p.getInt("a:$did", 0)
+        if (b == 0 || a == 0) return null
+        return ProfileColors(Color(b), Color(a)).also { synchronized(mem) { mem[did] = it } }
+    }
+
+    fun put(did: String, colors: ProfileColors) {
+        if (did.isBlank()) return
+        val old = synchronized(mem) { mem.put(did, colors) }
+        if (old == colors) return
+        prefs?.edit()?.putInt("b:$did", colors.banner.toArgb())?.putInt("a:$did", colors.avatar.toArgb())?.apply()
+    }
+
+    fun noteBanner(did: String, bannerUrl: String?) {
+        if (did.isNotBlank()) synchronized(banners) { banners[did] = bannerUrl }
+    }
+
+    /** The account's banner: known already, or looked up once (shared by
+     *  every card asking at the same time). Throws if it can't be found. */
+    suspend fun banner(did: String): String? {
+        synchronized(banners) { if (banners.containsKey(did)) return banners[did] }
+        val resolver = bannerResolver ?: error("no resolver")
+        val job = synchronized(inFlight) {
+            inFlight.getOrPut(did) {
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).async {
+                    resolver(did).getOrThrow()
+                }
+            }
+        }
+        return try {
+            job.await().also { noteBanner(did, it) }
+        } finally {
+            synchronized(inFlight) { if (inFlight[did] === job) inFlight.remove(did) }
+        }
+    }
+}
+
+/** Works out (and remembers) a profile's real colors from its banner and
+ *  avatar. [bannerKnown] false = the banner isn't known yet: it's looked
+ *  up first (when [resolve]), and if it can't be, the remembered colors —
+ *  or, for an account never seen before, the avatar alone — are returned
+ *  without being stored. */
+suspend fun fetchProfileColors(
+    context: android.content.Context,
+    did: String,
+    avatarUrl: String?,
+    bannerUrl: String?,
+    bannerKnown: Boolean,
+    resolve: Boolean = true
+): ProfileColors {
+    var banner = bannerUrl
+    var known = bannerKnown
+    if (known) ProfileColorStore.noteBanner(did, bannerUrl)
+    else if (resolve && did.isNotBlank()) {
+        runCatching { ProfileColorStore.banner(did) }.onSuccess { banner = it; known = true }
+    }
+    val avatar = if (avatarUrl.isNullOrBlank()) PlaceholderGrey else fetchDominantColor(context, avatarUrl)
+    if (!known) return ProfileColorStore.get(did) ?: ProfileColors(avatar, avatar)
+    val bannerColor = if (banner.isNullOrBlank()) avatar else fetchDominantColor(context, banner!!)
+    return ProfileColors(bannerColor, avatar).also { ProfileColorStore.put(did, it) }
+}
+
+/** Composable form of [fetchProfileColors]: starts on the remembered real
+ *  colors (or, if both images were already sampled this session, the exact
+ *  ones), never on the avatar-only guess when anything better is known. */
+@Composable
+fun rememberProfileColors(
+    did: String,
+    avatarUrl: String?,
+    bannerUrl: String? = null,
+    bannerKnown: Boolean = false,
+    resolve: Boolean = true
+): ProfileColors {
+    val context = LocalContext.current
+    var colors by remember(did) {
+        mutableStateOf(run {
+            val a = avatarUrl?.takeIf { it.isNotBlank() }?.let { cachedDominantColor(it) }
+            val exact = if (bannerKnown && a != null) {
+                val b = if (bannerUrl.isNullOrBlank()) a else cachedDominantColor(bannerUrl)
+                b?.let { ProfileColors(it, a) }
+            } else null
+            exact ?: ProfileColorStore.get(did) ?: ProfileColors(a ?: PlaceholderGrey, a ?: PlaceholderGrey)
+        })
+    }
+    LaunchedEffect(did, avatarUrl, bannerUrl, bannerKnown) {
+        colors = fetchProfileColors(context, did, avatarUrl, bannerUrl, bannerKnown, resolve)
+    }
+    return colors
 }
 
 /** A profile's UI color — identical to ProfileOverlay's own: the average of
  *  the banner's dominant color (avatar when there's no banner) and the
- *  avatar's. */
+ *  avatar's. Prefer [rememberProfileColors] when the DID is known. */
 @Composable
 fun rememberProfileTint(bannerUrl: String?, avatarUrl: String?): Color {
     val bannerColor = rememberDominantColor(bannerUrl ?: avatarUrl ?: "")
     val avatarColor = rememberDominantColor(avatarUrl ?: "")
-    return remember(bannerColor, avatarColor) {
-        Color(
-            red = (bannerColor.red + avatarColor.red) / 2f,
-            green = (bannerColor.green + avatarColor.green) / 2f,
-            blue = (bannerColor.blue + avatarColor.blue) / 2f,
-            alpha = 1f
-        )
-    }
+    return remember(bannerColor, avatarColor) { ProfileColors(bannerColor, avatarColor).blended }
 }
+
+/** Any account's UI color from just its DID + avatar (a blog or review
+ *  card, say): its real banner/avatar blend, looked up if needed. */
+@Composable
+fun rememberAuthorProfileTint(did: String, avatarUrl: String?): Color =
+    rememberProfileColors(did, avatarUrl).blended
 
 /** The signed-in user's own color, matching their profile page exactly. */
 @Composable
-fun rememberSelfProfileTint(selfAvatarUrl: String): Color =
-    rememberProfileTint(SelfProfileColors.bannerUrl, selfAvatarUrl)
+fun rememberSelfProfileTint(selfAvatarUrl: String): Color {
+    val did = SelfProfileColors.did
+    return if (!did.isNullOrBlank()) {
+        rememberProfileColors(
+            did, selfAvatarUrl, SelfProfileColors.bannerUrl,
+            bannerKnown = SelfProfileColors.loaded, resolve = false
+        ).blended
+    } else rememberProfileTint(SelfProfileColors.bannerUrl, selfAvatarUrl)
+}
 
 /** Samples a low-res copy of the given media URL and returns its average
  *  color. This is the "color of the post" used to tint that post's

@@ -674,6 +674,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // lets startHubBackgroundWarmup's own retryWithBackoff loop (below)
     // cover this the same reliable way it already covers Mutuals/Reviews/
     // Blogs/Livestreams, independent of navigation entirely.
+    /** An account's banner URL (null = it has none), for working out its
+     *  profile color where only its DID and avatar are known — see
+     *  ProfileColorStore. A failed lookup is a failure, not "no banner". */
+    suspend fun fetchBannerUrl(did: String): Result<String?> {
+        if (bskyToken.isBlank()) return Result.failure(IllegalStateException("not signed in"))
+        var result = bskyRepo.getFullProfile(bskyToken, did)
+        if (result.isFailure && refreshBskyTokenIfPossible()) result = bskyRepo.getFullProfile(bskyToken, did)
+        return result.map { it.bannerUrl }
+    }
+
     private suspend fun loadSelfProfileSuspend() {
         if (!_bskyLoggedIn.value) return
         bskyRepo.getFullProfile(bskyToken, _bskyDid.value).onSuccess {

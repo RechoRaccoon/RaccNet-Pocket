@@ -203,6 +203,8 @@ fun VrmModeScreen(
     var fullBright by remember { mutableStateOf(store.bool(K.FULL_BRIGHT, false)) }
     var armIk by remember { mutableStateOf(store.bool(K.ARM_IK, false)) }
     androidx.compose.runtime.LaunchedEffect(armIk) { store.put(K.ARM_IK, armIk) }
+    var armsNeedHands by remember { mutableStateOf(store.bool(K.ARMS_NEED_HANDS, false)) }
+    androidx.compose.runtime.LaunchedEffect(armsNeedHands) { store.put(K.ARMS_NEED_HANDS, armsNeedHands) }
     var cameraResetKey by remember { mutableStateOf(0) }
     androidx.compose.runtime.LaunchedEffect(videoMode) { store.put(K.VIDEO_MODE, videoMode) }
     androidx.compose.runtime.LaunchedEffect(fullBright) { store.put(K.FULL_BRIGHT, fullBright) }
@@ -552,17 +554,17 @@ fun VrmModeScreen(
                 pending[0] = FaceLandmarkerHelper.create(
                     context,
                     onResult = {
-                        trackerGate.release(TrackerGate.FACE)
+                        trackerGate.release(TrackerGate.FACE, it.timestampMs())
                         pipeline.onFace(it)
                     },
                     onError = { faceHelperError = it }
                 )
                 pending[1] = HandLandmarkerHelper.create(context, onResult = {
-                    trackerGate.release(TrackerGate.HAND)
+                    trackerGate.release(TrackerGate.HAND, it.timestampMs())
                     pipeline.onHand(it)
                 })
                 pending[2] = PoseLandmarkerHelper.create(context, onResult = {
-                    trackerGate.release(TrackerGate.POSE)
+                    trackerGate.release(TrackerGate.POSE, it.timestampMs())
                     pipeline.onPose(it)
                 })
             }
@@ -675,7 +677,8 @@ fun VrmModeScreen(
             armIk = armIk,
             manualEyes = manualEyes,
             eyeClosed = eyeClosed,
-            vrmData = parsedVrmData
+            vrmData = parsedVrmData,
+            armsNeedHands = armsNeedHands
         )
     }
     // Keeps derived tracking (and which trackers the camera feeds) current
@@ -721,6 +724,7 @@ fun VrmModeScreen(
                     poseHelper = poseHelper,
                     poseMode = { pipeline.poseMode },
                     gate = trackerGate,
+                    faceNeedsRebuild = { now -> pipeline.shouldRebuildFace(now) },
                     frameIntervalMs = if (fastTracking) 33L else 66L,
                     onFrame = { w, h -> pipeline.onCameraFrame(w, h) },
                     onCameraError = { cameraError = it }
@@ -1028,6 +1032,7 @@ fun VrmModeScreen(
                     showDebug = showDebug, onToggleDebug = { showDebug = it },
                     fullBright = fullBright, onToggleFullBright = { fullBright = it },
                     armIk = armIk, onToggleArmIk = { armIk = it },
+                    armsNeedHands = armsNeedHands, onToggleArmsNeedHands = { armsNeedHands = it },
                     lightLevel = lightLevel, onLightLevel = { lightLevel = it },
                     backgroundColor = backgroundColor, onBackgroundColor = { backgroundColor = it },
                     voicePitch = voicePitch, onVoicePitch = { voicePitch = it },
@@ -1091,6 +1096,10 @@ private fun VrmCameraTracking(
     /** Read on the analyzer thread per frame — see VrmTrackingPipeline.poseMode. */
     poseMode: () -> Int,
     gate: TrackerGate,
+    /** Analyzer thread, per frame: true when the face landmarker has fallen
+     *  behind and should be swapped for a fresh one (see
+     *  VrmTrackingPipeline.shouldRebuildFace). */
+    faceNeedsRebuild: (nowMs: Long) -> Boolean = { false },
     /** 33 ms (~30 fps, "Fast tracking") or 66 ms (~15 fps). */
     frameIntervalMs: Long = 66L,
     onFrame: (uprightWidth: Int, uprightHeight: Int) -> Unit = { _, _ -> },
@@ -1197,6 +1206,10 @@ private fun VrmCameraTracking(
             // timestamps that ever go backwards, and wall-clock time can.
             // Each detector only gets the frame if its previous one is done.
             try {
+                if (faceHelper != null && faceNeedsRebuild(nowMs)) {
+                    android.util.Log.i("VrmModeScreen", "Face tracking fell behind — rebuilding the face landmarker")
+                    if (faceHelper.rebuild()) gate.reset(TrackerGate.FACE)
+                }
                 if (faceHelper != null && gate.tryAcquire(TrackerGate.FACE, nowMs)) faceHelper.detectAsync(mpImage, 0, nowMs)
                 if (handHelper != null && gate.tryAcquire(TrackerGate.HAND, nowMs)) handHelper.detectAsync(mpImage, 0, nowMs)
                 // Pose: every frame while it's in use (Upper Body, or standing
@@ -1237,17 +1250,30 @@ private fun VrmCameraTracking(
  * failed frame) frees its slot after [STUCK_MS].
  */
 private class TrackerGate {
-    private val busySince = Array(3) { java.util.concurrent.atomic.AtomicLong(0L) }
+    /** Timestamp of the frame each detector is working on; 0 = free. */
+    private val inFlight = Array(3) { java.util.concurrent.atomic.AtomicLong(0L) }
     fun tryAcquire(slot: Int, nowMs: Long): Boolean {
-        val since = busySince[slot].get()
+        val since = inFlight[slot].get()
         if (since != 0L && nowMs - since < STUCK_MS) return false
-        busySince[slot].set(nowMs)
+        inFlight[slot].set(nowMs)
         return true
     }
-    fun release(slot: Int) = busySince[slot].set(0L)
+    /** Frees the slot only for the result of the frame actually in flight
+     *  (or a newer one). This used to free it for ANY result — so after a
+     *  slow frame was given up on, its late result freed the slot while the
+     *  replacement frame was still being worked on, a second frame went in,
+     *  and every hiccup left one more frame queued inside the landmarker.
+     *  The face graph (the heaviest) was the one that hit this, which is
+     *  why the face drifted further and further behind while hands and body
+     *  stayed live. */
+    fun release(slot: Int, resultTimestampMs: Long) {
+        val since = inFlight[slot].get()
+        if (since != 0L && resultTimestampMs >= since) inFlight[slot].compareAndSet(since, 0L)
+    }
+    fun reset(slot: Int) = inFlight[slot].set(0L)
     companion object {
         const val FACE = 0; const val HAND = 1; const val POSE = 2
-        const val STUCK_MS = 500L
+        const val STUCK_MS = 1_000L
     }
 }
 
@@ -1764,6 +1790,7 @@ private class VrmSettingsUi(
     val showDebug: Boolean, val onToggleDebug: (Boolean) -> Unit,
     val fullBright: Boolean, val onToggleFullBright: (Boolean) -> Unit,
     val armIk: Boolean, val onToggleArmIk: (Boolean) -> Unit,
+    val armsNeedHands: Boolean, val onToggleArmsNeedHands: (Boolean) -> Unit,
     val lightLevel: Int, val onLightLevel: (Int) -> Unit,
     val backgroundColor: Int, val onBackgroundColor: (Int) -> Unit,
     val voicePitch: Int, val onVoicePitch: (Int) -> Unit,
@@ -1828,6 +1855,8 @@ private fun VrmSettingsSheet(
             VrmSettingsSection("Tracking", tint)
             VrmSettingsToggleRow("Upper Body", ui.trackUpperBody, tint) { ui.onToggleUpperBody(it); if (!it) ui.onToggleFullBody(false) }
             VrmSettingsToggleRow("Full Body", ui.trackFullBody, tint, enabled = ui.trackUpperBody) { ui.onToggleFullBody(it) }
+            VrmSettingsToggleRow("Arms need hands", ui.armsNeedHands, tint, enabled = ui.trackUpperBody,
+                hint = "For close-ups: an arm only follows the body tracker while its hand is tracked too. Otherwise it rests at your side.") { ui.onToggleArmsNeedHands(it) }
             VrmSettingsToggleRow("Hand IK (experimental)", ui.armIk, tint,
                 hint = "Your tracked hands place the avatar's arms, even with body tracking off.") { ui.onToggleArmIk(it) }
             VrmSettingsToggleRow("Head fallback", ui.headFallback, tint,
@@ -2490,6 +2519,11 @@ private const val POSE_TRICKLE = 1
 /** Every tracked frame. */
 private const val POSE_FULL = 2
 private const val POSE_TRICKLE_INTERVAL_MS = 350L
+/** Average face-result delay past which the face landmarker is rebuilt. */
+private const val FACE_LAG_REBUILD_MS = 350f
+/** How long an arm keeps following the body tracker after its hand was
+ *  last seen, with "Arms need hands" on. */
+private const val HAND_GRACE_MS = 300L
 
 /**
  * VRM mode's tracking pipeline, outside Compose.
@@ -2531,7 +2565,28 @@ private class VrmTrackingPipeline : VrmFrameHook {
     /** Bumped (main thread, throttled) when the preview/debug views should redraw. */
     val uiTick = androidx.compose.runtime.mutableIntStateOf(0)
 
-    fun onFace(r: FaceLandmarkerResult) { face = r; faceSeq.incrementAndGet() }
+    fun onFace(r: FaceLandmarkerResult) {
+        val lat = (SystemClock.uptimeMillis() - r.timestampMs()).coerceAtLeast(0L).toFloat()
+        faceLatencyMs = if (faceLatencyMs <= 0f) lat else faceLatencyMs * 0.85f + lat * 0.15f
+        face = r; faceSeq.incrementAndGet()
+    }
+
+    /** Smoothed time from a frame going into the face landmarker to its
+     *  result coming back (listener thread writes, analyzer reads). */
+    @Volatile private var faceLatencyMs = 0f
+    @Volatile private var lastFaceRebuildMs = 0L
+
+    /** Analyzer thread. The face result is normally back in well under
+     *  100 ms; if it has crept past [FACE_LAG_REBUILD_MS] on average, the
+     *  face graph has a backlog it won't clear on its own — rebuild it (at
+     *  most every 15 s, so a phone that's just slow isn't rebuilt forever). */
+    fun shouldRebuildFace(nowMs: Long): Boolean {
+        if (lastFaceRebuildMs != 0L && nowMs - lastFaceRebuildMs < 15_000L) return false
+        if (faceLatencyMs < FACE_LAG_REBUILD_MS) return false
+        lastFaceRebuildMs = nowMs
+        faceLatencyMs = 0f
+        return true
+    }
     fun onHand(r: HandLandmarkerResult) { hand = r; handSeq.incrementAndGet() }
     fun onPose(r: PoseLandmarkerResult) { pose = r; poseSeq.incrementAndGet() }
     fun onCameraFrame(width: Int, height: Int) {
@@ -2551,6 +2606,9 @@ private class VrmTrackingPipeline : VrmFrameHook {
     private var trackFullBody = false
     private var headFallback = true
     private var armIk = false
+    private var armsNeedHands = false
+    /** When each avatar-side hand was last tracked (main thread). */
+    private val handSeenMs = HashMap<String, Long>()
     private var manualEyes = false
     private var eyeClosed = 0f
     private var vrmData: VrmData? = null
@@ -2561,8 +2619,9 @@ private class VrmTrackingPipeline : VrmFrameHook {
 
     fun sync(
         trackUpperBody: Boolean, trackFullBody: Boolean, headFallback: Boolean, armIk: Boolean,
-        manualEyes: Boolean, eyeClosed: Float, vrmData: VrmData?
+        manualEyes: Boolean, eyeClosed: Float, vrmData: VrmData?, armsNeedHands: Boolean = false
     ) {
+        this.armsNeedHands = armsNeedHands
         if (manualEyes != this.manualEyes || eyeClosed != this.eyeClosed || vrmData !== this.vrmData) expressionsDirty = true
         if (trackUpperBody != this.trackUpperBody || headFallback != this.headFallback) settingsChanged = true
         this.trackUpperBody = trackUpperBody
@@ -2675,6 +2734,10 @@ private class VrmTrackingPipeline : VrmFrameHook {
         }
         if (handNew || poseNew || settingsNew) {
             hands = avatarHands(h, if (trackUpperBody) p else null, f, w, ht, handFilters)
+            if (handNew) {
+                val now = SystemClock.uptimeMillis()
+                for (side in hands.keys) handSeenMs[side] = now
+            }
         }
 
         // Placement + size: the face while it's seen; the body tracker's
@@ -2719,6 +2782,14 @@ private class VrmTrackingPipeline : VrmFrameHook {
             // One call poses the whole skeleton (hips → spine → head → arms
             // → hands → fingers → legs), mirrored like the preview. Body
             // data only while "Upper Body" is on; otherwise the arms rest.
+            // "Arms need hands": an arm only takes the body tracker's
+            // shoulder/elbow/wrist while that side's hand is (or was just —
+            // a short grace so a flickering hand doesn't drop the arm) being
+            // tracked; otherwise it rests at the avatar's side.
+            val armBodySides = if (armsNeedHands && trackUpperBody) {
+                val now = SystemClock.uptimeMillis()
+                handSeenMs.filterValues { now - it <= HAND_GRACE_MS }.keys
+            } else null
             AvatarRetargeter.applyPose(
                 t,
                 TrackingFrame(
@@ -2726,7 +2797,8 @@ private class VrmTrackingPipeline : VrmFrameHook {
                     body = if (trackUpperBody) body else null,
                     trackLegs = trackFullBody,
                     hands = hands,
-                    armIk = armIk
+                    armIk = armIk,
+                    armBodySides = armBodySides
                 )
             )
         }

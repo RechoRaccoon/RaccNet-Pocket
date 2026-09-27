@@ -42,6 +42,7 @@ class VrmSettingsStore(context: Context) {
         const val VIDEO_MODE = "video_mode"        // capture button records video
         const val FULL_BRIGHT = "full_bright"      // all materials unlit
         const val ARM_IK = "arm_ik"                // hands place the arms (IK)
+        const val ARMS_NEED_HANDS = "arms_need_hands" // an arm follows the body only while its hand is tracked
         const val HIDDEN_PARTS = "hidden_parts"
         const val DEFAULT_SMOOTHING = 5
         const val MIC_MUTED = "mic_muted"

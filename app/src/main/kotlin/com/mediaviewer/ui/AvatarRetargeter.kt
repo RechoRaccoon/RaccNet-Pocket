@@ -92,7 +92,11 @@ class TrackingFrame(
     val hands: Map<String, TrackedHand> = emptyMap(),
     /** "Hand IK": tracked hands position the arms (two-bone IK). Off =
      *  arms come only from body tracking (relaxed when it's off). */
-    val armIk: Boolean = false
+    val armIk: Boolean = false,
+    /** Avatar sides ("left"/"right") whose arm may follow the body
+     *  tracker; null = both. With "Arms need hands" on, only sides whose
+     *  hand is tracked are listed — the others rest at the avatar's side. */
+    val armBodySides: Set<String>? = null
 )
 
 /** One tracked hand. */
@@ -294,7 +298,9 @@ object AvatarRetargeter {
             val tracked = frame.hands[side]
             val hand = tracked?.points?.takeIf { it.size >= 21 }?.map { modelPoint(it, flip) }
             val offset = if (frame.armIk) tracked?.offsetFromEyes?.let { modelPoint(it, flip) } else null
-            driveArm(ctx, side, ::point, hand, offset, frame.armIk)
+            val bodyAllowed = frame.armBodySides?.contains(side) ?: true
+            val noBody: (Int) -> FloatArray? = { _ -> null }
+            driveArm(ctx, side, if (bodyAllowed) ::point else noBody, hand, offset, frame.armIk)
         }
 
         // ── Legs (rest pose unless Full Body is on and they're visible) ──

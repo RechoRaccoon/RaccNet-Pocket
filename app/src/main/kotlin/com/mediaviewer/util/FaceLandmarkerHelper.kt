@@ -41,7 +41,9 @@ import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
  * disagrees, Android Studio's error will point at exactly which one moved.
  */
 class FaceLandmarkerHelper private constructor(
-    private val faceLandmarker: FaceLandmarker
+    private var faceLandmarker: FaceLandmarker,
+    /** Builds a fresh landmarker with the same options — see [rebuild]. */
+    private val factory: () -> FaceLandmarker?
 ) {
     /** Runs detection on a frame [VrmCameraTracking] has already decoded once
      *  (see its analyzer) and shares across all three landmarkers, rather
@@ -58,6 +60,22 @@ class FaceLandmarkerHelper private constructor(
     }
 
     fun close() = runCatching { faceLandmarker.close() }
+
+    /** Swaps in a brand-new landmarker (same model, same options, same
+     *  result listener) and closes the old one. The face graph is the
+     *  heaviest of the three, and on a warm phone it could build up a
+     *  backlog inside MediaPipe that never drained, so the face lagged
+     *  further and further behind while hands/body stayed live. A fresh
+     *  graph starts empty. Call it on the tracking thread — the same one
+     *  that calls [detectAsync] — so the two can never overlap. Returns
+     *  false (keeping the old one) if a new one couldn't be built. */
+    fun rebuild(): Boolean {
+        val fresh = runCatching { factory() }.getOrNull() ?: return false
+        val old = faceLandmarker
+        faceLandmarker = fresh
+        runCatching { old.close() }.onFailure { Log.e(TAG, "Closing the old FaceLandmarker failed", it) }
+        return true
+    }
 
     companion object {
         private const val TAG = "FaceLandmarkerHelper"
@@ -89,6 +107,18 @@ class FaceLandmarkerHelper private constructor(
             onError: (String) -> Unit
         ): FaceLandmarkerHelper? =
             runCatching {
+                val build = { buildLandmarker(context, delegate, onResult) }
+                FaceLandmarkerHelper(build(), factory = { runCatching { build() }.getOrNull() })
+            }.onFailure {
+                Log.e(TAG, "Could not create FaceLandmarker — is $MODEL_ASSET_PATH in app/src/main/assets/?", it)
+                onError("FaceLandmarker($delegate) failed: ${it.message}")
+            }.getOrNull()
+
+        private fun buildLandmarker(
+            context: Context,
+            delegate: Delegate,
+            onResult: (FaceLandmarkerResult) -> Unit
+        ): FaceLandmarker {
                 val baseOptions = BaseOptions.builder()
                     .setModelAssetPath(MODEL_ASSET_PATH)
                     .setDelegate(delegate)
@@ -109,10 +139,7 @@ class FaceLandmarkerHelper private constructor(
                     .setResultListener { result, _ -> onResult(result) }
                     .setErrorListener { e -> Log.e(TAG, "MediaPipe runtime error", e) }
                     .build()
-                FaceLandmarkerHelper(FaceLandmarker.createFromOptions(context, options))
-            }.onFailure {
-                Log.e(TAG, "Could not create FaceLandmarker — is $MODEL_ASSET_PATH in app/src/main/assets/?", it)
-                onError("FaceLandmarker($delegate) failed: ${it.message}")
-            }.getOrNull()
+                return FaceLandmarker.createFromOptions(context, options)
+        }
     }
 }

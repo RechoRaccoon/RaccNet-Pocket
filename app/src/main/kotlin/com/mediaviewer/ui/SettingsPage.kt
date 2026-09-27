@@ -387,7 +387,13 @@ internal fun SettingsPageContent(
         }
         SettingsBubble(liquidGlass, tint, backdrop) {
             BubbleRow {
-                RowLabel("Audio Visualizer", Modifier.weight(1f), sub = "Bars on the timeline that move to your music. Not calls.")
+                val visualizerStatus = com.mediaviewer.util.AudioVisualizerEngine.status
+                RowLabel(
+                    "Audio Visualizer", Modifier.weight(1f),
+                    sub = if (com.mediaviewer.util.UiToggles.audioVisualizer && visualizerStatus.isNotBlank())
+                        "Bars on the timeline that move to your music. Not calls.\nLast check: $visualizerStatus"
+                    else "Bars on the timeline that move to your music. Not calls."
+                )
                 CompactSwitch(com.mediaviewer.util.UiToggles.audioVisualizer) { on ->
                     if (!on) com.mediaviewer.util.UiToggles.updateAudioVisualizer(false)
                     else if (com.mediaviewer.util.AudioVisualizerEngine.hasPermission(visualizerContext)) com.mediaviewer.util.UiToggles.updateAudioVisualizer(true)
@@ -992,7 +998,6 @@ private fun E621AccountBubble(
 internal fun CreditsPageContent() {
     val recho = Color(0xFF00FF07)
     val rose = Color(0xFFE0245E)
-    val deepBlue = Color(0xFF2A4CE0)
 
     @Composable
     fun Header(text: String) {
@@ -1025,8 +1030,6 @@ internal fun CreditsPageContent() {
             Header("Special Thanks")
             Body(buildAnnotatedString {
                 withStyle(SpanStyle(color = rose)) { append("Rose (SomeDudeGT)") }
-                append(" and ")
-                withStyle(SpanStyle(color = deepBlue)) { append("Popper700") }
                 append(" - Helped push new builds to the GitHub Repo.")
             })
         }

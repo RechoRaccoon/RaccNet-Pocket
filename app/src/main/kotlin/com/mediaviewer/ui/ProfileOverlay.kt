@@ -465,16 +465,17 @@ fun ProfileOverlay(
     val bannerUrl = profile?.bannerUrl
     val avatarUrl = author.avatarUrl
 
-    val bannerColor = rememberDominantColor(bannerUrl ?: avatarUrl ?: "")
-    val avatarColor = rememberDominantColor(avatarUrl ?: "")
-    val blended = remember(bannerColor, avatarColor) {
-        Color(
-            red = (bannerColor.red + avatarColor.red) / 2f,
-            green = (bannerColor.green + avatarColor.green) / 2f,
-            blue = (bannerColor.blue + avatarColor.blue) / 2f,
-            alpha = 1f
-        )
-    }
+    // The profile's real colors from the first frame: remembered per
+    // account, so it no longer opens in the avatar-only color and shifts
+    // once the banner arrives. (The banner comes with the profile load
+    // itself, so no separate lookup here.)
+    val profileColors = rememberProfileColors(
+        did = author.did, avatarUrl = avatarUrl, bannerUrl = bannerUrl,
+        bannerKnown = profile != null, resolve = false
+    )
+    val bannerColor = profileColors.banner
+    val avatarColor = profileColors.avatar
+    val blended = profileColors.blended
 
     BackHandler(onClose)
 
@@ -1858,6 +1859,7 @@ private fun LazyListScope.profileResultsContent(
                 // fallbackAvatarUrl param) when the blog has no thumbnail
                 // of its own to pull a color from.
                 BlogBubble(blog = blog, liquidGlass = liquidGlass, fallbackAvatarUrl = state.author.avatarUrl, onOpenBlog = onOpenBlog,
+                    fallbackTint = profileTint,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp))
             }
         }
@@ -2761,13 +2763,25 @@ fun BlogBubble(
     modifier: Modifier = Modifier,
     fallbackAvatarUrl: String? = null,
     titleFontSize: androidx.compose.ui.unit.TextUnit = 13.sp,
-    fixedHeight: androidx.compose.ui.unit.Dp? = null
+    fixedHeight: androidx.compose.ui.unit.Dp? = null,
+    /** The author's DID: a card with no image wears the author's real
+     *  profile color (banner + avatar blend), looked up by it. */
+    authorDid: String? = null,
+    /** The author's profile color when the caller already has it. */
+    fallbackTint: Color? = null
 ) {
     val shape = RoundedCornerShape(16.dp)
     val dateText = formatCreatedAt(blog.createdAt)
     // Fix 9: the shared light tap, via the shared helper.
     val tap = rememberHapticTap()
-    val tint = rememberDominantColor(blog.thumbnailUrl ?: fallbackAvatarUrl ?: "")
+    // Imageless blogs wear the author's profile color — the real banner +
+    // avatar blend, not the avatar alone (the old color).
+    val tint = when {
+        blog.thumbnailUrl != null -> rememberDominantColor(blog.thumbnailUrl)
+        fallbackTint != null -> fallbackTint
+        !authorDid.isNullOrBlank() -> rememberAuthorProfileTint(authorDid, fallbackAvatarUrl)
+        else -> rememberDominantColor(fallbackAvatarUrl ?: "")
+    }
     // Item 5: the Hub passes fixedHeight, which also means smaller/tighter
     // pills than the profile's full-size ones — same visual language, just
     // scaled down to fit a shorter horizontally-scrolling card.
@@ -3141,13 +3155,53 @@ private fun BlogDetailOverlay(
                 }
                 .background(pageBrush)
         ) {
-            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
-                Spacer(Modifier.height(headerHeight + 14.dp))
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+                Spacer(Modifier.height(headerHeight + 10.dp))
+                // Title, byline and date are part of the page itself now
+                // (they used to float above it as glass bubbles) — set like
+                // the top of a printed article, so they scroll away with
+                // the text and leave the whole screen for reading.
+                val serif = androidx.compose.ui.text.font.FontFamily.Serif
+                Text(
+                    blog.title.ifBlank { "Untitled" }, color = Color.White,
+                    fontFamily = serif, fontWeight = FontWeight.Bold,
+                    fontSize = 28.sp, lineHeight = 34.sp,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(10.dp))
+                val accent = remember(tint) { androidx.compose.ui.graphics.lerp(tint, Color.White, 0.55f) }
+                val name = author.displayName.ifBlank { author.handle }
+                Text(
+                    buildAnnotatedString {
+                        withStyle(SpanStyle(color = Color.White.copy(0.6f))) { append("by ") }
+                        withStyle(SpanStyle(color = accent, fontWeight = FontWeight.SemiBold)) { append(name) }
+                        if (name != author.handle) {
+                            withStyle(SpanStyle(color = Color.White.copy(0.45f))) { append("  @${author.handle}") }
+                        }
+                    },
+                    fontSize = 14.sp, lineHeight = 19.sp,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                val dateText = formatCreatedAt(blog.createdAt)
+                val words = remember(blog.bodyText) { blog.bodyText.split(Regex("\\s+")).count { it.isNotBlank() } }
+                val readMinutes = (words / 220).coerceAtLeast(1)
+                val meta = listOfNotNull(dateText.takeIf { it.isNotBlank() }, if (words > 0) "$readMinutes min read" else null)
+                if (meta.isNotEmpty()) {
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        meta.joinToString("  ·  ").uppercase(), color = Color.White.copy(0.45f),
+                        fontSize = 11.sp, letterSpacing = 1.2.sp, fontWeight = FontWeight.Medium
+                    )
+                }
+                Spacer(Modifier.height(16.dp))
+                Box(Modifier.width(56.dp).height(3.dp).clip(RoundedCornerShape(2.dp)).background(accent.copy(alpha = 0.8f)))
+                Spacer(Modifier.height(18.dp))
                 if (!blog.description.isNullOrBlank()) {
                     Text(
-                        blog.description, color = Color.White.copy(0.78f), fontSize = 15.sp, lineHeight = 21.sp,
+                        blog.description, color = Color.White.copy(0.78f), fontSize = 16.sp, lineHeight = 23.sp,
+                        fontFamily = serif,
                         fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 14.dp)
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
                     )
                 }
                 // A Stellar blog's cover is its first inline image, so it
@@ -3164,32 +3218,17 @@ private fun BlogDetailOverlay(
                     Text(blog.bodyText.ifBlank { "This blog has no readable text content." },
                         color = Color.White.copy(0.92f), fontSize = 15.sp, lineHeight = 23.sp)
                 }
-                Spacer(Modifier.height(120.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()))
+                Spacer(Modifier.height((if (isOwn) 120.dp else 48.dp) + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()))
             }
         }
 
-        // ── Floating header: each bubble blurs what's behind it ──
-        Column(
-            Modifier.fillMaxWidth().padding(top = rememberTopCutoutClearance())
+        // ── Floating close button: the only thing over the page now ──
+        Box(
+            Modifier.padding(top = rememberTopCutoutClearance())
                 .onSizeChanged { headerHeight = with(density) { it.height.toDp() } }
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                CloseGlassBubble(liquidGlass = liquidGlass, tint = bubbleTint, onClick = onClose, backdrop = backdrop)
-                Spacer(Modifier.width(10.dp))
-                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
-                    ProfileGlassPill(text = blog.title, liquidGlass = liquidGlass, tint = bubbleTint, fontSize = 15.sp, bold = true, backdrop = backdrop)
-                }
-            }
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                ProfileGlassPill(text = "By @${author.handle}", liquidGlass = liquidGlass, tint = bubbleTint, fontSize = 11.sp, bold = false, backdrop = backdrop)
-                Spacer(Modifier.weight(1f))
-                val dateText = formatCreatedAt(blog.createdAt)
-                if (dateText.isNotBlank()) {
-                    ProfileGlassPill(text = dateText, liquidGlass = liquidGlass, tint = bubbleTint, fontSize = 11.sp, bold = false, backdrop = backdrop)
-                }
-            }
+            CloseGlassBubble(liquidGlass = liquidGlass, tint = bubbleTint, onClick = onClose, backdrop = backdrop)
         }
 
         // ── Interaction bar (like the profile's) ──
@@ -3205,23 +3244,17 @@ private fun BlogDetailOverlay(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                BarIcon(onClick = {
-                    runCatching {
-                        val web = "https://bsky.app/profile/${author.did}"
-                        context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(web)))
-                    }
-                }) { BlueskyLogoIcon(Modifier.size(20.dp), tint = Color.White) }
-                if (isOwn) {
-                    BarIcon(onClick = { onEdit(blog) }) {
-                        Icon(Icons.Default.Edit, contentDescription = "Edit blog", tint = Color.White, modifier = Modifier.size(20.dp))
-                    }
-                    BarIcon(onClick = { confirmDelete = true }) {
-                        Icon(Icons.Default.Delete, contentDescription = "Delete blog", tint = Color(0xFFFF8A80), modifier = Modifier.size(21.dp))
-                    }
+                BarIcon(onClick = { onEdit(blog) }) {
+                    Icon(Icons.Default.Edit, contentDescription = "Edit blog", tint = Color.White, modifier = Modifier.size(20.dp))
+                }
+                BarIcon(onClick = { confirmDelete = true }) {
+                    Icon(Icons.Default.Delete, contentDescription = "Delete blog", tint = Color(0xFFFF8A80), modifier = Modifier.size(21.dp))
                 }
             }
         }
-        Box(
+        // Someone else's blog has nothing to put in the bar (the Bluesky
+        // button is gone), so the bar only shows on your own: Edit/Delete.
+        if (isOwn) Box(
             Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navigationBars)
                 .height(if (liquidGlass) 60.dp else 52.dp).fillMaxWidth(),
             contentAlignment = Alignment.Center

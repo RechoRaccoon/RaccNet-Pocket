@@ -165,6 +165,13 @@ class MainActivity : ComponentActivity() {
         installCrashHandler(applicationContext)
         com.mediaviewer.util.CrashBreadcrumbs.init(applicationContext)
         com.mediaviewer.util.UiToggles.init(applicationContext)
+        com.mediaviewer.ui.ProfileColorStore.init(applicationContext)
+        // Audio visualizer: start noting music apps' audio sessions right
+        // away, so the bars can attach to one even if the music started
+        // before the feed was opened.
+        if (com.mediaviewer.util.UiToggles.audioVisualizer) {
+            com.mediaviewer.util.AudioVisualizerEngine.watchPlayerSessions(applicationContext)
+        }
         com.mediaviewer.util.ImageLoading.install(applicationContext)
         // 30-day image cache age limit: checked now, and daily in the
         // background for when the app isn't opened (see ImageLoading).
@@ -364,7 +371,16 @@ private fun AppRoot(viewModel: MainViewModel) {
     var currentBackdrop by remember { mutableStateOf<GlassBackdrop?>(null) }
     // Item 16: "your color" everywhere = the same banner/avatar blend your
     // profile page uses.
-    SideEffect { com.mediaviewer.ui.SelfProfileColors.bannerUrl = selfProfile?.bannerUrl }
+    SideEffect {
+        com.mediaviewer.ui.SelfProfileColors.bannerUrl = selfProfile?.bannerUrl
+        com.mediaviewer.ui.SelfProfileColors.did = selfProfile?.author?.did ?: bskyDid.takeIf { it.isNotBlank() }
+        com.mediaviewer.ui.SelfProfileColors.loaded = selfProfile != null
+    }
+    // Lets profile colors look up an account's banner when only its DID
+    // and avatar are known (blog/review cards) — see ProfileColorStore.
+    LaunchedEffect(Unit) {
+        com.mediaviewer.ui.ProfileColorStore.bannerResolver = { did -> viewModel.fetchBannerUrl(did) }
+    }
     val selfProfileTint = selfProfile?.author?.avatarUrl?.takeIf { it.isNotBlank() }
         ?.let { com.mediaviewer.ui.rememberSelfProfileTint(it) } ?: NeutralGlassTint
     var currentDominantColor by remember { mutableStateOf(NeutralGlassTint) }
@@ -441,7 +457,11 @@ private fun AppRoot(viewModel: MainViewModel) {
         val profile = selfProfile ?: return@LaunchedEffect // still loading — wait for the real fetch
         val url = profile.author.avatarUrl
         if (!url.isNullOrBlank()) {
-            val c = fetchDominantColor(context, url)
+            // The real profile color (banner + avatar blend), not the
+            // avatar alone — see ProfileColorStore.
+            val c = com.mediaviewer.ui.fetchProfileColors(
+                context, profile.author.did, url, profile.bannerUrl, bannerKnown = true
+            ).blended
             selfThemeColor = c
             if (pixelController.phase == PixelPhase.WIPE_IN || pixelController.phase == PixelPhase.LOADING) {
                 pixelController.updateColor(c)
@@ -547,10 +567,19 @@ private fun AppRoot(viewModel: MainViewModel) {
                 // safe to swap the real profile in behind it.
                 revealedProfileDids = revealedProfileDids + overlay.author.did
             }
-            if (!avatarUrl.isNullOrBlank()) {
-                val targetColor = fetchDominantColor(context, avatarUrl)
-                pixelController.updateColor(targetColor)
-            }
+            // The profile's real color (banner + avatar blend, the same one
+            // the page itself uses). Until its banner is known that's the
+            // color remembered from last time — never the avatar-only guess
+            // that the page would then visibly shift away from.
+            val loadedProfile = overlay.profile
+            val targetColor = if (loadedProfile != null) {
+                com.mediaviewer.ui.fetchProfileColors(
+                    context, overlay.author.did, avatarUrl ?: loadedProfile.author.avatarUrl,
+                    loadedProfile.bannerUrl, bannerKnown = true
+                ).blended
+            } else com.mediaviewer.ui.ProfileColorStore.get(overlay.author.did)?.blended
+                ?: if (!stillLoading && !avatarUrl.isNullOrBlank()) fetchDominantColor(context, avatarUrl) else null
+            if (targetColor != null) pixelController.updateColor(targetColor)
             if (!stillLoading && pixelController.phase != PixelPhase.HIDDEN) pixelController.finish()
         }
     }
@@ -577,14 +606,15 @@ private fun AppRoot(viewModel: MainViewModel) {
     // MainFeedScreen — never routes through this function) is deliberately
     // NOT wrapped here: that's just scrolling into an already-loaded feed
     // and should stay instant.
-    val handleSelectFeed: (String?) -> Unit = { uri ->
+    // The Hub's Timeline/Explore buttons open a picked feed in that view;
+    // picking a feed from Explore mode's own tab row stays in Explore.
+    val handleOpenFeed: (String?, ScreenState) -> Unit = { uri, targetScreen ->
         rootScope.launch {
             if (!com.mediaviewer.util.UiToggles.loadingScreens) {
                 // Loading screens off: straight into the feed, which shows
                 // its posts as they load.
                 viewModel.selectFeedFromAnyContext(uri)
-                // Feeds open in grid mode.
-                viewModel.setScreen(ScreenState.GRID)
+                viewModel.setScreen(targetScreen)
                 return@launch
             }
             // Bug fix (item 4): this used to start from `currentDominantColor`
@@ -621,11 +651,11 @@ private fun AppRoot(viewModel: MainViewModel) {
             // wipe. Flip this flag right before switching so MainFeedScreen
             // skips the slide just this once.
             skipFeedEntryAnim = true
-            // Feeds open in grid mode.
-            viewModel.setScreen(ScreenState.GRID)
+            viewModel.setScreen(targetScreen)
             pixelController.finish()
         }
     }
+    val handleSelectFeed: (String?) -> Unit = { uri -> handleOpenFeed(uri, ScreenState.GRID) }
 
     // Item 26: makes the glass-intensity dial reach every LiquidGlassSurface/
     // glassPanel below without threading a Float through every composable's
@@ -733,6 +763,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             // All feed-chip selections route through selectFeedFromAnyContext so that
             // selecting the previous feed while in an author overlay restores scroll position
             onSelectFeed              = handleSelectFeed,
+            onOpenFeed                = { uri, explore -> handleOpenFeed(uri, if (explore) ScreenState.GRID else ScreenState.FEED) },
             onToggleDownloadOnLike    = viewModel::setDownloadOnLike,
             onDownloadAllLiked        = viewModel::downloadAllBskyLikedMedia,
             settingsExtras            = SettingsExtras(

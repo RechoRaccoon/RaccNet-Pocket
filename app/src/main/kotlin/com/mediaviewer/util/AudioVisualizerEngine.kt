@@ -1,8 +1,12 @@
 package com.mediaviewer.util
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.media.AudioManager
+import android.media.audiofx.AudioEffect
 import android.media.audiofx.Visualizer
 import android.os.Handler
 import android.os.Looper
@@ -19,41 +23,49 @@ import kotlin.math.pow
 import kotlin.math.sqrt
 
 /**
- * The feed's audio visualizer: taps the phone's mixed audio output (the
- * global audio session, which needs the RECORD_AUDIO permission — nothing
- * is recorded or kept, the platform just hands over a spectrum) and turns
- * each FFT into [BAR_COUNT] smoothed 0..1 bar heights.
+ * The feed's audio visualizer: listens to what the phone is playing and
+ * turns each spectrum into [BAR_COUNT] smoothed 0..1 bar heights. Nothing
+ * is recorded or kept — the platform just hands over a spectrum (it needs
+ * the RECORD_AUDIO permission to do that).
  *
- * Music only: while a call is going on (phone, or VoIP apps like Discord,
- * which switch the phone into "communication" audio mode) the bars fall
- * flat. Silence is flat on its own (an all-zero spectrum), so there's no
- * separate "is music playing" gate any more — that check
- * (AudioManager.isMusicActive) missed players that don't use the music
- * stream and left the bars dead.
+ * Two ways in, tried in turn until one actually carries sound:
+ *  1. **The phone's output mix** (audio session 0) — sees every app at
+ *     once, but many phones hand it silence: offloaded/"deep buffer" music
+ *     playback, some OEM audio stacks, or another visualizer app holding it.
+ *  2. **The music app's own audio session.** Players (Spotify, YouTube
+ *     Music, Poweramp, Samsung Music, …) announce their session with the
+ *     standard "open audio effect session" broadcast so equalizer apps can
+ *     attach — [watchPlayerSessions] listens for those from app start, and
+ *     the engine attaches straight to the newest one when the mix is quiet.
  *
- * Why it used to stay flat: the output-mix visualizer is fragile. It can
- * fail to attach (another app holding one, the audio server not ready),
- * and it silently stops delivering data when the output changes under it
- * (headphones/Bluetooth connecting, offloaded playback starting). It's now
- * re-created whenever it's missing, disabled, or has gone quiet while the
- * phone says something is playing, and it starts as soon as permission is
- * granted instead of only on the first bar row ever shown.
+ * Music only: during a call (phone, or VoIP apps like Discord, which put
+ * the phone in "communication" mode) the bars fall flat. Silence is flat on
+ * its own (an all-zero spectrum).
+ *
+ * [status] is a short plain-language line for the Settings row, so it's
+ * visible on the phone why the bars aren't moving if they aren't.
  *
  * Reference counted — every visible bar row [acquire]s it and [release]s
- * it when it leaves the screen; the capture runs only while at least one
- * is showing.
+ * it when it leaves the screen; the capture runs only while one is showing.
  */
 object AudioVisualizerEngine {
     const val BAR_COUNT = 28
     private const val TAG = "AudioVisualizer"
+    private const val MIX = 0
 
     /** Current bar heights, 0..1 — Compose state. Read it inside a draw
      *  block so new frames only redraw the bars, never recompose them. */
     var levels by mutableStateOf(FloatArray(BAR_COUNT))
         private set
 
+    /** Plain-language state for the Settings row — how it's going now, or
+     *  how it went the last time the bars were on screen ("" = never ran). */
+    var status by mutableStateOf("")
+        private set
+
     private var users = 0
     private var visualizer: Visualizer? = null
+    private var attachedSession = -1
     private var appContext: Context? = null
     private var audioManager: AudioManager? = null
     private val main = Handler(Looper.getMainLooper())
@@ -61,12 +73,60 @@ object AudioVisualizerEngine {
     private val smoothed = FloatArray(BAR_COUNT)
     private val peak = FloatArray(BAR_COUNT) { 1f }
 
-    /** Last time a capture with any real signal arrived. */
+    /** Player sessions announced by music apps, oldest first (main thread). */
+    private val playerSessions = LinkedHashMap<Int, String>()
+    private var receiverRegistered = false
+    /** Session ids that were attached and stayed silent while music played. */
+    private val silentSessions = HashMap<Int, Long>()
+
     private var lastSignalMs = 0L
-    /** Last time any capture callback arrived at all. */
     private var lastCallbackMs = 0L
     private var createdAtMs = 0L
     private var nextCreateAttemptMs = 0L
+    private var consecutiveFailures = 0
+
+    private val sessionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val session = intent?.getIntExtra(AudioEffect.EXTRA_AUDIO_SESSION, AudioEffect.ERROR) ?: return
+            if (session <= 0) return
+            val pkg = intent.getStringExtra(AudioEffect.EXTRA_PACKAGE_NAME).orEmpty()
+            when (intent.action) {
+                AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION -> {
+                    playerSessions.remove(session)
+                    playerSessions[session] = pkg
+                    silentSessions.remove(session)
+                    while (playerSessions.size > 8) playerSessions.remove(playerSessions.keys.first())
+                    // A new song/player just started: if we're showing and
+                    // the current source is quiet, try the new session now.
+                    if (users > 0 && SystemClock.uptimeMillis() - lastSignalMs > 1_000) {
+                        nextCreateAttemptMs = 0L
+                        teardownVisualizer()
+                    }
+                }
+                AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION -> {
+                    playerSessions.remove(session)
+                    silentSessions.remove(session)
+                    if (attachedSession == session) teardownVisualizer()
+                }
+            }
+        }
+    }
+
+    /** Call once at app start: remembers the audio sessions music apps
+     *  announce, so the visualizer can attach to them later even if the
+     *  music started before the feed was opened. Harmless if nothing ever
+     *  broadcasts. */
+    fun watchPlayerSessions(context: Context) {
+        if (receiverRegistered) return
+        val filter = IntentFilter().apply {
+            addAction(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION)
+            addAction(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION)
+        }
+        runCatching {
+            ContextCompat.registerReceiver(context.applicationContext, sessionReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
+            receiverRegistered = true
+        }.onFailure { Log.w(TAG, "Couldn't listen for player sessions", it) }
+    }
 
     private val poll = object : Runnable {
         override fun run() {
@@ -79,23 +139,51 @@ object AudioVisualizerEngine {
             }.getOrDefault(false)
             val now = SystemClock.uptimeMillis()
             val ctx = appContext
+            if (ctx == null || !hasPermission(ctx)) {
+                status = "Needs the microphone permission (nothing is recorded)."
+                teardownVisualizer()
+                decay()
+                main.postDelayed(this, 1_000)
+                return
+            }
             val v = visualizer
-            if (ctx != null && hasPermission(ctx)) {
-                val enabled = v != null && runCatching { v.getEnabled() }.getOrDefault(false)
-                val playing = am != null && runCatching { am.isMusicActive }.getOrDefault(false)
-                // Something is playing but the capture has gone silent or
-                // stopped calling back: the output changed under it.
-                val stalled = v != null && playing && !inCall && now - createdAtMs > 2_500 &&
-                    (now - lastCallbackMs > 2_500 || now - lastSignalMs > 4_000)
-                if ((v == null || !enabled || stalled) && now >= nextCreateAttemptMs) {
-                    if (stalled) Log.i(TAG, "Capture went quiet while audio is playing — re-attaching")
-                    teardownVisualizer()
-                    createVisualizer()
-                }
+            val enabled = v != null && runCatching { v.getEnabled() }.getOrDefault(false)
+            val playing = am != null && runCatching { am.isMusicActive }.getOrDefault(false)
+            val sinceCreate = now - createdAtMs
+            // Attached, music is playing, but nothing's coming through: this
+            // source is a dud on this phone (or the output changed under it).
+            val stalled = v != null && playing && !inCall && sinceCreate > 2_500 &&
+                (now - lastCallbackMs > 2_500 || now - lastSignalMs > 3_000)
+            if (stalled) {
+                silentSessions[attachedSession] = now
+                Log.i(TAG, "Session $attachedSession silent while music plays — trying another source")
+            }
+            if ((v == null || !enabled || stalled) && now >= nextCreateAttemptMs) {
+                teardownVisualizer()
+                createVisualizer(pickSession(now))
+            }
+            status = when {
+                inCall -> "Paused during calls."
+                visualizer == null -> "Couldn't reach your phone's audio. Try pausing and playing your music."
+                now - lastSignalMs < 1_500 -> "Listening."
+                playing -> "Music is playing but no sound is reaching the bars yet…"
+                else -> "Waiting for music."
             }
             if (inCall || visualizer == null) decay()
             main.postDelayed(this, 400)
         }
+    }
+
+    /** Which session to attach to next: the output mix unless it has
+     *  recently proved silent, then the newest announced player session
+     *  that hasn't; if everything has, start over from the mix. */
+    private fun pickSession(now: Long): Int {
+        silentSessions.entries.removeAll { now - it.value > 30_000 }
+        if (MIX !in silentSessions) return MIX
+        val candidate = playerSessions.keys.reversed().firstOrNull { it !in silentSessions }
+        if (candidate != null) return candidate
+        silentSessions.clear()
+        return MIX
     }
 
     fun hasPermission(context: Context) =
@@ -105,12 +193,17 @@ object AudioVisualizerEngine {
     fun acquire(context: Context) {
         users++
         if (users > 1) return
+        main.removeCallbacks(releaseLater)
         appContext = context.applicationContext
         audioManager = context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        watchPlayerSessions(context)
         nextCreateAttemptMs = 0L
-        if (hasPermission(context)) createVisualizer()
+        consecutiveFailures = 0
         main.removeCallbacks(poll)
-        main.post(poll)
+        // A short delay: the previous post's row releases a frame before
+        // the next one acquires, and re-creating instantly can be refused
+        // while the audio server is still tearing the old one down.
+        main.postDelayed(poll, 50)
     }
 
     /** Main thread. */
@@ -118,39 +211,61 @@ object AudioVisualizerEngine {
         users = (users - 1).coerceAtLeast(0)
         if (users > 0) return
         main.removeCallbacks(poll)
+        // Keep the capture for a moment: swiping to the next post releases
+        // and re-acquires within a frame or two.
+        main.postDelayed(releaseLater, 600)
+    }
+
+    private val releaseLater = Runnable {
+        if (users > 0) {
+            main.removeCallbacks(poll); main.post(poll)
+            return@Runnable
+        }
         teardownVisualizer()
         smoothed.fill(0f)
         levels = FloatArray(BAR_COUNT)
+        // [status] is kept: Settings shows how it went last time.
     }
 
-    private fun createVisualizer() {
+    private fun createVisualizer(session: Int) {
         val now = SystemClock.uptimeMillis()
-        // Don't hammer the audio server if it keeps refusing.
-        nextCreateAttemptMs = now + 3_000
+        main.removeCallbacks(releaseLater)
         visualizer = runCatching {
-            Visualizer(0).apply {
+            Visualizer(session).apply {
+                runCatching { setEnabled(false) }
                 val range = Visualizer.getCaptureSizeRange()
                 setCaptureSize(min(max(512, range[0]), range[1]))
                 runCatching { setScalingMode(Visualizer.SCALING_MODE_NORMALIZED) }
                 setDataCaptureListener(object : Visualizer.OnDataCaptureListener {
-                    override fun onWaveFormDataCapture(v: Visualizer?, waveform: ByteArray?, samplingRate: Int) {}
+                    override fun onWaveFormDataCapture(v: Visualizer?, waveform: ByteArray?, samplingRate: Int) {
+                        if (waveform != null) onWaveform(waveform)
+                    }
                     override fun onFftDataCapture(v: Visualizer?, fft: ByteArray?, samplingRate: Int) {
                         if (fft != null) onFft(fft)
                     }
-                }, min(Visualizer.getMaxCaptureRate(), 20_000), false, true)
+                }, min(Visualizer.getMaxCaptureRate(), 20_000), true, true)
                 setEnabled(true)
             }
-        }.onFailure { Log.w(TAG, "Couldn't attach to the output mix", it) }.getOrNull()
+        }.onFailure { Log.w(TAG, "Couldn't attach to audio session $session", it) }.getOrNull()
         if (visualizer != null) {
+            attachedSession = session
             createdAtMs = now
             lastCallbackMs = now
-            lastSignalMs = now
+            consecutiveFailures = 0
+            nextCreateAttemptMs = now + 1_000
+        } else {
+            attachedSession = -1
+            // Don't hammer the audio server if it keeps refusing.
+            if (session != MIX || playerSessions.isEmpty()) consecutiveFailures++
+            silentSessions[session] = now
+            nextCreateAttemptMs = now + min(10_000L, 1_500L * (1 + consecutiveFailures))
         }
     }
 
     private fun teardownVisualizer() {
         visualizer?.let { v -> runCatching { v.setEnabled(false) }; runCatching { v.release() } }
         visualizer = null
+        attachedSession = -1
     }
 
     private fun decay() {
@@ -160,6 +275,27 @@ object AudioVisualizerEngine {
             if (smoothed[i] > 0.01f) any = true else smoothed[i] = 0f
         }
         levels = if (any) smoothed.copyOf() else FloatArray(BAR_COUNT)
+    }
+
+    /** The waveform only proves there's sound (some phones deliver an
+     *  all-zero FFT for a moment after attaching, but real samples). */
+    private fun onWaveform(wave: ByteArray) {
+        val now = SystemClock.uptimeMillis()
+        lastCallbackMs = now
+        if (inCall || wave.isEmpty()) return
+        // 8-bit PCM. Judged by the spread of the samples, not their offset
+        // from 128, because some phones hand back a flat all-zero buffer
+        // when nothing is actually coming through.
+        var lo = 255
+        var hi = 0
+        var k = 0
+        while (k < wave.size) {
+            val v = wave[k].toInt() and 0xFF
+            if (v < lo) lo = v
+            if (v > hi) hi = v
+            k += 2
+        }
+        if (hi - lo >= 4) lastSignalMs = now
     }
 
     /** FFT bytes → log-spaced bands (≈40 Hz … 16 kHz), each normalised by

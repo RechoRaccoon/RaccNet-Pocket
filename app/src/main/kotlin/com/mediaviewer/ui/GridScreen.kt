@@ -40,7 +40,8 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 
 /**
- * The feed's grid mode (pinch in on a post). Laid out like a profile page:
+ * The feed's Explore mode (the grid — pinch in on a post, or the Hub's
+ * Explore button). Laid out like a profile page:
  * the feeds as a row of profile-style main tabs, the content-type sub-tabs
  * under them, the posts in the profile's own layouts (masonry / square
  * grid / text list / video lists), and the profile's interaction bar with
@@ -95,7 +96,8 @@ private suspend fun centreOn(state: LazyStaggeredGridState, index: Int, delta: I
 }
 
 /**
- * The feed's grid mode (pinch in on a post). Laid out like a profile page:
+ * The feed's Explore mode (the grid — pinch in on a post, or the Hub's
+ * Explore button). Laid out like a profile page:
  * the feeds as a row of profile-style main tabs, the content-type sub-tabs
  * under them, the posts in the profile's own layouts (masonry / square
  * grid / text list / video lists), and the profile's interaction bar with
@@ -150,41 +152,15 @@ fun GridScreen(
     }
     val gridScope = androidx.compose.runtime.rememberCoroutineScope()
     val showScrollTop by remember(gridState) { androidx.compose.runtime.derivedStateOf { gridState.firstVisibleItemIndex >= 6 + GRID_HEADER_ITEMS } }
-    // Pull-down-at-top → Hub. Only drags the grid couldn't use itself (it's
-    // already at the top) count, and only one trigger per gesture.
+    // Pull-down-at-top → Hub. Tracked straight off the finger (see the
+    // pointerInput on the grid below) rather than from nested-scroll
+    // leftovers, which the grid's own overscroll stretch could swallow:
+    // once the grid is at the very top, pulling down a further ~88dp — or
+    // a quick flick down of ~36dp — opens the Hub. One trigger per gesture.
     val latestOnSwipeDown by rememberUpdatedState(onSwipeDown)
     val density = androidx.compose.ui.platform.LocalDensity.current
-    val pullThresholdPx = with(density) { 96.dp.toPx() }
-    val pullToHub = remember(gridState) {
-        object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
-            var pulled = 0f
-            var fired = false
-            override fun onPreScroll(available: androidx.compose.ui.geometry.Offset, source: androidx.compose.ui.input.nestedscroll.NestedScrollSource): androidx.compose.ui.geometry.Offset {
-                // Scrolling back up (content moving up) cancels a partial pull.
-                if (available.y < 0f) pulled = 0f
-                return androidx.compose.ui.geometry.Offset.Zero
-            }
-            override fun onPostScroll(
-                consumed: androidx.compose.ui.geometry.Offset,
-                available: androidx.compose.ui.geometry.Offset,
-                source: androidx.compose.ui.input.nestedscroll.NestedScrollSource
-            ): androidx.compose.ui.geometry.Offset {
-                if (source == androidx.compose.ui.input.nestedscroll.NestedScrollSource.Drag && available.y > 0f && !gridState.canScrollBackward) {
-                    pulled += available.y
-                    if (!fired && pulled >= pullThresholdPx) {
-                        fired = true
-                        latestOnSwipeDown()
-                    }
-                }
-                return androidx.compose.ui.geometry.Offset.Zero
-            }
-            override suspend fun onPreFling(available: androidx.compose.ui.unit.Velocity): androidx.compose.ui.unit.Velocity {
-                pulled = 0f
-                fired = false
-                return androidx.compose.ui.unit.Velocity.Zero
-            }
-        }
-    }
+    val pullThresholdPx = with(density) { 88.dp.toPx() }
+    val flickThresholdPx = with(density) { 36.dp.toPx() }
     // A swipeable multi-image tile reports which image it's showing just
     // before its click lands; carried into onItemClick as the sub-image.
     val pendingSeed = remember { arrayOfNulls<Pair<String, Int>>(1) }
@@ -278,20 +254,55 @@ fun GridScreen(
             verticalItemSpacing = spec.spacing,
             modifier = Modifier
                 .fillMaxSize()
-                .nestedScroll(pullToHub)
                 // Pinch OUT (fingers spreading apart) — the opposite of
                 // the pinch-in that opened the grid — goes back to the
                 // post you were on. Watched at the Initial pass and only
                 // consumed once it fires, so one-finger scrolling is
                 // untouched.
-                .pointerInput(Unit) {
+                .pointerInput(gridState) {
                     awaitEachGesture {
                         var startDist = -1f
+                        // Pull-to-Hub: where the finger was when the grid
+                        // was (or became) scrolled all the way up.
+                        var pullBaseY = Float.NaN
+                        var lastY = 0f
+                        var lastT = 0L
+                        var velocity = 0f   // px per ms, + = downward
+                        var multiTouch = false
+                        var pullFired = false
                         while (true) {
                             val event = awaitPointerEvent(PointerEventPass.Initial)
                             val pressed = event.changes.filter { it.pressed }
-                            if (pressed.isEmpty()) break
+                            if (pressed.isEmpty()) {
+                                // Released: a quick flick down at the top counts too.
+                                if (!pullFired && !multiTouch && !pullBaseY.isNaN() &&
+                                    lastY - pullBaseY >= flickThresholdPx && velocity > 0.9f
+                                ) {
+                                    latestOnSwipeDown()
+                                }
+                                break
+                            }
+                            if (pressed.size == 1 && !multiTouch) {
+                                val ch = pressed[0]
+                                val y = ch.position.y
+                                val t = ch.uptimeMillis
+                                if (lastT != 0L && t > lastT) {
+                                    val v = (y - lastY) / (t - lastT)
+                                    velocity = velocity * 0.4f + v * 0.6f
+                                }
+                                lastY = y; lastT = t
+                                if (!gridState.canScrollBackward) {
+                                    if (pullBaseY.isNaN() || y < pullBaseY) pullBaseY = y
+                                    if (!pullFired && y - pullBaseY >= pullThresholdPx) {
+                                        pullFired = true
+                                        latestOnSwipeDown()
+                                    }
+                                } else {
+                                    pullBaseY = Float.NaN
+                                }
+                            }
                             if (pressed.size < 2) { startDist = -1f; continue }
+                            multiTouch = true
                             val dist = (pressed[0].position - pressed[1].position).getDistance()
                             if (startDist < 0f) { startDist = dist; continue }
                             pressed.forEach { it.consume() }

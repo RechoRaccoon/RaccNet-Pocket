@@ -203,6 +203,12 @@ fun SettingsSheet(
     onShowE621Favorites: () -> Unit,
     onSwitchMode: (AppMode) -> Unit,
     onSwipeToFeed: () -> Unit,
+    /** Hub → Timeline/Explore after picking a different feed: open that
+     *  feed in the timeline (explore = false) or Explore mode (true). */
+    onOpenFeed: (uri: String?, explore: Boolean) -> Unit = { _, _ -> },
+    /** Hub → Timeline/Explore with no new pick: back into the current feed
+     *  in that view. */
+    onEnterFeedView: (explore: Boolean) -> Unit = {},
     // Settings Update
     selfProfile: com.mediaviewer.model.ProfileData?,
     hideTextOnlyPosts: Boolean,
@@ -327,9 +333,18 @@ fun SettingsSheet(
     // now — each one switches mode and jumps straight to the feed itself,
     // rather than deferring to this button (see AtProtocolPageContent's
     // onOpenE621* handlers).
-    fun onReturnToFeed() {
+    //
+    // Tapping a feed chip only *picks* it (highlights it) — nothing opens
+    // until Timeline or Explore is tapped, which then opens the picked feed
+    // in that view. With nothing new picked, they just go back into the
+    // current feed in that view.
+    var pickedFeed by remember { mutableStateOf<PickedFeed?>(null) }
+    fun onReturnToFeed(explore: Boolean) {
+        val picked = pickedFeed
+        pickedFeed = null
+        val isNewPick = picked != null && (authorFeedState != null || picked.uri != selectedFeedUri)
         if (hubPage == HubPage.MAIN) onSwitchMode(AppMode.BLUESKY)
-        onSwipeToFeed()
+        if (isNewPick) onOpenFeed(picked!!.uri, explore) else onEnterFeedView(explore)
     }
 
     // Bug fix (item 5 — Hub upload bubbles need a genuine "cutout" look):
@@ -451,7 +466,10 @@ fun SettingsSheet(
                             onShowLikes = onShowLikes, onShowFriends = onShowFriends,
                             selfProfile = selfProfile, onOpenOwnProfile = onOpenOwnProfile,
                             onShowSaves = onShowSaves, onShowHistory = onShowHistory, onOpenDmInbox = onOpenDmInbox,
-                            onSelectFeed = onSelectFeed, isLoading = isLoading,
+                            onSelectFeed = { uri -> pickedFeed = PickedFeed(uri) }, isLoading = isLoading,
+                            highlightedFeedUri = pickedFeed.let { if (it != null) it.uri else selectedFeedUri },
+                            authorChipSelected = pickedFeed == null && authorFeedState != null,
+                            onTapAuthorChip = { pickedFeed = null },
                             onLoginBluesky = onLoginBluesky, onOpenSearch = onOpenSearch,
                             liquidGlass = liquidGlass, dominantColor = dominantColor, backdrop = backdrop,
                             dmConversations = dmConversations, dmConversationsLoading = dmConversationsLoading,
@@ -468,7 +486,7 @@ fun SettingsSheet(
                             followerScanState = followerScanState, followerScanCompletedOnce = followerScanCompletedOnce,
                             onStartFollowerScan = onStartFollowerScan, onDismissFollowerScanResult = onDismissFollowerScanResult,
                             onRefreshHub = onRefreshHub,
-                            onReturnToFeed = { onReturnToFeed() },
+                            onReturnToFeed = { onReturnToFeed(explore = false) },
                             hasVisitedFeed = hasVisitedFeed,
                             liveTwitchUrl = liveTwitchUrl, liveYoutubeUrl = liveYoutubeUrl,
                             liveActivePlatform = liveActivePlatform,
@@ -527,7 +545,7 @@ fun SettingsSheet(
                 ReturnToFeedBar(
                     liquidGlass = liquidGlass, tint = dominantColor, backdrop = null,
                     uploadBackdrop = hubBackgroundBackdrop,
-                    onReturnToFeed = { onReturnToFeed() },
+                    onReturnToFeed = { explore -> onReturnToFeed(explore) },
                     onOpenSettings = { goToHubPage(if (hubPage == HubPage.SETTINGS) HubPage.MAIN else HubPage.SETTINGS) },
                     // Fix (per feedback): the More popup's Refresh bubble
                     // must always appear — ReturnToFeedBar only feeds this
@@ -560,6 +578,11 @@ fun SettingsSheet(
 
 // ── AT Protocol page: login form, feed row, quick-access buttons, and every
 // Bluesky-specific setting — item 5. ──────────────────────────────────────
+/** A feed chip the person has tapped in the Hub (not opened yet). The
+ *  wrapper keeps "picked a feed whose uri is null" distinct from "nothing
+ *  picked". */
+private data class PickedFeed(val uri: String?)
+
 @Composable
 private fun AtProtocolPageContent(
     bskyLoggedIn: Boolean,
@@ -581,6 +604,10 @@ private fun AtProtocolPageContent(
     liquidGlass: Boolean,
     dominantColor: Color,
     backdrop: GlassBackdrop?,
+    // Which feed chip shows as picked (the one Timeline/Explore will open).
+    highlightedFeedUri: String? = selectedFeedUri,
+    authorChipSelected: Boolean = authorFeedState != null,
+    onTapAuthorChip: () -> Unit = {},
     // Item 8: Friends section (Profiles/Reviews sub-tabs).
     dmConversations: List<com.mediaviewer.model.DmConversation> = emptyList(),
     dmConversationsLoading: Boolean = false,
@@ -784,7 +811,9 @@ private fun AtProtocolPageContent(
         HubFeedRow(
             availableFeeds = availableFeeds, selectedFeedUri = selectedFeedUri, authorFeedState = authorFeedState,
             liquidGlass = liquidGlass, dominantColor = dominantColor, drag = feedDrag,
-            onSelectFeed = onSelectFeed, onMoveFeed = onMoveFeed, onRemoveFeed = onRemoveFeed
+            onSelectFeed = onSelectFeed, onMoveFeed = onMoveFeed, onRemoveFeed = onRemoveFeed,
+            highlightedFeedUri = highlightedFeedUri, authorChipSelected = authorChipSelected,
+            onTapAuthorChip = onTapAuthorChip
         )
 
         Spacer(Modifier.height(8.dp))
@@ -1041,7 +1070,11 @@ private fun AtProtocolPageContent(
                     // thumbnail color (falling back to the author's avatar
                     // color) instead of the page-wide dominantColor, so it
                     // visually matches the card it belongs to.
-                    val blogTint = rememberDominantColor(fb.blog.thumbnailUrl ?: fb.author.avatarUrl ?: "")
+                    // No image: the author's real profile color (banner +
+                    // avatar blend) rather than the avatar-only one.
+                    val blogThumb = fb.blog.thumbnailUrl
+                    val blogTint = if (blogThumb != null) rememberDominantColor(blogThumb)
+                        else rememberAuthorProfileTint(fb.author.did, fb.author.avatarUrl)
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         // Item 11: blog cards don't have one fixed width
                         // (it follows each thumbnail's own aspect ratio at
@@ -1054,6 +1087,7 @@ private fun AtProtocolPageContent(
                         Spacer(Modifier.height(6.dp))
                         BlogBubble(
                             blog = fb.blog, liquidGlass = liquidGlass, fallbackAvatarUrl = fb.author.avatarUrl,
+                            fallbackTint = blogTint,
                             onOpenBlog = { onOpenBlog(fb) },
                             titleFontSize = 10.sp, fixedHeight = HUB_BLOG_CARD_HEIGHT
                         )
@@ -1734,7 +1768,8 @@ private fun ReturnToFeedBar(
     liquidGlass: Boolean,
     tint: Color,
     backdrop: GlassBackdrop?,
-    onReturnToFeed: () -> Unit,
+    /** false = Timeline (the normal feed), true = Explore mode. */
+    onReturnToFeed: (explore: Boolean) -> Unit,
     onOpenSettings: () -> Unit,
     onRefresh: () -> Unit = {},
     // Item 14: false pre-login (nothing to return to / refresh yet, only
@@ -1771,10 +1806,10 @@ private fun ReturnToFeedBar(
 ) {
     val barHeight = 40.dp
     val shape = RoundedCornerShape(20.dp)
-    val label = if (hasVisitedFeed) "Return to Feed" else "Open Feed"
     // Item 8: haptic tap when leaving the Hub back to the feed.
     val tap = rememberHapticTap()
-    val onReturnToFeedHaptic = { tap(); onReturnToFeed() }
+    val onTimeline = { tap(); onReturnToFeed(false) }
+    val onExplore = { tap(); onReturnToFeed(true) }
     // Bug fix (per feedback): the pill used to shrink-wrap its own text
     // and sit centered as a small standalone group with the refresh bubble
     // — not the wide, left-anchored bar it used to be. The pill itself now
@@ -1809,22 +1844,34 @@ private fun ReturnToFeedBar(
         // on, so there's nothing to visually fight with underneath it and
         // no reason to force extra opacity. It now uses a completely
         // normal LiquidGlassSurface, same as the HubChip row above it.
-        if (liquidGlass) {
-            LiquidGlassSurface(
-                Modifier.fillMaxWidth().padding(start = moreReserve, end = uploadReserve).height(barHeight)
-                    .clickable(onClick = onReturnToFeedHaptic),
-                shape = shape, tint = tint, backdrop = backdrop
-            ) {}
-        } else {
-            Box(
-                Modifier.fillMaxWidth().padding(start = moreReserve, end = uploadReserve).height(barHeight)
-                    .clip(shape).background(Color.White.copy(0.08f)).clickable(onClick = onReturnToFeedHaptic)
-            )
+        // The old single Return to Feed pill, split in two: Timeline (the
+        // normal one-post-at-a-time feed) on the left, Explore (the grid)
+        // on the right. Both open whichever feed is picked in the row above.
+        Row(
+            Modifier.fillMaxWidth().padding(start = moreReserve, end = uploadReserve).height(barHeight),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            @Composable
+            fun HalfPill(label: String, onClick: () -> Unit) {
+                val m = Modifier.weight(1f).fillMaxHeight()
+                if (liquidGlass) {
+                    LiquidGlassSurface(m.clickable(onClick = onClick), shape = shape, tint = tint, backdrop = backdrop) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                } else {
+                    Box(
+                        m.clip(shape).background(Color.White.copy(0.08f)).clickable(onClick = onClick),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+            HalfPill("Timeline", onTimeline)
+            HalfPill("Explore", onExplore)
         }
-        Text(
-            label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.align(Alignment.Center)
-        )
         HubUploadBubble(
             liquidGlass, tint, size = barHeight, modifier = Modifier.align(Alignment.CenterEnd),
             backdrop = backdrop, menuBackdrop = uploadBackdrop,
@@ -2119,15 +2166,20 @@ private fun ProfileGridButton(
 // ── Shared feed-row chip composables ─────────────────────────────────────────
 
 @Composable
-fun AuthorChip(author: com.mediaviewer.model.AuthorInfo, liquidGlass: Boolean = false, dominantColor: Color = NeutralGlassTint) {
-    // Always shown as "selected" since we're currently viewing this author's posts.
-    // Tapping it is intentionally a no-op — to leave, tap a real feed chip.
+fun AuthorChip(
+    author: com.mediaviewer.model.AuthorInfo, liquidGlass: Boolean = false, dominantColor: Color = NeutralGlassTint,
+    // Selected while it's the feed Timeline/Explore would open (nothing
+    // else picked); tapping it picks it again.
+    selected: Boolean = true,
+    onClick: (() -> Unit)? = null
+) {
     Row(
         modifier = Modifier
             .then(
-                if (liquidGlass) Modifier.glassPanel(true, tint = dominantColor, shape = RoundedCornerShape(20.dp))
-                else Modifier.clip(RoundedCornerShape(20.dp)).background(Color.White.copy(0.18f))
+                if (liquidGlass) Modifier.glassPanel(true, tint = if (selected) dominantColor else dominantColor.copy(alpha = 0.5f), shape = RoundedCornerShape(20.dp))
+                else Modifier.clip(RoundedCornerShape(20.dp)).background(if (selected) Color.White.copy(0.18f) else Color.White.copy(0.06f))
             )
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 10.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -2143,7 +2195,8 @@ fun AuthorChip(author: com.mediaviewer.model.AuthorInfo, liquidGlass: Boolean = 
         } else {
             Box(Modifier.size(16.dp).clip(CircleShape).background(Color.White.copy(0.2f)))
         }
-        Text(author.displayName.take(16), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Text(author.displayName.take(16), color = if (selected) Color.White else DimGray, fontSize = 12.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
     }
 }
 
@@ -2319,7 +2372,10 @@ private fun HubFeedRow(
     drag: HubFeedDragState,
     onSelectFeed: (String?) -> Unit,
     onMoveFeed: (Int, Int) -> Unit,
-    onRemoveFeed: (String) -> Unit
+    onRemoveFeed: (String) -> Unit,
+    highlightedFeedUri: String? = selectedFeedUri,
+    authorChipSelected: Boolean = authorFeedState != null,
+    onTapAuthorChip: () -> Unit = {}
 ) {
     // The row's own copy of the order, so a drop re-lays it out in the same
     // frame the drag ends (no one-frame jump while the ViewModel catches up).
@@ -2400,7 +2456,11 @@ private fun HubFeedRow(
     ) {
         val saved = authorFeedState
         if (saved != null) {
-            AuthorChip(author = saved.author, liquidGlass = liquidGlass, dominantColor = dominantColor)
+            AuthorChip(
+                author = saved.author, liquidGlass = liquidGlass, dominantColor = dominantColor,
+                selected = authorChipSelected,
+                onClick = { view.hubHaptic(HapticFeedbackConstants.VIRTUAL_KEY); onTapAuthorChip() }
+            )
         }
         order.forEachIndexed { index, feed ->
             key(feed.uri) {
@@ -2460,7 +2520,7 @@ private fun HubFeedRow(
                 ) {
                     FeedChip(
                         feed.displayName, feed.avatarUrl,
-                        selectedFeedUri == feed.uri && saved == null,
+                        highlightedFeedUri == feed.uri && !authorChipSelected,
                         liquidGlass = liquidGlass, dominantColor = dominantColor,
                         modifier = Modifier.graphicsLayer {
                             translationX = shift

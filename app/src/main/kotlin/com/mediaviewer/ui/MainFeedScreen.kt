@@ -43,6 +43,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalConfiguration
@@ -233,6 +234,9 @@ fun MainFeedScreen(
     onLikeComment: (CommentItem) -> Unit,
     onVoteComment: (CommentItem, Int) -> Unit,
     onSelectFeed: (String?) -> Unit,
+    /** Hub Timeline/Explore after picking a feed: open it in the timeline
+     *  (explore = false) or Explore mode (true). */
+    onOpenFeed: (uri: String?, explore: Boolean) -> Unit = { uri, _ -> onSelectFeed(uri) },
     onToggleDownloadOnLike: (Boolean) -> Unit,
     onDownloadAllLiked: () -> Unit,
     onCancelDownload: () -> Unit,
@@ -564,6 +568,8 @@ fun MainFeedScreen(
                         onShowE621Favorites       = { onShowE621Favorites(); onSetScreen(ScreenState.FEED) },
                         onSwitchMode              = onSwipeToMode,
                         onSwipeToFeed             = onReturnToFeed,
+                        onOpenFeed                = onOpenFeed,
+                        onEnterFeedView           = { explore -> onSetScreen(if (explore) ScreenState.GRID else ScreenState.FEED) },
                         selfProfile               = selfProfile,
                         hideTextOnlyPosts         = hideTextOnlyPosts,
                         onToggleHideTextOnlyPosts = onToggleHideTextOnlyPosts,
@@ -1656,6 +1662,28 @@ private fun PostContent(
             ) {
                 val showTranslateIndicator = translationEnabled && item.text.isNotBlank() &&
                     translationState != null && translationState.status != TranslationStatus.IDLE
+                // Audio visualizer bars and the indicator pills share one
+                // Box: the bars are drawn first (behind the pills, in front
+                // of the media) and take up no layout space at all, so
+                // turning them on never moves the pills or anything else.
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.BottomCenter) {
+                if (com.mediaviewer.util.UiToggles.audioVisualizer) {
+                    val barsColor = if (liquidGlass) dominantColor else rememberDominantColor(glassBackdropUrl)
+                    AudioVisualizerBars(
+                        color = barsColor,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .layout { measurable, constraints ->
+                                // Measured at 34dp, laid out as zero height and
+                                // drawn upward from the bottom of this Box, i.e.
+                                // resting right on top of the interaction bar.
+                                val h = 34.dp.roundToPx()
+                                val placeable = measurable.measure(constraints.copy(minHeight = h, maxHeight = h))
+                                layout(placeable.width, 0) { placeable.place(0, -placeable.height) }
+                            }
+                            .padding(horizontal = 20.dp)
+                    )
+                }
                 if (showTranslateIndicator || item.mediaGroup.size > 1) {
                     Row(
                         modifier = Modifier.padding(bottom = 4.dp),
@@ -1742,13 +1770,6 @@ private fun PostContent(
                         }
                     }
                 }
-                // Item 8: audio visualizer bars, right on top of the bar.
-                if (com.mediaviewer.util.UiToggles.audioVisualizer) {
-                    val barsColor = if (liquidGlass) dominantColor else rememberDominantColor(glassBackdropUrl)
-                    AudioVisualizerBars(
-                        color = barsColor,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp).height(30.dp)
-                    )
                 }
                 ActionRow(item, appMode, onToggleLike, onToggleRepost, onToggleBookmark, onE621Vote,
                     onQuoteRepost, onDownload, onDownloadGif, onBlockAccount, onSendPost,
