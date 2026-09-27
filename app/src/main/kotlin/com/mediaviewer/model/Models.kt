@@ -405,7 +405,11 @@ data class BskyPutRecordRequest(
     val repo: String,
     val collection: String,
     val rkey: String,
-    val record: Map<String, Any>
+    val record: Map<String, Any>,
+    /** false = skip the PDS's lexicon validation (third-party lexicons
+     *  like standard.site that a PDS may know a different revision of).
+     *  null = omitted from the JSON, the PDS default. */
+    val validate: Boolean? = null
 )
 
 data class BskyPutRecordResponse(val uri: String, val cid: String)

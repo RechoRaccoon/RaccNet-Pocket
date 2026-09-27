@@ -123,7 +123,9 @@ fun CapturePreviewScreen(
     var poster by remember(uri) { mutableStateOf<Bitmap?>(null) }
     LaunchedEffect(uri) {
         withContext(Dispatchers.IO) {
-            mediaSize = if (isVideo) videoSize(context, uri) else imageSize(context, uri)
+            val probed = if (isVideo) videoSize(context, uri) else imageSize(context, uri)
+            // A video's player may already have reported its real size.
+            if (mediaSize == null) mediaSize = probed
             if (!isVideo) poster = decodeScaled(context, uri, 1600)
         }
     }
@@ -180,7 +182,18 @@ fun CapturePreviewScreen(
                         }
                 ) {
                     if (isVideo) {
-                        CaptureVideo(uri)
+                        CaptureVideo(
+                            uri = uri,
+                            // No crop: show the whole frame (never zoomed).
+                            // A crop: fill the crop box, centre-cropped —
+                            // exactly what the export keeps.
+                            zoom = crop.ratio != null,
+                            // The decoder's real frame size is the truth; the
+                            // file metadata can disagree (rotation flags,
+                            // encoder padding), which is what threw the box's
+                            // aspect off and made the video look zoomed/offset.
+                            onVideoSize = { w, h -> if (w > 0 && h > 0 && mediaSize != (w to h)) mediaSize = w to h }
+                        )
                     } else {
                         poster?.let {
                             androidx.compose.foundation.Image(
@@ -268,9 +281,10 @@ fun CapturePreviewScreen(
 }
 
 @Composable
-private fun CaptureVideo(uri: Uri) {
+private fun CaptureVideo(uri: Uri, zoom: Boolean, onVideoSize: (Int, Int) -> Unit) {
     val context = LocalContext.current
     var paused by remember { mutableStateOf(false) }
+    val latestOnVideoSize = androidx.compose.runtime.rememberUpdatedState(onVideoSize)
     val player = remember(uri) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri(uri))
@@ -279,7 +293,22 @@ private fun CaptureVideo(uri: Uri) {
             playWhenReady = true
         }
     }
-    DisposableEffect(player) { onDispose { player.release() } }
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                if (videoSize.width <= 0 || videoSize.height <= 0) return
+                // Displayed size: pixel aspect applied, rotation the
+                // renderer didn't apply itself accounted for.
+                val w = (videoSize.width * videoSize.pixelWidthHeightRatio).toInt()
+                val h = videoSize.height
+                @Suppress("DEPRECATION")
+                val rotated = videoSize.unappliedRotationDegrees == 90 || videoSize.unappliedRotationDegrees == 270
+                if (rotated) latestOnVideoSize.value(h, w) else latestOnVideoSize.value(w, h)
+            }
+        }
+        player.addListener(listener)
+        onDispose { player.removeListener(listener); player.release() }
+    }
     Box(Modifier.fillMaxSize().clickable {
         paused = !paused
         player.playWhenReady = !paused
@@ -287,12 +316,20 @@ private fun CaptureVideo(uri: Uri) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                PlayerView(ctx).apply {
+                // TextureView-backed (inflated — the surface type can only be
+                // set from XML): a SurfaceView ignores this box's rounded
+                // clip and lags behind its size animation, so the video sat
+                // offset/oversized inside the frame. A TextureView draws
+                // like a normal view, and the glass buttons can blur it.
+                (android.view.LayoutInflater.from(ctx).inflate(com.mediaviewer.R.layout.player_view_texture, null) as PlayerView).apply {
                     this.player = player
                     useController = false
-                    // Zoom = centre-crop, i.e. exactly what the chosen crop keeps.
-                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                    setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
                 }
+            },
+            update = { view ->
+                val mode = if (zoom) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
+                if (view.resizeMode != mode) view.resizeMode = mode
             },
             onRelease = { it.player = null }
         )

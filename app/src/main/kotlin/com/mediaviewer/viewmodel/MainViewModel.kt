@@ -322,6 +322,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _hasVisitedFeed = MutableStateFlow(false)
     val hasVisitedFeed: StateFlow<Boolean> = _hasVisitedFeed
 
+    /** Grid or timeline — whichever the person was last in (updated by the
+     *  screenState collector in init). Feeds open in the grid, so that's
+     *  also where a first "Open Feed" goes. */
+    private var lastFeedView = ScreenState.GRID
+
+    /** The Hub's Return to Feed: back to the grid or the timeline, whichever
+     *  the person was last using. */
+    fun returnToFeed() = setScreen(lastFeedView)
+
     // Track swipe direction for animations (1=next/down, -1=prev/up, 0=other)
     private val _navDirection = MutableStateFlow(0)
     val navDirection: StateFlow<Int> = _navDirection
@@ -975,7 +984,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Boolean flow in this ViewModel.
     private val _vrmModeOpen = MutableStateFlow(false)
     val vrmModeOpen: StateFlow<Boolean> = _vrmModeOpen
-    fun openVrmMode() { _vrmModeOpen.value = true }
+    fun openVrmMode() {
+        // Opened from the posting page's notch bubble: VRM mode replaces the
+        // posting page rather than stacking on top of it (a capture taken in
+        // VRM mode comes back through its own review page into a fresh
+        // composer anyway). A post that's mid-upload keeps uploading.
+        if (_composePostOpen.value) resetComposeState()
+        _vrmModeOpen.value = true
+    }
     fun closeVrmMode() { _vrmModeOpen.value = false }
 
     /** A photo/video just taken in VRM mode, shown on its own review page
@@ -1002,6 +1018,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closeComposePost() {
         if (_composePostSubmitting.value) return
+        resetComposeState()
+    }
+
+    private fun resetComposeState() {
         _composePostOpen.value = false
         _reviewComposeTarget.value = null
         _initialComposeImageUri.value = null
@@ -1012,7 +1032,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Routes a finished [com.mediaviewer.ui.ComposePostDraft] to the right
      *  BlueskyRepository call for its mode, retrying once on an expired-
      *  session error the same way every other authenticated call in this
-     *  ViewModel does (see isAuthError/refreshBskyTokenIfPossible). */
+     *  ViewModel does (see isAuthError/refreshBskyTokenIfPossible). On
+     *  success the composer closes and whatever was just posted opens. */
     fun submitComposePost(draft: com.mediaviewer.ui.ComposePostDraft) {
         if (_composePostSubmitting.value) return
         // Item 8: haptic tap on posting (thread/single/review/blog/textshot
@@ -1024,10 +1045,140 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
                 if (refreshBskyTokenIfPossible()) result = runCatchingComposePost(draft)
             }
-            result.onFailure { _errorMessage.value = it.message }
-            _composePostSubmitting.value = false
-            if (result.isSuccess) { _composePostOpen.value = false; _reviewComposeTarget.value = null; _blogEditDraft.value = null }
+            val error = result.exceptionOrNull()
+            if (error != null) {
+                // The composer sits above the feed's error snackbar, so a
+                // failure used to be completely silent — the Post button just
+                // came back. A toast shows over everything.
+                val message = error.message?.takeIf { it.isNotBlank() } ?: "Couldn't post that"
+                _errorMessage.value = message
+                showToast(message)
+                _composePostSubmitting.value = false
+                return@launch
+            }
+            // Work out what to open while the Post button keeps spinning, so
+            // the composer closes straight onto the new post/blog/review.
+            val open = runCatching { resolvePublished(draft.mode, result.getOrNull()) }.getOrNull()
+            withContext(Dispatchers.Main) {
+                _composePostSubmitting.value = false
+                val composerStillOpen = _composePostOpen.value
+                resetComposeState()
+                // Closed meanwhile (VRM mode took over the screen): don't
+                // yank the person somewhere else, just confirm it went out.
+                if (!composerStillOpen || _vrmModeOpen.value) showToast("Posted")
+                else if (open != null) open() else showToast("Posted")
+            }
         }
+    }
+
+    /** The signed-in account as an [AuthorInfo]. */
+    private fun selfAuthorInfo(): AuthorInfo =
+        _selfProfile.value?.author ?: AuthorInfo(did = _bskyDid.value, handle = bskyHandle, displayName = bskyHandle, avatarUrl = null)
+
+    /**
+     * After posting: fetches whatever was just published and returns the
+     * action that opens it (run on the main thread) — the post itself in the
+     * pager (reached through your own profile, so pinching in lands on it),
+     * or your profile with the new blog/review open. IO thread.
+     */
+    private suspend fun resolvePublished(mode: com.mediaviewer.ui.ComposeMode, published: Any?): (() -> Unit)? {
+        val did = _bskyDid.value
+        return when (mode) {
+            com.mediaviewer.ui.ComposeMode.BLOG -> {
+                val uri = published as? String ?: return { showOwnProfileWith(ProfileTab.BLOGS) }
+                val blog = bskyRepo.getBlogByUri(bskyToken, did, uri)
+                return { showOwnProfileWith(ProfileTab.BLOGS, blog = blog) }
+            }
+            com.mediaviewer.ui.ComposeMode.REVIEW -> {
+                val uri = published as? String ?: return { showOwnProfileWith(ProfileTab.REVIEWS) }
+                val review = bskyRepo.getReviewByUri(bskyToken, did, uri)
+                return { showOwnProfileWith(ProfileTab.REVIEWS, review = review) }
+            }
+            else -> {
+                val uris = when (published) {
+                    is BskyRef -> listOf(published.uri)
+                    is List<*> -> published.filterIsInstance<BskyRef>().map { it.uri }
+                    else -> emptyList()
+                }
+                if (uris.isEmpty()) return { showOwnProfileWith(ProfileTab.POSTS) }
+                // The AppView indexes a new post within a second or two;
+                // retry briefly until it's there.
+                var items: List<MediaItem> = emptyList()
+                for (attempt in 0 until 6) {
+                    if (attempt > 0) delay(700)
+                    items = bskyRepo.getPostsByUris(bskyToken, uris).getOrNull().orEmpty()
+                    if (items.isNotEmpty()) break
+                }
+                val order = uris.withIndex().associate { (i, u) -> u to i }
+                val sorted = items.sortedBy { order[it.postUri] ?: Int.MAX_VALUE }
+                if (sorted.isEmpty()) return { showOwnProfileWith(ProfileTab.POSTS) }
+                return { openPublishedPosts(sorted) }
+            }
+        }
+    }
+
+    /** Opens your own profile on [tab] with a just-published blog/review
+     *  open on top of it. Reuses your profile if it's already the one
+     *  showing (refreshing it in place), otherwise opens it fresh. */
+    private fun showOwnProfileWith(tab: ProfileTab, blog: LeafletBlog? = null, review: PopfeedReview? = null) {
+        if (!_bskyLoggedIn.value) return
+        val did = _bskyDid.value
+        // Overlays that would sit on top of the profile.
+        _dmInboxOpen.value = false
+        _dmThread.value = null
+        fun seed(o: ProfileOverlayState): ProfileOverlayState {
+            // The tab probes haven't run yet (fresh open) or may be stale
+            // (already open): make sure the tab exists with the new item in
+            // it right away; the probe then replaces it with the full list.
+            val content = when (tab) {
+                ProfileTab.BLOGS -> blog?.let { b ->
+                    val existing = o.tabStates[ProfileTab.BLOGS]?.blogs.orEmpty().filterNot { it.uri == b.uri }
+                    ProfileTabState(blogs = listOf(b) + existing, loaded = true)
+                }
+                ProfileTab.REVIEWS -> review?.let { r ->
+                    val existing = o.tabStates[ProfileTab.REVIEWS]?.reviews.orEmpty().filterNot { it.uri == r.uri }
+                    ProfileTabState(reviews = listOf(r) + existing, loaded = true)
+                }
+                else -> null
+            }
+            val hasTab = tab in o.availableTabs || content != null
+            return o.copy(
+                selectedTab = if (hasTab) tab else o.selectedTab,
+                availableTabs = if (content != null) o.availableTabs + tab else o.availableTabs,
+                tabStates = if (content != null) o.tabStates + (tab to content) else o.tabStates,
+                openBlog = blog ?: o.openBlog,
+                openReview = review ?: o.openReview
+            )
+        }
+        val cur = _profileOverlay.value
+        if (cur != null && !cur.hidden && cur.author.did == did) {
+            _profileOverlay.value = seed(cur.copy(openBlog = null, openReview = null, openTitle = null, openTitlePreselectedReview = null))
+            // Give the AppView/PDS listing a moment, then reload in place.
+            viewModelScope.launch { delay(1200); refreshProfile() }
+            return
+        }
+        openProfile(selfAuthorInfo(), initialTab = if (tab == ProfileTab.BLOGS || tab == ProfileTab.REVIEWS) ProfileTab.POSTS else tab)
+        _profileOverlay.value?.let { _profileOverlay.value = seed(it) }
+    }
+
+    /** Opens just-posted posts (a thread's posts in order) full-screen in
+     *  the pager, with your own profile hidden behind them — pinch in to
+     *  see it, exactly like opening a post from your profile's grid. */
+    private fun openPublishedPosts(items: List<MediaItem>) {
+        if (!_bskyLoggedIn.value) return
+        _dmInboxOpen.value = false
+        _dmThread.value = null
+        // Search draws above the pager; close it so the post is visible.
+        _searchOpen.value = false
+        _searchHiddenBehindPost.value = false
+        openProfile(selfAuthorInfo(), initialTab = ProfileTab.POSTS)
+        openPostFromProfileTab(items, 0)
+    }
+
+    /** Hub "Liked Posts": your own profile, on its Likes tab. */
+    fun openOwnLikes() {
+        if (!_bskyLoggedIn.value) return
+        openProfile(selfAuthorInfo(), initialTab = ProfileTab.LIKES)
     }
 
     private suspend fun runCatchingComposePost(draft: com.mediaviewer.ui.ComposePostDraft): Result<Any> {
@@ -1079,13 +1230,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (blog == null) Result.failure(IllegalStateException("Empty blog"))
                 else runCatching {
                     val selfName = _selfProfile.value?.author?.displayName.orEmpty()
-                    val uri = bskyRepo.publishBlog(bskyToken, did, bskyHandle, selfName, context, blog, draft.selfLabels).getOrElse { throw it }
-                    // Show it: refresh the open profile's Blogs tab (if it's yours).
-                    viewModelScope.launch {
-                        kotlinx.coroutines.delay(800)
-                        if (_profileOverlay.value?.author?.did == did) refreshProfile()
-                    }
-                    uri
+                    // Opening it afterwards (see submitComposePost) also
+                    // refreshes your profile's Blogs tab if it's open.
+                    bskyRepo.publishBlog(bskyToken, did, bskyHandle, selfName, context, blog, draft.selfLabels).getOrElse { throw it }
                 }
             }
             com.mediaviewer.ui.ComposeMode.REVIEW -> {
@@ -2024,7 +2171,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // lands the person on the feed, this reacts to the resulting state
         // change and flips hasVisitedFeed once, for good, for the rest of
         // the process's life (see hasVisitedFeed's own doc comment above).
-        viewModelScope.launch { screenState.collect { if (it == ScreenState.FEED) _hasVisitedFeed.value = true } }
+        // Grid mode counts as "the feed" too (feeds now open straight into
+        // it), and whichever of the two the person was last in is what the
+        // Hub's Return to Feed goes back to — see returnToFeed().
+        viewModelScope.launch {
+            screenState.collect {
+                if (it == ScreenState.FEED || it == ScreenState.GRID) {
+                    _hasVisitedFeed.value = true
+                    lastFeedView = it
+                }
+            }
+        }
         viewModelScope.launch { prefs.reducedAnimations.collect { _reducedAnimations.value = it } }
         viewModelScope.launch { prefs.liquidGlass.collect { _liquidGlass.value = it } }
         viewModelScope.launch { prefs.classicProfileTabRow.collect { _classicProfileTabRow.value = it } }

@@ -83,6 +83,8 @@ fun rememberTopCutoutClearance(minimum: Dp = 32.dp): Dp {
  *  observe it asynchronously through composition. */
 suspend fun fetchDominantColor(context: android.content.Context, url: String): Color {
     if (url.isBlank()) return Color(0xFF2A2A2E)
+    val cached = cachedDominantColor(url)
+    if (cached != null) return cached
     try {
         val loader = coil.Coil.imageLoader(context)
         val request = ImageRequest.Builder(context).data(url).size(16, 16).allowHardware(false).build()
@@ -93,11 +95,27 @@ suspend fun fetchDominantColor(context: android.content.Context, url: String): C
                 val p = bmp.getPixel(x, y)
                 r += (p shr 16) and 0xFF; g += (p shr 8) and 0xFF; b += p and 0xFF; n++
             }
-            if (n > 0) return Color(r.toFloat() / n / 255f, g.toFloat() / n / 255f, b.toFloat() / n / 255f, 1f)
+            if (n > 0) {
+                val c = Color(r.toFloat() / n / 255f, g.toFloat() / n / 255f, b.toFloat() / n / 255f, 1f)
+                synchronized(dominantColorCache) { dominantColorCache[url] = c }
+                return c
+            }
         }
     } catch (_: Exception) { /* fall through to default below */ }
     return Color(0xFF2A2A2E)
 }
+
+/** Colors already sampled this session, by URL. Every glass surface, tint
+ *  and transition asks for these over and over (the Hub, profiles and the
+ *  notch all re-derive "your color" each time they appear); without this,
+ *  each appearance started from a grey placeholder and re-ran the image
+ *  fetch, then recomposed its whole subtree again once the real color
+ *  arrived — a visible flash and extra work on every menu switch. */
+private val dominantColorCache = object : LinkedHashMap<String, Color>(64, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Color>?): Boolean = size > 300
+}
+
+private fun cachedDominantColor(url: String): Color? = synchronized(dominantColorCache) { dominantColorCache[url] }
 
 /** The signed-in account's banner, set once from AppRoot, so every
  *  "your color" surface outside the profile page can use the exact same
@@ -135,10 +153,11 @@ fun rememberSelfProfileTint(selfAvatarUrl: String): Color =
 @Composable
 fun rememberDominantColor(url: String): Color {
     val context = LocalContext.current
-    var color by remember(url) { mutableStateOf(Color(0xFF2A2A2E)) }
+    // Already known: use it from the very first frame, no fetch.
+    var color by remember(url) { mutableStateOf(cachedDominantColor(url) ?: Color(0xFF2A2A2E)) }
     LaunchedEffect(url) {
         if (url.isBlank()) return@LaunchedEffect
-        color = fetchDominantColor(context, url)
+        color = cachedDominantColor(url) ?: fetchDominantColor(context, url)
     }
     return color
 }

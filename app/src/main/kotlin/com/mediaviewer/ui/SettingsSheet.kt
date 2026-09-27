@@ -54,6 +54,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
@@ -967,7 +968,7 @@ private fun AtProtocolPageContent(
         // ProfileOverlay.kt), not everyone followed.
         @Composable
         fun ReviewsSectionContent() {
-            val friendOnlyReviews = friendsReviews.filter { it.author.did != selfDid }
+            val friendOnlyReviews = remember(friendsReviews, selfDid) { friendsReviews.filter { it.author.did != selfDid }.take(20) }
             if (friendOnlyReviews.isEmpty()) return
             // Bug fix (per feedback): see LiveSectionContent's matching
             // comment just above — same tightened spacing applied here so
@@ -980,11 +981,17 @@ private fun AtProtocolPageContent(
                 HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
             }
             Spacer(Modifier.height(8.dp))
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+            // Lazy: only the cards actually on screen are composed (each is
+            // a blurred glass card with artwork — building all 20 up front
+            // was a big part of the Hub's open time).
+            androidx.compose.foundation.lazy.LazyRow(
+                Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                friendOnlyReviews.take(20).forEach { fr -> MutualReviewCard(fr, liquidGlass, onOpenReview, onOpenProfile) }
+                items(friendOnlyReviews.size) { i ->
+                    MutualReviewCard(friendOnlyReviews[i], liquidGlass, onOpenReview, onOpenProfile)
+                }
             }
         }
 
@@ -992,7 +999,7 @@ private fun AtProtocolPageContent(
         // separate list (see ProfileOverlay.kt's Blogs sub-row).
         @Composable
         fun BlogsSectionContent() {
-            val friendOnlyBlogs = friendsBlogs.filter { it.author.did != selfDid }
+            val friendOnlyBlogs = remember(friendsBlogs, selfDid) { friendsBlogs.filter { it.author.did != selfDid }.take(20) }
             if (friendOnlyBlogs.isEmpty()) return
             // Bug fix (per feedback): see LiveSectionContent's matching
             // comment above — same tightened spacing applied here so it's
@@ -1017,12 +1024,14 @@ private fun AtProtocolPageContent(
             // above it — the Hub mixes posts from many different accounts
             // in one row, unlike a profile's Blogs tab where the author is
             // implicit, so each card needs to say whose it is.
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+            androidx.compose.foundation.lazy.LazyRow(
+                Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.Top
             ) {
-                friendOnlyBlogs.take(20).forEach { fb ->
+                items(friendOnlyBlogs.size) { i ->
+                    val fb = friendOnlyBlogs[i]
                     // Bug fix (per feedback): the author bubble now (a)
                     // centers horizontally over its own blog card instead
                     // of hugging the card's left edge — Column defaults to
@@ -1847,12 +1856,14 @@ private fun ReturnToFeedBar(
 @Composable
 private fun ShimmerBox(shape: androidx.compose.ui.graphics.Shape, modifier: Modifier = Modifier) {
     val transition = rememberInfiniteTransition(label = "hubShimmer")
-    val alpha by transition.animateFloat(
+    val alpha = transition.animateFloat(
         initialValue = 0.05f, targetValue = 0.15f,
         animationSpec = infiniteRepeatable(animation = tween(700, easing = LinearEasing), repeatMode = RepeatMode.Reverse),
         label = "hubShimmerAlpha"
     )
-    Box(modifier.clip(shape).background(Color.White.copy(alpha = alpha)))
+    // The pulse is read while drawing, so it only redraws the block each
+    // frame instead of recomposing it (there can be a dozen of these).
+    Box(modifier.clip(shape).drawBehind { drawRect(Color.White.copy(alpha = alpha.value)) })
 }
 
 /** Latest-Reviews-From-Subscribed-Accounts card. Item (this session): the

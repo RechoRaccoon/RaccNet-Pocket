@@ -252,6 +252,8 @@ fun MainFeedScreen(
     onShowLikes: () -> Unit,
     onShowFriends: () -> Unit,
     onShowE621Following: () -> Unit,
+    /** The Hub's Return to Feed — grid or timeline, whichever was last used. */
+    onReturnToFeed: () -> Unit = { onSetScreen(ScreenState.FEED) },
     onToggleReducedAnimations: (Boolean) -> Unit,
     combineListsAndPacks: Boolean,
     onToggleCombineListsPacks: (Boolean) -> Unit,
@@ -417,7 +419,7 @@ fun MainFeedScreen(
                         // bleed through the wipe) — skip it for just this
                         // one switch. The explicit "Return to Feed" button
                         // never sets this flag, so it keeps the slide below.
-                        initialState == ScreenState.SETTINGS && targetState == ScreenState.FEED && skipFeedEntryAnim ->
+                        initialState == ScreenState.SETTINGS && (targetState == ScreenState.FEED || targetState == ScreenState.GRID) && skipFeedEntryAnim ->
                             EnterTransition.None togetherWith ExitTransition.None
                         initialState == ScreenState.SETTINGS ->
                             slideInVertically(tween(220, easing = FastOutSlowInEasing)) { it } togetherWith
@@ -532,7 +534,9 @@ fun MainFeedScreen(
                         onExportDataset           = onExportDataset,
                         onImportDataset           = onImportDataset,
                         onDeleteImportedDataset   = onDeleteImportedDataset,
-                        onShowLikes               = { onShowLikes(); onSetScreen(ScreenState.FEED) },
+                        // Opens your own profile's Likes tab (an overlay), so
+                        // the Hub stays underneath it.
+                        onShowLikes               = onShowLikes,
                         onShowFriends             = { onShowFriends(); onSetScreen(ScreenState.FEED) },
                         onShowE621Following       = { onShowE621Following(); onSetScreen(ScreenState.FEED) },
                         onToggleReducedAnimations = onToggleReducedAnimations,
@@ -559,7 +563,7 @@ fun MainFeedScreen(
                         onSearchE621              = { tags -> onSearchE621(tags); onSetScreen(ScreenState.FEED) },
                         onShowE621Favorites       = { onShowE621Favorites(); onSetScreen(ScreenState.FEED) },
                         onSwitchMode              = onSwipeToMode,
-                        onSwipeToFeed             = { onSetScreen(ScreenState.FEED) },
+                        onSwipeToFeed             = onReturnToFeed,
                         selfProfile               = selfProfile,
                         hideTextOnlyPosts         = hideTextOnlyPosts,
                         onToggleHideTextOnlyPosts = onToggleHideTextOnlyPosts,
@@ -635,7 +639,9 @@ fun MainFeedScreen(
                         selfAvatarUrl   = selfAvatarUrl,
                         isLoading       = isLoading,
                         roundedGridTiles = squareGridRounded,
-                        reducedAnimations = reducedAnimations
+                        reducedAnimations = reducedAnimations,
+                        // Pulling down while already at the top opens the Hub.
+                        onSwipeDown     = { onSetScreen(ScreenState.SETTINGS) }
                     )
                 }
             }
@@ -1397,12 +1403,6 @@ private fun PostContent(
             val mediaModifier = Modifier.fillMaxSize().graphicsLayer {
                 scaleX = scale; scaleY = scale; translationX = offset.x; translationY = offset.y
             }.let { if (item.isBlocked || nsfwBlurred) it.blur(90.dp) else it }
-            // Item 10: Ambient Light — the media's top/bottom edge pixels
-            // stretched out behind it to fill the letterbox bars.
-            if (com.mediaviewer.util.UiToggles.ambientLight && !item.isTextOnly && !item.isBlocked && !nsfwBlurred) {
-                val ambientUrl = (item.mediaGroup.getOrNull(subImageIndex)?.thumbUrl ?: item.thumbUrl).ifBlank { item.mediaUrl }
-                AmbientEdgeFill(ambientUrl, Modifier.fillMaxSize())
-            }
             if (item.isTextOnly) {
                 // Big Update #3: text-only posts get a liquid-glass card shaped
                 // like a piece of media, centered where an image would sit.

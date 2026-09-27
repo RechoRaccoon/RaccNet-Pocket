@@ -122,6 +122,7 @@ class RetargetTarget(
     internal val smoothed = HashMap<String, Quaternion>()
     internal var lastHead: Quaternion? = null
     internal var lastUpdateNanos = 0L
+    internal var expressionCache: AvatarRetargeter.ExpressionCache? = null
 }
 
 object AvatarRetargeter {
@@ -562,36 +563,124 @@ object AvatarRetargeter {
 
     // ---------------------------------------------------------- expressions
 
+    /** Per-model expression bookkeeping, built once per loaded model
+     *  instead of re-deriving it (and reallocating every array) each frame. */
+    internal class ExpressionCache(
+        val vrmData: VrmData,
+        /** Every node any expression drives, with its entity + morph count. */
+        val nodes: List<Triple<Int, Int, Int>>,
+        /** Reused per-node weight buffers, and what was last written. */
+        val buffers: HashMap<Int, FloatArray>,
+        val lastWritten: HashMap<Int, FloatArray>,
+        val hasBlinkBoth: Boolean,
+        val hasBlinkSplit: Boolean
+    )
+
+    private fun expressionCache(target: RetargetTarget, vrmData: VrmData): ExpressionCache {
+        target.expressionCache?.takeIf { it.vrmData === vrmData }?.let { return it }
+        val rm = target.engine.renderableManager
+        val nodes = ArrayList<Triple<Int, Int, Int>>()
+        for (nodeIndex in vrmData.expressions.values.flatten().map { it.nodeIndex }.toSet()) {
+            val entity = target.nodeIndexToEntity[nodeIndex] ?: continue
+            val instance = rm.getInstance(entity)
+            if (instance == 0) continue
+            val count = runCatching { rm.getMorphTargetCount(instance) }.getOrDefault(0)
+            if (count > 0) nodes.add(Triple(nodeIndex, entity, count))
+        }
+        val names = vrmData.expressions.keys.map { it.lowercase() }.toSet()
+        val cache = ExpressionCache(
+            vrmData = vrmData,
+            nodes = nodes,
+            buffers = HashMap(),
+            lastWritten = HashMap(),
+            hasBlinkBoth = "blink" in names,
+            hasBlinkSplit = ("blinkleft" in names || "blink_l" in names) && ("blinkright" in names || "blink_r" in names)
+        )
+        target.expressionCache = cache
+        return cache
+    }
+
+    /** MediaPipe's blink score sits around 0.1–0.3 with the eyes open (more
+     *  when looking down) and rarely reaches 1 when closed. Open reads as
+     *  fully open, a real blink as fully shut. */
+    private fun blinkCurve(raw: Float): Float {
+        val t = ((raw - 0.25f) / 0.45f).coerceIn(0f, 1f)
+        return t * t * (3f - 2f * t)
+    }
+
     /** Drives the VRM's expressions from MediaPipe's ARKit-style scores.
      *  With [MIRROR], left/right blendshapes are swapped so winking your
-     *  left eye closes the avatar eye on the same side of the screen. */
-    fun applyExpressions(target: RetargetTarget, vrmData: VrmData, arkitBlendshapeScores: Map<String, Float>) {
+     *  left eye closes the avatar eye on the same side of the screen.
+     *
+     *  Blinks: most avatars define "blink" AND "blinkLeft"/"blinkRight",
+     *  and the one-sided shapes together already equal the two-eyed one.
+     *  Driving all three at full strength (as this used to) closed each
+     *  eyelid twice over, pushing it down past the lower lid. Now the
+     *  shared part of the two eyes goes to "blink" and only the difference
+     *  to the one-sided shapes, so each eye closes exactly once. Emotions
+     *  that shape the eyes themselves (a smile's squint) fade the blink out
+     *  the way VRM's overrideBlink = "blend" does, instead of stacking.
+     *  [remapBlink] = false feeds eye scores through as-is (manual eyes). */
+    fun applyExpressions(
+        target: RetargetTarget,
+        vrmData: VrmData,
+        arkitBlendshapeScores: Map<String, Float>,
+        remapBlink: Boolean = true
+    ) {
         if (arkitBlendshapeScores.isEmpty() || vrmData.expressions.isEmpty()) return
         val scores = if (MIRROR) mirrorSides(arkitBlendshapeScores) else arkitBlendshapeScores
-        val renderableManager = target.engine.renderableManager
-        val weightsByNode = mutableMapOf<Int, MutableMap<Int, Float>>()
-        for ((expressionName, binds) in vrmData.expressions) {
-            val intensity = arkitIntensityForExpression(expressionName, scores)
-            if (intensity <= 0.001f) continue
-            for (bind in binds) {
-                val nodeWeights = weightsByNode.getOrPut(bind.nodeIndex) { mutableMapOf() }
-                nodeWeights[bind.morphTargetIndex] = (nodeWeights[bind.morphTargetIndex] ?: 0f) + intensity * bind.weight
+        val cache = expressionCache(target, vrmData)
+
+        // ── Eyes ──
+        var left = scores["eyeBlinkLeft"] ?: 0f
+        var right = scores["eyeBlinkRight"] ?: 0f
+        if (remapBlink) { left = blinkCurve(left); right = blinkCurve(right) }
+        var emotion = 0f
+        for (name in vrmData.expressions.keys) {
+            when (name.lowercase()) {
+                "happy", "joy", "angry", "anger", "sad", "sorrow", "surprised", "surprise" ->
+                    emotion = maxOf(emotion, arkitIntensityForExpression(name, scores))
             }
         }
-        // Nodes that had weights last time but none now must be zeroed, or a
-        // blink would stay closed once the score drops to 0.
-        for (nodeIndex in vrmData.expressions.values.flatten().map { it.nodeIndex }.toSet()) {
-            weightsByNode.getOrPut(nodeIndex) { mutableMapOf() }
+        val eyeScale = (1f - emotion).coerceIn(0f, 1f)
+        val both = minOf(left, right)
+        val blinkBoth: Float
+        val blinkLeft: Float
+        val blinkRight: Float
+        when {
+            cache.hasBlinkBoth && cache.hasBlinkSplit -> { blinkBoth = both; blinkLeft = left - both; blinkRight = right - both }
+            cache.hasBlinkSplit -> { blinkBoth = 0f; blinkLeft = left; blinkRight = right }
+            else -> { blinkBoth = (left + right) / 2f; blinkLeft = 0f; blinkRight = 0f }
         }
-        for ((nodeIndex, morphWeights) in weightsByNode) {
-            val entity = target.nodeIndexToEntity[nodeIndex] ?: continue
-            val instance = renderableManager.getInstance(entity)
+
+        for (buffer in cache.buffers.values) buffer.fill(0f)
+        for ((expressionName, binds) in vrmData.expressions) {
+            val intensity = when (expressionName.lowercase()) {
+                "blink" -> blinkBoth * eyeScale
+                "blinkleft", "blink_l" -> blinkLeft * eyeScale
+                "blinkright", "blink_r" -> blinkRight * eyeScale
+                else -> arkitIntensityForExpression(expressionName, scores)
+            }.coerceIn(0f, 1f)
+            if (intensity <= 0.001f) continue
+            for (bind in binds) {
+                val node = cache.nodes.firstOrNull { it.first == bind.nodeIndex } ?: continue
+                val weights = cache.buffers.getOrPut(bind.nodeIndex) { FloatArray(node.third) }
+                if (bind.morphTargetIndex in weights.indices) weights[bind.morphTargetIndex] += intensity * bind.weight
+            }
+        }
+        // Every node is written each time (a node with no active expression
+        // gets all zeros, or a blink would stay closed once the score drops)
+        // — but only when its weights actually changed.
+        val rm = target.engine.renderableManager
+        for ((nodeIndex, entity, count) in cache.nodes) {
+            val weights = cache.buffers.getOrPut(nodeIndex) { FloatArray(count) }
+            for (i in weights.indices) weights[i] = weights[i].coerceIn(0f, 1f)
+            val last = cache.lastWritten[nodeIndex]
+            if (last != null && last.contentEquals(weights)) continue
+            val instance = rm.getInstance(entity)
             if (instance == 0) continue
-            val morphCount = runCatching { renderableManager.getMorphTargetCount(instance) }.getOrDefault(0)
-            if (morphCount <= 0) continue
-            val weights = FloatArray(morphCount)
-            morphWeights.forEach { (index, weight) -> if (index in weights.indices) weights[index] = weight.coerceIn(0f, 1f) }
-            runCatching { renderableManager.setMorphWeights(instance, weights, 0) }
+            runCatching { rm.setMorphWeights(instance, weights, 0) }
+                .onSuccess { cache.lastWritten[nodeIndex] = weights.copyOf() }
                 .onFailure { Log.e(TAG, "setMorphWeights failed for node $nodeIndex", it) }
         }
     }

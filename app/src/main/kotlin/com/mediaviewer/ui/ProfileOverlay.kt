@@ -71,11 +71,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.draw.blur
@@ -1089,19 +1091,19 @@ private fun ProfileInteractionBar(
             // in flight (dimmed instead when animations are reduced); taps
             // are ignored until it finishes. Haptic comes from the ViewModel.
             IconButton(onClick = { if (!refreshing) onRefresh() }) {
-                val angle = if (refreshing && animateRefresh) {
+                val angleState: androidx.compose.runtime.State<Float>? = if (refreshing && animateRefresh) {
                     androidx.compose.animation.core.rememberInfiniteTransition(label = "profileRefresh").animateFloat(
                         initialValue = 0f, targetValue = 360f,
                         animationSpec = androidx.compose.animation.core.infiniteRepeatable(
                             androidx.compose.animation.core.tween(900, easing = androidx.compose.animation.core.LinearEasing)
                         ),
                         label = "profileRefreshSpin"
-                    ).value
-                } else 0f
+                    )
+                } else null
                 Icon(
                     Icons.Filled.Refresh, contentDescription = "Refresh profile",
                     tint = Color.White.copy(alpha = if (refreshing && !animateRefresh) 0.5f else 1f),
-                    modifier = Modifier.size(iconSize).rotate(angle)
+                    modifier = Modifier.size(iconSize).graphicsLayer { rotationZ = angleState?.value ?: 0f }
                 )
             }
             if (showGrid) {
@@ -2274,8 +2276,18 @@ private fun LazyListScope.postsPinterestGridRows(
     // instead of every tile again — same visual result, without the
     // rebuild.
     item(key = "pinterest_grid_${columns}_${matched.firstOrNull()?.id ?: "empty"}") {
-        if (!loading && items.isNotEmpty()) {
-            LaunchedEffect(matched.size) { onLoadMore() }
+        // Load more only once the bottom of the masonry is actually coming
+        // into view. This used to fire on every page that arrived while the
+        // masonry was on screen at all — so just opening a profile kept
+        // paging in (and composing, since this one item isn't virtualized)
+        // its ENTIRE post history in the background, getting slower and
+        // slower the longer it stayed open.
+        val windowHeightPx = with(androidx.compose.ui.platform.LocalDensity.current) {
+            androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp.toPx()
+        }
+        var masonryNearEnd by remember { mutableStateOf(false) }
+        LaunchedEffect(masonryNearEnd, matched.size, loading) {
+            if (masonryNearEnd && !loading && items.isNotEmpty()) onLoadMore()
         }
         // Adjustment #3 (performance, continued): the column-balancing pass
         // itself is an O(matched.size) walk, re-run from scratch here on
@@ -2291,7 +2303,16 @@ private fun LazyListScope.postsPinterestGridRows(
         // fixes the reported slowdown as a Pinterest-layout tab accumulates
         // more and more loaded posts.
         val cols = remember(matched) { assignMasonryColumns(matched, columns) }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp)
+                .onGloballyPositioned { c ->
+                    // Unclipped bottom edge vs. ~1.5 screens down.
+                    val bottom = c.positionInWindow().y + c.size.height
+                    val near = bottom < windowHeightPx * 2.5f
+                    if (near != masonryNearEnd) masonryNearEnd = near
+                },
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
             cols.forEach { colEntries ->
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     colEntries.forEach { e ->
@@ -4477,19 +4498,19 @@ fun ResultsInteractionBar(
                 Modifier.size(44.dp).clip(CircleShape).clickable { if (!refreshing) { tap(); onRefresh() } },
                 contentAlignment = Alignment.Center
             ) {
-                val angle = if (refreshing && animateRefresh) {
+                val angleState: androidx.compose.runtime.State<Float>? = if (refreshing && animateRefresh) {
                     androidx.compose.animation.core.rememberInfiniteTransition(label = "resultsRefresh").animateFloat(
                         initialValue = 0f, targetValue = 360f,
                         animationSpec = androidx.compose.animation.core.infiniteRepeatable(
                             androidx.compose.animation.core.tween(900, easing = androidx.compose.animation.core.LinearEasing)
                         ),
                         label = "resultsRefreshSpin"
-                    ).value
-                } else 0f
+                    )
+                } else null
                 Icon(
                     Icons.Filled.Refresh, contentDescription = "Refresh",
                     tint = Color.White.copy(alpha = if (refreshing && !animateRefresh) 0.5f else 1f),
-                    modifier = Modifier.size(iconSize).rotate(angle)
+                    modifier = Modifier.size(iconSize).graphicsLayer { rotationZ = angleState?.value ?: 0f }
                 )
             }
             if (showGrid) {

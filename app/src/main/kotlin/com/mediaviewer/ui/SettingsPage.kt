@@ -378,11 +378,6 @@ internal fun SettingsPageContent(
             }
         }
 
-        // Item 10: letterboxed media's edges stretched to fill the screen.
-        ToggleBubble(
-            "Ambient Light", com.mediaviewer.util.UiToggles.ambientLight,
-            { com.mediaviewer.util.UiToggles.updateAmbientLight(it) }, liquidGlass, tint, backdrop
-        )
         // Item 8: audio visualizer above the feed's interaction bar. It needs
         // the microphone permission to read the phone's audio output
         // (nothing is recorded), so turning it on asks for that first.

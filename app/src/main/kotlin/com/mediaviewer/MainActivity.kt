@@ -564,7 +564,7 @@ private fun AppRoot(viewModel: MainViewModel) {
     // Feed" tap gets its slide animation back.
     var skipFeedEntryAnim by remember { mutableStateOf(false) }
     LaunchedEffect(screenState) {
-        if (screenState == ScreenState.FEED) skipFeedEntryAnim = false
+        if (screenState == ScreenState.FEED || screenState == ScreenState.GRID) skipFeedEntryAnim = false
     }
 
     // Scenario C — opening a feed from the Feeds row (item 4/7): tapping a
@@ -583,7 +583,8 @@ private fun AppRoot(viewModel: MainViewModel) {
                 // Loading screens off: straight into the feed, which shows
                 // its posts as they load.
                 viewModel.selectFeedFromAnyContext(uri)
-                viewModel.setScreen(ScreenState.FEED)
+                // Feeds open in grid mode.
+                viewModel.setScreen(ScreenState.GRID)
                 return@launch
             }
             // Bug fix (item 4): this used to start from `currentDominantColor`
@@ -620,7 +621,8 @@ private fun AppRoot(viewModel: MainViewModel) {
             // wipe. Flip this flag right before switching so MainFeedScreen
             // skips the slide just this once.
             skipFeedEntryAnim = true
-            viewModel.setScreen(ScreenState.FEED)
+            // Feeds open in grid mode.
+            viewModel.setScreen(ScreenState.GRID)
             pixelController.finish()
         }
     }
@@ -759,7 +761,9 @@ private fun AppRoot(viewModel: MainViewModel) {
             onExportDataset           = viewModel::exportDataset,
             onImportDataset           = viewModel::importDatasetFromUri,
             onDeleteImportedDataset   = viewModel::deleteImportedDataset,
-            onShowLikes               = viewModel::showBskyLikes,
+            // Hub "Liked Posts" opens your own profile on its Likes tab.
+            onShowLikes               = viewModel::openOwnLikes,
+            onReturnToFeed            = viewModel::returnToFeed,
             onShowFriends             = viewModel::showFriendsFeed,
             onShowE621Following       = viewModel::searchFollowingE621,
             onToggleReducedAnimations = viewModel::setReducedAnimations,

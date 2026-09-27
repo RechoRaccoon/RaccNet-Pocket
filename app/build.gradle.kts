@@ -24,7 +24,15 @@ android {
     kotlinOptions {
         jvmTarget = "17"
         freeCompilerArgs += listOf(
-            "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api"
+            "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api",
+            // Performance: strong skipping lets composables whose parameters
+            // haven't changed (by identity, for unstable types like List or
+            // the ViewModel-bound lambdas AppRoot passes everywhere) skip
+            // recomposition instead of re-running every time any of AppRoot's
+            // ~100 collected flows emits. Default-on in newer Compose
+            // compilers; opt-in on 1.5.x.
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:experimentalStrongSkipping=true"
         )
     }
     compileOptions {
@@ -57,6 +65,11 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.activity:activity-compose:1.8.2")
     implementation("androidx.core:core-ktx:1.12.0")
+    // Performance: installs the baseline profiles Compose/Material/Media3
+    // ship inside their AARs, so their hot paths get AOT-compiled on a
+    // sideloaded install instead of running interpreted/JIT for the first
+    // several launches (the main cause of first-open jank on menus).
+    implementation("androidx.profileinstaller:profileinstaller:1.3.1")
 
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")

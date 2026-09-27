@@ -2884,7 +2884,7 @@ class BlueskyRepository {
             "name" to name,
             "description" to "Written with Stellar"
         )
-        val resp = api.putRecord("Bearer $token", BskyPutRecordRequest(did, "site.standard.publication", "stellar", record))
+        val resp = api.putRecord("Bearer $token", BskyPutRecordRequest(did, "site.standard.publication", "stellar", record, validate = false))
         if (!resp.isSuccessful) error("Couldn't set up your blog (${resp.code()}): ${resp.errorBody()?.string()?.take(160)}")
         return uri
     }
@@ -3029,10 +3029,36 @@ class BlueskyRepository {
                 )
             } else record.remove("labels")
 
-            val resp = api.putRecord("Bearer $token", BskyPutRecordRequest(did, collection, rkey, record))
+            // validate = false: standard.site is a third-party lexicon. A PDS
+            // that resolves it may hold a different revision than the one
+            // this record was written against, and Stellar's own content
+            // union member isn't published anywhere — so strict validation
+            // could reject an otherwise perfectly readable blog.
+            val resp = api.putRecord("Bearer $token", BskyPutRecordRequest(did, collection, rkey, record, validate = false))
             if (!resp.isSuccessful) error("Publishing the blog failed (${resp.code()}): ${resp.errorBody()?.string()?.take(200)}")
             "at://$did/$collection/$rkey"
         }
+    }
+
+    /** Reads one blog record straight from the author's repo (no AppView
+     *  involved, so a blog that was published a moment ago is already
+     *  there) and parses it like the Blogs tab does. Null if it can't. */
+    suspend fun getBlogByUri(token: String, did: String, uri: String): LeafletBlog? = withContext(Dispatchers.IO) {
+        runCatching {
+            val obj = api.getRecord("Bearer $token", did, blogCollection(uri), blogRkey(uri)).body()?.value
+                ?.takeIf { it.isJsonObject }?.asJsonObject ?: return@runCatching null
+            parseLeafletBlogRecord(did, uri, obj)
+        }.getOrNull()
+    }
+
+    /** Same idea for a Popfeed review just posted. */
+    suspend fun getReviewByUri(token: String, did: String, uri: String): PopfeedReview? = withContext(Dispatchers.IO) {
+        runCatching {
+            val collection = uri.removePrefix("at://").split('/').getOrNull(1) ?: return@runCatching null
+            val obj = api.getRecord("Bearer $token", did, collection, uri.substringAfterLast('/')).body()?.value
+                ?.takeIf { it.isJsonObject }?.asJsonObject ?: return@runCatching null
+            parsePopfeedReviewRecord(did, uri, obj)
+        }.getOrNull()
     }
 
     /** Item 12: reads one of your blogs back into editor rows (pen icon in

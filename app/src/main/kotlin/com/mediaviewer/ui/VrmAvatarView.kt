@@ -106,8 +106,9 @@ fun VrmAvatarView(
     onTexturesApplied: (Int) -> Unit = {},
     /** What [VrmGlbPatcher] changed on load, for the debug overlay. */
     onMaterialsPatched: (String) -> Unit = {},
-    /** Latest face placement from tracking, or null if none seen yet. */
-    framing: AvatarFraming? = null,
+    /** Poses the avatar from tracking and says where to frame it, once per
+     *  rendered frame — see [VrmFrameHook]. */
+    frameHook: VrmFrameHook? = null,
     followTracking: Boolean = true,
     /** The avatar's separate meshes (clothes, hair, accessories …), reported
      *  once per load for the settings sheet's part toggles. */
@@ -191,7 +192,7 @@ fun VrmAvatarView(
         session?.let { s ->
             s.userYawDegrees = userYawDegrees
             s.zoom = zoom
-            s.framing = framing
+            s.frameHook = frameHook
             s.followTracking = followTracking
             s.springsEnabled = springBones
             s.maxFps = maxFps
@@ -381,13 +382,22 @@ internal class ViewerSession {
         val rec = recording ?: return
         val view = v.view
         val saved = view.viewport
+        if (saved.width <= 0 || saved.height <= 0) return
+        // The video size is the screen's rounded down to multiples of 16, so
+        // its aspect differs slightly; keep the vertical field of view and
+        // let only the horizontal extent adapt (same as renderStream) so the
+        // recording frames the avatar exactly like the screen, unstretched.
+        val screenAspect = saved.width.toDouble() / saved.height
+        val recordingAspect = rec.width.toDouble() / rec.height
         try {
             view.viewport = com.google.android.filament.Viewport(0, 0, rec.width, rec.height)
+            v.camera.setScaling(screenAspect / recordingAspect, 1.0)
             if (v.renderer.beginFrame(rec.swapChain, frameTimeNanos)) {
                 v.renderer.render(view)
                 v.renderer.endFrame()
             }
         } finally {
+            v.camera.setScaling(1.0, 1.0)
             view.viewport = saved
         }
     }
@@ -497,6 +507,7 @@ internal class ViewerSession {
     }
 
     // Written by the composable (SideEffect), read by the frame loop.
+    var frameHook: VrmFrameHook? = null
     var userYawDegrees = 0f
     var zoom = DEFAULT_ZOOM
     var framing: AvatarFraming? = null
@@ -531,6 +542,13 @@ internal class ViewerSession {
             if (lastFrameNanos != 0L && frameTimeNanos - lastFrameNanos < minInterval) return
             val dt = if (lastFrameNanos == 0L) 0f else ((frameTimeNanos - lastFrameNanos) / 1e9f).coerceIn(0f, 0.25f)
             lastFrameNanos = frameTimeNanos
+            // Tracking → skeleton/expressions, in step with rendering (it
+            // used to run from a Compose SideEffect, i.e. a recomposition of
+            // the whole VRM screen for every tracking result).
+            frameHook?.let { hook ->
+                runCatching { framing = hook.beforeFrame() }
+                    .onFailure { Log.e(TAG, "Applying tracking failed", it) }
+            }
             runCatching { updateRootTransform(v, dt) }
                 .onFailure { Log.e(TAG, "Placing the model failed", it) }
             runCatching { updateLights(v) }
@@ -800,6 +818,13 @@ private fun captureRootTransform(viewer: ModelViewer): FloatArray? {
     val instance = tm.getInstance(asset.root)
     if (instance == 0) return null
     return FloatArray(16).also { tm.getTransform(instance, it) }
+}
+
+/** Runs on the main thread at the start of every rendered frame, before the
+ *  model is placed and drawn: poses the avatar from the latest tracking and
+ *  returns where to frame it (null = no placement known yet). */
+fun interface VrmFrameHook {
+    fun beforeFrame(): AvatarFraming?
 }
 
 /** Where the user's eyes are in the upright tracking frame. [anchorX] and

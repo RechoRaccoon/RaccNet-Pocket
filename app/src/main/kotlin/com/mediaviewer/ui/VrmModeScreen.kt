@@ -482,16 +482,16 @@ fun VrmModeScreen(
     androidx.compose.runtime.LaunchedEffect(hiddenParts) { store.put(K.HIDDEN_PARTS, hiddenParts) }
     val trackerGate = remember { TrackerGate() }
 
-    // Step 1 verification state (see doc comment above): the latest result
-    // from each landmarker, updated from VrmCameraTracking's ImageAnalysis
-    // callback. Read by VrmTrackingOverlay to print debug scores — these
-    // fields are *only* for that on-device sanity check and go away once
-    // step 2 (smoothing) and step 3 (retargeting) consume the results
-    // directly instead.
-    var latestFaceResult by remember { mutableStateOf<FaceLandmarkerResult?>(null) }
-    var latestHandResult by remember { mutableStateOf<HandLandmarkerResult?>(null) }
-    var latestPoseResult by remember { mutableStateOf<PoseLandmarkerResult?>(null) }
-    var faceResultCount by remember { mutableStateOf(0) }
+    // Everything per-frame lives here, outside Compose: MediaPipe results,
+    // smoothing, retargeting and framing. It used to be Compose state, so
+    // every face/hand/pose result (and every camera frame's counter)
+    // recomposed this whole screen — dozens of times a second — just to
+    // run a SideEffect. Now results are plain fields, the avatar is posed
+    // from Filament's own frame loop (see VrmFrameHook), and only the small
+    // preview/debug views redraw when tracking changes.
+    val pipeline = remember { VrmTrackingPipeline() }
+    var faceHelperError by remember { mutableStateOf<String?>(null) }
+    var cameraError by remember { mutableStateOf<String?>(null) }
 
     // Item 8, VRM pipeline step 5 — the user's picked `.vrm` avatar file.
     // `vrmBytes` is what actually drives VrmAvatarView/VrmParser; `pickedVrmUri`
@@ -523,13 +523,6 @@ fun VrmModeScreen(
     var faceHelper by remember { mutableStateOf<FaceLandmarkerHelper?>(null) }
     var handHelper by remember { mutableStateOf<HandLandmarkerHelper?>(null) }
     var poseHelper by remember { mutableStateOf<PoseLandmarkerHelper?>(null) }
-    var faceHelperError by remember { mutableStateOf<String?>(null) }
-    var cameraError by remember { mutableStateOf<String?>(null) }
-    var cameraFrameCount by remember { mutableStateOf(0) }
-    // Size of the upright (already-rotated) frame MediaPipe sees — used by
-    // the tracking preview box to draw landmarks at the right aspect ratio.
-    var trackingFrameWidth by remember { mutableStateOf(480) }
-    var trackingFrameHeight by remember { mutableStateOf(640) }
 
     // ONE single-thread executor owns every call into the MediaPipe helpers:
     // the camera analyzer runs on it, and the helpers are closed on it too.
@@ -554,22 +547,23 @@ fun VrmModeScreen(
         var handedOff = false
         try {
             withContext(Dispatchers.Default) {
+                // Results land in the pipeline (plain fields, no Compose
+                // state): nothing recomposes per tracking result any more.
                 pending[0] = FaceLandmarkerHelper.create(
                     context,
                     onResult = {
                         trackerGate.release(TrackerGate.FACE)
-                        latestFaceResult = it
-                        faceResultCount++
+                        pipeline.onFace(it)
                     },
                     onError = { faceHelperError = it }
                 )
                 pending[1] = HandLandmarkerHelper.create(context, onResult = {
                     trackerGate.release(TrackerGate.HAND)
-                    latestHandResult = it
+                    pipeline.onHand(it)
                 })
                 pending[2] = PoseLandmarkerHelper.create(context, onResult = {
                     trackerGate.release(TrackerGate.POSE)
-                    latestPoseResult = it
+                    pipeline.onPose(it)
                 })
             }
             faceHelper = pending[0] as FaceLandmarkerHelper?
@@ -616,71 +610,6 @@ fun VrmModeScreen(
     // Distinguishes "model has no textures" from "binding failed".
     var texturesApplied by remember { mutableStateOf(-1) }
     var materialsPatched by remember { mutableStateOf("") }
-
-    // Shared once here (not duplicated inside VrmTrackingOverlay) so the
-    // debug overlay's five-blendshape subset and step 6's full-52
-    // retargeting call are reading the exact same smoothed values for the
-    // exact same frame, rather than two independent OneEuroFilterBank
-    // instances drifting slightly apart from each other.
-    val blendshapeFilters = remember { OneEuroFilterBank(minCutoff = 1.0, beta = 0.3, dCutoff = 1.0) }
-    val smoothedBlendshapes = remember(latestFaceResult) { smoothedFaceBlendshapes(latestFaceResult, blendshapeFilters) }
-    // Item 8, VRM pipeline step 6 (bone-rotation half) — MediaPipe's raw
-    // per-frame head-pose matrix, unsmoothed (unlike the blendshapes
-    // above): AvatarRetargeter.applyPose applies it as an absolute,
-    // mirrored head rotation and smooths it over time itself.
-    val headMatrix = remember(latestFaceResult) { headTransformationMatrix(latestFaceResult) }
-    // Item 8, VRM pipeline step 6 (arm rotation) — unlike the head's face
-    // matrix, raw pose landmarks are noisy enough that calibration alone
-    // doesn't hide it, so these get the same OneEuroFilterBank treatment
-    // face blendshapes already get, in a bank of its own (per
-    // OneEuroFilterBank's own doc comment: face/body tuning may need to
-    // diverge, and a bank is cheap).
-    // beta is per unit of speed: these landmarks are in metres (an arm
-    // swing is ~1-2 m/s), so beta 8 opens the filter to ~10-17 Hz during
-    // fast moves — the old 0.3 left it at ~1.5 Hz, i.e. visible lag.
-    val poseFilters = remember { OneEuroFilterBank(minCutoff = 1.0, beta = 8.0, dCutoff = 1.0) }
-    val smoothedBodyLandmarks = remember(latestPoseResult, trackUpperBody) {
-        if (trackUpperBody) smoothedBodyWorldLandmarks(latestPoseResult, poseFilters) else emptyMap()
-    }
-    // Finger curls, keyed by the AVATAR's side (mirroring already applied).
-    // Hand world landmarks are hand-centred metres (small, slower numbers).
-    val handFilters = remember { OneEuroFilterBank(minCutoff = 1.5, beta = 20.0, dCutoff = 1.0) }
-    val handPoints = remember(latestHandResult, latestPoseResult, trackUpperBody, trackingFrameWidth, trackingFrameHeight) {
-        avatarHands(
-            latestHandResult, if (trackUpperBody) latestPoseResult else null, latestFaceResult,
-            trackingFrameWidth, trackingFrameHeight, handFilters
-        )
-    }
-    // Where your eyes are in the camera frame (mirrored like the preview) —
-    // drives "follow my head". The last known placement is held while the
-    // face is briefly lost, so the avatar doesn't snap back to the centre.
-    val framingFilters = remember { OneEuroFilterBank(minCutoff = 1.2, beta = 2.0, dCutoff = 1.0) }
-    val lastFraming = remember { arrayOfNulls<AvatarFraming>(1) }
-    // Smoothing slider → every filter bank + the retargeter's bone easing.
-    // 5 = the tuned defaults; 0 = raw; 10 = twice as smooth.
-    androidx.compose.runtime.SideEffect {
-        val strength = smoothing / K.DEFAULT_SMOOTHING.toDouble()
-        blendshapeFilters.strength = strength
-        poseFilters.strength = strength
-        handFilters.strength = strength
-        framingFilters.strength = strength
-        AvatarRetargeter.smoothingScale = strength.toFloat()
-    }
-    // Head fallback: no face this frame (hair, a hand, turning away) → the
-    // body tracker's nose/eyes/ears still say where the head is and which
-    // way it's turned. The pose landmarker runs only while it's needed.
-    val faceMissing = trackersReady && faceResultCount > 0 &&
-        latestFaceResult?.faceLandmarks()?.isEmpty() != false
-    val poseForHead = headFallback && faceMissing
-    val headFallbackFilters = remember { OneEuroFilterBank(minCutoff = 1.0, beta = 1.5, dCutoff = 1.0) }
-    val poseHead = remember(latestPoseResult, poseForHead, trackingFrameWidth, trackingFrameHeight) {
-        if (poseForHead) poseHeadEstimate(latestPoseResult, trackingFrameWidth, trackingFrameHeight, headFallbackFilters)
-        else { headFallbackFilters.resetPrefixed("phead."); null }
-    }
-    val framing = remember(latestFaceResult, poseHead, trackingFrameWidth, trackingFrameHeight) {
-        (faceFraming(latestFaceResult, trackingFrameWidth, trackingFrameHeight, framingFilters) ?: poseHead?.framing)
-            ?.also { lastFraming[0] = it } ?: lastFraming[0]
-    }
 
     androidx.compose.runtime.LaunchedEffect(Unit) {
         prefsManager.vrmAvatarUri.firstOrNull()?.let { pickedVrmUri = Uri.parse(it) }
@@ -732,37 +661,37 @@ fun VrmModeScreen(
         coroutineScope.launch { prefsManager.setVrmAvatarUri(uri.toString()) }
     }
 
-    // Item 8, VRM pipeline step 6 (expression half only — see
-    // AvatarRetargeter.kt's doc comment) — pushes this frame's smoothed
-    // blendshape scores onto whatever avatar is currently loaded. A plain
-    // SideEffect: this is "sync the current values to an external system
-    // (Filament's native scene graph)" exactly as Compose's own docs
-    // describe that API for, not state Compose itself owns.
+
+    // Settings → pipeline (only runs when this screen recomposes, which is
+    // now just settings/UI changes, never per tracking frame).
     androidx.compose.runtime.SideEffect {
-        val target = retargetTarget
-        val vrmData = parsedVrmData
-        if (target != null && vrmData != null) {
-            // Manual eyes: blink tracking replaced by the slider's value.
-            val scores = if (manualEyes) smoothedBlendshapes + mapOf(
-                "eyeBlinkLeft" to eyeClosed, "eyeBlinkRight" to eyeClosed,
-                "eyeSquintLeft" to 0f, "eyeSquintRight" to 0f,
-                "eyeWideLeft" to 0f, "eyeWideRight" to 0f
-            ) else smoothedBlendshapes
-            AvatarRetargeter.applyExpressions(target, vrmData, scores)
-            // One call poses the whole skeleton (hips → spine → head → arms
-            // → hands → fingers → legs), mirrored like the preview. Body
-            // data is only passed while "Upper Body" is on (otherwise it'd be
-            // stale); without it the arms rest in a relaxed arms-down pose.
-            AvatarRetargeter.applyPose(
-                target,
-                TrackingFrame(
-                    faceMatrix = headMatrix ?: poseHead?.matrix,
-                    body = if (trackUpperBody) smoothedBodyLandmarks else null,
-                    trackLegs = trackFullBody,
-                    hands = handPoints,
-                    armIk = armIk
-                )
-            )
+        val strength = smoothing / K.DEFAULT_SMOOTHING.toDouble()
+        pipeline.setSmoothing(strength)
+        AvatarRetargeter.smoothingScale = strength.toFloat()
+        pipeline.sync(
+            trackUpperBody = trackUpperBody,
+            trackFullBody = trackFullBody,
+            headFallback = headFallback,
+            armIk = armIk,
+            manualEyes = manualEyes,
+            eyeClosed = eyeClosed,
+            vrmData = parsedVrmData
+        )
+    }
+    // Keeps derived tracking (and which trackers the camera feeds) current
+    // even with no avatar loaded, and redraws the preview/debug views at a
+    // modest rate — only when tracking actually changed.
+    val showTrackingViews = showPreview || showDebug
+    androidx.compose.runtime.LaunchedEffect(pipeline, showTrackingViews) {
+        var shown = -1
+        while (true) {
+            androidx.compose.runtime.withFrameNanos { }
+            pipeline.update()
+            if (showTrackingViews && pipeline.version != shown) {
+                shown = pipeline.version
+                pipeline.uiTick.intValue = shown
+            }
+            kotlinx.coroutines.delay(if (showTrackingViews) 45L else 120L)
         }
     }
 
@@ -790,14 +719,10 @@ fun VrmModeScreen(
                     faceHelper = faceHelper,
                     handHelper = handHelper,
                     poseHelper = poseHelper,
-                    trackPose = trackUpperBody || poseForHead,
+                    poseMode = { pipeline.poseMode },
                     gate = trackerGate,
                     frameIntervalMs = if (fastTracking) 33L else 66L,
-                    onFrame = { w, h ->
-                        cameraFrameCount++
-                        if (w != trackingFrameWidth) trackingFrameWidth = w
-                        if (h != trackingFrameHeight) trackingFrameHeight = h
-                    },
+                    onFrame = { w, h -> pipeline.onCameraFrame(w, h) },
                     onCameraError = { cameraError = it }
                 )
             } else {
@@ -837,10 +762,10 @@ fun VrmModeScreen(
                     // avatar dominant color), same color the X button and
                     // bottom bar already wear.
                     backgroundTint = if (backgroundColor != 0) Color(backgroundColor) else tint,
-                    onRetargetTargetReady = { retargetTarget = it },
+                    onRetargetTargetReady = { retargetTarget = it; pipeline.target = it },
                     onTexturesApplied = { texturesApplied = it },
                     onMaterialsPatched = { materialsPatched = it },
-                    framing = framing,
+                    frameHook = pipeline,
                     followTracking = followHead,
                     onPartsReady = { parts ->
                         avatarParts = parts
@@ -888,35 +813,24 @@ fun VrmModeScreen(
             // prints step 1's raw landmarker output so tracking itself can
             // be confirmed working before anything is built on top of it.
             // Debug readout: off unless turned on in settings.
-            if (showDebug) VrmTrackingOverlay(
+            if (showDebug) VrmDebugReadout(
+                pipeline = pipeline,
                 tint = tint,
                 trackUpperBody = trackUpperBody,
                 trackFullBody = trackFullBody,
-                smoothedFaceBlendshapes = smoothedBlendshapes,
                 faceHelperError = faceHelperError,
-                faceResultCount = faceResultCount,
                 texturesApplied = texturesApplied,
                 materialsPatched = materialsPatched,
                 cameraError = cameraError,
-                cameraFrameCount = cameraFrameCount,
-                handResult = latestHandResult,
-                poseResult = latestPoseResult,
                 parsedVrmData = parsedVrmData,
-                retargetTarget = retargetTarget,
-                headTrackingActive = headMatrix != null || poseHead != null,
-                armTrackingActive = smoothedBodyLandmarks.isNotEmpty(),
-                legTrackingActive = smoothedBodyLandmarks.isNotEmpty(),
-                modifier = Modifier.fillMaxSize()
+                retargetTarget = retargetTarget
             )
             // Small black "what the tracker sees" box, top-right: landmark
             // dots/skeleton only — never the camera image itself (VRM mode
             // deliberately never shows the user's real face). Toggleable.
             if (showPreview) TrackingPreview(
-                faceResult = latestFaceResult,
-                handResult = latestHandResult,
-                poseResult = if (trackUpperBody) latestPoseResult else null,
-                frameWidth = trackingFrameWidth,
-                frameHeight = trackingFrameHeight,
+                pipeline = pipeline,
+                showPose = trackUpperBody,
                 tint = tint,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
@@ -1174,7 +1088,8 @@ private fun VrmCameraTracking(
     faceHelper: FaceLandmarkerHelper?,
     handHelper: HandLandmarkerHelper?,
     poseHelper: PoseLandmarkerHelper?,
-    trackPose: Boolean,
+    /** Read on the analyzer thread per frame — see VrmTrackingPipeline.poseMode. */
+    poseMode: () -> Int,
     gate: TrackerGate,
     /** 33 ms (~30 fps, "Fast tracking") or 66 ms (~15 fps). */
     frameIntervalMs: Long = 66L,
@@ -1186,11 +1101,12 @@ private fun VrmCameraTracking(
     val view = androidx.compose.ui.platform.LocalView.current
     // Only touched from the analyzer thread.
     val lastSubmittedMs = remember { java.util.concurrent.atomic.AtomicLong(0L) }
-    // Read on the analyzer thread, written from composition — so toggling
-    // "Upper Body" no longer tears the whole camera down and rebinds it.
-    val trackPoseFlag = remember { java.util.concurrent.atomic.AtomicBoolean(trackPose) }
+    // Read on the analyzer thread, written from composition — so changing
+    // the tracking rate never tears the camera down and rebinds it.
     val intervalMs = remember { java.util.concurrent.atomic.AtomicLong(frameIntervalMs) }
-    androidx.compose.runtime.SideEffect { trackPoseFlag.set(trackPose); intervalMs.set(frameIntervalMs) }
+    androidx.compose.runtime.SideEffect { intervalMs.set(frameIntervalMs) }
+    val currentPoseMode by androidx.compose.runtime.rememberUpdatedState(poseMode)
+    val lastPoseMs = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val frameBitmaps = remember { FrameBitmaps() }
     val analysisHolder = remember { arrayOfNulls<ImageAnalysis>(1) }
     // Scratch buffers for de-striding camera rows (analyzer thread only).
@@ -1283,7 +1199,18 @@ private fun VrmCameraTracking(
             try {
                 if (faceHelper != null && gate.tryAcquire(TrackerGate.FACE, nowMs)) faceHelper.detectAsync(mpImage, 0, nowMs)
                 if (handHelper != null && gate.tryAcquire(TrackerGate.HAND, nowMs)) handHelper.detectAsync(mpImage, 0, nowMs)
-                if (trackPoseFlag.get() && poseHelper != null && gate.tryAcquire(TrackerGate.POSE, nowMs)) poseHelper.detectAsync(mpImage, 0, nowMs)
+                // Pose: every frame while it's in use (Upper Body, or standing
+                // in for a hidden face), a couple of times a second while the
+                // head fallback just needs to stay locked on (see poseMode).
+                val runPose = when (currentPoseMode()) {
+                    POSE_FULL -> true
+                    POSE_TRICKLE -> nowMs - lastPoseMs.get() >= POSE_TRICKLE_INTERVAL_MS
+                    else -> false
+                }
+                if (runPose && poseHelper != null && gate.tryAcquire(TrackerGate.POSE, nowMs)) {
+                    lastPoseMs.set(nowMs)
+                    poseHelper.detectAsync(mpImage, 0, nowMs)
+                }
             } finally {
                 // Pixels were copied inside detectAsync; free the wrapper.
                 runCatching { mpImage.close() }
@@ -1785,6 +1712,44 @@ private fun VrmTrackingOverlay(
     }
 }
 
+/** The debug readout, fed from the pipeline. Its own function so the
+ *  tracking tick it reads only recomposes this readout, not the screen. */
+@Composable
+private fun VrmDebugReadout(
+    pipeline: VrmTrackingPipeline,
+    tint: Color,
+    trackUpperBody: Boolean,
+    trackFullBody: Boolean,
+    faceHelperError: String?,
+    texturesApplied: Int,
+    materialsPatched: String,
+    cameraError: String?,
+    parsedVrmData: VrmData?,
+    retargetTarget: RetargetTarget?
+) {
+    pipeline.uiTick.intValue
+    VrmTrackingOverlay(
+        tint = tint,
+        trackUpperBody = trackUpperBody,
+        trackFullBody = trackFullBody,
+        smoothedFaceBlendshapes = pipeline.blendshapes,
+        faceHelperError = faceHelperError,
+        faceResultCount = pipeline.faceResultCount,
+        texturesApplied = texturesApplied,
+        materialsPatched = materialsPatched,
+        cameraError = cameraError,
+        cameraFrameCount = pipeline.cameraFrameCount,
+        handResult = pipeline.hand,
+        poseResult = pipeline.pose,
+        parsedVrmData = parsedVrmData,
+        retargetTarget = retargetTarget,
+        headTrackingActive = pipeline.headTrackingActive,
+        armTrackingActive = pipeline.body.isNotEmpty(),
+        legTrackingActive = pipeline.body.isNotEmpty(),
+        modifier = Modifier.fillMaxSize()
+    )
+}
+
 /** Everything the VRM settings sheet shows and changes. */
 private class VrmSettingsUi(
     val trackUpperBody: Boolean, val onToggleUpperBody: (Boolean) -> Unit,
@@ -2067,15 +2032,15 @@ private val POSE_CONNECTIONS = intArrayOf(
  */
 @Composable
 private fun TrackingPreview(
-    faceResult: FaceLandmarkerResult?,
-    handResult: HandLandmarkerResult?,
-    poseResult: PoseLandmarkerResult?,
-    frameWidth: Int,
-    frameHeight: Int,
+    pipeline: VrmTrackingPipeline,
+    showPose: Boolean,
     tint: Color,
     modifier: Modifier = Modifier
 ) {
     val boxWidth = 104.dp
+    val frameSize = pipeline.frameSize.value
+    val frameWidth = frameSize.width
+    val frameHeight = frameSize.height
     val aspect = if (frameWidth > 0 && frameHeight > 0) frameHeight.toFloat() / frameWidth else 4f / 3f
     val faceColor = Color(0xFF7CFFB2)
     val handColor = Color(0xFF6FD3FF)
@@ -2088,6 +2053,11 @@ private fun TrackingPreview(
             .background(Color.Black)
             .border(1.dp, tint.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
     ) {
+        // Read in the draw phase: new tracking only redraws this box.
+        pipeline.uiTick.intValue
+        val faceResult = pipeline.face
+        val handResult = pipeline.hand
+        val poseResult = if (showPose) pipeline.pose else null
         val w = size.width
         val h = size.height
         fun px(x: Float, y: Float) = androidx.compose.ui.geometry.Offset((1f - x) * w, y * h)
@@ -2428,32 +2398,35 @@ private fun VrmConfirmDialog(
  *  face tracker has lost the face (see "Head fallback"). */
 private class PoseHead(val matrix: FloatArray, val framing: AvatarFraming)
 
+/** One unsmoothed reading of the head from BlazePose's face points. */
+private class PoseHeadRaw(
+    val yaw: Float, val pitch: Float, val roll: Float,
+    /** Mirrored eye-midpoint, 0..1 of the frame. */
+    val anchorX: Float, val anchorY: Float,
+    /** Eye spacing in frame pixels, corrected for the head's turn. */
+    val eyeDistancePx: Float,
+    val timestampSeconds: Double
+)
+
 /**
  * Where the head is and which way it's turned, from BlazePose's face points
  * (nose 0, eyes 2/5, ears 7/8) — these keep tracking when hair or a hand
- * hides the face from FaceLandmarker. Returns a rotation in the same
- * camera-space convention as MediaPipe's facial transformation matrix
- * (x = image right, y up, z toward the camera; identity = facing the
- * camera), so [AvatarRetargeter.applyPose] treats it exactly like a face
- * matrix. Rougher than real face tracking — good enough to keep the
- * avatar's head where yours is instead of freezing.
+ * hides the face from FaceLandmarker. Rotation uses the same camera-space
+ * convention as MediaPipe's facial transformation matrix (x = image right,
+ * y up, z toward the camera; identity = facing the camera). Unsmoothed.
  */
-private fun poseHeadEstimate(
-    pose: PoseLandmarkerResult?,
-    frameWidth: Int,
-    frameHeight: Int,
-    filters: OneEuroFilterBank
-): PoseHead? {
+private fun poseHeadRaw(pose: PoseLandmarkerResult?, frameWidth: Int, frameHeight: Int): PoseHeadRaw? {
     val p = pose ?: return null
     val lm = p.landmarks().firstOrNull()?.takeIf { it.size > 8 } ?: return null
     fun vis(i: Int) = lm[i].visibility().orElse(1f)
-    if (vis(0) < 0.4f) return null
+    // A hidden face lowers the nose's visibility even though BlazePose
+    // still places it well, so the bar is low.
+    if (vis(0) < 0.25f) return null
     val W = frameWidth.toFloat().coerceAtLeast(1f)
     val H = frameHeight.toFloat().coerceAtLeast(1f)
     val nose = lm[0]
     val lEye = lm[2]; val rEye = lm[5]
     val lEar = lm[7]; val rEar = lm[8]
-    val t = p.timestampMs() / 1000.0
 
     // Eye line: roll, plus framing (anchor + spacing).
     val ex = (lEye.x() - rEye.x()) * W
@@ -2474,25 +2447,291 @@ private fun poseHeadEstimate(
     val neutral = if (earsSeen) 0.12f else 0.22f
     val pitch = kotlin.math.atan(((nose.y() - midY) * H / fullSpan - neutral) / 0.55f).coerceIn(-0.6f, 0.6f)
 
-    val sYaw = filters.filter("phead.yaw", yaw, t)
-    val sPitch = filters.filter("phead.pitch", pitch, t)
-    val sRoll = filters.filter("phead.roll", roll, t)
+    val cx = (lEye.x() + rEye.x()) / 2f
+    val cy = (lEye.y() + rEye.y()) / 2f
+    return PoseHeadRaw(
+        yaw = yaw, pitch = pitch, roll = roll,
+        anchorX = if (AvatarRetargeter.MIRROR) 1f - cx else cx,
+        anchorY = cy,
+        eyeDistancePx = eyeSpacing / kotlin.math.cos(yaw).coerceAtLeast(0.35f),
+        timestampSeconds = p.timestampMs() / 1000.0
+    )
+}
+
+/** [poseHeadRaw], One-Euro smoothed, as a head rotation matrix + framing. */
+private fun poseHeadEstimate(raw: PoseHeadRaw, frameWidth: Int, frameHeight: Int, filters: OneEuroFilterBank): PoseHead {
+    val t = raw.timestampSeconds
+    val sYaw = filters.filter("phead.yaw", raw.yaw, t)
+    val sPitch = filters.filter("phead.pitch", raw.pitch, t)
+    val sRoll = filters.filter("phead.roll", raw.roll, t)
     fun axis(x: Float, y: Float, z: Float, a: Float): com.mediaviewer.util.Quaternion {
         val s = kotlin.math.sin(a / 2f)
         return com.mediaviewer.util.Quaternion(x * s, y * s, z * s, kotlin.math.cos(a / 2f))
     }
     val q = axis(0f, 1f, 0f, sYaw) * axis(1f, 0f, 0f, sPitch) * axis(0f, 0f, 1f, sRoll)
-
-    val cx = (lEye.x() + rEye.x()) / 2f
-    val cy = (lEye.y() + rEye.y()) / 2f
     val framing = AvatarFraming(
-        anchorX = filters.filter("phead.x", if (AvatarRetargeter.MIRROR) 1f - cx else cx, t),
-        anchorY = filters.filter("phead.y", cy, t),
-        eyeDistancePx = filters.filter("phead.d", eyeSpacing / kotlin.math.cos(sYaw).coerceAtLeast(0.35f), t),
+        anchorX = filters.filter("phead.x", raw.anchorX, t),
+        anchorY = filters.filter("phead.y", raw.anchorY, t),
+        eyeDistancePx = filters.filter("phead.d", raw.eyeDistancePx, t),
         frameWidth = frameWidth,
         frameHeight = frameHeight
     )
     return PoseHead(q.normalized().toColumnMajorMatrix(), framing)
+}
+
+/** [VrmTrackingPipeline.poseMode] values: whether the camera analyzer
+ *  feeds the (expensive) pose landmarker. */
+private const val POSE_OFF = 0
+/** A few frames a second — keeps BlazePose locked onto you while your face
+ *  is visible, so the head fallback has you the instant the face is hidden
+ *  (BlazePose finds people by their face, so starting it only after the
+ *  face is covered often found nothing). */
+private const val POSE_TRICKLE = 1
+/** Every tracked frame. */
+private const val POSE_FULL = 2
+private const val POSE_TRICKLE_INTERVAL_MS = 350L
+
+/**
+ * VRM mode's tracking pipeline, outside Compose.
+ *
+ * MediaPipe's result listeners (their own threads) drop results into
+ * volatile fields and bump a sequence number; everything else happens on
+ * the main thread: [update] turns whatever is new into smoothed
+ * blendshapes, head/body/hand data and framing, and [beforeFrame] — called
+ * by the avatar's Filament frame loop, once per rendered frame — applies it
+ * to the model. Nothing here is Compose state except [uiTick] and
+ * [frameSize], which only the small preview/debug views read.
+ *
+ * Head fallback: when the face is hidden, BlazePose's nose/eyes/ears carry
+ * the head's rotation AND its placement/size on screen until the face is
+ * back. While both trackers see you, the pose estimate is continuously
+ * calibrated against the face's (offset + scale), so the hand-over in
+ * either direction doesn't jump.
+ */
+private class VrmTrackingPipeline : VrmFrameHook {
+    // ── Written off the main thread ──
+    @Volatile var face: FaceLandmarkerResult? = null
+        private set
+    @Volatile var hand: HandLandmarkerResult? = null
+        private set
+    @Volatile var pose: PoseLandmarkerResult? = null
+        private set
+    private val faceSeq = java.util.concurrent.atomic.AtomicInteger(0)
+    private val handSeq = java.util.concurrent.atomic.AtomicInteger(0)
+    private val poseSeq = java.util.concurrent.atomic.AtomicInteger(0)
+    private val cameraFrames = java.util.concurrent.atomic.AtomicInteger(0)
+    @Volatile private var frameWidth = 480
+    @Volatile private var frameHeight = 640
+    /** Read by the camera analyzer every frame. */
+    @Volatile var poseMode = POSE_OFF
+        private set
+
+    /** Upright tracking-frame size (Compose state: changes almost never). */
+    val frameSize = mutableStateOf(androidx.compose.ui.unit.IntSize(480, 640))
+    /** Bumped (main thread, throttled) when the preview/debug views should redraw. */
+    val uiTick = androidx.compose.runtime.mutableIntStateOf(0)
+
+    fun onFace(r: FaceLandmarkerResult) { face = r; faceSeq.incrementAndGet() }
+    fun onHand(r: HandLandmarkerResult) { hand = r; handSeq.incrementAndGet() }
+    fun onPose(r: PoseLandmarkerResult) { pose = r; poseSeq.incrementAndGet() }
+    fun onCameraFrame(width: Int, height: Int) {
+        cameraFrames.incrementAndGet()
+        if (width != frameWidth || height != frameHeight) {
+            frameWidth = width
+            frameHeight = height
+            frameSize.value = androidx.compose.ui.unit.IntSize(width, height)
+        }
+    }
+
+    val faceResultCount: Int get() = faceSeq.get()
+    val cameraFrameCount: Int get() = cameraFrames.get()
+
+    // ── Settings (main thread, from VrmModeScreen's SideEffect) ──
+    private var trackUpperBody = false
+    private var trackFullBody = false
+    private var headFallback = true
+    private var armIk = false
+    private var manualEyes = false
+    private var eyeClosed = 0f
+    private var vrmData: VrmData? = null
+    private var settingsChanged = true
+    /** The loaded avatar (null while none, or while one is being swapped). */
+    var target: RetargetTarget? = null
+        set(value) { field = value; expressionsDirty = true }
+
+    fun sync(
+        trackUpperBody: Boolean, trackFullBody: Boolean, headFallback: Boolean, armIk: Boolean,
+        manualEyes: Boolean, eyeClosed: Float, vrmData: VrmData?
+    ) {
+        if (manualEyes != this.manualEyes || eyeClosed != this.eyeClosed || vrmData !== this.vrmData) expressionsDirty = true
+        if (trackUpperBody != this.trackUpperBody || headFallback != this.headFallback) settingsChanged = true
+        this.trackUpperBody = trackUpperBody
+        this.trackFullBody = trackFullBody
+        this.headFallback = headFallback
+        this.armIk = armIk
+        this.manualEyes = manualEyes
+        this.eyeClosed = eyeClosed
+        this.vrmData = vrmData
+    }
+
+    // ── Smoothing ──
+    private val blendshapeFilters = OneEuroFilterBank(minCutoff = 1.0, beta = 0.3, dCutoff = 1.0)
+    // beta is per unit of speed: pose landmarks are in metres (an arm swing
+    // is ~1-2 m/s), so beta 8 opens the filter to ~10-17 Hz during fast moves.
+    private val poseFilters = OneEuroFilterBank(minCutoff = 1.0, beta = 8.0, dCutoff = 1.0)
+    // Hand world landmarks are hand-centred metres (small, slower numbers).
+    private val handFilters = OneEuroFilterBank(minCutoff = 1.5, beta = 20.0, dCutoff = 1.0)
+    private val framingFilters = OneEuroFilterBank(minCutoff = 1.2, beta = 2.0, dCutoff = 1.0)
+    private val headFallbackFilters = OneEuroFilterBank(minCutoff = 1.0, beta = 1.5, dCutoff = 1.0)
+
+    /** Smoothing slider: 1 = the tuned defaults, 0 = raw. */
+    fun setSmoothing(strength: Double) {
+        blendshapeFilters.strength = strength
+        poseFilters.strength = strength
+        handFilters.strength = strength
+        framingFilters.strength = strength
+        headFallbackFilters.strength = strength
+    }
+
+    // ── Derived (main thread) ──
+    var blendshapes: Map<String, Float> = emptyMap()
+        private set
+    private var headMatrix: FloatArray? = null
+    private var poseHead: PoseHead? = null
+    var body: Map<Int, BodyPoint> = emptyMap()
+        private set
+    private var hands: Map<String, TrackedHand> = emptyMap()
+    private var faceFramingNow: AvatarFraming? = null
+    private var framing: AvatarFraming? = null
+    private var faceMissing = false
+    /** Bumped whenever anything derived changes. */
+    var version = 0
+        private set
+    val headTrackingActive: Boolean get() = headMatrix != null || poseHead != null
+
+    private var seenFace = 0
+    private var seenHand = 0
+    private var seenPose = 0
+    private var expressionsDirty = true
+
+    // Pose-eyes → face-eyes calibration for the head fallback's framing.
+    private var calValid = false
+    private var calDx = 0f
+    private var calDy = 0f
+    private var calScale = 1f
+
+    /** Main thread. Folds in any new results; true if anything changed. */
+    fun update(): Boolean {
+        poseMode = when {
+            trackUpperBody -> POSE_FULL
+            headFallback && faceMissing -> POSE_FULL
+            headFallback -> POSE_TRICKLE
+            else -> POSE_OFF
+        }
+        val fs = faceSeq.get(); val hs = handSeq.get(); val ps = poseSeq.get()
+        val faceNew = fs != seenFace
+        val handNew = hs != seenHand
+        val poseNew = ps != seenPose
+        val settingsNew = settingsChanged
+        if (!faceNew && !handNew && !poseNew && !settingsNew) return false
+        seenFace = fs; seenHand = hs; seenPose = ps
+        settingsChanged = false
+        val f = face; val h = hand; val p = pose
+        val w = frameWidth; val ht = frameHeight
+
+        if (faceNew) {
+            blendshapes = smoothedFaceBlendshapes(f, blendshapeFilters)
+            headMatrix = headTransformationMatrix(f)
+            faceMissing = fs > 0 && f?.faceLandmarks()?.isEmpty() != false
+            faceFramingNow = faceFraming(f, w, ht, framingFilters)
+            expressionsDirty = true
+        }
+
+        // Body tracker's view of the head: calibration while the face is
+        // seen, the stand-in while it isn't.
+        val fallbackActive = headFallback && faceMissing
+        if (poseNew || faceNew || settingsNew) {
+            val raw = if (headFallback) poseHeadRaw(p, w, ht) else null
+            val fromFace = faceFramingNow
+            if (poseNew && raw != null && fromFace != null && raw.eyeDistancePx > 1f) {
+                val dx = fromFace.anchorX - raw.anchorX
+                val dy = fromFace.anchorY - raw.anchorY
+                val sc = fromFace.eyeDistancePx / raw.eyeDistancePx
+                if (sc in 0.4f..2.5f && kotlin.math.abs(dx) < 0.25f && kotlin.math.abs(dy) < 0.25f) {
+                    if (!calValid) { calDx = dx; calDy = dy; calScale = sc; calValid = true }
+                    else { calDx += (dx - calDx) * 0.2f; calDy += (dy - calDy) * 0.2f; calScale += (sc - calScale) * 0.2f }
+                }
+            }
+            poseHead = if (fallbackActive && raw != null) {
+                if (poseNew || poseHead == null) poseHeadEstimate(raw, w, ht, headFallbackFilters) else poseHead
+            } else {
+                headFallbackFilters.resetPrefixed("phead.")
+                null
+            }
+        }
+
+        if (poseNew || settingsNew) {
+            body = if (trackUpperBody) smoothedBodyWorldLandmarks(p, poseFilters) else emptyMap()
+        }
+        if (handNew || poseNew || settingsNew) {
+            hands = avatarHands(h, if (trackUpperBody) p else null, f, w, ht, handFilters)
+        }
+
+        // Placement + size: the face while it's seen; the body tracker's
+        // head (calibrated onto the face's) while it's hidden; otherwise
+        // hold the last placement.
+        val fromFace = faceFramingNow
+        val fromPose = poseHead?.framing
+        framing = when {
+            fromFace != null -> fromFace
+            fromPose != null && calValid -> AvatarFraming(
+                anchorX = fromPose.anchorX + calDx,
+                anchorY = fromPose.anchorY + calDy,
+                eyeDistancePx = fromPose.eyeDistancePx * calScale,
+                frameWidth = fromPose.frameWidth,
+                frameHeight = fromPose.frameHeight
+            )
+            fromPose != null -> fromPose
+            else -> framing
+        }
+        version++
+        return true
+    }
+
+    /** Filament frame loop (main thread), once per rendered frame. Poses
+     *  every frame (the retargeter eases bones toward the latest tracking,
+     *  so motion stays smooth between 15–30 Hz tracking updates);
+     *  expressions only when the face changed. */
+    override fun beforeFrame(): AvatarFraming? {
+        update()
+        val t = target
+        val data = vrmData
+        if (t != null && data != null) {
+            if (expressionsDirty) {
+                expressionsDirty = false
+                val scores = if (manualEyes) blendshapes + mapOf(
+                    "eyeBlinkLeft" to eyeClosed, "eyeBlinkRight" to eyeClosed,
+                    "eyeSquintLeft" to 0f, "eyeSquintRight" to 0f,
+                    "eyeWideLeft" to 0f, "eyeWideRight" to 0f
+                ) else blendshapes
+                AvatarRetargeter.applyExpressions(t, data, scores, remapBlink = !manualEyes)
+            }
+            // One call poses the whole skeleton (hips → spine → head → arms
+            // → hands → fingers → legs), mirrored like the preview. Body
+            // data only while "Upper Body" is on; otherwise the arms rest.
+            AvatarRetargeter.applyPose(
+                t,
+                TrackingFrame(
+                    faceMatrix = headMatrix ?: poseHead?.matrix,
+                    body = if (trackUpperBody) body else null,
+                    trackLegs = trackFullBody,
+                    hands = hands,
+                    armIk = armIk
+                )
+            )
+        }
+        return framing
+    }
 }
 
 /** Background swatches: the default (your profile color) plus a few
