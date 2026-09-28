@@ -20,18 +20,21 @@ object UiToggles {
     private const val KEY_VISUALIZER_CALL_MODE = "audio_visualizer_call_mode"
     private const val KEY_VISUALIZER_PERMISSION_ASKED = "audio_visualizer_permission_asked"
     private const val KEY_STARRY_BACKGROUND = "starry_background"
+    private const val KEY_OVERRIDE_COLORS = "override_app_colors"
+    private const val KEY_OVERRIDE_COLOR = "override_app_color"
 
     /** Settings → UI Customization → "Loading Animation". */
     enum class LoadingAnimation(val label: String) {
-        /** Pages open immediately and fill in as their data arrives. */
-        NONE("None"),
+        /** The old page fades into a drifting starfield with the Stellar
+         *  logo, which then fades away to reveal the loaded page. First in
+         *  the list (and the default). */
+        SPACE("Space"),
         /** The retro pixel-matrix wipe. */
         PIXELS("Pixels"),
         /** The screen shatters like glass from where you tapped. */
         SHATTER("Shatter"),
-        /** The old page fades into a drifting starfield with the Stellar
-         *  logo, which then fades away to reveal the loaded page. */
-        SPACE("Space")
+        /** Pages open immediately and fill in as their data arrives. */
+        NONE("None")
     }
 
     private var prefs: SharedPreferences? = null
@@ -53,6 +56,16 @@ object UiToggles {
     /** Settings → UI Customization → "Starry Background": the twinkling
      *  stars / shooting stars behind every page (on by default). */
     var starryBackground by mutableStateOf(true)
+        private set
+
+    /** Settings → UI Customization → "Override App Colors": everywhere the
+     *  app would wear the signed-in account's profile color, it wears
+     *  [overrideColor] instead (the account's own profile page keeps its
+     *  real colors). */
+    var overrideAppColors by mutableStateOf(false)
+        private set
+    /** ARGB. Defaults to the Stellar logo pink. */
+    var overrideColor by mutableStateOf(0xFFFF4FA1.toInt())
         private set
 
     /** Settings → Audio Visualizer → "During Calls". */
@@ -81,6 +94,8 @@ object UiToggles {
             ?: LoadingAnimation.SPACE
         audioVisualizer = p.getBoolean(KEY_AUDIO_VISUALIZER, true)
         starryBackground = p.getBoolean(KEY_STARRY_BACKGROUND, true)
+        overrideAppColors = p.getBoolean(KEY_OVERRIDE_COLORS, false)
+        overrideColor = p.getInt(KEY_OVERRIDE_COLOR, 0xFFFF4FA1.toInt())
         visualizerCallMode = p.getString(KEY_VISUALIZER_CALL_MODE, null)
             ?.let { name -> VisualizerCallMode.entries.firstOrNull { it.name == name } }
             ?: if (p.getBoolean(KEY_VISUALIZER_DURING_CALLS, false)) VisualizerCallMode.MUSIC_ONLY else VisualizerCallMode.PAUSE
@@ -94,6 +109,16 @@ object UiToggles {
     fun updateAudioVisualizer(enabled: Boolean) {
         audioVisualizer = enabled
         prefs?.edit()?.putBoolean(KEY_AUDIO_VISUALIZER, enabled)?.apply()
+    }
+
+    fun updateOverrideAppColors(enabled: Boolean) {
+        overrideAppColors = enabled
+        prefs?.edit()?.putBoolean(KEY_OVERRIDE_COLORS, enabled)?.apply()
+    }
+
+    fun updateOverrideColor(argb: Int) {
+        overrideColor = argb or 0xFF000000.toInt()
+        prefs?.edit()?.putInt(KEY_OVERRIDE_COLOR, overrideColor)?.apply()
     }
 
     fun updateStarryBackground(enabled: Boolean) {

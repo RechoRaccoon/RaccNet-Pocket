@@ -1024,8 +1024,11 @@ class BlueskyRepository {
             "durationMinutes" to durationMinutes,
             "embed" to mapOf(
                 "\$type" to "app.bsky.embed.external",
+                // No inner "$type": "app.bsky.embed.external.external" isn't
+                // a real type id (the def is app.bsky.embed.external#external,
+                // which a plain ref doesn't need at all), and a PDS that
+                // validates the record strictly could reject it.
                 "external" to mapOf(
-                    "\$type" to "app.bsky.embed.external.external",
                     "uri" to streamUrl,
                     "title" to title,
                     "description" to ""
@@ -1033,7 +1036,16 @@ class BlueskyRepository {
             )
         )
         val resp = api.putRecord("Bearer $token", BskyPutRecordRequest(did, "app.bsky.actor.status", "self", record))
-        if (!resp.isSuccessful) error("setLiveNowStatus failed: ${resp.code()} ${resp.errorBody()?.string()}")
+        if (!resp.isSuccessful) {
+            val body = resp.errorBody()?.string().orEmpty()
+            // Pull the PDS's own explanation out of {"error":…,"message":…}
+            // so the on-screen error says what actually went wrong.
+            val detail = runCatching {
+                val o = com.google.gson.JsonParser.parseString(body).asJsonObject
+                listOfNotNull(o.get("error")?.asString, o.get("message")?.asString).joinToString(": ")
+            }.getOrNull()?.takeIf { it.isNotBlank() } ?: body.take(200)
+            error("setLiveNowStatus failed: ${resp.code()} $detail")
+        }
         resp.body()?.uri ?: ""
     }
 

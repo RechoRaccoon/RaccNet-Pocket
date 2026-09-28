@@ -305,7 +305,10 @@ private fun BlueskyLogoIcon(modifier: Modifier = Modifier, tint: Color = Color.W
 // value most of the subtree wants" case CompositionLocal exists for, rather
 // than a cross-cutting concern threaded through unrelated intermediate
 // signatures. Provided once, high up, in ProfileOverlay itself.
-private val LocalHateFunBlurNsfw = androidx.compose.runtime.compositionLocalOf { false }
+/** Settings → "I Hate Fun": blur NSFW-labeled media. Provided app-wide from
+ *  AppRoot (and again by ProfileOverlay), so every tile/grid/search result
+ *  reading it honours the setting — not just profile pages. */
+internal val LocalHateFunBlurNsfw = androidx.compose.runtime.compositionLocalOf { false }
 
 @Composable
 private fun <T> ProfileSubFilterRow(
@@ -2080,7 +2083,9 @@ private fun ThumbBox(item: MediaItem, tint: Color, shape: RoundedCornerShape, mo
                 TextshotEmojiImage(item.textshotImageUrl, cornerRadius = 10.dp, modifier = Modifier.fillMaxSize())
             }
         } else if (item.isTextOnly) {
-            Box(contentModifier.background(OledBlack).padding(10.dp), contentAlignment = Alignment.Center) {
+            // The uploader's own color, dimmed, behind their text.
+            val authorTint = if (item.author.did.isNotBlank()) rememberAuthorProfileTint(item.author.did, item.author.avatarUrl) else tint
+            Box(contentModifier.background(androidx.compose.ui.graphics.lerp(OledBlack, authorTint, 0.35f)).padding(10.dp), contentAlignment = Alignment.Center) {
                 Text(item.text, color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp, maxLines = 8, overflow = TextOverflow.Ellipsis)
             }
         } else {
@@ -2655,6 +2660,9 @@ private fun ShrinkToFitText(text: String, baseFontSize: androidx.compose.ui.unit
  *  don't have a separate title the way blogs do. */
 @Composable
 private fun TextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, onOpen: () -> Unit, modifier: Modifier = Modifier) {
+    // A text post wears its uploader's own profile color, wherever it shows.
+    @Suppress("NAME_SHADOWING")
+    val tint = if (item.author.did.isNotBlank()) rememberAuthorProfileTint(item.author.did, item.author.avatarUrl) else tint
     val shape = RoundedCornerShape(16.dp)
     // Fix 9: the shared light tap, via the shared helper.
     val tap = rememberHapticTap()
@@ -2699,6 +2707,9 @@ private fun TextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, o
  *  column's worth instead. */
 @Composable
 private fun CompactTextPostBubble(item: MediaItem, liquidGlass: Boolean, tint: Color, shape: RoundedCornerShape, onOpen: () -> Unit) {
+    // A text post wears its uploader's own profile color, wherever it shows.
+    @Suppress("NAME_SHADOWING")
+    val tint = if (item.author.did.isNotBlank()) rememberAuthorProfileTint(item.author.did, item.author.avatarUrl) else tint
     // Fix 9: the shared light tap, via the shared helper.
     val tap = rememberHapticTap()
     val emoji = item.isEmojiTextshot

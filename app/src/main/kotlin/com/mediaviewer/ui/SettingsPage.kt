@@ -5,6 +5,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -48,7 +49,7 @@ import com.mediaviewer.viewmodel.MainViewModel
 
 /** Which of the Settings page's two tabs is showing — switched by the
  *  "Settings / Credits" control at the right end of the Hub's bottom bar. */
-internal enum class SettingsTab { SETTINGS, CREDITS }
+internal enum class SettingsTab { SETTINGS, CREDITS, SUPPORT }
 
 /** Everything the reworked Settings page needs beyond what [SettingsSheet]
  *  already took: multiple-account handling, the tagging-model download, and
@@ -359,6 +360,45 @@ internal fun SettingsPageContent(
             "Starry Background", com.mediaviewer.util.UiToggles.starryBackground,
             { com.mediaviewer.util.UiToggles.updateStarryBackground(it) }, liquidGlass, tint, backdrop
         )
+        // Override App Colors: everywhere the app would wear your profile
+        // color, it wears the color picked here instead. Your own profile
+        // page keeps its real colors.
+        SettingsBubble(liquidGlass, tint, backdrop) {
+            var showWheel by remember { mutableStateOf(false) }
+            val overrideOn = com.mediaviewer.util.UiToggles.overrideAppColors
+            val overrideColor = Color(com.mediaviewer.util.UiToggles.overrideColor)
+            BubbleRow {
+                RowLabel("Override App Colors", Modifier.weight(1f), sub = "Your profile page keeps its own colors.")
+                CompactSwitch(overrideOn) { com.mediaviewer.util.UiToggles.updateOverrideAppColors(it) }
+            }
+            if (overrideOn) {
+                val tapColor = rememberHapticTap()
+                BubbleDivider()
+                BubbleRow(Modifier.clickable { tapColor(); showWheel = true }) {
+                    RowLabel("Color", Modifier.weight(1f))
+                    Text(
+                        "#%06X".format(com.mediaviewer.util.UiToggles.overrideColor and 0xFFFFFF),
+                        color = DimGray, fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Box(
+                        Modifier.size(26.dp).clip(CircleShape).background(overrideColor)
+                            .border(1.5.dp, Color.White.copy(alpha = 0.7f), CircleShape)
+                    )
+                }
+            }
+            if (showWheel) {
+                ColorWheelDialog(
+                    initial = overrideColor,
+                    title = "App Color",
+                    onDismiss = { showWheel = false },
+                    onPick = {
+                        com.mediaviewer.util.UiToggles.updateOverrideColor(it.toArgb())
+                        showWheel = false
+                    }
+                )
+            }
+        }
         // Which transition plays while a page loads: None (pages open
         // instantly and fill in as their data arrives), Pixels, Shatter or
         // Space (the default).
@@ -474,24 +514,56 @@ internal fun SettingsPageContent(
             }
         }
 
-        // App Font: the label stays "App Font"; an active custom font's name
-        // gets its own row underneath.
+        // App Font: "Import" adds a .ttf/.otf to the list; the list (styled
+        // like Loading Animation) shows the selected font — Audiowide by
+        // default, the Original system font second, then every import, each
+        // written in its own face.
+        val fontContext = androidx.compose.ui.platform.LocalContext.current
+        val fontScope = androidx.compose.runtime.rememberCoroutineScope()
         val fontPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-            if (uri != null) onPickFontFile(uri)
+            if (uri != null) fontScope.launch {
+                val error = com.mediaviewer.util.FontStore.import(fontContext, uri)
+                if (error != null) android.widget.Toast.makeText(fontContext, error, android.widget.Toast.LENGTH_LONG).show()
+            }
         }
         SettingsBubble(liquidGlass, tint, backdrop) {
+            var fontMenuExpanded by remember { mutableStateOf(false) }
+            val fontStore = com.mediaviewer.util.FontStore
+            val selectedFont = fontStore.selected
             BubbleRow {
                 RowLabel("App Font", Modifier.weight(1f))
-                if (customFontName != null) {
-                    PillButton("Reset", onResetFont, color = DangerRed)
-                    Spacer(Modifier.width(6.dp))
-                }
-                PillButton("Choose File", { fontPickerLauncher.launch("*/*") })
-            }
-            if (customFontName != null) {
-                BubbleDivider()
-                BubbleRow {
-                    Text("Font: $customFontName", color = DimGray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                PillButton("Import", { fontPickerLauncher.launch("*/*") })
+                Spacer(Modifier.width(10.dp))
+                Box {
+                    Text(
+                        fontStore.selectedName,
+                        color = VoteGreen, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 120.dp).clickable { fontMenuExpanded = true }
+                    )
+                    DropdownMenu(expanded = fontMenuExpanded, onDismissRequest = { fontMenuExpanded = false }) {
+                        fontStore.entries.forEach { option ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        option.name,
+                                        fontFamily = fontStore.familyFor(option.id) ?: androidx.compose.ui.text.font.FontFamily.Default,
+                                        fontWeight = if (option.id == selectedFont) FontWeight.SemiBold else FontWeight.Normal,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                                    )
+                                },
+                                trailingIcon = if (option.imported) {
+                                    {
+                                        Icon(
+                                            Icons.Default.Close, contentDescription = "Remove ${option.name}",
+                                            modifier = Modifier.size(18.dp).clip(CircleShape).clickable { fontStore.remove(option.id) }
+                                        )
+                                    }
+                                } else null,
+                                onClick = { fontStore.select(option.id); fontMenuExpanded = false }
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -742,7 +814,7 @@ internal fun SettingsPageContent(
                 val prog = downloadProgress.takeIf { !extras.downloadIsE621 }
                 val running = prog?.isRunning == true
                 ActionBubble(
-                    label = "Download AT Protocol Media when Liked",
+                    label = "Download all liked AT Protocol media",
                     sub = when {
                         running -> "${prog?.count ?: 0} queued"
                         prog != null && prog.count > 0 -> "Done — ${prog.count} queued"
@@ -758,7 +830,7 @@ internal fun SettingsPageContent(
                 val prog = downloadProgress.takeIf { extras.downloadIsE621 }
                 val running = prog?.isRunning == true
                 ActionBubble(
-                    label = "Download e621 Media when Saved",
+                    label = "Download all saved e621 media",
                     sub = when {
                         running -> "${prog?.count ?: 0} queued"
                         prog != null && prog.count > 0 -> "Done — ${prog.count} queued"
@@ -1074,7 +1146,7 @@ internal fun CreditsPageContent() {
             Header("AT Protocol Integrations")
             Body(buildAnnotatedString {
                 append("Bluesky - Accounts, Posts, etc.\n")
-                append("Leaflet - Long-Form Blogs.\n")
+                append("Standard.site/Leaflet - Long-Form Blogs.\n")
                 append("Popfeed - Title Reviews and Backlog.\n")
                 append("Rocksky - Music Listening History.")
             })

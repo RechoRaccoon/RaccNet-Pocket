@@ -249,17 +249,18 @@ fun SpaceOverlay(controller: SpaceTransitionController, modifier: Modifier = Mod
                     }
                 }
             )
-            // The logo: not too big, a little above centre, with a soft
-            // pink glow and a very slow breathe.
-            val logoWidth = (maxWidth * 0.56f).coerceAtMost(300.dp)
-            val lift = -(maxHeight * 0.07f)
+            // The logo lockup ("Stellar" + "Created by Recho Raccoon"):
+            // fairly big, well above centre, with a soft glow and a very
+            // slow breathe.
+            val logoWidth = (maxWidth * 0.74f).coerceAtMost(400.dp)
+            val lift = -(maxHeight * 0.12f)
             val breathe by remember { derivedBreathe(time) }
             Box(Modifier.align(Alignment.Center).offset(y = lift)) {
                 Image(
                     painter = painterResource(R.drawable.stellar_logo_vector),
                     contentDescription = null,
                     modifier = Modifier.width(logoWidth).graphicsLayer {
-                        scaleX = 1.08f; scaleY = 1.35f; alpha = 0.55f + 0.2f * breathe
+                        scaleX = 1.04f; scaleY = 1.12f; alpha = 0.5f + 0.2f * breathe
                     }.blur(14.dp, edgeTreatment = BlurredEdgeTreatment.Unbounded)
                 )
                 Image(

@@ -106,21 +106,14 @@ fun CameraModeScreen(
     var captureError by remember { mutableStateOf<String?>(null) }
     // Flip: a quick dip to black so the switch doesn't show a torn frame.
     val flipCover = remember { Animatable(1f) }
-    // Set once per camera (re)bind, when its first frame reaches the screen —
-    // never per frame, so nothing recomposes while the camera runs.
-    var frameSeen by remember { mutableStateOf(false) }
-    val frameFlag = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
-    val uiHandler = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
     SideEffect { renderer.mirror = frontCamera }
-    DisposableEffect(renderer) {
-        renderer.onFrameDrawn = {
-            if (frameFlag.compareAndSet(false, true)) uiHandler.post { frameSeen = true }
+    // Opening: the cover lifts once the camera's first frame is on screen
+    // (or after a few seconds regardless, so it can never stay black).
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.withTimeoutOrNull(4000) {
+            while (renderer.lastDrawnStream == 0) kotlinx.coroutines.delay(16)
         }
-        onDispose { renderer.onFrameDrawn = null }
-    }
-    // First frame after (re)binding: fade the cover out.
-    LaunchedEffect(frameSeen) {
-        if (frameSeen) flipCover.animateTo(0f, tween(220))
+        flipCover.animateTo(0f, tween(220))
     }
 
     val capture = remember { CameraCaptureSession(renderer) }
@@ -233,7 +226,7 @@ fun CameraModeScreen(
                 liveBadgeUrl = link
                 launch(Dispatchers.IO) {
                     com.mediaviewer.util.LiveLinkManager.setStreamLive(appContext, link, "Live now")
-                        .onFailure { e -> withContext(Dispatchers.Main) { captureError = "Live badge: ${e.message?.take(60)}" } }
+                        .onFailure { e -> withContext(Dispatchers.Main) { captureError = "Stream is live, but the Bluesky Live badge didn't update — ${e.message?.removePrefix("setLiveNowStatus failed: ")?.take(160) ?: "unknown error"}" } }
                 }
             }
         }
@@ -319,7 +312,7 @@ fun CameraModeScreen(
         }
     }
     LaunchedEffect(captureError) {
-        if (captureError != null) { kotlinx.coroutines.delay(3000); captureError = null }
+        if (captureError != null) { kotlinx.coroutines.delay(if ((captureError?.length ?: 0) > 60) 7000L else 3000L); captureError = null }
     }
     fun onCapturePressed() {
         if (captureBusy) return
@@ -482,9 +475,16 @@ fun CameraModeScreen(
                 tap()
                 scope.launch {
                     flipCover.animateTo(1f, tween(120))
-                    frameSeen = false
-                    frameFlag.set(false)
+                    // Wait for a frame from the NEW camera stream specifically
+                    // (a stale frame from the old one used to lift — or, if
+                    // it landed at the wrong moment, permanently stick — the
+                    // cover), with a timeout so it can never stay black.
+                    val before = renderer.streamCount
                     frontCamera = !frontCamera
+                    kotlinx.coroutines.withTimeoutOrNull(3000) {
+                        while (renderer.lastDrawnStream <= before) kotlinx.coroutines.delay(16)
+                    }
+                    flipCover.animateTo(0f, tween(220))
                 }
             },
             modifier = Modifier.align(Alignment.BottomCenter)

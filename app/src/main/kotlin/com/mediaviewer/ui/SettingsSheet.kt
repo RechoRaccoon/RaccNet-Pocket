@@ -426,6 +426,7 @@ fun SettingsSheet(
                         ) { tab ->
                             when (tab) {
                                 SettingsTab.CREDITS -> CreditsPageContent()
+                                SettingsTab.SUPPORT -> SupportPageContent(liquidGlass = liquidGlass, tint = dominantColor)
                                 SettingsTab.SETTINGS -> SettingsPageContent(
                                     reducedAnimations = reducedAnimations, onToggleReducedAnimations = onToggleReducedAnimations,
                                     hateFunBlurNsfw = hateFunBlurNsfw, onToggleHateFunBlurNsfw = onToggleHateFunBlurNsfw,
@@ -804,7 +805,7 @@ private fun AtProtocolPageContent(
     ) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
-            Text("Feeds", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+            Text("Feeds", color = hubDividerLabel(dominantColor), fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(horizontal = 10.dp))
             HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
         }
@@ -823,7 +824,7 @@ private fun AtProtocolPageContent(
             HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
             Text(
                 selfProfile?.author?.displayName?.ifBlank { null } ?: bskyHandle,
-                color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+                color = hubDividerLabel(dominantColor), fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(horizontal = 10.dp)
             )
@@ -855,7 +856,7 @@ private fun AtProtocolPageContent(
         Spacer(Modifier.height(14.dp))
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
-            Text("Mutuals", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+            Text("Mutuals", color = hubDividerLabel(dominantColor), fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(horizontal = 10.dp))
             HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
         }
@@ -981,7 +982,7 @@ private fun AtProtocolPageContent(
             Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
-                Text("Livestreams", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+                Text("Livestreams", color = hubDividerLabel(dominantColor), fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.padding(horizontal = 10.dp))
                 HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
             }
@@ -1007,7 +1008,7 @@ private fun AtProtocolPageContent(
             Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
-                Text("Reviews", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+                Text("Reviews", color = hubDividerLabel(dominantColor), fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.padding(horizontal = 10.dp))
                 HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
             }
@@ -1038,7 +1039,7 @@ private fun AtProtocolPageContent(
             Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
-                Text("Blogs", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+                Text("Blogs", color = hubDividerLabel(dominantColor), fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.padding(horizontal = 10.dp))
                 HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
             }
@@ -1190,7 +1191,7 @@ private fun AtProtocolPageContent(
             Spacer(Modifier.height(14.dp))
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
-                Text("Switch Accounts", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+                Text("Switch Accounts", color = hubDividerLabel(dominantColor), fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.padding(horizontal = 10.dp))
                 HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
             }
@@ -1730,7 +1731,11 @@ private fun SettingsCreditsSwitch(
     @Composable
     fun Segments() {
         Row(Modifier.padding(3.dp), verticalAlignment = Alignment.CenterVertically) {
-            listOf(SettingsTab.SETTINGS to "Settings", SettingsTab.CREDITS to "Credits").forEach { (tab, label) ->
+            listOf(
+                SettingsTab.SETTINGS to "Settings",
+                SettingsTab.CREDITS to "Credits",
+                SettingsTab.SUPPORT to "Support Stellar"
+            ).forEach { (tab, label) ->
                 val isSelected = tab == selected
                 Box(
                     Modifier
@@ -1738,12 +1743,12 @@ private fun SettingsCreditsSwitch(
                         .clip(RoundedCornerShape(17.dp))
                         .background(if (isSelected) Color.White.copy(alpha = 0.18f) else Color.Transparent)
                         .clickable { if (!isSelected) { tap(); onSelect(tab) } }
-                        .padding(horizontal = 12.dp),
+                        .padding(horizontal = 10.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
                         label, color = if (isSelected) Color.White else DimGray,
-                        fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false
+                        fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false
                     )
                 }
             }
@@ -1884,7 +1889,7 @@ private fun ReturnToFeedBar(
             SettingsCreditsSwitch(
                 selected = settingsTab, onSelect = onSettingsTabChange,
                 liquidGlass = liquidGlass, tint = tint, height = barHeight,
-                modifier = Modifier.align(Alignment.CenterEnd)
+                modifier = Modifier.align(Alignment.CenterEnd).padding(start = moreReserve)
             )
         }
         // Item 14: always shown, in the same left slot, whether or not the
@@ -2616,3 +2621,7 @@ private fun HubRemoveBubble(hovered: Boolean, liquidGlass: Boolean, modifier: Mo
         Text("Remove", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
     }
 }
+
+/** Hub section-divider labels: the profile color, lifted a little so the
+ *  text stays readable on the dim profile-colored background. */
+private fun hubDividerLabel(tint: Color): Color = androidx.compose.ui.graphics.lerp(tint, Color.White, 0.35f)

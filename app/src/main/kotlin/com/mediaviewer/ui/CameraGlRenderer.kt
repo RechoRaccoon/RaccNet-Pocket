@@ -52,12 +52,31 @@ internal class CameraGlRenderer {
     private val quadUv: FloatBuffer = floatBuffer(FloatArray(8))
     private val uvScratch = FloatArray(8)
 
-    /** The camera stream currently feeding the texture. */
-    private class Source(val texture: SurfaceTexture, val textureId: Int, val width: Int, val height: Int)
+    /** The camera stream currently feeding the texture. [number] counts
+     *  streams (1, 2, … — a new one per camera bind/flip). */
+    private class Source(val texture: SurfaceTexture, val textureId: Int, val width: Int, val height: Int, val number: Int)
     private var source: Source? = null
 
-    /** Clockwise rotation that makes the camera buffer upright. */
+    /** Clockwise rotation (degrees) CameraX says the buffer needs to match
+     *  the screen — used only when the camera did NOT already write its
+     *  own orientation into the stream ([hasCameraTransform] false). */
     @Volatile var rotationDegrees = 0
+    /** The camera wrote its sensor orientation into the SurfaceTexture's
+     *  transform (the normal case): the texture is then already upright for
+     *  the phone's natural orientation, and only the screen's own rotation
+     *  is left to undo. Applying [rotationDegrees] on top of that turned the
+     *  picture 90° and squashed it. */
+    @Volatile var hasCameraTransform = true
+    /** Surface.ROTATION_* of the screen (the Preview's target rotation). */
+    @Volatile var targetRotationDegrees = 0
+
+    /** How many camera streams have started, and which one last reached
+     *  the screen (0 = none yet) — lets the page wait for the new camera's
+     *  first frame after a flip. */
+    @Volatile var streamCount = 0
+        private set
+    @Volatile var lastDrawnStream = 0
+        private set
     /** Mirror horizontally (the selfie camera, like every camera app). */
     @Volatile var mirror = true
 
@@ -153,12 +172,22 @@ internal class CameraGlRenderer {
         val res = request.resolution
         val st = SurfaceTexture(texId)
         st.setDefaultBufferSize(res.width, res.height)
-        val src = Source(st, texId, res.width, res.height)
+        streamCount++
+        val src = Source(st, texId, res.width, res.height, streamCount)
         st.setOnFrameAvailableListener({ drawFrame(src) }, handler)
         val surface = Surface(st)
         source = src
         request.setTransformationInfoListener(glExecutor) { info ->
-            if (source === src) rotationDegrees = info.rotationDegrees
+            if (source === src) {
+                rotationDegrees = info.rotationDegrees
+                hasCameraTransform = info.hasCameraTransform()
+                targetRotationDegrees = when (info.targetRotation) {
+                    Surface.ROTATION_90 -> 90
+                    Surface.ROTATION_180 -> 180
+                    Surface.ROTATION_270 -> 270
+                    else -> 0
+                }
+            }
         }
         request.provideSurface(surface, glExecutor) {
             // The camera is done with this stream (unbound or replaced).
@@ -190,15 +219,29 @@ internal class CameraGlRenderer {
         }
         for (t in dead) removeTargetNow(t.id)
         makeCurrent(pbuffer)
-        if (drewDisplay) onFrameDrawn?.invoke()
+        if (drewDisplay) {
+            lastDrawnStream = src.number
+            onFrameDrawn?.invoke()
+        }
     }
 
     /** Output (u,v) corners → upright crop → camera buffer coords. */
     private fun drawQuad(src: Source, tw: Int, th: Int) {
-        val rot = ((rotationDegrees % 360) + 360) % 360
+        // Same rules as CameraX's own PreviewView: with the camera's
+        // transform in the stream, the texture (after the SurfaceTexture
+        // matrix) is the picture upright for the phone's natural
+        // orientation, sized like the buffer turned by the sensor
+        // orientation; only the screen rotation remains. Without it, the
+        // raw buffer needs the full rotation.
+        val camTransform = hasCameraTransform
+        val target = targetRotationDegrees
+        val texSideways = camTransform && ((rotationDegrees + target) % 180 != 0)
+        val texW = if (texSideways) src.height else src.width
+        val texH = if (texSideways) src.width else src.height
+        val rot = if (camTransform) ((360 - target) % 360) else ((rotationDegrees % 360) + 360) % 360
         val sideways = rot == 90 || rot == 270
-        val uprightW = (if (sideways) src.height else src.width).toFloat()
-        val uprightH = (if (sideways) src.width else src.height).toFloat()
+        val uprightW = (if (sideways) texH else texW).toFloat()
+        val uprightH = (if (sideways) texW else texH).toFloat()
         val targetAspect = tw.toFloat() / th.coerceAtLeast(1)
         val uprightAspect = uprightW / uprightH.coerceAtLeast(1f)
         // Centre-crop to fill the target.

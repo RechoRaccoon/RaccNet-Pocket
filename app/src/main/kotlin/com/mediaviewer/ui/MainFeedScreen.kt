@@ -1088,7 +1088,11 @@ private fun PostContent(
     // the liquid-glass panels so their tint/"reflection" shifts with whatever
     // is on screen, per post.
     val glassBackdropUrl = item.thumbUrl.ifBlank { item.mediaUrl }
-    val dominantColor = if (liquidGlass) rememberDominantColor(glassBackdropUrl) else Color.White
+    // Text-only posts have no media to take a color from: they wear the
+    // uploader's own profile color (banner/avatar blend) instead.
+    val authorTint = if (liquidGlass && item.isTextOnly && item.author.did.isNotBlank())
+        rememberAuthorProfileTint(item.author.did, item.author.avatarUrl) else null
+    val dominantColor = authorTint ?: if (liquidGlass) rememberDominantColor(glassBackdropUrl) else Color.White
 
     // Big Update #4: a single shared layer this post re-records every frame
     // with its actual rendered pixels (background gradient + media + quick

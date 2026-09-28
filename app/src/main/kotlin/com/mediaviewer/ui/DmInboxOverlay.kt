@@ -558,9 +558,10 @@ private fun DmBubble(
     val view = androidx.compose.ui.platform.LocalView.current
     val scope = rememberCoroutineScope()
     val density = androidx.compose.ui.platform.LocalDensity.current
-    // Swipe right to reply: the bubble follows the finger (with a little
-    // resistance), a reply arrow grows in behind it, and crossing the
-    // threshold ticks — let go past it to reply.
+    // Swipe to reply: their messages (left side) are pulled right, your own
+    // (right side) are pulled left. The bubble follows the finger (with a
+    // little resistance), a reply arrow grows in on the side it's leaving,
+    // and crossing the threshold ticks — let go past it to reply.
     val dragX = remember { androidx.compose.animation.core.Animatable(0f) }
     val thresholdPx = with(density) { 64.dp.toPx() }
     val maxPx = with(density) { 96.dp.toPx() }
@@ -570,7 +571,9 @@ private fun DmBubble(
     val flash by androidx.compose.animation.core.animateFloatAsState(if (highlighted) 1f else 0f, androidx.compose.animation.core.tween(350), label = "replyFlash")
 
     Box(
-        Modifier.fillMaxWidth().pointerInput(msg.id) {
+        Modifier.fillMaxWidth().pointerInput(msg.id, isMine) {
+            // +1 = pull right (their messages), -1 = pull left (yours).
+            val dir = if (isMine) -1f else 1f
             var raw = 0f
             detectHorizontalDragGestures(
                 onDragStart = { raw = 0f },
@@ -584,11 +587,11 @@ private fun DmBubble(
                     scope.launch { dragX.animateTo(0f, androidx.compose.animation.core.spring(dampingRatio = 0.6f, stiffness = 500f)) }
                 }
             ) { change, amount ->
-                raw = (raw + amount).coerceAtLeast(0f)
+                raw = (raw + amount * dir).coerceAtLeast(0f)
                 if (raw > 0f) change.consume()
                 // Rubber-band: follows 1:1 at first, then stiffens.
                 val shown = if (raw <= thresholdPx) raw else thresholdPx + (raw - thresholdPx) * 0.35f
-                scope.launch { dragX.snapTo(shown.coerceAtMost(maxPx)) }
+                scope.launch { dragX.snapTo(shown.coerceAtMost(maxPx) * dir) }
                 val nowArmed = raw >= thresholdPx
                 if (nowArmed != armed) {
                     armed = nowArmed
@@ -598,11 +601,18 @@ private fun DmBubble(
         }
     ) {
         // The reply arrow, revealed behind the bubble as it slides.
-        val progress = (dragX.value / thresholdPx).coerceIn(0f, 1f)
+        val progress = (kotlin.math.abs(dragX.value) / thresholdPx).coerceIn(0f, 1f)
         if (progress > 0f) {
             Box(
-                Modifier.align(Alignment.CenterStart).padding(start = 4.dp).size(30.dp)
-                    .graphicsLayer { alpha = progress; scaleX = 0.5f + 0.5f * progress; scaleY = 0.5f + 0.5f * progress }
+                Modifier.align(if (isMine) Alignment.CenterEnd else Alignment.CenterStart)
+                    .padding(start = 4.dp, end = 4.dp).size(30.dp)
+                    .graphicsLayer {
+                        alpha = progress
+                        // Your own messages slide the other way, so their
+                        // arrow is mirrored to point back at the bubble.
+                        scaleX = (0.5f + 0.5f * progress) * (if (isMine) -1f else 1f)
+                        scaleY = 0.5f + 0.5f * progress
+                    }
                     .clip(CircleShape).background(tint.copy(alpha = if (armed) 0.65f else 0.3f)),
                 contentAlignment = Alignment.Center
             ) {

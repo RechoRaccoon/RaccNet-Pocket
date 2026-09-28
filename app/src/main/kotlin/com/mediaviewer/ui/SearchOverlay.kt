@@ -27,6 +27,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -461,13 +462,21 @@ private fun MainViewModel.SearchFilter.label(): String = when (this) {
 @Composable
 private fun SearchPostCell(item: MediaItem, onClick: () -> Unit) {
     val tap = rememberHapticTap()
-    Box(Modifier.aspectRatio(1f).clickable(onClick = { tap(); onClick() })) {
+    // "I Hate Fun": NSFW-labeled results are blurred here too.
+    val blurNsfw = LocalHateFunBlurNsfw.current && item.isNsfwLabeled
+    Box(
+        Modifier.aspectRatio(1f).clip(androidx.compose.ui.graphics.RectangleShape)
+            .then(if (blurNsfw) Modifier.blur(60.dp) else Modifier)
+            .clickable(onClick = { tap(); onClick() })
+    ) {
         if (item.isEmojiTextshot) {
             Box(Modifier.fillMaxSize().background(OffBlack)) {
                 TextshotEmojiImage(item.textshotImageUrl, cornerRadius = 0.dp, modifier = Modifier.fillMaxSize())
             }
         } else if (item.isTextOnly) {
-            Box(Modifier.fillMaxSize().background(OffBlack).padding(6.dp), contentAlignment = Alignment.Center) {
+            // The uploader's own color, dimmed, behind their text.
+            val authorTint = if (item.author.did.isNotBlank()) rememberAuthorProfileTint(item.author.did, item.author.avatarUrl) else Color.Black
+            Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.lerp(OffBlack, authorTint, 0.35f)).padding(6.dp), contentAlignment = Alignment.Center) {
                 Text(item.text, color = Color.White.copy(alpha = 0.85f), fontSize = 10.sp, maxLines = 5, overflow = TextOverflow.Ellipsis)
             }
         } else {

@@ -115,7 +115,7 @@ dependencies {
 
     // Item 8 — VRM/VTuber mode: CameraX for the live front-camera preview
     // that face/hand/body tracking runs against.
-    val cameraxVersion = "1.3.4"
+    val cameraxVersion = "1.4.2"
     implementation("androidx.camera:camera-core:$cameraxVersion")
     implementation("androidx.camera:camera-camera2:$cameraxVersion")
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")

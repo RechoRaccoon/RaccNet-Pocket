@@ -199,9 +199,12 @@ fun VrmModeScreen(
     // trackers for the GPU).
     var performanceMode by remember { mutableStateOf(store.bool(K.PERFORMANCE_MODE, false)) }
     androidx.compose.runtime.LaunchedEffect(performanceMode) { store.put(K.PERFORMANCE_MODE, performanceMode) }
-    // The avatar never renders above 60 fps, so a 90/120 Hz screen only
-    // burns power (and wakes the frame loop twice as often) — ask for 60.
-    DisplayRefreshCap(60f)
+    // Frame rate cap (VRM settings → Performance): 120 (default — the
+    // screen runs at its normal rate), 60 or 30 to save power / leave more
+    // room for a second app or a stream.
+    var frameRateCap by remember { mutableStateOf(store.int(K.FRAME_RATE_CAP, 120).let { if (it in FRAME_RATE_CAPS) it else 120 }) }
+    androidx.compose.runtime.LaunchedEffect(frameRateCap) { store.put(K.FRAME_RATE_CAP, frameRateCap) }
+    if (frameRateCap < 120) DisplayRefreshCap(frameRateCap.toFloat())
     // Manual eyes: blink tracking off, openness set by the slider.
     var manualEyes by remember { mutableStateOf(store.bool(K.MANUAL_EYES, false)) }
     var eyeClosed by remember { mutableStateOf(store.float(K.EYE_CLOSED, 0f).coerceIn(0f, 1f)) }
@@ -354,7 +357,7 @@ fun VrmModeScreen(
                 liveBadgeUrl = link
                 launch(Dispatchers.IO) {
                     com.mediaviewer.util.LiveLinkManager.setStreamLive(appContext, link, "Live now")
-                        .onFailure { e -> withContext(Dispatchers.Main) { captureError = "Live badge: ${e.message?.take(60)}" } }
+                        .onFailure { e -> withContext(Dispatchers.Main) { captureError = "Stream is live, but the Bluesky Live badge didn't update — ${e.message?.removePrefix("setLiveNowStatus failed: ")?.take(160) ?: "unknown error"}" } }
                 }
             }
         }
@@ -433,7 +436,7 @@ fun VrmModeScreen(
         }
     }
     androidx.compose.runtime.LaunchedEffect(captureError) {
-        if (captureError != null) { kotlinx.coroutines.delay(3000); captureError = null }
+        if (captureError != null) { kotlinx.coroutines.delay(if ((captureError?.length ?: 0) > 60) 7000L else 3000L); captureError = null }
     }
     fun onCapturePressed() {
         if (captureBusy) return
@@ -802,7 +805,9 @@ fun VrmModeScreen(
                     },
                     hiddenParts = hiddenParts,
                     springBones = springBones,
-                    maxFps = if (fastTracking) 60 else 30,
+                    // The avatar draws up to the cap; without Fast tracking
+                    // (≈15 updates a second) it stops at 60.
+                    maxFps = minOf(frameRateCap, if (fastTracking) 120 else 60),
                     fullBright = fullBright,
                     cameraResetKey = cameraResetKey,
                     captureController = captureController,
@@ -964,6 +969,7 @@ fun VrmModeScreen(
                     smoothing = smoothing, onSmoothing = { smoothing = it },
                     fastTracking = fastTracking, onToggleFastTracking = { fastTracking = it },
                     performanceMode = performanceMode, onTogglePerformanceMode = { performanceMode = it },
+                    frameRateCap = frameRateCap, onFrameRateCap = { frameRateCap = it },
                     manualEyes = manualEyes, onToggleManualEyes = { manualEyes = it },
                     eyeClosed = eyeClosed, onEyeClosed = { eyeClosed = it },
                     springBones = springBones, onToggleSpringBones = { springBones = it },
@@ -1723,6 +1729,7 @@ private class VrmSettingsUi(
     val smoothing: Int, val onSmoothing: (Int) -> Unit,
     val fastTracking: Boolean, val onToggleFastTracking: (Boolean) -> Unit,
     val performanceMode: Boolean, val onTogglePerformanceMode: (Boolean) -> Unit,
+    val frameRateCap: Int, val onFrameRateCap: (Int) -> Unit,
     val manualEyes: Boolean, val onToggleManualEyes: (Boolean) -> Unit,
     val eyeClosed: Float, val onEyeClosed: (Float) -> Unit,
     val springBones: Boolean, val onToggleSpringBones: (Boolean) -> Unit,
@@ -1805,6 +1812,11 @@ private fun VrmSettingsSheet(
                 hint = "Keeps up with quick movements. Uses more battery and warms the phone.") { ui.onToggleFastTracking(it) }
             VrmSettingsToggleRow("Performance mode", ui.performanceMode, tint,
                 hint = "Plain tinted buttons instead of glass that blurs the avatar. Frees up the GPU for tracking — useful with another app open or while streaming.") { ui.onTogglePerformanceMode(it) }
+            VrmSettingsChoiceRow(
+                label = "Frame rate cap", options = FRAME_RATE_CAPS, selected = ui.frameRateCap, tint = tint,
+                optionLabel = { "$it" },
+                hint = "Lower caps save battery and heat and leave more room for tracking, another app or a stream."
+            ) { ui.onFrameRateCap(it) }
             VrmSettingsSlider(
                 label = "Smoothing", valueText = if (ui.smoothing == 0) "off" else ui.smoothing.toString(),
                 value = ui.smoothing.toFloat(), range = 0f..10f, steps = 9, tint = tint,
@@ -1949,6 +1961,43 @@ private fun VrmSettingsToggleRow(
         ) {
             Box(Modifier.padding(3.dp).size(20.dp).clip(CircleShape).background(Color.White))
         }
+    }
+}
+
+/** The VRM frame rate cap options, highest (default) first. */
+private val FRAME_RATE_CAPS = listOf(120, 60, 30)
+
+/** A label with a small segmented pill of choices on the right. */
+@Composable
+private fun <T> VrmSettingsChoiceRow(
+    label: String, options: List<T>, selected: T, tint: Color, optionLabel: (T) -> String,
+    hint: String? = null, onSelect: (T) -> Unit
+) {
+    val tap = rememberHapticTap()
+    androidx.compose.foundation.layout.Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Row(
+                Modifier.clip(RoundedCornerShape(13.dp)).background(Color.White.copy(alpha = 0.12f)).padding(2.dp)
+            ) {
+                options.forEach { option ->
+                    val isSelected = option == selected
+                    Box(
+                        Modifier.height(26.dp).clip(RoundedCornerShape(11.dp))
+                            .background(if (isSelected) tint else Color.Transparent)
+                            .clickable { if (!isSelected) { tap(); onSelect(option) } }
+                            .padding(horizontal = 11.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            optionLabel(option), color = if (isSelected) Color.White else Color.White.copy(alpha = 0.6f),
+                            fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+        }
+        if (hint != null) Text(hint, color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp)
     }
 }
 
@@ -2854,7 +2903,11 @@ internal fun CaptureControlsBar(
                         Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFFFF3B30)))
                         Spacer(Modifier.width(6.dp))
                     }
-                    Text(status, color = Color.White, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+                    Text(
+                        status, color = Color.White, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center, maxLines = 4,
+                        modifier = Modifier.widthIn(max = 320.dp)
+                    )
                 }
             }
         }
@@ -2937,8 +2990,7 @@ internal fun CaptureControlsBar(
 }
 
 /** Asks for a [hz] display refresh rate while this is composed (restored
- *  after) — VRM mode and the Camera page never draw faster than 60 fps, so
- *  a 90/120 Hz panel just costs power and frame-loop wakeups. */
+ *  after) — used by VRM mode's frame rate cap and the Camera page. */
 @Composable
 internal fun DisplayRefreshCap(hz: Float) {
     val view = androidx.compose.ui.platform.LocalView.current

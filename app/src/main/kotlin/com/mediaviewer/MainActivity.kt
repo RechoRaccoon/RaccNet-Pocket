@@ -154,6 +154,7 @@ class MainActivity : ComponentActivity() {
         installCrashHandler(applicationContext)
         com.mediaviewer.util.CrashBreadcrumbs.init(applicationContext)
         com.mediaviewer.util.UiToggles.init(applicationContext)
+        com.mediaviewer.util.FontStore.init(applicationContext)
         com.mediaviewer.ui.ProfileColorStore.init(applicationContext)
         // Audio visualizer: start noting music apps' audio sessions right
         // away, so the bars can attach to one even if the music started
@@ -191,17 +192,17 @@ class MainActivity : ComponentActivity() {
                 CrashLogScreen(log = crashLog!!, onDismiss = { clearCrashLog(applicationContext); crashLog = null })
                 return@setContent
             }
-            // Phase 4 — custom font pack: rebuilt only when the stored path
-            // actually changes, not on every recomposition. Falls back to null
-            // (MediaViewerTheme's own default Typography) if the file somehow
-            // isn't there anymore (e.g. cleared app storage out from under it).
-            val customFontPath by viewModel.customFontPath.collectAsState()
-            val customFontFamily = remember(customFontPath) {
-                customFontPath?.let { path ->
-                    val file = File(path)
-                    if (file.exists()) FontFamily(Font(file)) else null
-                }
+            // App Font: Audiowide by default, the Original system font, or
+            // any imported font (Settings → UI Customization → App Font).
+            // A font picked with the old single-font setting is adopted into
+            // the list once.
+            val legacyFontPath by viewModel.customFontPath.collectAsState()
+            val legacyFontName by viewModel.customFontName.collectAsState()
+            LaunchedEffect(legacyFontPath) {
+                if (legacyFontPath != null) com.mediaviewer.util.FontStore.adoptLegacy(legacyFontPath, legacyFontName)
             }
+            val selectedFont = com.mediaviewer.util.FontStore.selected
+            val customFontFamily = remember(selectedFont) { com.mediaviewer.util.FontStore.familyFor(selectedFont) }
             MediaViewerTheme(customFontFamily = customFontFamily) { AppRoot(viewModel) }
         }
     }
@@ -636,7 +637,9 @@ private fun AppRoot(viewModel: MainViewModel) {
     CompositionLocalProvider(
         LocalGlassIntensity provides liquidGlassIntensity,
         LocalGlassRimIntensity provides glassRimIntensity,
-        LocalGlassRimVibrantSecondary provides glassRimVibrantSecondary
+        LocalGlassRimVibrantSecondary provides glassRimVibrantSecondary,
+        // "I Hate Fun": every tile, grid, search result and page reads this.
+        com.mediaviewer.ui.LocalHateFunBlurNsfw provides hateFunBlurNsfw
     ) {
     Box(Modifier.fillMaxSize().recordLastTap(pixelController.shatter)) {
         // Feature request #8: lifted out of MainFeedScreen so a multi-image
@@ -1168,7 +1171,8 @@ private fun AppRoot(viewModel: MainViewModel) {
                     blue = (bannerColor.blue + avatarColor.blue) / 2f,
                     alpha = 1f
                 )
-            } else if (screenState == ScreenState.SETTINGS) {
+            } else if (screenState == ScreenState.SETTINGS || screenState == ScreenState.GRID) {
+                // The Hub and Explore/grid mode both wear your own color.
                 val selfAvatar = selfProfile?.author?.avatarUrl
                 if (!selfAvatar.isNullOrBlank()) com.mediaviewer.ui.rememberSelfProfileTint(selfAvatar) else currentDominantColor
             } else {

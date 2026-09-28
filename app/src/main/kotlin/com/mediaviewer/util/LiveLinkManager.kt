@@ -83,9 +83,19 @@ object LiveLinkManager {
      *  and ends, and re-bumps the expiry itself while it's still live). */
     suspend fun setStreamLive(context: Context, streamUrl: String, title: String): Result<Unit> =
         withContext(Dispatchers.IO) {
-            withFreshToken(context) { repo, token, did ->
+            var result = withFreshToken(context) { repo, token, did ->
                 repo.setLiveNowStatus(token, did, streamUrl, title, MAX_DURATION_MINUTES)
             }.map { Unit }
+            // Going live often happens right as the phone switches its
+            // network over to the stream upload — one retry covers a
+            // dropped request without bothering the streamer.
+            if (result.exceptionOrNull() is java.io.IOException) {
+                kotlinx.coroutines.delay(2_000)
+                result = withFreshToken(context) { repo, token, did ->
+                    repo.setLiveNowStatus(token, did, streamUrl, title, MAX_DURATION_MINUTES)
+                }.map { Unit }
+            }
+            result
         }
 
     /** Ends VRM mode's Live badge (see [setStreamLive]). */
@@ -106,8 +116,8 @@ object LiveLinkManager {
     fun normalizeStreamLink(input: String, rtmpServer: String): String? {
         val raw = input.trim()
         if (raw.isBlank()) return null
-        if (raw.startsWith("http://", true) || raw.startsWith("https://", true)) return raw
-        if (raw.contains('.') && !raw.startsWith("@")) return "https://$raw"
+        if (raw.startsWith("http://", true) || raw.startsWith("https://", true)) return tidyUrl(raw)
+        if (raw.contains('.') && !raw.startsWith("@")) return tidyUrl("https://$raw")
         val name = raw.removePrefix("@").trim('/')
         if (name.isBlank()) return null
         val server = rtmpServer.lowercase()
@@ -116,6 +126,23 @@ object LiveLinkManager {
             "kick" in server -> "https://kick.com/$name"
             else -> "https://twitch.tv/$name"
         }
+    }
+
+    /** "YouTube.com/@Name" → "https://www.youtube.com/@Name": the scheme
+     *  and host are lower-cased (hosts are case-insensitive, but Bluesky
+     *  matches its list of live-badge services against the host as written)
+     *  and bare youtube.com / twitch.tv get their canonical form. The path
+     *  (channel names) is left exactly as typed. */
+    private fun tidyUrl(url: String): String {
+        val schemeEnd = url.indexOf("://")
+        if (schemeEnd < 0) return url
+        val scheme = url.substring(0, schemeEnd).lowercase()
+        val rest = url.substring(schemeEnd + 3)
+        val cut = rest.indexOfFirst { it == '/' || it == '?' || it == '#' }.let { if (it < 0) rest.length else it }
+        var host = rest.substring(0, cut).lowercase()
+        if (host == "youtube.com" || host == "m.youtube.com") host = "www.youtube.com"
+        if (host == "www.twitch.tv" || host == "m.twitch.tv") host = "twitch.tv"
+        return "https://$host${rest.substring(cut)}".let { if (scheme == "http" || scheme == "https") it else url }
     }
 
     /** Called by the periodic worker only. If the saved channel is

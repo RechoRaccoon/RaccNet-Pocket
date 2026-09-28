@@ -278,6 +278,10 @@ fun rememberAuthorProfileTint(did: String, avatarUrl: String?): Color =
 /** The signed-in user's own color, matching their profile page exactly. */
 @Composable
 fun rememberSelfProfileTint(selfAvatarUrl: String): Color {
+    // Settings → "Override App Colors": the picked color everywhere "your
+    // color" is used (your actual profile page computes its own colors and
+    // is never routed through here, so it keeps its real ones).
+    if (com.mediaviewer.util.UiToggles.overrideAppColors) return Color(com.mediaviewer.util.UiToggles.overrideColor)
     val did = SelfProfileColors.did
     return if (!did.isNullOrBlank()) {
         rememberProfileColors(

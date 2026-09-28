@@ -61,5 +61,6 @@ class VrmSettingsStore(context: Context) {
         const val VOICE_PITCH = "voice_pitch"      // semitones, 0 = natural
         const val HEAD_FALLBACK = "head_fallback"  // body tracker places the head when the face is lost
         const val PERFORMANCE_MODE = "performance_mode" // flat buttons, no live blur over the avatar
+        const val FRAME_RATE_CAP = "frame_rate_cap" // 120 (default), 60 or 30
     }
 }
