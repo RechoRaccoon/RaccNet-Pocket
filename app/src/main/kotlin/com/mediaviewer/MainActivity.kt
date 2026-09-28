@@ -64,6 +64,7 @@ import com.mediaviewer.ui.fetchDominantColor
 import com.mediaviewer.ui.rememberLoadingTransition
 import com.mediaviewer.ui.ShatterOverlay
 import com.mediaviewer.ui.recordLastTap
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -87,6 +88,8 @@ import java.io.StringWriter
 // shown as plain copyable text instead of the normal UI — so a crash can be
 // diagnosed just by reopening the app and copying what's on screen.
 private const val CRASH_LOG_FILENAME = "last_crash.txt"
+/** Longest the first frame waits for your profile color (see holdFirstFrameForProfileColors). */
+private const val PROFILE_COLOR_WAIT_MS = 1500L
 
 private fun installCrashHandler(context: Context) {
     val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
@@ -150,12 +153,38 @@ class MainActivity : ComponentActivity() {
         com.mediaviewer.util.HardwareKeys.dispatch(event) || super.dispatchKeyEvent(event)
 
     private val viewModel: MainViewModel by viewModels()
+
+    /** Opens the app already in your profile colors: the first frame is
+     *  held back (the window's own background shows meanwhile) until "your
+     *  color" is known — instantly on most launches, since it's remembered
+     *  from the last run. Nothing to wait for when you're signed out, and
+     *  never longer than [PROFILE_COLOR_WAIT_MS] (e.g. offline on a first
+     *  launch). */
+    private fun holdFirstFrameForProfileColors() {
+        if (com.mediaviewer.ui.SelfProfileColors.ready) return
+        val started = android.os.SystemClock.uptimeMillis()
+        // Signed out → no profile color to wait for.
+        lifecycleScope.launch {
+            val did = runCatching { com.mediaviewer.util.PreferencesManager(applicationContext).bskyDid.first() }.getOrNull()
+            if (did.isNullOrBlank()) com.mediaviewer.ui.SelfProfileColors.ready = true
+        }
+        val content = findViewById<android.view.View>(android.R.id.content)
+        content.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                val go = com.mediaviewer.ui.SelfProfileColors.ready ||
+                    android.os.SystemClock.uptimeMillis() - started > PROFILE_COLOR_WAIT_MS
+                if (go) content.viewTreeObserver.removeOnPreDrawListener(this)
+                return go
+            }
+        })
+    }
     override fun onCreate(savedInstanceState: Bundle?) {        super.onCreate(savedInstanceState)
         installCrashHandler(applicationContext)
         com.mediaviewer.util.CrashBreadcrumbs.init(applicationContext)
         com.mediaviewer.util.UiToggles.init(applicationContext)
         com.mediaviewer.util.FontStore.init(applicationContext)
         com.mediaviewer.ui.ProfileColorStore.init(applicationContext)
+        com.mediaviewer.ui.SelfProfileColors.init(applicationContext)
         // Audio visualizer: start noting music apps' audio sessions right
         // away, so the bars can attach to one even if the music started
         // before the feed was opened.
@@ -186,6 +215,7 @@ class MainActivity : ComponentActivity() {
                 layoutInDisplayCutoutMode = android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
         }
+        holdFirstFrameForProfileColors()
         setContent {
             var crashLog by remember { mutableStateOf(readCrashLog(applicationContext)) }
             if (crashLog != null) {

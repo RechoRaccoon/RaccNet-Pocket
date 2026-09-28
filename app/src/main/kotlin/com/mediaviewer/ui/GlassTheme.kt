@@ -126,6 +126,37 @@ object SelfProfileColors {
     var bannerUrl by mutableStateOf<String?>(null)
     var did by mutableStateOf<String?>(null)
     var loaded by mutableStateOf(false)
+
+    /** The signed-in account's DID from the last run, read synchronously at
+     *  launch. The live [did] only arrives once the saved login has loaded,
+     *  a moment after the first frame — this lets "your color" come
+     *  straight out of [ProfileColorStore] from the very first frame
+     *  instead of starting grey and then shifting. */
+    var savedDid by mutableStateOf<String?>(null)
+        private set
+
+    /** True once "your color" is the real one (or there's none to wait
+     *  for). MainActivity holds the first frame until then, up to a short
+     *  timeout, so the app opens already in your colors. */
+    @Volatile var ready = false
+
+    private var prefs: android.content.SharedPreferences? = null
+
+    /** Call after [ProfileColorStore.init]. */
+    fun init(context: android.content.Context) {
+        if (prefs != null) return
+        val p = context.applicationContext.getSharedPreferences("self_profile_color", android.content.Context.MODE_PRIVATE)
+        prefs = p
+        savedDid = p.getString("did", null)?.takeIf { it.isNotBlank() }
+        if (com.mediaviewer.util.UiToggles.overrideAppColors) ready = true
+        savedDid?.let { if (ProfileColorStore.get(it) != null) ready = true }
+    }
+
+    fun rememberDid(value: String) {
+        if (value.isBlank() || value == savedDid) return
+        savedDid = value
+        prefs?.edit()?.putString("did", value)?.apply()
+    }
 }
 
 private val PlaceholderGrey = Color(0xFF2A2A2E)
@@ -282,13 +313,23 @@ fun rememberSelfProfileTint(selfAvatarUrl: String): Color {
     // color" is used (your actual profile page computes its own colors and
     // is never routed through here, so it keeps its real ones).
     if (com.mediaviewer.util.UiToggles.overrideAppColors) return Color(com.mediaviewer.util.UiToggles.overrideColor)
-    val did = SelfProfileColors.did
-    return if (!did.isNullOrBlank()) {
+    // Until the saved login has loaded, use last run's account, so its
+    // remembered colors show from the very first frame.
+    val did = SelfProfileColors.did?.takeIf { it.isNotBlank() } ?: SelfProfileColors.savedDid
+    val color = if (!did.isNullOrBlank()) {
         rememberProfileColors(
             did, selfAvatarUrl, SelfProfileColors.bannerUrl,
-            bannerKnown = SelfProfileColors.loaded, resolve = false
+            bannerKnown = SelfProfileColors.loaded && SelfProfileColors.did == did, resolve = false
         ).blended
     } else rememberProfileTint(SelfProfileColors.bannerUrl, selfAvatarUrl)
+    val liveDid = SelfProfileColors.did
+    LaunchedEffect(liveDid) { if (!liveDid.isNullOrBlank()) SelfProfileColors.rememberDid(liveDid) }
+    // The real color is in: let the first frame through (see MainActivity).
+    LaunchedEffect(color, did) {
+        if (!SelfProfileColors.ready && did != null && color != PlaceholderGrey &&
+            (ProfileColorStore.get(did) != null || SelfProfileColors.loaded)) SelfProfileColors.ready = true
+    }
+    return color
 }
 
 /** Samples a low-res copy of the given media URL and returns its average
