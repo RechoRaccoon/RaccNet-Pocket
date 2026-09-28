@@ -459,6 +459,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var profileTabCache: MutableMap<String, CachedProfileTabs> = mutableMapOf()
     private var profileTabCacheHydrated = false
     private val profileTabCacheMutex = Mutex()
+    /** Guards loading the DM conversation list (see ensureDmConversationsLoadedSuspend). */
+    private val dmConversationsMutex = Mutex()
     private val profileTabCacheGson by lazy { com.google.gson.Gson() }
     private val profileTabCacheType by lazy {
         object : com.google.gson.reflect.TypeToken<Map<String, CachedProfileTabs>>() {}.type
@@ -2291,12 +2293,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // get kicked off below — decouples "show what's on disk" from all
         // of that entirely, so it can never be starved out by unrelated
         // network traffic the way it apparently was.
-        viewModelScope.launch(Dispatchers.IO) {
-            if (_dmConversations.value.isEmpty()) {
-                runCatching {
-                    val type = object : com.google.gson.reflect.TypeToken<List<DmConversation>>() {}.type
-                    val cached: List<DmConversation> = dmCacheGson.fromJson(prefs.hubMutualsCacheJson.first(), type) ?: emptyList()
-                    if (cached.isNotEmpty()) _dmConversations.value = cached
+        // Starts on Main so it only runs once the ViewModel has finished
+        // constructing (dmCacheGson is declared further down this file).
+        viewModelScope.launch(Dispatchers.Main) {
+            withContext(Dispatchers.IO) {
+                if (_dmConversations.value.isEmpty()) {
+                    runCatching {
+                        val type = object : com.google.gson.reflect.TypeToken<List<DmConversation>>() {}.type
+                        val cached: List<DmConversation> = dmCacheGson.fromJson(prefs.hubMutualsCacheJson.first(), type) ?: emptyList()
+                        if (cached.isNotEmpty()) _dmConversations.value = cached
+                    }
                 }
             }
         }
@@ -2319,7 +2325,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
-        viewModelScope.launch {
+        // Crash fix: Dispatchers.Main (not the default Main.immediate) so
+        // this startup work always begins *after* the ViewModel has finished
+        // constructing. When the saved login was already in memory, the
+        // reads below returned instantly and the warmups kicked off here
+        // reached fields declared further down this file (the DM mutex)
+        // before they existed, crashing on launch.
+        viewModelScope.launch(Dispatchers.Main) {
             val accessJwt    = prefs.bskyAccessJwt.first()
             val refreshJwt   = prefs.bskyRefreshJwt.first()
             val did          = prefs.bskyDid.first()
@@ -4107,7 +4119,8 @@ _bskyDid.value          = session.did
     // way it already self-heals friendsReviews/liveFriends — so simply
     // opening the Hub is itself a retry, not just something that works if
     // you happen to open Send Post.
-    private val dmConversationsMutex = Mutex()
+    // (dmConversationsMutex is declared near the top of the class, so it
+    // exists before any init block can start work that uses it.)
 
     // Bug fix (see the init-block cache-hydration comment above): a plain
     // Gson().fromJson would throw — and, wrapped in runCatching, silently
