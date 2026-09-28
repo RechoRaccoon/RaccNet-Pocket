@@ -163,8 +163,8 @@ class BlueskyRepository {
         resp.body()?.count ?: error("Unread count ${resp.code()}: ${errorBodyText(resp)}")
     }
 
-    suspend fun listNotifications(token: String, myDid: String, cursor: String? = null): Result<BskyListNotificationsResponse> = runCatching {
-        val resp = viaAppView(token, myDid, "app.bsky.notification.listNotifications") { a, auth -> a.listNotifications(auth, 50, cursor) }
+    suspend fun listNotifications(token: String, myDid: String, cursor: String? = null, limit: Int = 30): Result<BskyListNotificationsResponse> = runCatching {
+        val resp = viaAppView(token, myDid, "app.bsky.notification.listNotifications") { a, auth -> a.listNotifications(auth, limit, cursor) }
         resp.body() ?: error("Notifications ${resp.code()}: ${errorBodyText(resp)}")
     }
 
@@ -175,21 +175,36 @@ class BlueskyRepository {
     }
 
     /** Posts by URI, for the Inbox's "liked your post: …" previews. */
-    suspend fun getPostsByUri(token: String, myDid: String, uris: List<String>): Map<String, BskyPost> {
-        val out = HashMap<String, BskyPost>()
-        uris.distinct().chunked(25).forEach { batch ->
-            runCatching {
-                viaAppView(token, myDid, "app.bsky.feed.getPosts") { a, auth -> a.getPosts(auth, batch) }
-            }.getOrNull()?.body()?.posts?.forEach { out[it.uri] = it }
-        }
-        return out
+    suspend fun getPostsByUri(token: String, myDid: String, uris: List<String>): Map<String, BskyPost> = coroutineScope {
+        // Batches in parallel rather than one after another.
+        uris.distinct().chunked(25).map { batch ->
+            async {
+                runCatching {
+                    viaAppView(token, myDid, "app.bsky.feed.getPosts") { a, auth -> a.getPosts(auth, batch) }
+                }.getOrNull()?.body()?.posts.orEmpty()
+            }
+        }.awaitAll().flatten().associateBy { it.uri }
     }
 
     // ── Starting chats ───────────────────────────────────────────────────────
 
     suspend fun searchActorsTypeahead(token: String, myDid: String, q: String): Result<List<BskyActorBasic>> = runCatching {
         val resp = viaAppView(token, myDid, "app.bsky.actor.searchActorsTypeahead") { a, auth -> a.searchActorsTypeahead(auth, q, 25) }
-        resp.body()?.actors ?: error("Search ${resp.code()}: ${errorBodyText(resp)}")
+        val actors = resp.body()?.actors ?: error("Search ${resp.code()}: ${errorBodyText(resp)}")
+        actors.forEach { com.mediaviewer.util.BlockedAccounts.noteViewer(it.did, it.viewer) }
+        actors.filterNot { com.mediaviewer.util.BlockedAccounts.isHidden(it.did) }
+    }
+
+    /** The New chat popup's "Suggested" list, the way Bluesky's own app
+     *  builds it: the accounts you follow, most recently followed first
+     *  (getFollows' own order), one page at a time. Filtering by who can
+     *  actually be messaged happens in MainViewModel. */
+    suspend fun getFollowsForChat(token: String, myDid: String, cursor: String?): Result<Pair<List<BskyActorBasic>, String?>> = runCatching {
+        val resp = api.getFollowsFull("Bearer $token", myDid, 100, cursor)
+        if (!resp.isSuccessful) error("getFollows ${resp.code()}: ${resp.message()}")
+        val body = resp.body() ?: error("getFollows: empty body")
+        body.follows.forEach { com.mediaviewer.util.BlockedAccounts.noteViewer(it.did, it.viewer) }
+        Pair(body.follows.filter { it.did != myDid && !com.mediaviewer.util.BlockedAccounts.isHidden(it.did) }, body.cursor)
     }
 
     /** Whether a 1:1 chat with [did] can be started (their "who can message
@@ -1535,6 +1550,8 @@ class BlueskyRepository {
         // page down into it locally without any further network calls.
         fun toCommentItem(view: BskyThreadView): CommentItem? {
             val post = view.post ?: return null
+            com.mediaviewer.util.BlockedAccounts.noteViewer(post.author.did, post.author.viewer)
+            if (com.mediaviewer.util.BlockedAccounts.isHidden(post.author.did)) return null
             val childReplies = (view.replies ?: emptyList()).mapNotNull { toCommentItem(it) }
             return CommentItem(
                 id                = post.cid,
@@ -1575,7 +1592,8 @@ class BlueskyRepository {
         : Result<Pair<List<SearchAccountResult>, String?>> = runCatching {
         val resp = api.searchActors("Bearer $token", query, cursor = cursor)
         val body = resp.body() ?: error("Search actors ${resp.code()}")
-        val results = body.actors.mapNotNull { a ->
+        body.actors.forEach { com.mediaviewer.util.BlockedAccounts.noteViewer(it.did, it.viewer) }
+        val results = body.actors.filterNot { com.mediaviewer.util.BlockedAccounts.isHidden(it.did) }.mapNotNull { a ->
             runCatching {
                 SearchAccountResult(
                     author = AuthorInfo(did = a.did, handle = a.handle, displayName = a.displayName ?: a.handle, avatarUrl = a.avatar),
@@ -1951,6 +1969,35 @@ class BlueskyRepository {
 
     /** Every account the current user is currently blocking. Neither DMs nor the
      *  From Friends feed should ever surface a blocked account. */
+    /** Settings → Data and Privacy → Blocked Accounts: every account the
+     *  signed-in user is blocking, most recently blocked first (the order
+     *  app.bsky.graph.getBlocks returns them in), with each block record's
+     *  URI so it can be undone. Also refreshes [BlockedAccounts]. */
+    suspend fun getBlockedAccounts(token: String): Result<List<BlockedAccount>> = runCatching {
+        val out = LinkedHashMap<String, BlockedAccount>()
+        var cursor: String? = null
+        var pages = 0
+        do {
+            val resp = api.getBlocks("Bearer $token", 100, cursor)
+            if (!resp.isSuccessful) error("getBlocks ${resp.code()}: ${resp.message()}")
+            val body = resp.body() ?: break
+            body.blocks.forEach { p ->
+                if (!out.containsKey(p.did)) out[p.did] = BlockedAccount(
+                    author = AuthorInfo(
+                        did = p.did, handle = p.handle,
+                        displayName = p.displayName?.takeIf { it.isNotBlank() } ?: p.handle,
+                        avatarUrl = p.avatar
+                    ),
+                    blockUri = p.viewer?.blocking.orEmpty()
+                )
+            }
+            cursor = body.cursor
+            pages++
+        } while (!cursor.isNullOrBlank() && pages < 100)
+        com.mediaviewer.util.BlockedAccounts.setBlocking(out.values.associate { it.author.did to it.blockUri })
+        out.values.toList()
+    }
+
     suspend fun getBlockedDids(token: String): Result<Set<String>> = runCatching {
         val out = HashSet<String>()
         var cursor: String? = null
@@ -2030,6 +2077,7 @@ class BlueskyRepository {
     /** A 1:1 chat as a [DmConversation]. */
     private fun directConversation(convo: BskyConvoView, myDid: String): DmConversation {
         val other = convo.members.firstOrNull { it.did != myDid }
+        if (other != null) com.mediaviewer.util.BlockedAccounts.noteViewer(other.did, other.viewer)
         val author = AuthorInfo(
             did = other?.did ?: convo.id,
             handle = other?.handle ?: "unknown",
@@ -2300,6 +2348,66 @@ class BlueskyRepository {
         val body = resp.body() ?: error("StarterPacks ${resp.code()}: ${resp.message()}")
         body.starterPacks
     }
+
+    /** Which of your lists / starter packs [actorDid] is already on: list
+     *  URI (a starter pack's underlying list) -> that list item's URI, used to
+     *  remove them again. Pages through both membership endpoints. */
+    suspend fun getListMemberships(token: String, myDid: String, actorDid: String): Result<Map<String, String>> = runCatching {
+        val out = HashMap<String, String>()
+        fun obj(e: com.google.gson.JsonElement?): com.google.gson.JsonObject? = e?.takeIf { it.isJsonObject }?.asJsonObject
+        fun str(o: com.google.gson.JsonObject?, key: String): String? =
+            o?.get(key)?.takeIf { it.isJsonPrimitive }?.asString
+        coroutineScope {
+            val lists = async {
+                runCatching {
+                    var cursor: String? = null
+                    var pages = 0
+                    do {
+                        val resp = viaAppView(token, myDid, "app.bsky.graph.getListsWithMembership") { a, auth ->
+                            a.getListsWithMembership(auth, actorDid, 50, cursor)
+                        }
+                        val body = resp.body() ?: error("getListsWithMembership ${resp.code()}")
+                        body.getAsJsonArray("listsWithMembership")?.forEach { e ->
+                            val o = obj(e)
+                            val listUri = str(obj(o?.get("list")), "uri")
+                            val itemUri = str(obj(o?.get("listItem")), "uri")
+                            if (listUri != null && itemUri != null) synchronized(out) { out[listUri] = itemUri }
+                        }
+                        cursor = str(body, "cursor")
+                        pages++
+                    } while (!cursor.isNullOrBlank() && pages < 10)
+                }
+            }
+            val packs = async {
+                runCatching {
+                    var cursor: String? = null
+                    var pages = 0
+                    do {
+                        val resp = viaAppView(token, myDid, "app.bsky.graph.getStarterPacksWithMembership") { a, auth ->
+                            a.getStarterPacksWithMembership(auth, actorDid, 50, cursor)
+                        }
+                        val body = resp.body() ?: error("getStarterPacksWithMembership ${resp.code()}")
+                        body.getAsJsonArray("starterPacksWithMembership")?.forEach { e ->
+                            val o = obj(e)
+                            val sp = obj(o?.get("starterPack"))
+                            val listUri = str(obj(sp?.get("list")), "uri") ?: str(obj(sp?.get("record")), "list")
+                            val itemUri = str(obj(o?.get("listItem")), "uri")
+                            if (listUri != null && itemUri != null) synchronized(out) { out[listUri] = itemUri }
+                        }
+                        cursor = str(body, "cursor")
+                        pages++
+                    } while (!cursor.isNullOrBlank() && pages < 10)
+                }
+            }
+            val r1 = lists.await(); val r2 = packs.await()
+            if (r1.isFailure && r2.isFailure) throw (r1.exceptionOrNull() ?: Exception("membership lookup failed"))
+        }
+        out
+    }
+
+    /** Takes someone back off a list (or starter pack's list). */
+    suspend fun removeFromList(token: String, repoDid: String, listItemUri: String): Result<Unit> =
+        deleteRecord(token, repoDid, "app.bsky.graph.listitem", listItemUri.rkey())
 
     suspend fun addToList(token: String, repoDid: String, listUri: String, targetDid: String): Result<String> =
         createRecord(token, repoDid, "app.bsky.graph.listitem", mapOf(
@@ -2816,6 +2924,12 @@ class BlueskyRepository {
 
     private fun parseFeedItem(item: BskyFeedItem): List<MediaItem> {
         val post   = item.post
+        // Blocked either way (you block them, or they block you): never shown
+        // anywhere — not as the post's author, and not as whoever reposted it.
+        com.mediaviewer.util.BlockedAccounts.noteViewer(post.author.did, post.author.viewer)
+        item.reason?.by?.let { com.mediaviewer.util.BlockedAccounts.noteViewer(it.did, it.viewer) }
+        if (com.mediaviewer.util.BlockedAccounts.isHidden(post.author.did) ||
+            com.mediaviewer.util.BlockedAccounts.isHidden(item.reason?.by?.did)) return emptyList()
         val author = AuthorInfo(
             did          = post.author.did,
             handle       = post.author.handle,
@@ -3006,7 +3120,8 @@ class BlueskyRepository {
                 embed.type.contains("record") -> {
                     val quoted = embed.record?.record ?: embed.record
                     val quotedAuthorRaw = quoted?.author
-                    if (quoted == null || quotedAuthorRaw == null) {
+                    if (quoted == null || quotedAuthorRaw == null ||
+                        com.mediaviewer.util.BlockedAccounts.isHidden(quotedAuthorRaw.did)) {
                         textOnlyItem()
                     } else {
                         val quotedAuthor = AuthorInfo(

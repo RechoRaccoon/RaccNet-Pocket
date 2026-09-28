@@ -22,21 +22,17 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.mediaviewer.viewmodel.MainViewModel
 
 /**
- * Settings → App Functionality → "Debug Overlay". Sits in the strip beside
- * the camera cutout: frame rate on the far right, and — when "Tag Post When
- * Liked" is on — the like-tagging queue on the far left ("Activating
- * tagger…" while the model loads, then "Tagging N posts" counting down).
- * Drawn in the signed-in user's profile color; never takes touches.
+ * Settings → App Functionality → "FPS Overlay": the frame rate, in the strip
+ * beside the camera cutout, lined up with the right edge of the Hub's own
+ * UI (16dp in). Drawn in whatever color the current page wears (the post's
+ * color on the timeline, your profile color on the Hub, a profile's own
+ * color on its page…); never takes touches.
  */
 @Composable
 fun DebugOverlay(
     tint: Color,
-    taggingEnabled: Boolean,
-    tagPhase: MainViewModel.LikeTagPhase,
-    tagPending: Int,
     modifier: Modifier = Modifier
 ) {
     var fps by remember { mutableIntStateOf(0) }
@@ -64,15 +60,7 @@ fun DebugOverlay(
         color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold,
         shadow = Shadow(Color.Black.copy(alpha = 0.8f), blurRadius = 4f)
     )
-    Box(modifier.fillMaxWidth().height(rememberTopCutoutClearance()).padding(horizontal = 14.dp)) {
-        if (taggingEnabled) {
-            val label = when (tagPhase) {
-                MainViewModel.LikeTagPhase.ACTIVATING -> "Activating tagger…"
-                MainViewModel.LikeTagPhase.TAGGING -> "Tagging $tagPending post" + if (tagPending == 1) "" else "s"
-                MainViewModel.LikeTagPhase.IDLE -> "Tagger idle"
-            }
-            Text(label, style = style, modifier = Modifier.align(Alignment.CenterStart))
-        }
+    Box(modifier.fillMaxWidth().height(rememberTopCutoutClearance()).padding(horizontal = 16.dp)) {
         Row(Modifier.align(Alignment.CenterEnd)) {
             Text("$fps FPS", style = style)
         }

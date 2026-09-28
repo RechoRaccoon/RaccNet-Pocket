@@ -7,18 +7,26 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import com.mediaviewer.model.MediaItem
 import com.mediaviewer.ui.theme.*
@@ -26,10 +34,12 @@ import com.mediaviewer.util.rememberHapticTap
 
 private const val BSKY_POST_LIMIT = 300
 
-// Item 7 (Phase 3): brought in line with the Send / Add To overlays — rendered
-// in-place (never a separate Dialog window) so its glass sheet can share the
-// current post's live backdrop layer, and in Glass mode shows no outer scrim
-// of its own so the post stays visible around it.
+/**
+ * Quote Repost — same treatment as Share To: rendered in-place so its glass
+ * live-blurs the post (whose own UI fades away meanwhile), fades/scales in
+ * and out via [FadingPopupHost], sits at the bottom of the screen and rides
+ * up on top of the keyboard while typing.
+ */
 @Composable
 fun QuoteRepostDialog(
     target: MediaItem?,
@@ -43,121 +53,114 @@ fun QuoteRepostDialog(
     if (target == null) return
     var text by remember(target.id) { mutableStateOf("") }
     val tap = rememberHapticTap()
+    val tint = dominantColor
     val overLimit = text.length > BSKY_POST_LIMIT
+    val focus = remember { FocusRequester() }
 
     BackHandler(onBack = onDismiss)
 
     Box(
-        modifier = Modifier.fillMaxSize().zIndex(10f)
-            .then(
-                if (liquidGlass) Modifier else Modifier.background(Color.Black.copy(alpha = 0.65f))
-            )
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss),
-        contentAlignment = Alignment.Center
+        modifier = Modifier.fillMaxSize()
+            .background(Color.Black.copy(alpha = if (liquidGlass) 0.22f else 0.6f))
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss)
+            .imePadding()
+            .padding(top = rememberTopCutoutClearance() + 8.dp)
+            .navigationBarsPadding()
+            .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+        contentAlignment = Alignment.BottomCenter
     ) {
-        val sheetModifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp)
-            .heightIn(min = 200.dp, max = 560.dp)
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { }
-
-        @Composable
-        fun SheetContent() {
-            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp)) {
-                Text("Quote Repost", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.fillMaxWidth(), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-                Spacer(Modifier.height(14.dp))
-
-                // Growing input — identical behavior to the comment box: no minLines,
-                // capped at 3 rows, OutlinedTextField grows on its own as the user types.
-                OutlinedTextField(
-                    value = text, onValueChange = { text = it },
-                    placeholder = { Text("Add a comment (optional)…", color = DimGray, fontSize = 13.sp) },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White, unfocusedTextColor = Color.White,
-                        focusedBorderColor = Color.White.copy(0.3f), unfocusedBorderColor = Color.White.copy(0.12f),
-                        cursorColor = Color.White, focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent
-                    ),
-                    textStyle = LocalTextStyle.current.copy(fontSize = 14.sp), maxLines = 3,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Text(
-                    "${text.length}/$BSKY_POST_LIMIT",
-                    color = if (overLimit) Color(0xFFE0245E) else DimGray,
-                    fontSize = 11.sp, modifier = Modifier.align(Alignment.End).padding(top = 4.dp)
+        PopupSheetSurface(
+            liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                PopupSheetHeader(
+                    title = "Quote Repost",
+                    liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                    onClose = onDismiss
                 )
 
-                Spacer(Modifier.height(14.dp))
-
-                // Preview of the post being quote-reposted — its own small glass
-                // chip in Glass mode, reflecting the same post it's a preview of.
-                @Composable
-                fun PreviewRowContent() {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                // The post being quoted.
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color.White.copy(alpha = 0.06f))
+                        .padding(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val thumb = target.thumbUrl.ifBlank { target.mediaUrl }
+                    if (thumb.isNotBlank()) {
                         AsyncImage(
-                            model = target.thumbUrl.ifBlank { target.mediaUrl }, contentDescription = null,
+                            model = thumb, contentDescription = null,
                             contentScale = ContentScale.Crop,
-                            modifier = Modifier.size(56.dp).clip(RoundedCornerShape(8.dp))
+                            modifier = Modifier.size(52.dp).clip(RoundedCornerShape(10.dp))
                         )
                         Spacer(Modifier.width(10.dp))
-                        Column {
-                            Text(target.author.displayName, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                            Text("@${target.author.handle}", color = DimGray, fontSize = 12.sp)
+                    }
+                    Column(Modifier.weight(1f)) {
+                        Text(target.author.displayName, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("@${target.author.handle}", color = DimGray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (target.text.isNotBlank()) {
+                            Text(target.text, color = Color.White.copy(alpha = 0.75f), fontSize = 12.sp, lineHeight = 15.sp,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
                         }
                     }
                 }
-                if (liquidGlass) {
-                    LiquidGlassSurface(
-                        modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp),
-                        tint = dominantColor, backdrop = backdrop
-                    ) { PreviewRowContent() }
-                } else {
-                    Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color.White.copy(0.05f))) { PreviewRowContent() }
+
+                // Your comment — the same dark, colored-rim well as the Share To box.
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .heightIn(min = 90.dp)
+                        .popupFieldWell(tint, RoundedCornerShape(18.dp))
+                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
+                            runCatching { focus.requestFocus() }
+                        }
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                ) {
+                    BasicTextField(
+                        value = text, onValueChange = { text = it },
+                        textStyle = TextStyle(color = Color.White, fontSize = 15.sp, lineHeight = 20.sp),
+                        cursorBrush = SolidColor(Color.White),
+                        maxLines = 6,
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                        modifier = Modifier.fillMaxWidth().focusRequester(focus)
+                    )
+                    if (text.isEmpty()) Text("Add a comment (optional)…", color = DimGray, fontSize = 15.sp)
                 }
 
-                Spacer(Modifier.height(16.dp))
-
-                if (liquidGlass) {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "${text.length}/$BSKY_POST_LIMIT",
+                        color = if (overLimit) Color(0xFFE0245E) else DimGray,
+                        fontSize = 12.sp, modifier = Modifier.weight(1f).padding(start = 4.dp)
+                    )
                     val enabled = !overLimit && !submitting
-                    LiquidGlassSurface(
-                        modifier = Modifier.fillMaxWidth().height(46.dp),
-                        shape = RoundedCornerShape(23.dp),
-                        tint = if (enabled) RepostGreen else NeutralGlassTint,
-                        backdrop = backdrop
-                    ) {
-                        Box(
-                            Modifier.matchParentSize()
-                                .clickable(enabled = enabled) { tap(); onSubmit(text.trim()) },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (submitting) CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
-                            else Text("Post", color = Color.White, fontWeight = FontWeight.SemiBold)
-                        }
-                    }
-                } else {
-                    Button(
-                        onClick = { tap(); if (!overLimit && !submitting) onSubmit(text.trim()) },
-                        enabled = !overLimit && !submitting,
-                        colors = ButtonDefaults.buttonColors(containerColor = RepostGreen, disabledContainerColor = Color.White.copy(0.1f)),
-                        modifier = Modifier.fillMaxWidth().height(46.dp)
+                    Box(
+                        Modifier
+                            .height(42.dp)
+                            .widthIn(min = 110.dp)
+                            .clip(RoundedCornerShape(21.dp))
+                            .background(
+                                if (enabled) lerp(RepostGreen, tint, 0.25f)
+                                else Color.White.copy(alpha = 0.08f)
+                            )
+                            .clickable(enabled = enabled) { tap(); onSubmit(text.trim()) }
+                            .padding(horizontal = 22.dp),
+                        contentAlignment = Alignment.Center
                     ) {
                         if (submitting) CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
-                        else Text("Post", color = Color.White, fontWeight = FontWeight.SemiBold)
+                        else Text("Post", color = if (enabled) Color.White else DimGray, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
-        }
-
-        if (liquidGlass) {
-            LiquidGlassSurface(
-                modifier = sheetModifier, shape = RoundedCornerShape(20.dp),
-                tint = dominantColor, backdrop = backdrop
-            ) { SheetContent() }
-        } else {
-            Box(sheetModifier.clip(RoundedCornerShape(20.dp)).background(OffBlack)) { SheetContent() }
         }
     }
 }

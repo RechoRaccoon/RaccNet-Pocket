@@ -37,6 +37,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
@@ -65,6 +66,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.layout.positionInRoot
@@ -553,7 +555,13 @@ fun SettingsSheet(
             Box(Modifier.fillMaxWidth().height(0.dp).zIndex(2f), contentAlignment = Alignment.BottomCenter) {
                 HubRemoveDropTarget(feedDrag, liquidGlass)
             }
-            Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp).padding(top = 6.dp)) {
+            // The bar sits right at the bottom now (the old credit line under
+            // it is gone), just clear of the system navigation bar.
+            Box(
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp).padding(top = 6.dp)
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .padding(bottom = 10.dp)
+            ) {
                 ReturnToFeedBar(
                     liquidGlass = liquidGlass, tint = dominantColor, backdrop = null,
                     uploadBackdrop = hubBackgroundBackdrop,
@@ -572,15 +580,6 @@ fun SettingsSheet(
                     onSettingsTabChange = { settingsTab = it }
                 )
             }
-
-            Text(
-                buildAnnotatedString {
-                    append("Created by ")
-                    withStyle(SpanStyle(color = Color(0xFF00FF07))) { append("Recho Raccoon") }
-                },
-                color = DimGray, fontSize = 11.sp, textAlign = TextAlign.Center,
-                modifier = Modifier.padding(bottom = 20.dp, top = 2.dp)
-            )
         }
 
         // The held feed chip, popped up and following the finger.
@@ -1508,7 +1507,7 @@ fun LiveNowPlayerOverlay(stream: com.mediaviewer.viewmodel.MainViewModel.Playing
                     Modifier.size(32.dp).clip(CircleShape).background(Color.White.copy(0.12f)).clickable { onClose() },
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(18.dp))
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(18.dp))
                 }
             }
             // 16:9 embed player — most live platform embeds (Twitch, YouTube)
@@ -1869,6 +1868,23 @@ private fun ReturnToFeedBar(
         // The old single Return to Feed pill, split in two: Timeline (the
         // normal one-post-at-a-time feed) on the left, Explore (the grid)
         // on the right. Both open whichever feed is picked in the row above.
+        // Audio visualizer resting on top of the Timeline/Explore pills, in
+        // your own color: laid out at zero height and drawn upward, so it
+        // never moves the bar or anything above it.
+        if (com.mediaviewer.util.UiToggles.audioVisualizer) {
+            AudioVisualizerBars(
+                color = tint,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .fillMaxWidth()
+                    .padding(start = moreReserve + 6.dp, end = uploadReserve + 6.dp)
+                    .layout { measurable, constraints ->
+                        val h = 26.dp.roundToPx()
+                        val placeable = measurable.measure(constraints.copy(minHeight = h, maxHeight = h))
+                        layout(placeable.width, 0) { placeable.place(0, -placeable.height - 2.dp.roundToPx()) }
+                    }
+            )
+        }
         Row(
             Modifier.fillMaxWidth().padding(start = moreReserve, end = uploadReserve).height(barHeight),
             horizontalArrangement = Arrangement.spacedBy(8.dp)

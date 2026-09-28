@@ -14,6 +14,8 @@ import androidx.compose.runtime.setValue
 object UiToggles {
     private const val PREFS = "ui_toggles"
     private const val KEY_DEBUG_OVERLAY = "debug_overlay"
+    private const val KEY_SHOW_TAGGING_STATUS = "show_tagging_status"
+    private const val KEY_SHOW_TRANSLATION_STATUS = "show_translation_status"
     private const val KEY_LOADING_ANIMATION = "loading_animation"
     private const val KEY_AUDIO_VISUALIZER = "audio_visualizer"
     private const val KEY_VISUALIZER_DURING_CALLS = "audio_visualizer_during_calls" // old on/off switch
@@ -28,7 +30,7 @@ object UiToggles {
         /** The old page fades into a drifting starfield with the Stellar
          *  logo, which then fades away to reveal the loaded page. First in
          *  the list (and the default). */
-        SPACE("Space"),
+        SPACE("Stellar"),
         /** The retro pixel-matrix wipe. */
         PIXELS("Pixels"),
         /** The screen shatters like glass from where you tapped. */
@@ -39,9 +41,19 @@ object UiToggles {
 
     private var prefs: SharedPreferences? = null
 
-    /** Settings → App Functionality → "Debug Overlay": FPS counter (top
-     *  right) and AI-tagging queue readout (top left). */
+    /** Settings → App Functionality → "FPS Overlay": the frame-rate readout
+     *  beside the camera cutout. (Stored under its old "debug overlay" key.) */
     var debugOverlay by mutableStateOf(false)
+        private set
+
+    /** Settings → Media Tagging → "Show Tagging Status" (under Tag Media When
+     *  Liked): the like-tagging queue as a status bubble on the timeline. */
+    var showTaggingStatus by mutableStateOf(true)
+        private set
+
+    /** Settings → App Functionality → "Show Translation Status" (under
+     *  Translate To): the "Translated X to Y" bubble on the timeline. */
+    var showTranslationStatus by mutableStateOf(true)
         private set
 
     /** Which loading transition plays (default: Space). */
@@ -89,6 +101,8 @@ object UiToggles {
         val p = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         prefs = p
         debugOverlay = p.getBoolean(KEY_DEBUG_OVERLAY, false)
+        showTaggingStatus = p.getBoolean(KEY_SHOW_TAGGING_STATUS, true)
+        showTranslationStatus = p.getBoolean(KEY_SHOW_TRANSLATION_STATUS, true)
         loadingAnimation = p.getString(KEY_LOADING_ANIMATION, null)
             ?.let { name -> LoadingAnimation.entries.firstOrNull { it.name == name } }
             ?: LoadingAnimation.SPACE
@@ -134,6 +148,16 @@ object UiToggles {
 
     fun markVisualizerPermissionAsked() {
         prefs?.edit()?.putBoolean(KEY_VISUALIZER_PERMISSION_ASKED, true)?.apply()
+    }
+
+    fun updateShowTaggingStatus(enabled: Boolean) {
+        showTaggingStatus = enabled
+        prefs?.edit()?.putBoolean(KEY_SHOW_TAGGING_STATUS, enabled)?.apply()
+    }
+
+    fun updateShowTranslationStatus(enabled: Boolean) {
+        showTranslationStatus = enabled
+        prefs?.edit()?.putBoolean(KEY_SHOW_TRANSLATION_STATUS, enabled)?.apply()
     }
 
     fun updateDebugOverlay(enabled: Boolean) {

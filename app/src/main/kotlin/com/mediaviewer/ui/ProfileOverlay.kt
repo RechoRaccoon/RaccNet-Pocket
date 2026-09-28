@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -1276,6 +1277,8 @@ private fun ProfileHeaderSection(
                 bannerColor = bannerColor,
                 avatarColor = avatarColor,
                 isOwnProfile = isOwnProfile,
+                // Both follow each other: the button reads "Mutuals".
+                isMutual = profile?.followedByMe == true,
                 backdrop = bannerBackdrop,
                 onToggleFollow = onToggleFollow,
                 onClose = onClose,
@@ -1399,6 +1402,7 @@ private fun ProfileBannerOverlayLayout(
     bannerColor: Color,
     avatarColor: Color,
     isOwnProfile: Boolean,
+    isMutual: Boolean = false,
     // Big Update #4 (extended to profiles): live backdrop of the banner photo
     // itself, re-recorded every frame by ProfileHeaderSection — see the
     // comment there. Every glass piece in this layout sits directly over
@@ -1436,7 +1440,7 @@ private fun ProfileBannerOverlayLayout(
                 // bubble the size of the X on the left (and level with it).
                 EditGlassBubble(liquidGlass = liquidGlass, tint = bannerColor, onClick = onEditProfile, backdrop = backdrop)
             } else {
-                FollowButton(isFollowing = author.isFollowing, liquidGlass = liquidGlass, tint = bannerColor, onClick = onToggleFollow, backdrop = backdrop)
+                FollowButton(isFollowing = author.isFollowing, liquidGlass = liquidGlass, tint = bannerColor, onClick = onToggleFollow, backdrop = backdrop, isMutual = isMutual)
             }
         }.first().measure(loose)
 
@@ -1522,7 +1526,7 @@ private fun CloseGlassBubble(liquidGlass: Boolean, tint: Color, onClick: () -> U
             shape = shape, tint = tint, backdrop = backdrop
         ) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Icon(Icons.Default.Close, contentDescription = "Close profile", tint = Color.White, modifier = Modifier.size(16.dp))
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(16.dp))
             }
         }
     } else {
@@ -1530,7 +1534,7 @@ private fun CloseGlassBubble(liquidGlass: Boolean, tint: Color, onClick: () -> U
             Modifier.size(30.dp).clip(shape).background(Color.White.copy(0.14f)).clickable(onClick = { tap(); onClick() }),
             contentAlignment = Alignment.Center
         ) {
-            Icon(Icons.Default.Close, contentDescription = "Close profile", tint = Color.White, modifier = Modifier.size(16.dp))
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(16.dp))
         }
     }
 }
@@ -3296,7 +3300,7 @@ private fun BlogDetailOverlay(
             ) {
                 // Close (replaces the old top-left X).
                 BarIcon(onClick = onClose) {
-                    Icon(Icons.Default.Close, contentDescription = "Close blog", tint = Color.White, modifier = Modifier.size(21.dp))
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(21.dp))
                 }
                 if (isOwn) BarIcon(onClick = { onEdit(blog) }) {
                     Icon(Icons.Default.Edit, contentDescription = "Edit blog", tint = Color.White, modifier = Modifier.size(20.dp))

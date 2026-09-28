@@ -103,7 +103,9 @@ fun NewChatDialog(
     onSetGroupMode: (Boolean) -> Unit,
     onStartChat: (AuthorInfo) -> Unit,
     onCreateGroup: (String, List<AuthorInfo>) -> Unit,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    /** Scrolled near the end of the Suggested list: fetch more follows. */
+    onLoadMoreSuggestions: () -> Unit = {}
 ) {
     val tap = rememberHapticTap()
     // Opened straight into group mode (e.g. "New group with …" on a
@@ -230,7 +232,17 @@ fun NewChatDialog(
                                     candidates.isEmpty() -> Box(Modifier.fillMaxWidth().padding(28.dp), contentAlignment = Alignment.Center) {
                                         Text(if (query.isBlank()) "Search for anyone on Bluesky" else "No one found", color = DimGray, fontSize = 13.sp)
                                     }
-                                    else -> LazyColumn(contentPadding = PaddingValues(bottom = 10.dp)) {
+                                    else -> {
+                                        val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+                                        val nearEnd by androidx.compose.runtime.remember {
+                                            androidx.compose.runtime.derivedStateOf {
+                                                val info = listState.layoutInfo
+                                                val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+                                                info.totalItemsCount > 0 && last >= info.totalItemsCount - 6
+                                            }
+                                        }
+                                        LaunchedEffect(nearEnd, query) { if (nearEnd && query.isBlank()) onLoadMoreSuggestions() }
+                                        LazyColumn(state = listState, contentPadding = PaddingValues(bottom = 10.dp)) {
                                         items(candidates, key = { it.author.did }) { c ->
                                             val isSelected = selected.any { it.did == c.author.did }
                                             CandidateRow(
@@ -242,6 +254,7 @@ fun NewChatDialog(
                                                     else if (selected.size < 99) selected.add(c.author)
                                                 }
                                             )
+                                        }
                                         }
                                     }
                                 }

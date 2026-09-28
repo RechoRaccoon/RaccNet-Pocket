@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.Close
@@ -123,7 +124,7 @@ fun InboxOverlay(
                         .then(if (liquidGlass) Modifier.glassPanel(true, shape = CircleShape, tint = profileTint) else Modifier.clip(CircleShape).background(Color.White.copy(0.14f)))
                         .clickable { tap(); onClose() },
                     contentAlignment = Alignment.Center
-                ) { Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(17.dp)) }
+                ) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(17.dp)) }
                 Row(Modifier.weight(1f), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.Email, contentDescription = null, tint = lerp(profileTint, Color.White, 0.55f), modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
@@ -142,7 +143,7 @@ fun InboxOverlay(
                 }
                 else -> {
                     val listState = rememberLazyListState()
-                    LaunchedEffect(listState, items.size) {
+                    LaunchedEffect(listState, items.size, loading) {
                         snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
                             .collect { last -> if (last >= items.size - 5) onLoadMore() }
                     }

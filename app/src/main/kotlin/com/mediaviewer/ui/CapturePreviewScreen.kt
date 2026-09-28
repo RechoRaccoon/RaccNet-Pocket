@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.Download
@@ -326,7 +327,7 @@ fun CapturePreviewScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             CaptureGlassBubble(liquidGlass, tint, backdrop, onClick = { tap(); onClose() }) {
-                Icon(Icons.Default.Close, contentDescription = "Back to VRM mode", tint = Color.White, modifier = Modifier.size(20.dp))
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to VRM mode", tint = Color.White, modifier = Modifier.size(20.dp))
             }
             Spacer(Modifier.weight(1f))
             Box {

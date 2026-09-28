@@ -266,6 +266,16 @@ interface BlueskyApi {
         @Query("cursor") cursor: String? = null
     ): Response<BskyGetFollowsResponse>
 
+    /** Same endpoint as [getFollows], parsed with chat settings/viewer state
+     *  (the New chat popup's suggestions — see BlueskyRepository.getFollowsForChat). */
+    @GET("xrpc/app.bsky.graph.getFollows")
+    suspend fun getFollowsFull(
+        @Header("Authorization") token: String,
+        @Query("actor") actor: String,
+        @Query("limit") limit: Int = 100,
+        @Query("cursor") cursor: String? = null
+    ): Response<BskyGetFollowsFullResponse>
+
     @GET("xrpc/app.bsky.graph.getFollowers")
     suspend fun getFollowers(
         @Header("Authorization") token: String,
@@ -323,6 +333,25 @@ interface BlueskyApi {
     suspend fun getNotificationUnreadCount(
         @Header("Authorization") token: String
     ): Response<BskyUnreadCountResponse>
+
+    /** Your lists, each with the list item for [actor] if they're on it
+     *  (Add To's + / − buttons). */
+    @GET("xrpc/app.bsky.graph.getListsWithMembership")
+    suspend fun getListsWithMembership(
+        @Header("Authorization") token: String,
+        @Query("actor") actor: String,
+        @Query("limit") limit: Int = 50,
+        @Query("cursor") cursor: String? = null
+    ): Response<com.google.gson.JsonObject>
+
+    /** Your starter packs, each with the list item for [actor] if they're in it. */
+    @GET("xrpc/app.bsky.graph.getStarterPacksWithMembership")
+    suspend fun getStarterPacksWithMembership(
+        @Header("Authorization") token: String,
+        @Query("actor") actor: String,
+        @Query("limit") limit: Int = 50,
+        @Query("cursor") cursor: String? = null
+    ): Response<com.google.gson.JsonObject>
 
     @GET("xrpc/app.bsky.notification.listNotifications")
     suspend fun listNotifications(

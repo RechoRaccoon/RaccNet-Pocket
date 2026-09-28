@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.Check
@@ -925,7 +926,7 @@ fun ComposePostScreen(
                 // Top row: X close — status bubble — Post button
                 Box(Modifier.fillMaxWidth().height(40.dp)) {
                     GlassCircleButton(
-                        icon = Icons.Default.Close, contentDescription = "Close",
+                        icon = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back",
                         liquidGlass = liquidGlass, tint = dominantColor,
                         modifier = Modifier.align(Alignment.CenterStart), onClick = onClose
                     )

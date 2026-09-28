@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Person
@@ -625,12 +626,12 @@ private fun SearchCloseBubble(liquidGlass: Boolean, tint: Color = NeutralGlassTi
     if (liquidGlass) {
         LiquidGlassSurface(modifier = Modifier.size(30.dp).clickable(onClick = { tap(); onClick() }), shape = shape, tint = tint, backdrop = backdrop) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Icon(Icons.Default.Close, contentDescription = "Close search", tint = Color.White, modifier = Modifier.size(16.dp))
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(16.dp))
             }
         }
     } else {
         Box(Modifier.size(30.dp).clip(shape).background(Color.White.copy(0.14f)).clickable(onClick = { tap(); onClick() }), contentAlignment = Alignment.Center) {
-            Icon(Icons.Default.Close, contentDescription = "Close search", tint = Color.White, modifier = Modifier.size(16.dp))
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(16.dp))
         }
     }
 }

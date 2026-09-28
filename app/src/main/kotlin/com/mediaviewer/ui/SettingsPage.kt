@@ -68,7 +68,11 @@ data class SettingsExtras(
     val onSwitchBskyAccount: (String) -> Unit = {},
     val onRemoveBskyAccount: (String) -> Unit = {},
     val onDownloadTaggerModel: () -> Unit = {},
-    val onDownloadAllE621Saved: () -> Unit = {}
+    val onDownloadAllE621Saved: () -> Unit = {},
+    /** Data and Privacy → Blocked Accounts → View. */
+    val onOpenBlockedAccounts: () -> Unit = {},
+    /** Media Tagging → Export Dataset progress (see MainViewModel.DatasetExportState). */
+    val datasetExportState: com.mediaviewer.viewmodel.MainViewModel.DatasetExportState = com.mediaviewer.viewmodel.MainViewModel.DatasetExportState.Idle
 )
 
 // ── Shared building blocks ──────────────────────────────────────────────────
@@ -272,6 +276,35 @@ private fun CompactField(
             }
         }
     )
+}
+
+/** A running/finished export's status, shown as its own line under the
+ *  row that started it: an animated bar while the file is being written,
+ *  then a check (or the error) once it's done. */
+@Composable
+private fun ExportStatusLine(working: Boolean, message: String, success: Boolean, tint: Color) {
+    val barColor = headerColorFor(tint)
+    Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp).padding(bottom = 10.dp, top = 2.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (working) {
+                CircularProgressIndicator(Modifier.size(12.dp), color = barColor, strokeWidth = 1.5.dp)
+            } else {
+                Text(if (success) "✓" else "!", color = if (success) VoteGreen else DangerRed, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                message, color = if (working) Color.White.copy(alpha = 0.85f) else if (success) VoteGreen else DangerRed,
+                fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis
+            )
+        }
+        if (working) {
+            Spacer(Modifier.height(6.dp))
+            LinearProgressIndicator(
+                modifier = Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)),
+                color = barColor, trackColor = Color.White.copy(alpha = 0.12f)
+            )
+        }
+    }
 }
 
 // ── The Settings page ───────────────────────────────────────────────────────
@@ -573,10 +606,9 @@ internal fun SettingsPageContent(
 
         ToggleBubble("Hide Text Only Posts", hideTextOnlyPosts, onToggleHideTextOnlyPosts, liquidGlass, tint, backdrop)
         ToggleBubble("I Hate Fun (Blur NSFW Content)", hateFunBlurNsfw, onToggleHateFunBlurNsfw, liquidGlass, tint, backdrop)
-        // Frame rate (top right) + AI tag-on-like queue (top left) beside the
-        // camera cutout — see DebugOverlay.
+        // Frame rate beside the camera cutout — see DebugOverlay.
         ToggleBubble(
-            "Debug Overlay", com.mediaviewer.util.UiToggles.debugOverlay,
+            "FPS Overlay", com.mediaviewer.util.UiToggles.debugOverlay,
             { com.mediaviewer.util.UiToggles.updateDebugOverlay(it) }, liquidGlass, tint, backdrop
         )
 
@@ -621,6 +653,13 @@ internal fun SettingsPageContent(
                                 )
                             }
                         }
+                    }
+                }
+                BubbleDivider()
+                BubbleRow {
+                    RowLabel("Show Translation Status", Modifier.weight(1f))
+                    CompactSwitch(com.mediaviewer.util.UiToggles.showTranslationStatus) {
+                        com.mediaviewer.util.UiToggles.updateShowTranslationStatus(it)
                     }
                 }
             }
@@ -765,6 +804,15 @@ internal fun SettingsPageContent(
                         RowLabel("Tag Media When Liked", Modifier.weight(1f))
                         CompactSwitch(tagPostWhenLiked, onToggleTagPostWhenLiked)
                     }
+                    if (tagPostWhenLiked) {
+                        BubbleDivider()
+                        BubbleRow {
+                            RowLabel("Show Tagging Status", Modifier.weight(1f), sub = "A bubble on the timeline while liked posts are being tagged.")
+                            CompactSwitch(com.mediaviewer.util.UiToggles.showTaggingStatus) {
+                                com.mediaviewer.util.UiToggles.updateShowTaggingStatus(it)
+                            }
+                        }
+                    }
                     BubbleDivider()
                     BubbleRow {
                         RowLabel(
@@ -787,9 +835,26 @@ internal fun SettingsPageContent(
             // imported dataset can exist without it).
             if (hasTaggedData) {
                 BubbleDivider()
+                val exportState = extras.datasetExportState
+                val exportWorking = exportState is MainViewModel.DatasetExportState.Working
                 BubbleRow {
                     RowLabel("Export Dataset", Modifier.weight(1f))
-                    PillButton("Export", { pendingExportName = ""; showExportNameDialog = true })
+                    PillButton(
+                        if (exportWorking) "Exporting…" else "Export",
+                        { pendingExportName = ""; showExportNameDialog = true },
+                        enabled = !exportWorking
+                    )
+                }
+                AnimatedVisibility(visible = exportState !is MainViewModel.DatasetExportState.Idle) {
+                    when (exportState) {
+                        is MainViewModel.DatasetExportState.Working ->
+                            ExportStatusLine(true, exportState.stage, success = false, tint = tint)
+                        is MainViewModel.DatasetExportState.Done ->
+                            ExportStatusLine(false, "Exported ${exportState.postCount} post${if (exportState.postCount == 1) "" else "s"} — saved to the file you picked.", success = true, tint = tint)
+                        is MainViewModel.DatasetExportState.Failed ->
+                            ExportStatusLine(false, "Export failed: ${exportState.message}", success = false, tint = tint)
+                        MainViewModel.DatasetExportState.Idle -> Spacer(Modifier.height(0.dp))
+                    }
                 }
                 BubbleDivider()
                 BubbleRow {
@@ -806,8 +871,17 @@ internal fun SettingsPageContent(
             }
         }
 
-        // ── Data ────────────────────────────────────────────────────────
-        SectionHeader("Data", tint)
+        // ── Data and Privacy ────────────────────────────────────────────
+        SectionHeader("Data and Privacy", tint)
+        if (bskyLoggedIn) {
+            ActionBubble(
+                label = "Blocked Accounts",
+                sub = "Hidden everywhere in Stellar, along with anyone who's blocked you.",
+                buttonLabel = "View",
+                onClick = extras.onOpenBlockedAccounts,
+                liquidGlass = liquidGlass, tint = tint, backdrop = backdrop
+            )
+        }
         if (anyLoggedIn) {
 
             if (bskyLoggedIn) {
@@ -855,6 +929,13 @@ internal fun SettingsPageContent(
         val backupContext = androidx.compose.ui.platform.LocalContext.current
         val backupScope = rememberCoroutineScope()
         var backupBusy by remember { mutableStateOf(false) }
+        // What the Export/Import rows show underneath while (and just after)
+        // a backup file is written or read: null = nothing.
+        var backupStatus by remember { mutableStateOf<Triple<Boolean, String, Boolean>?>(null) } // (working, message, success)
+        LaunchedEffect(backupStatus) {
+            val st = backupStatus
+            if (st != null && !st.first) { kotlinx.coroutines.delay(6000); if (backupStatus == st) backupStatus = null }
+        }
         var confirmingImport by remember { mutableStateOf(false) }
         LaunchedEffect(confirmingImport) {
             if (confirmingImport) { kotlinx.coroutines.delay(4000); confirmingImport = false }
@@ -862,10 +943,12 @@ internal fun SettingsPageContent(
         val backupExportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
             if (uri != null) {
                 backupBusy = true
+                backupStatus = Triple(true, "Exporting app data…", false)
                 backupScope.launch {
-                    val msg = runCatching { com.mediaviewer.util.AppBackup.export(backupContext, uri) }
-                        .getOrElse { "Export failed: ${it.message}" }
+                    val result = runCatching { com.mediaviewer.util.AppBackup.export(backupContext, uri) }
                     backupBusy = false
+                    val msg = result.getOrElse { "Export failed: ${it.message}" }
+                    backupStatus = Triple(false, if (result.isSuccess) "Export complete — $msg" else msg, result.isSuccess)
                     android.widget.Toast.makeText(backupContext, msg, android.widget.Toast.LENGTH_LONG).show()
                 }
             }
@@ -873,9 +956,11 @@ internal fun SettingsPageContent(
         val backupImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) {
                 backupBusy = true
+                backupStatus = Triple(true, "Importing app data…", false)
                 backupScope.launch {
                     val result = runCatching { com.mediaviewer.util.AppBackup.import(backupContext, uri) }
                     backupBusy = false
+                    backupStatus = Triple(false, result.fold({ "Imported — restarting…" }, { "Import failed: ${it.message}" }), result.isSuccess)
                     result.onSuccess { msg ->
                         android.widget.Toast.makeText(backupContext, "$msg — restarting…", android.widget.Toast.LENGTH_LONG).show()
                         kotlinx.coroutines.delay(900)
@@ -889,10 +974,15 @@ internal fun SettingsPageContent(
         SettingsBubble(liquidGlass, tint, backdrop) {
             BubbleRow {
                 RowLabel("Export App Data", Modifier.weight(1f), sub = "Settings, VRM & Live settings, tagged posts and subscriptions, in one file.")
-                PillButton(if (backupBusy) "…" else "Export", {
+                PillButton(if (backupBusy) "Working…" else "Export", {
                     val date = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
                     backupExportLauncher.launch("Stellar-backup-$date.json")
                 }, enabled = !backupBusy)
+            }
+            AnimatedVisibility(visible = backupStatus != null) {
+                val st = backupStatus
+                if (st != null) ExportStatusLine(st.first, st.second, st.third, tint)
+                else Spacer(Modifier.height(0.dp))
             }
             BubbleDivider()
             BubbleRow {

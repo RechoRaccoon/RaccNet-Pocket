@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Send
@@ -174,7 +175,7 @@ fun DmInboxOverlay(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        if (thread != null) Icons.Default.ArrowBack else Icons.Default.Close,
+                        Icons.AutoMirrored.Filled.ArrowBack,
                         contentDescription = if (thread != null) "Back" else "Close",
                         tint = Color.White, modifier = Modifier.size(17.dp)
                     )

@@ -3,7 +3,9 @@ package com.mediaviewer.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -14,7 +16,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.FormatListBulleted
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -43,11 +47,13 @@ private data class CombinedEntry(
     val avatarUrl: String?
 )
 
-// Big Update #10: like the Share page, this is rendered in-place (never a
-// separate `Dialog`/Android window) so its glass sheet can share the current
-// post's live backdrop layer and, in Glass mode, show no outer background of
-// its own — the post stays genuinely visible around it instead of being
-// dimmed toward it.
+/**
+ * Add To — the account's lists and starter packs, each with a + (add them)
+ * or − (take them back off) button on the far right. Tapping one never
+ * closes the popup; the round X in the corner (or Back, or tapping outside)
+ * does. Same presentation as Share To / Quote Repost: in-place glass that
+ * live-blurs the post, faded/scaled in and out via [FadingPopupHost].
+ */
 @Composable
 fun ListPickerDialog(
     lists: List<BskyList>,
@@ -58,14 +64,21 @@ fun ListPickerDialog(
     liquidGlass: Boolean,
     dominantColor: Color = NeutralGlassTint,
     backdrop: GlassBackdrop? = null,
+    /** List URI -> list item URI for every list the account is already on. */
+    memberships: Map<String, String> = emptyMap(),
+    membershipsLoading: Boolean = false,
+    /** List URIs with an add/remove in flight. */
+    busy: Set<String> = emptySet(),
     onTabChange: (String) -> Unit,
-    onSelectList: (listUri: String, additionalUri: String?) -> Unit,
+    /** + / −: add to (or remove from) the list, and its merged starter pack. */
+    onToggle: (listUri: String, additionalUri: String?) -> Unit,
     onDismiss: () -> Unit
 ) {
     var activeTab by remember(initialTab) {
         mutableStateOf(if (initialTab == "STARTER_PACKS") PickerTab.STARTER_PACKS else PickerTab.LISTS)
     }
     var swipeDx by remember { mutableFloatStateOf(0f) }
+    val tint = dominantColor
 
     fun switchTab(tab: PickerTab) {
         activeTab = tab
@@ -89,102 +102,87 @@ fun ListPickerDialog(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .zIndex(10f)
-            .then(
-                // Non-glass mode keeps a real dimming scrim since there's no
-                // glass surface underneath to separate the popup from the post.
-                if (liquidGlass) Modifier else Modifier.background(Color.Black.copy(alpha = 0.65f))
-            )
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss),
-        contentAlignment = Alignment.Center
+            .background(Color.Black.copy(alpha = if (liquidGlass) 0.22f else 0.6f))
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss)
+            .padding(top = rememberTopCutoutClearance() + 8.dp)
+            .navigationBarsPadding()
+            .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+        contentAlignment = Alignment.BottomCenter
     ) {
-        val sheetModifier = Modifier
-            .fillMaxWidth(0.88f)
-            .heightIn(min = 140.dp, max = 460.dp)
-            // Horizontal drag to switch tabs — runs at Main pass BEFORE the
-            // Final-pass consumer below, so it always sees events first.
-            .pointerInput(combineMode) {
-                if (!combineMode) {
-                    detectHorizontalDragGestures(
-                        onDragEnd = {
-                            if (swipeDx < -60f) switchTab(PickerTab.STARTER_PACKS)
-                            else if (swipeDx > 60f) switchTab(PickerTab.LISTS)
-                            swipeDx = 0f
-                        },
-                        onDragCancel = { swipeDx = 0f }
-                    ) { _, dragAmount -> swipeDx += dragAmount }
-                }
-            }
-            // Absorbs taps so they don't fall through to the scrim's dismiss
-            // handler. Using `clickable` (tap-gesture detection only) instead of
-            // a raw Final-pass consumer means it never competes with the
-            // LazyColumn's own drag/scroll recognition, which was causing the
-            // list to need multiple attempts before it would scroll.
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null
-            ) { }
-
-            @Composable
-            fun SheetContent() {
-                Column(modifier = Modifier.fillMaxWidth()) {
-
-                    // ── Header ────────────────────────────────────────────────
-                    if (combineMode) {
-                        // Combined mode: single centered title — styled identically to
-                        // the regular tab header (no icon, no extra decoration).
-                        Box(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 16.dp)
-                        ) {
-                            Text("Add To", color = Color.White, fontSize = 16.sp,
-                                fontWeight = FontWeight.SemiBold, modifier = Modifier.align(Alignment.Center))
-                        }
-                    } else {
-                        // Normal mode: tab switcher with "Add To" centered
-                        Box(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 16.dp)
-                        ) {
-                            TabButton(
-                                label    = "My Lists",
-                                selected = activeTab == PickerTab.LISTS,
-                                liquidGlass = liquidGlass,
-                                dominantColor = dominantColor,
-                                backdrop = backdrop,
-                                modifier = Modifier.align(Alignment.CenterStart),
-                                onClick  = { switchTab(PickerTab.LISTS) }
-                            )
-                            Text("Add To", color = Color.White, fontSize = 16.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                modifier = Modifier.align(Alignment.Center))
-                            TabButton(
-                                label    = "Starter Packs",
-                                selected = activeTab == PickerTab.STARTER_PACKS,
-                                liquidGlass = liquidGlass,
-                                dominantColor = dominantColor,
-                                backdrop = backdrop,
-                                modifier = Modifier.align(Alignment.CenterEnd),
-                                onClick  = { switchTab(PickerTab.STARTER_PACKS) }
-                            )
-                        }
+        PopupSheetSurface(
+            liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 180.dp)
+                .fillMaxHeight(0.7f)
+                // Horizontal drag switches between My Lists and Starter Packs.
+                .pointerInput(combineMode) {
+                    if (!combineMode) {
+                        detectHorizontalDragGestures(
+                            onDragEnd = {
+                                if (swipeDx < -60f) switchTab(PickerTab.STARTER_PACKS)
+                                else if (swipeDx > 60f) switchTab(PickerTab.LISTS)
+                                swipeDx = 0f
+                            },
+                            onDragCancel = { swipeDx = 0f }
+                        ) { _, dragAmount -> swipeDx += dragAmount }
                     }
+                }
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                PopupSheetHeader(
+                    title = "Add To",
+                    liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                    onClose = onDismiss
+                )
+                if (!combineMode) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        TabButton(
+                            label = "My Lists",
+                            selected = activeTab == PickerTab.LISTS,
+                            liquidGlass = liquidGlass,
+                            dominantColor = tint,
+                            backdrop = backdrop,
+                            modifier = Modifier.weight(1f),
+                            onClick = { switchTab(PickerTab.LISTS) }
+                        )
+                        TabButton(
+                            label = "Starter Packs",
+                            selected = activeTab == PickerTab.STARTER_PACKS,
+                            liquidGlass = liquidGlass,
+                            dominantColor = tint,
+                            backdrop = backdrop,
+                            modifier = Modifier.weight(1f),
+                            onClick = { switchTab(PickerTab.STARTER_PACKS) }
+                        )
+                    }
+                }
 
-                    HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                HorizontalDivider(color = Color.White.copy(alpha = 0.08f), modifier = Modifier.padding(top = 4.dp))
 
-                    // ── Content ───────────────────────────────────────────────
+                @Composable
+                fun Entry(name: String, subtitle: String?, avatarUrl: String?, isPack: Boolean, listUri: String, additionalUri: String?) {
+                    EntryRow(
+                        name = name, subtitle = subtitle, avatarUrl = avatarUrl, isPack = isPack,
+                        liquidGlass = liquidGlass, tint = tint,
+                        isMember = memberships.containsKey(listUri),
+                        busy = listUri in busy,
+                        membershipKnown = !membershipsLoading,
+                        onToggle = { onToggle(listUri, additionalUri) }
+                    )
+                }
+
+                Box(Modifier.weight(1f).fillMaxWidth()) {
                     if (combineMode) {
                         PickerBody(loading = listsLoading) {
                             if (combinedEntries.isEmpty() && !listsLoading) {
                                 item { EmptyLabel("No matching Lists + Starter Packs found.\nMake sure they share the same name.") }
                             }
                             items(combinedEntries, key = { it.listUri }) { entry ->
-                                EntryRow(
-                                    name      = entry.name,
-                                    subtitle  = null,
-                                    avatarUrl = entry.avatarUrl,
-                                    isPack    = false,
-                                    liquidGlass = liquidGlass,
-                                    onClick   = { onSelectList(entry.listUri, entry.starterPackListUri) }
-                                )
+                                Entry(entry.name, null, entry.avatarUrl, false, entry.listUri, entry.starterPackListUri)
                             }
                         }
                     } else {
@@ -192,8 +190,8 @@ fun ListPickerDialog(
                             targetState = activeTab,
                             transitionSpec = {
                                 val dir = if (targetState == PickerTab.STARTER_PACKS) 1 else -1
-                                (slideInHorizontally(tween(180)) { it * dir } + fadeIn(tween(150))) togetherWith
-                                (slideOutHorizontally(tween(180)) { -it * dir } + fadeOut(tween(120)))
+                                (slideInHorizontally(tween(200)) { it * dir } + fadeIn(tween(170))) togetherWith
+                                (slideOutHorizontally(tween(200)) { -it * dir } + fadeOut(tween(130)))
                             },
                             label = "tab"
                         ) { tab ->
@@ -202,28 +200,14 @@ fun ListPickerDialog(
                                     PickerTab.LISTS -> {
                                         if (lists.isEmpty() && !listsLoading) item { EmptyLabel("You have no lists yet.") }
                                         items(lists, key = { it.uri }) { list ->
-                                            EntryRow(
-                                                name      = list.name,
-                                                subtitle  = list.itemCount?.let { "$it members" },
-                                                avatarUrl = list.avatar,
-                                                isPack    = false,
-                                                liquidGlass = liquidGlass,
-                                                onClick   = { onSelectList(list.uri, null) }
-                                            )
+                                            Entry(list.name, list.itemCount?.let { "$it members" }, list.avatar, false, list.uri, null)
                                         }
                                     }
                                     PickerTab.STARTER_PACKS -> {
                                         if (starterPacks.isEmpty() && !listsLoading) item { EmptyLabel("You have no Starter Packs yet.") }
                                         items(starterPacks, key = { it.uri }) { pack ->
                                             val listUri = pack.record?.list ?: return@items
-                                            EntryRow(
-                                                name      = pack.record.name,
-                                                subtitle  = pack.listItemCount?.let { "$it members" },
-                                                avatarUrl = null,
-                                                isPack    = true,
-                                                liquidGlass = liquidGlass,
-                                                onClick   = { onSelectList(listUri, null) }
-                                            )
+                                            Entry(pack.record.name, pack.listItemCount?.let { "$it members" }, null, true, listUri, null)
                                         }
                                     }
                                 }
@@ -232,18 +216,6 @@ fun ListPickerDialog(
                     }
                 }
             }
-
-        // Big Update #10 / item 3: no outer background of its own in Glass mode
-        // (the post stays visible around it), and the sheet's own glass reflects
-        // that same post in real time via [backdrop], exactly like the main
-        // glass buttons.
-        if (liquidGlass) {
-            LiquidGlassSurface(
-                modifier = sheetModifier, shape = RoundedCornerShape(20.dp),
-                tint = dominantColor, backdrop = backdrop
-            ) { SheetContent() }
-        } else {
-            Box(sheetModifier.clip(RoundedCornerShape(20.dp)).background(OffBlack)) { SheetContent() }
         }
     }
 }
@@ -261,30 +233,22 @@ private fun TabButton(
     onClick: () -> Unit
 ) {
     val tap = rememberHapticTap()
-    val shape = RoundedCornerShape(10.dp)
+    val shape = RoundedCornerShape(14.dp)
+    val m = modifier.height(34.dp).clip(shape).clickable(onClick = { tap(); onClick() })
     if (liquidGlass && selected) {
-        LiquidGlassSurface(
-            modifier = modifier, shape = shape, tint = dominantColor, backdrop = backdrop
-        ) {
-            Text(
-                text = label, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
-                modifier = Modifier
-                    .clickable(onClick = { tap(); onClick() })
-                    .padding(horizontal = 9.dp, vertical = 5.dp)
-            )
+        LiquidGlassSurface(modifier = m, shape = shape, tint = dominantColor, backdrop = backdrop, contentAlignment = Alignment.Center) {
+            Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
         }
     } else {
-        Text(
-            text       = label,
-            color      = if (selected) Color.White else DimGray,
-            fontSize   = 12.sp,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-            modifier   = modifier
-                .clip(shape)
-                .background(if (selected) Color.White.copy(0.1f) else Color.Transparent)
-                .clickable(onClick = { tap(); onClick() })
-                .padding(horizontal = 9.dp, vertical = 5.dp)
-        )
+        Box(
+            m.background(if (selected) Color.White.copy(0.14f) else Color.White.copy(0.04f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                label, color = if (selected) Color.White else DimGray, fontSize = 13.sp,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+            )
+        }
     }
 }
 
@@ -307,20 +271,24 @@ private fun EmptyLabel(text: String) {
 }
 
 @Composable
-private fun EntryRow(name: String, subtitle: String?, avatarUrl: String?, isPack: Boolean, liquidGlass: Boolean = false, onClick: () -> Unit) {
-    val tap = rememberHapticTap()
+private fun EntryRow(
+    name: String, subtitle: String?, avatarUrl: String?, isPack: Boolean,
+    liquidGlass: Boolean = false, tint: Color = NeutralGlassTint,
+    isMember: Boolean, busy: Boolean, membershipKnown: Boolean,
+    onToggle: () -> Unit
+) {
     Row(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = { tap(); onClick() }).padding(horizontal = 14.dp, vertical = 11.dp),
+        modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 12.dp, top = 7.dp, bottom = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         if (avatarUrl != null) {
             AsyncImage(model = avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                modifier = Modifier.size(32.dp).clip(CircleShape))
+                modifier = Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)))
         } else {
             // Item 3: placeholder icon is white (not grey) in Glass mode so it
             // reads clearly against the clear/tinted glass background.
-            Box(modifier = Modifier.size(32.dp).clip(CircleShape).background(Color.White.copy(0.09f)),
+            Box(modifier = Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).background(Color.White.copy(0.09f)),
                 contentAlignment = Alignment.Center) {
                 Icon(
                     imageVector = if (isPack) Icons.Default.Groups else Icons.Default.FormatListBulleted,
@@ -331,8 +299,38 @@ private fun EntryRow(name: String, subtitle: String?, avatarUrl: String?, isPack
             }
         }
         Column(modifier = Modifier.weight(1f)) {
-            Text(name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+            Text(name, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
             if (subtitle != null) Text(subtitle, color = DimGray, fontSize = 11.sp)
+        }
+        // One button: + adds them, − takes them back off.
+        val bg by animateColorAsState(
+            if (isMember) androidx.compose.ui.graphics.lerp(tint, Color.White, 0.2f).copy(alpha = 0.9f) else Color.White.copy(alpha = 0.1f),
+            label = "addToBg"
+        )
+        Box(
+            Modifier
+                .size(34.dp)
+                .clip(CircleShape)
+                .background(bg)
+                .border(1.dp, androidx.compose.ui.graphics.lerp(tint, Color.White, 0.35f).copy(alpha = if (isMember) 0f else 0.6f), CircleShape)
+                .clickable(enabled = !busy && membershipKnown, onClick = onToggle),
+            contentAlignment = Alignment.Center
+        ) {
+            when {
+                busy || !membershipKnown -> CircularProgressIndicator(Modifier.size(15.dp), color = Color.White, strokeWidth = 1.5.dp)
+                else -> AnimatedContent(
+                    targetState = isMember,
+                    transitionSpec = { (scaleIn(tween(180)) + fadeIn(tween(180))) togetherWith (scaleOut(tween(140)) + fadeOut(tween(140))) },
+                    label = "addToIcon"
+                ) { member ->
+                    Icon(
+                        if (member) Icons.Default.Remove else Icons.Default.Add,
+                        contentDescription = if (member) "Remove" else "Add",
+                        tint = Color.White, modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
         }
     }
 }

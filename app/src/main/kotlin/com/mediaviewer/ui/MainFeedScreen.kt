@@ -33,9 +33,19 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerState
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.verticalScroll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
@@ -343,10 +353,24 @@ fun MainFeedScreen(
     // MainActivity provides separately — this screen has no Pinterest grid
     // of its own to apply it to).
     pinterestThreeColumns: Boolean = false,
-    onTogglePinterestThreeColumns: (Boolean) -> Unit = {}
+    onTogglePinterestThreeColumns: (Boolean) -> Unit = {},
+    // Share To / Quote Repost / Add To are open over the post: the post's
+    // own UI fades away while they're up (and back when they close).
+    popupOpen: Boolean = false,
+    // Tag Media When Liked's queue, shown as a status bubble under the
+    // author row (Settings → Show Tagging Status).
+    likeTagPhase: MainViewModel.LikeTagPhase = MainViewModel.LikeTagPhase.IDLE,
+    likeTagPending: Int = 0
 ) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
+    val taggingStatusLabel: String? =
+        if (!tagPostWhenLiked || !com.mediaviewer.util.UiToggles.showTaggingStatus) null
+        else when (likeTagPhase) {
+            MainViewModel.LikeTagPhase.ACTIVATING -> "Activating tagger…"
+            MainViewModel.LikeTagPhase.TAGGING -> "Tagging $likeTagPending post" + if (likeTagPending == 1) "" else "s"
+            MainViewModel.LikeTagPhase.IDLE -> null
+        }
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     // Item 3: which sub-image each multi-image post was left on, keyed by post id.
     // Lives here (above the per-post AnimatedContent) so it survives navigating
@@ -471,6 +495,8 @@ fun MainFeedScreen(
                     translationEnabled      = translationEnabled,
                     translationTargetLang   = translationTargetLang,
                     translationStates       = translationStates,
+                    popupOpen               = popupOpen,
+                    taggingStatusLabel      = taggingStatusLabel,
                     onBackdropChanged      = { backdrop, color ->
                         lastDominantColor = color
                         lastBackdrop = backdrop
@@ -882,7 +908,9 @@ private fun FeedView(
     externallyPaused: Boolean = false,
     hateFunBlurNsfw: Boolean = false,
     /** 0 = no comments; 1 = comments fully open (post blurred, UI faded). */
-    commentsFraction: Float = 0f
+    commentsFraction: Float = 0f,
+    popupOpen: Boolean = false,
+    taggingStatusLabel: String? = null
 ) {
     val context     = LocalContext.current
     // The app-wide loader (not a private one): prefetches land in the same
@@ -962,7 +990,8 @@ private fun FeedView(
                     textExpanded            = textExpanded,
                     onToggleTextExpanded    = onToggleTextExpanded,
                     reducedAnimations      = reducedAnimations,
-                    uiHidden               = uiHidden || commentsFraction > 0.02f,
+                    uiHidden               = uiHidden || commentsFraction > 0.02f || popupOpen,
+                    taggingStatusLabel     = taggingStatusLabel,
                     onSetUiHidden          = onSetUiHidden,
                     translationEnabled     = translationEnabled,
                     translationTargetLang  = translationTargetLang,
@@ -1019,7 +1048,8 @@ private fun PostContent(
     // Feature request #8: "I hate fun" — Settings toggle (Bluesky mode
     // only; item.isNsfwLabeled is always false for other modes anyway
     // since only Bluesky posts ever populate MediaItem.labels).
-    hateFunBlurNsfw: Boolean = false
+    hateFunBlurNsfw: Boolean = false,
+    taggingStatusLabel: String? = null
 ) {
     val context = LocalContext.current
     var scale  by remember { mutableFloatStateOf(1f) }
@@ -1064,20 +1094,6 @@ private fun PostContent(
     // it) converts root-space coordinates back into local placement offsets with.
     var postBoxRootOrigin    by remember { mutableStateOf(Offset.Zero) }
 
-    // Press-and-hold post indicator → Next/Previous buttons: same press-hold-
-    // drag-release pattern as the quick shortcuts. `indicatorPillOrigin`/`Size`
-    // are the "1/N" pill's own root-relative bounds (tracked via
-    // onGloballyPositioned below); `indicatorHoverSide` is -1 while the drag is
-    // held over the left (Previous) side, +1 over the right (Next) side, 0
-    // otherwise. The two buttons render as their own sibling below (same
-    // outside-the-recorded-box reasoning as QuickActionMenu/video controls),
-    // anchored to the pill's position rather than to a live press point, since
-    // the pill itself doesn't move around.
-    var indicatorPillOrigin  by remember(item.id) { mutableStateOf<Offset?>(null) }
-    var indicatorPillSize    by remember(item.id) { mutableStateOf(IntSize.Zero) }
-    var indicatorHoldActive  by remember(item.id) { mutableStateOf(false) }
-    var indicatorHoverSide   by remember(item.id) { mutableStateOf(0) }
-
     // Items 5-8: the "More" menu's own state, hoisted up here (out of
     // ActionRow) for the same reason as the indicator pill's Next/Previous
     // buttons above — it needs to render as a sibling of the recorded box,
@@ -1089,6 +1105,59 @@ private fun PostContent(
     var moreMenuExpanded by remember(item.id) { mutableStateOf(false) }
     var actionBarOrigin  by remember(item.id) { mutableStateOf<Offset?>(null) }
     var actionBarSize    by remember(item.id) { mutableStateOf(IntSize.Zero) }
+
+    // ── Multi-image posts: every image at once as a grid, tap one to zoom
+    // it to full screen (then swipe between them / pick from the selector
+    // row above the interaction bar). ──
+    val isImageGrid = !item.isVideo && !item.isTextOnly && item.mediaGroup.size >= 2
+    // Non-null while the fullscreen viewer is open (or animating in/out).
+    var viewerIndex by remember(item.id) { mutableStateOf<Int?>(null) }
+    var viewerClosing by remember(item.id) { mutableStateOf(false) }
+    // 0 = the image sits in its grid tile, 1 = fullscreen.
+    val viewerAnim = remember(item.id) { Animatable(0f) }
+    val pagerState = rememberPagerState(initialPage = 0, pageCount = { item.mediaGroup.size.coerceAtLeast(1) })
+    // Each grid tile's on-screen bounds (root coordinates) — where the zoom starts/ends.
+    val tileRects = remember(item.id) { mutableStateMapOf<Int, Rect>() }
+    // Each image's width/height, learned as it loads (or from the post).
+    val imageAspects = remember(item.id) { mutableStateMapOf<Int, Float>() }
+    // The text bubble above the interaction bar: compact, or grown upward
+    // to show the whole text.
+    var textBubbleExpanded by remember(item.id) { mutableStateOf(false) }
+    val postScope = rememberCoroutineScope()
+    val viewerSpringIn = spring<Float>(dampingRatio = 0.8f, stiffness = 280f)
+    val viewerSpringOut = spring<Float>(dampingRatio = 0.92f, stiffness = 380f)
+
+    fun openViewer(index: Int) {
+        if (viewerIndex != null || item.mediaGroup.isEmpty()) return
+        val i = index.coerceIn(0, item.mediaGroup.size - 1)
+        haptic(context)
+        viewerIndex = i
+        viewerClosing = false
+        textBubbleExpanded = false
+        postScope.launch {
+            pagerState.scrollToPage(i)
+            onSetSubImageIndex(i)
+            viewerAnim.snapTo(0f)
+            if (reducedAnimations) viewerAnim.snapTo(1f) else viewerAnim.animateTo(1f, viewerSpringIn)
+        }
+    }
+
+    fun closeViewer() {
+        if (viewerIndex == null || viewerClosing) return
+        viewerClosing = true
+        scale = 1f; offset = Offset.Zero
+        postScope.launch {
+            if (reducedAnimations) viewerAnim.snapTo(0f) else viewerAnim.animateTo(0f, viewerSpringOut)
+            viewerIndex = null
+            viewerClosing = false
+        }
+    }
+
+    // Back closes the fullscreen image first.
+    androidx.activity.compose.BackHandler(enabled = viewerIndex != null) { closeViewer() }
+    LaunchedEffect(pagerState, item.id) {
+        snapshotFlow { pagerState.currentPage }.collect { page -> if (viewerIndex != null) onSetSubImageIndex(page) }
+    }
 
     // Big Update #1: sampled average color of the current post's media — feeds
     // the liquid-glass panels so their tint/"reflection" shifts with whatever
@@ -1169,20 +1238,10 @@ private fun PostContent(
     // swipe does the same thing (cycle sub-images, then fall through to next/
     // previous post) no matter where on the post it starts.
     val handleHorizontalSwipe: (Float) -> Unit = { totalDx ->
-        val groupSize = item.mediaGroup.size
-        // Read fresh here — this can fire from either gesture, potentially on
-        // different recompositions, so a captured subImageIndex value would
-        // go stale after the first swipe and cause stuck/skipping behavior.
-        val curSubIdx = getSubImageIndex()
-        if (totalDx < 0) {
-            // swiping toward "next"
-            if (groupSize > 1 && curSubIdx < groupSize - 1) onSetSubImageIndex(curSubIdx + 1)
-            else onSwipeLeft()
-        } else {
-            // swiping toward "previous"
-            if (groupSize > 1 && curSubIdx > 0) onSetSubImageIndex(curSubIdx - 1)
-            else onSwipeRight()
-        }
+        // Multi-image posts show every image at once now (grid), so a swipe
+        // always moves to the next/previous post; inside the fullscreen
+        // viewer the pager itself takes horizontal swipes.
+        if (totalDx < 0) onSwipeLeft() else onSwipeRight()
     }
 
     // Phase 4 — "Tapping the indicator or the translated text toggles original
@@ -1302,7 +1361,10 @@ private fun PostContent(
                                 } else if (scale <= 1.05f && !externallyClaimed) {
                                     when {
                                         abs(dx) > 80f && abs(dx) > abs(dy) * 1.2f -> handleHorizontalSwipe(dx)
-                                        abs(dy) > 80f && abs(dy) > abs(dx) * 1.2f -> if (dy < 0) onSwipeUp() else onSwipeDown()
+                                        abs(dy) > 80f && abs(dy) > abs(dx) * 1.2f ->
+                                            if (dy < 0) onSwipeUp()
+                                            else if (viewerIndex != null) closeViewer()
+                                            else onSwipeDown()
                                     }
                                 }
                                 if (scale <= 1.02f) { scale = 1f; offset = Offset.Zero }
@@ -1343,7 +1405,11 @@ private fun PostContent(
                                     if (prevPinchDist > 0f) {
                                         val rawNew = scale * dist / prevPinchDist
                                         if (gridArmed && dist < gridArmDist * 0.7f) {
-                                            scale = 1f; offset = Offset.Zero; onPinchToGrid(); break
+                                            scale = 1f; offset = Offset.Zero
+                                            // In the fullscreen image viewer, pinching in
+                                            // zooms back out to the grid instead.
+                                            if (viewerIndex != null) closeViewer() else onPinchToGrid()
+                                            break
                                         }
                                         // Item 3 fix: a text-only post has no image/video to
                                         // magnify — letting scale/offset change anyway used to
@@ -1354,7 +1420,7 @@ private fun PostContent(
                                         // look frozen (couldn't scroll in any direction). Pinch-to-
                                         // grid detection above still works on text posts — only
                                         // the magnification itself is disabled.
-                                        if (!item.isTextOnly) {
+                                        if (!item.isTextOnly && !(isImageGrid && viewerIndex == null)) {
                                             val oldScale = scale
                                             val newScale = rawNew.coerceIn(1f, 8f)
                                             scale = newScale
@@ -1441,6 +1507,45 @@ private fun PostContent(
                     onBoundsChanged = { origin, size -> videoBoundsOrigin = origin; videoBoundsSize = size },
                     externallyPaused = externallyPaused
                 )
+            } else if (isImageGrid) {
+                val gridBlurred = item.isBlocked || nsfwBlurred
+                val progress = viewerAnim.value
+                val openIdx = viewerIndex
+                // The image that flies between its tile and full screen: the
+                // one tapped while opening, whichever is showing while closing.
+                val flyPage = if (viewerClosing || openIdx == null) pagerState.currentPage else openIdx
+                val outline = rememberAuthorProfileTint(item.author.did, item.author.avatarUrl)
+                MultiImageGrid(
+                    images = item.mediaGroup,
+                    outline = outline,
+                    blurred = gridBlurred,
+                    // The rest of the grid fades away as the picked image
+                    // flies up to full screen (and back as it returns).
+                    alpha = if (openIdx == null) 1f else (1f - progress).coerceIn(0f, 1f),
+                    hiddenIndex = if (openIdx == null) null else minOf(flyPage, 8),
+                    onTileBounds = { i, r -> if (tileRects[i] != r) tileRects[i] = r },
+                    onAspect = { i, a -> if (!imageAspects.containsKey(i)) imageAspects[i] = a },
+                    onTap = { i -> if (menuCenter == null && !gridBlurred) openViewer(i) }
+                )
+                if (openIdx != null) {
+                    val tile = tileRects[minOf(flyPage, 8)]
+                    MultiImageViewer(
+                        images = item.mediaGroup,
+                        pagerState = pagerState,
+                        flyPage = flyPage,
+                        progress = progress,
+                        // The uncropped pager takes over once the zoom has
+                        // fully come to rest (the spring may overshoot a hair).
+                        settled = !viewerClosing && !viewerAnim.isRunning && progress >= 0.99f,
+                        fromRect = tile?.translate(-postBoxRootOrigin),
+                        aspectFor = { i -> imageAspects[i] ?: item.mediaGroup.getOrNull(i)?.aspectRatio },
+                        zoomScale = scale,
+                        zoomOffset = offset,
+                        interactive = !viewerClosing,
+                        onAspect = { i, a -> if (imageAspects[i] != a) imageAspects[i] = a },
+                        onTap = { closeViewer() }
+                    )
+                }
             } else {
                 // Item 3: sub-image switches animate with the same slide+fade the
                 // outer post-to-post transition uses, instead of an instant cut.
@@ -1570,24 +1675,6 @@ private fun PostContent(
             }
         }
 
-        // Press-and-hold post indicator's Next/Previous buttons: rendered as a
-        // sibling for the same reason as QuickActionMenu/the video controls bar
-        // above — they're LiquidGlassSurface panels reading the live backdrop,
-        // and would self-reference the recorded layer if drawn from inside it.
-        // Unlike QuickActionMenu, these are anchored to the indicator pill's own
-        // fixed position rather than a live press point (the pill doesn't move).
-        val pillOrigin = indicatorPillOrigin
-        if (indicatorHoldActive && pillOrigin != null) {
-            PostIndicatorNavButtons(
-                pillCenterRoot = pillOrigin + Offset(indicatorPillSize.width / 2f, indicatorPillSize.height / 2f),
-                containerRootOrigin = postBoxRootOrigin,
-                hoveredSide = indicatorHoverSide,
-                liquidGlass = liquidGlass,
-                dominantColor = dominantColor,
-                backdrop = glassBackdrop
-            )
-        }
-
         // Author and action rows on top (zIndex ensures they're tappable over the media).
         // Phase 4 — "3-finger pinch out hides UI": wrapped in AnimatedVisibility so
         // it fades away/back rather than cutting instantly, matching the rest of
@@ -1628,14 +1715,40 @@ private fun PostContent(
                         liquidGlass = liquidGlass,
                         dominantColor = dominantColor,
                         backdrop = glassBackdrop,
-                        isTextOnly = item.isTextOnly,
-                        textExpanded = textExpanded,
-                        onToggleTextExpanded = onToggleTextExpanded,
-                        reducedAnimations = reducedAnimations,
-                        onHorizontalSwipe = handleHorizontalSwipe,
-                        translationState = translationState,
-                        onToggleTranslationView = onToggleTranslationView
+                        onHorizontalSwipe = handleHorizontalSwipe
                     )
+                    // Status bubbles, centered right under the author row:
+                    // translation (Settings → Show Translation Status) and
+                    // like-tagging (Settings → Show Tagging Status).
+                    val showTranslateStatus = translationEnabled && com.mediaviewer.util.UiToggles.showTranslationStatus &&
+                        item.text.isNotBlank() && translationState != null && translationState.status != TranslationStatus.IDLE
+                    val tagLabel = taggingStatusLabel
+                    AnimatedVisibility(
+                        visible = showTranslateStatus || tagLabel != null,
+                        enter = if (reducedAnimations) EnterTransition.None else fadeIn(FADE_ANIM) + expandVertically(),
+                        exit = if (reducedAnimations) ExitTransition.None else fadeOut(FADE_ANIM) + shrinkVertically(),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 10.dp).padding(bottom = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (showTranslateStatus) {
+                                TranslationIndicatorPill(
+                                    state = translationState!!, liquidGlass = liquidGlass,
+                                    dominantColor = dominantColor, backdrop = glassBackdrop,
+                                    onClick = onToggleTranslationView
+                                )
+                            }
+                            if (tagLabel != null) {
+                                StatusPill(
+                                    label = tagLabel, spinning = true, liquidGlass = liquidGlass,
+                                    tint = dominantColor, backdrop = glassBackdrop, onClick = null
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1644,11 +1757,10 @@ private fun PostContent(
         // long-press radial menu above (see QuickActionMenu / getHoveredAction) —
         // they are Bluesky-only, matching the existing radial menu's action set.
 
-        // Bottom cluster: the "1/4" style page indicator (only for multi-image
-        // posts) and, per Phase 4, the translation status pill both sit here as
-        // small liquid-glass pills. When both are present they're centered
-        // together as one row — translation on the left, page indicator on the
-        // right — rather than each independently centering itself.
+        // Bottom cluster, bottom to top: the interaction bar; right above it
+        // the post's text bubble (or, while a multi-image post's fullscreen
+        // viewer is open, the image selector row in its place); and the audio
+        // visualizer resting on top of whichever of those is showing.
         AnimatedVisibility(
             visible = !uiHidden,
             enter = if (reducedAnimations) EnterTransition.None else fadeIn(FADE_ANIM),
@@ -1659,13 +1771,8 @@ private fun PostContent(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                val showTranslateIndicator = translationEnabled && item.text.isNotBlank() &&
-                    translationState != null && translationState.status != TranslationStatus.IDLE
-                // Audio visualizer bars and the indicator pills share one
-                // Box: the bars are drawn first (behind the pills, in front
-                // of the media) and take up no layout space at all, so
-                // turning them on never moves the pills or anything else.
-                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.BottomCenter) {
+                // The visualizer takes up no layout space at all (drawn upward
+                // from a zero-height slot), so turning it on never moves anything.
                 if (com.mediaviewer.util.UiToggles.audioVisualizer) {
                     val barsColor = if (liquidGlass) dominantColor else rememberDominantColor(glassBackdropUrl)
                     AudioVisualizerBars(
@@ -1673,9 +1780,6 @@ private fun PostContent(
                         modifier = Modifier
                             .fillMaxWidth()
                             .layout { measurable, constraints ->
-                                // Measured at 34dp, laid out as zero height and
-                                // drawn upward from the bottom of this Box, i.e.
-                                // resting right on top of the interaction bar.
                                 val h = 34.dp.roundToPx()
                                 val placeable = measurable.measure(constraints.copy(minHeight = h, maxHeight = h))
                                 layout(placeable.width, 0) { placeable.place(0, -placeable.height) }
@@ -1683,92 +1787,46 @@ private fun PostContent(
                             .padding(horizontal = 20.dp)
                     )
                 }
-                if (showTranslateIndicator || item.mediaGroup.size > 1) {
-                    Row(
-                        modifier = Modifier.padding(bottom = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if (showTranslateIndicator) {
-                            TranslationIndicatorPill(
-                                state = translationState!!, liquidGlass = liquidGlass,
-                                dominantColor = dominantColor, backdrop = glassBackdrop,
-                                onClick = onToggleTranslationView
-                            )
-                        }
-                        if (item.mediaGroup.size > 1) {
-                            val pageText = "${subImageIndex + 1}/${item.mediaGroup.size}"
-                            val pageShape = RoundedCornerShape(14.dp)
-                            Box(
-                                modifier = Modifier
-                                    .onGloballyPositioned { coords -> indicatorPillOrigin = coords.positionInRoot(); indicatorPillSize = coords.size }
-                                    // Press-and-hold post indicator (Phase 3): same press-hold-
-                                    // drag-release pattern the quick shortcuts use, just with two
-                                    // options (left = Previous, right = Next) instead of eight.
-                                    // This pill sits inside a multi-image post, where a horizontal
-                                    // swipe on the media itself is already claimed for cycling
-                                    // sub-images first — so this is the direct way to skip straight
-                                    // to the next/previous post from here without swiping through
-                                    // every sub-image first.
-                                    .pointerInput(item.id) {
-                                        awaitEachGesture {
-                                            val down = awaitFirstDown(requireUnconsumed = false)
-                                            val downPos = down.position
-                                            var longPressFired = false
-                                            var hoverSide = 0
-                                            // Item 15: the Next/Previous arrows should appear the instant
-                                            // a finger touches the indicator, not after a hold delay.
-                                            longPressFired = true
-                                            haptic(context)
-                                            indicatorHoldActive = true
-                                            while (true) {
-                                                val result = withTimeoutOrNull(16L) { awaitPointerEvent(PointerEventPass.Main) }
-                                                val event = result ?: continue
-                                                val pressed = event.changes.filter { it.pressed }
-                                                if (pressed.isEmpty()) {
-                                                    if (longPressFired && hoverSide != 0) {
-                                                        haptic(context)
-                                                        // Left = Previous (onSwipeRight = onNavigatePrev),
-                                                        // Right = Next (onSwipeLeft = onNavigateNext) — see
-                                                        // the callback wiring in FeedView.
-                                                        if (hoverSide < 0) onSwipeRight() else onSwipeLeft()
-                                                    }
-                                                    indicatorHoldActive = false
-                                                    indicatorHoverSide = 0
-                                                    break
-                                                }
-                                                if (longPressFired) {
-                                                    val dx = pressed[0].position.x - downPos.x
-                                                    val newSide = when { dx < -36f -> -1; dx > 36f -> 1; else -> 0 }
-                                                    if (newSide != hoverSide) {
-                                                        hoverSide = newSide; indicatorHoverSide = newSide
-                                                        if (newSide != 0) haptic(context)
-                                                    }
-                                                    pressed[0].consume()
-                                                }
-                                            }
-                                        }
-                                    }
-                            ) {
-                                if (liquidGlass) {
-                                    LiquidGlassSurface(shape = pageShape, tint = dominantColor, backdrop = glassBackdrop) {
-                                        Text(
-                                            pageText, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
-                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                                        )
-                                    }
-                                } else {
-                                    Box(Modifier.clip(pageShape).background(Color.Black.copy(0.5f))) {
-                                        Text(
-                                            pageText, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
+                val viewerShowing = isImageGrid && viewerIndex != null && !viewerClosing
+                val originalBubbleText = if (item.isTextOnly || item.isBlocked) "" else item.text
+                val bubbleText = if (translationState?.status == TranslationStatus.DONE && translationState.showingTranslated && originalBubbleText.isNotBlank())
+                    translationState!!.translatedText else originalBubbleText
+                AnimatedContent(
+                    targetState = viewerShowing,
+                    transitionSpec = {
+                        if (reducedAnimations) EnterTransition.None togetherWith ExitTransition.None
+                        else (fadeIn(tween(240, delayMillis = 60)) + scaleIn(tween(240, delayMillis = 60), initialScale = 0.96f)) togetherWith
+                            fadeOut(tween(160))
+                    },
+                    contentAlignment = Alignment.BottomCenter,
+                    label = "bubbleOrSelector"
+                ) { showSelector ->
+                    if (showSelector) {
+                        ImageSelectorRow(
+                            images = item.mediaGroup,
+                            currentPage = pagerState.currentPage,
+                            outline = rememberAuthorProfileTint(item.author.did, item.author.avatarUrl),
+                            liquidGlass = liquidGlass, tint = dominantColor, backdrop = glassBackdrop,
+                            onSelect = { i, animate ->
+                                postScope.launch { if (animate) pagerState.animateScrollToPage(i) else pagerState.scrollToPage(i) }
+                            },
+                            onPrevPost = { haptic(context); onSwipeRight() },
+                            onNextPost = { haptic(context); onSwipeLeft() },
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 2.dp)
+                        )
+                    } else if (bubbleText.isNotBlank()) {
+                        PostTextBubble(
+                            text = bubbleText,
+                            expanded = textBubbleExpanded,
+                            onToggle = { textBubbleExpanded = !textBubbleExpanded },
+                            liquidGlass = liquidGlass, tint = dominantColor, backdrop = glassBackdrop,
+                            reducedAnimations = reducedAnimations,
+                            onHorizontalSwipe = handleHorizontalSwipe,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 4.dp)
+                        )
+                    } else {
+                        Spacer(Modifier.fillMaxWidth().height(0.dp))
                     }
-                }
                 }
                 ActionRow(item, appMode, onToggleLike, onToggleRepost, onToggleBookmark, onE621Vote,
                     onQuoteRepost, onDownload, onDownloadGif, onBlockAccount, onSendPost,
@@ -1797,7 +1855,7 @@ private fun PostContent(
         // swipes to a different post, or navigates to the hub, comments, or
         // grid — never from an outside tap.
         val barOrigin = actionBarOrigin
-        if (moreMenuExpanded && barOrigin != null) {
+        if (moreMenuExpanded && barOrigin != null && !uiHidden) {
             MoreBubbleMenu(
                 anchorOriginRoot = barOrigin,
                 anchorSize = actionBarSize,
@@ -2021,74 +2079,6 @@ private fun QuickActionMenu(center: Offset, hoveredAction: QuickAction?, appMode
     }
 }
 
-/** Phase 3 "press-and-hold post indicator" item: two glass buttons — Previous
- *  (left) and Next (right) — that pop in beside the "1/N" sub-image pill on a
- *  long-press, following it purely from the pill's own fixed position (unlike
- *  [QuickActionMenu], which centers on wherever the press happened — this pill
- *  doesn't move, so there's no need to track a live press point for placement,
- *  only for which side is currently hovered). Uses the same
- *  [LiquidGlassSurface.staticOrigin] analytic-position trick QuickActionMenu's
- *  buttons use, for the same reason: the bouncy pop-in/hover scale is a
- *  draw-only transform that doesn't reliably re-fire `onGloballyPositioned`,
- *  so a tracked origin could go stale mid-bounce. */
-@Composable
-private fun PostIndicatorNavButtons(
-    pillCenterRoot: Offset,
-    containerRootOrigin: Offset,
-    hoveredSide: Int,
-    liquidGlass: Boolean,
-    dominantColor: Color,
-    backdrop: GlassBackdrop?
-) {
-    val density = LocalDensity.current
-    var visible by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { visible = true }
-    val popScale by animateFloatAsState(
-        targetValue = if (visible) 1f else 0f,
-        animationSpec = spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMedium), label = "indicatorNavPop"
-    )
-    val buttonSize = 44.dp
-    val sideDx = with(density) { 60.dp.toPx() }
-    val halfPx = with(density) { (buttonSize / 2).toPx() }
-    Box(Modifier.fillMaxSize().zIndex(3f)) {
-        listOf(-1, 1).forEach { side ->
-            val centerRoot = pillCenterRoot + Offset(sideDx * side, 0f)
-            val topLeftRoot = Offset(centerRoot.x - halfPx, centerRoot.y - halfPx)
-            val topLeftLocal = topLeftRoot - containerRootOrigin
-            val bx = with(density) { topLeftLocal.x.toDp() }
-            val by = with(density) { topLeftLocal.y.toDp() }
-            val isHovered = hoveredSide == side
-            val btnScale by animateFloatAsState(
-                targetValue = if (isHovered) 1.3f else 1f,
-                animationSpec = spring(Spring.DampingRatioMediumBouncy), label = "indicatorNavBtn"
-            )
-            val icon = if (side < 0) Icons.Default.ChevronLeft else Icons.Default.ChevronRight
-            val label = if (side < 0) "Previous post" else "Next post"
-            if (liquidGlass) {
-                LiquidGlassSurface(
-                    modifier = Modifier.offset(x = bx, y = by).scale(popScale * btnScale).size(buttonSize),
-                    shape = CircleShape,
-                    tint = if (isHovered) Color.White.copy(alpha = 0.6f) else dominantColor,
-                    backdrop = backdrop,
-                    staticOrigin = topLeftRoot
-                ) {
-                    Box(Modifier.matchParentSize(), contentAlignment = Alignment.Center) {
-                        Icon(icon, contentDescription = label, tint = Color.White, modifier = Modifier.size(28.dp))
-                    }
-                }
-            } else {
-                Box(
-                    modifier = Modifier.offset(x = bx, y = by).scale(popScale * btnScale)
-                        .size(buttonSize).clip(CircleShape).background(if (isHovered) Color.White.copy(0.25f) else Color(0xFF1C1C1C)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(icon, contentDescription = label, tint = Color.White, modifier = Modifier.size(28.dp))
-                }
-            }
-        }
-    }
-}
-
 // ─── Liquid Glass primitives (Big Update #1) ───────────────────────────────────
 // rememberDominantColor / LiquidGlassSurface / UploadPlaceholderButton now live
 // in GlassTheme.kt so Settings, Comments, and the quick-action menu can share
@@ -2106,19 +2096,35 @@ private fun PostIndicatorNavButtons(
 private fun TranslationIndicatorPill(
     state: TranslationState, liquidGlass: Boolean, dominantColor: Color, backdrop: GlassBackdrop?, onClick: () -> Unit
 ) {
-    val shape = RoundedCornerShape(14.dp)
     val label = when (state.status) {
         TranslationStatus.TRANSLATING -> "Translating…"
-        TranslationStatus.DONE -> "Translated ${state.sourceLangLabel} to ${state.targetLangLabel}"
+        TranslationStatus.DONE ->
+            if (state.showingTranslated) "Translated ${state.sourceLangLabel} to ${state.targetLangLabel}"
+            else "Showing original · tap to translate"
         TranslationStatus.IDLE -> ""
     }
+    StatusPill(
+        label = label,
+        spinning = state.status == TranslationStatus.TRANSLATING,
+        liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
+        onClick = if (state.status == TranslationStatus.DONE) onClick else null
+    )
+}
+
+/** One of the small status bubbles under the author row (translation,
+ *  like-tagging): an optional spinner and a one-line label. */
+@Composable
+private fun StatusPill(
+    label: String, spinning: Boolean, liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, onClick: (() -> Unit)?
+) {
+    val shape = RoundedCornerShape(14.dp)
 
     @Composable
     fun PillBody() {
         Row(
             modifier = Modifier
                 .then(
-                    if (state.status == TranslationStatus.DONE)
+                    if (onClick != null)
                         Modifier.clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick)
                     else Modifier
                 )
@@ -2126,7 +2132,7 @@ private fun TranslationIndicatorPill(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            if (state.status == TranslationStatus.TRANSLATING) {
+            if (spinning) {
                 CircularProgressIndicator(Modifier.size(11.dp), color = Color.White, strokeWidth = 1.5.dp)
             }
             Text(label, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
@@ -2135,9 +2141,9 @@ private fun TranslationIndicatorPill(
     }
 
     if (liquidGlass) {
-        LiquidGlassSurface(shape = shape, tint = dominantColor, backdrop = backdrop) { PillBody() }
+        LiquidGlassSurface(modifier = Modifier.widthIn(max = 300.dp), shape = shape, tint = tint, backdrop = backdrop) { PillBody() }
     } else {
-        Box(Modifier.clip(shape).background(Color.Black.copy(0.5f))) { PillBody() }
+        Box(Modifier.widthIn(max = 300.dp).clip(shape).background(Color.Black.copy(0.5f))) { PillBody() }
     }
 }
 
@@ -2206,139 +2212,59 @@ private fun TextOnlyPostCard(
 
 // ─── Author Row ───────────────────────────────────────────────────────────────
 
+/** Top of the post: one bubble with the author's icon, display name and
+ *  handle (the post text now lives in its own bubble above the interaction
+ *  bar — see [PostTextBubble]), and the Follow button, both the same height. */
 @Composable
 private fun AuthorRow(
     item: MediaItem, appMode: AppMode, onToggleFollow: () -> Unit, onTapAuthor: () -> Unit,
     modifier: Modifier, liquidGlass: Boolean, dominantColor: Color, backdrop: GlassBackdrop?,
-    isTextOnly: Boolean,
-    textExpanded: Boolean, onToggleTextExpanded: () -> Unit,
-    reducedAnimations: Boolean = false,
-    onHorizontalSwipe: (Float) -> Unit = {},
-    // Phase 4 — "media posts' text bubbles" get the same translate-in-place
-    // toggle as text-only posts' big card (see TextOnlyPostCard's doc comment).
-    translationState: TranslationState? = null,
-    onToggleTranslationView: () -> Unit = {}
+    onHorizontalSwipe: (Float) -> Unit = {}
 ) {
     val author = item.author
-    // Item 7: text-only posts already show their full text as their own big
-    // card in the middle of the screen — showing it a second time in this
-    // pill is redundant, so the pill only shows it for posts that have media.
-    val originalPostText = if (isTextOnly) "" else item.text
-    val showTranslated = !isTextOnly && translationState?.status == TranslationStatus.DONE && translationState.showingTranslated
-    val postText = if (showTranslated) translationState!!.translatedText else originalPostText
-    val postTextToggleable = !isTextOnly && translationState?.status == TranslationStatus.DONE
-    val pillShape = RoundedCornerShape(16.dp)
+    val pillShape = RoundedCornerShape(14.dp)
 
-    // Big Update #2: username/display-name pill grows downward to show the
-    // post's own text. Default is fully expanded (natural size for however
-    // many lines the text needs); swiping up/down on the bubble (item 6)
-    // collapses it to a single ellipsized line or restores it.
     @Composable
     fun PillContent() {
-        Column(Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
-            Row(
-                modifier = Modifier.clickable(
-                    indication = null, interactionSource = remember { MutableInteractionSource() },
-                    onClick = onTapAuthor
-                ),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(7.dp)
-            ) {
-                if (author.avatarUrl != null) {
-                    AsyncImage(model = author.avatarUrl, contentDescription = null,
-                        contentScale = ContentScale.Crop, modifier = Modifier.size(24.dp).clip(CircleShape))
-                } else {
-                    Box(Modifier.size(24.dp).clip(CircleShape).background(Color.White.copy(0.12f)))
-                }
-                Text(author.displayName, color = Color.White, fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 130.dp))
-                if (appMode == AppMode.BLUESKY) {
-                    Text("@${author.handle}", color = if (liquidGlass) Color.White.copy(0.75f) else DimGray,
-                        fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
+        Row(
+            modifier = Modifier.fillMaxHeight().padding(start = 4.dp, end = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp)
+        ) {
+            if (author.avatarUrl != null) {
+                AsyncImage(model = author.avatarUrl, contentDescription = null,
+                    contentScale = ContentScale.Crop, modifier = Modifier.size(22.dp).clip(CircleShape))
+            } else {
+                Box(Modifier.size(22.dp).clip(CircleShape).background(Color.White.copy(0.12f)))
             }
-            if (postText.isNotBlank()) {
-                Text(
-                    postText,
-                    color = Color.White.copy(alpha = 0.95f),
-                    fontSize = 13.sp,
-                    lineHeight = 17.sp,
-                    maxLines = if (textExpanded) Int.MAX_VALUE else 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 4.dp).let {
-                        // Phase 4: tapping the (already-translated) text toggles
-                        // original <-> translated. This Text sits inside the
-                        // pill's own manual pointerInput below, but that gesture
-                        // only ever *claims* pointers on a clear drag (see
-                        // `claimed` in that pointerInput) — a plain tap is never
-                        // claimed, so it still reaches this clickable normally,
-                        // the same way onTapAuthor's clickable above already does.
-                        if (postTextToggleable) it.clickable(
-                            indication = null, interactionSource = remember { MutableInteractionSource() },
-                            onClick = onToggleTranslationView
-                        ) else it
-                    }
-                )
+            Text(author.displayName, color = Color.White, fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold, maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 150.dp))
+            if (appMode == AppMode.BLUESKY) {
+                Text("@${author.handle}", color = if (liquidGlass) Color.White.copy(0.75f) else DimGray,
+                    fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
     }
 
-    Row(modifier = modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.Top) {
-
-        // Item 6: the bubble opens/closes on a vertical swipe, not a tap — and
-        // it claims (consumes) only clear vertical drags. But this pill is a
-        // sibling of the box that owns the page's swipe gesture below, not a
-        // descendant of it, and draws on top via its own zIndex — so a touch
-        // that starts here hit-tests exclusively to the pill; the outer
-        // gesture never sees it at all, consumed or not. A plain tap still
-        // falls through naturally (the Row's own clickable above handles it),
-        // but a horizontal drag has nothing else to fall through to — so it's
-        // resolved right here, via the same shared function the outer gesture
-        // uses, instead of silently doing nothing.
+    Row(
+        modifier = modifier.padding(horizontal = 10.dp, vertical = 6.dp).height(IntrinsicSize.Min),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // This bubble sits above (not inside) the post's own gesture area, so
+        // a horizontal swipe that starts on it is handled here the same way.
         val pillModifier = Modifier
-            .weight(1f)
-            // Item (Phase 3 "text bubble" item): the expand/collapse used to be
-            // an instant cut (maxLines flipping with no size animation at all).
-            // animateContentSize picks up that height change automatically.
-            // Bug fix: this used to use a medium-bouncy spring, which read as
-            // jittery/overshooting on this particular bubble — switched to a
-            // plain tween (smooth ease, no overshoot) instead, or an instant
-            // snap when reduced-motion is on.
-            .animateContentSize(
-                animationSpec = if (reducedAnimations) snap()
-                else tween(durationMillis = 220, easing = FastOutSlowInEasing)
-            )
+            .weight(1f, fill = false)
+            .fillMaxHeight()
+            .heightIn(min = 30.dp)
             .clip(pillShape)
-            .pointerInput(item.id, postText, textExpanded) {
-                if (postText.isBlank()) return@pointerInput
-                awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false)
-                    var totalX = 0f; var totalY = 0f; var claimed = false
-                    while (true) {
-                        val event = awaitPointerEvent(PointerEventPass.Main)
-                        val pressed = event.changes.filter { it.pressed }
-                        if (pressed.isEmpty()) break
-                        val change = pressed[0]
-                        val delta = change.positionChange()
-                        totalX += delta.x; totalY += delta.y
-                        if (!claimed && abs(totalY) > 24f && abs(totalY) > abs(totalX) * 1.3f) claimed = true
-                        if (claimed) change.consume()
-                    }
-                    if (claimed) {
-                        if (totalY > 60f && !textExpanded) onToggleTextExpanded()
-                        else if (totalY < -60f && textExpanded) onToggleTextExpanded()
-                    } else if (abs(totalX) > 80f && abs(totalX) > abs(totalY) * 1.2f) {
-                        // Same threshold the outer page gesture uses, so a
-                        // swipe feels identical whether it starts on the pill
-                        // or anywhere else on the post.
-                        onHorizontalSwipe(totalX)
-                    }
-                }
-            }
-
+            .horizontalSwipeWatcher(onHorizontalSwipe)
+            .clickable(
+                indication = null, interactionSource = remember { MutableInteractionSource() },
+                onClick = onTapAuthor
+            )
         if (liquidGlass) {
             LiquidGlassSurface(modifier = pillModifier, shape = pillShape, tint = dominantColor, backdrop = backdrop) { PillContent() }
         } else {
@@ -2347,9 +2273,6 @@ private fun AuthorRow(
 
         Spacer(Modifier.width(8.dp))
 
-        // Follow button — its own separate rounded pill. Pinned to the TOP of
-        // the row (not vertically centered) so it stays put at the top-right
-        // even as the pill beside it grows taller to show post text.
         // Shared with the profile page's follow button (see FollowButton in
         // GlassTheme.kt) so both look and behave identically.
         FollowButton(
@@ -2358,8 +2281,435 @@ private fun AuthorRow(
             tint = dominantColor,
             backdrop = backdrop,
             onClick = onToggleFollow,
-            modifier = Modifier.align(Alignment.Top)
+            modifier = Modifier.fillMaxHeight().heightIn(min = 30.dp)
         )
+    }
+}
+
+/** Watches a touch on a bubble that sits above the post's own gesture area
+ *  (so the post never sees it): a clear horizontal swipe is claimed — so the
+ *  bubble's own tap/scroll don't also fire — and handed to [onSwipe] with its
+ *  total distance, exactly like a swipe anywhere else on the post. */
+private fun Modifier.horizontalSwipeWatcher(onSwipe: (Float) -> Unit): Modifier = this.pointerInput(Unit) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        var totalX = 0f; var totalY = 0f
+        var claimed = false
+        var vertical = false
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+            if (!change.pressed) break
+            val d = change.positionChange()
+            totalX += d.x; totalY += d.y
+            if (!claimed && !vertical) {
+                if (abs(totalX) > viewConfiguration.touchSlop && abs(totalX) > abs(totalY) * 1.2f) claimed = true
+                else if (abs(totalY) > viewConfiguration.touchSlop) vertical = true
+            }
+            if (claimed) change.consume()
+        }
+        if (claimed && abs(totalX) > 80f) onSwipe(totalX)
+    }
+}
+
+/** A tap that ignores drags (unlike detectTapGestures, which still fires
+ *  after a swipe that stayed inside the element) and long presses. Nothing
+ *  is consumed, so the post's own gestures (double-tap to like, swipes)
+ *  keep working over it. */
+private fun Modifier.quickTap(key: Any?, onTap: () -> Unit): Modifier = this.pointerInput(key) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        var moved = false
+        var upAt = -1L
+        while (true) {
+            val event = awaitPointerEvent()
+            if (event.changes.count { it.pressed } > 1) moved = true
+            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+            if ((change.position - down.position).getDistance() > viewConfiguration.touchSlop) moved = true
+            if (!change.pressed) { upAt = change.uptimeMillis; break }
+        }
+        if (!moved && upAt >= 0 && upAt - down.uptimeMillis < 400L) onTap()
+    }
+}
+
+// ─── Post text bubble ─────────────────────────────────────────────────────────
+
+/** The post's text, in its own edge-to-edge bubble right above the
+ *  interaction bar: compact (two lines, scrollable) until tapped, then it
+ *  grows upward to show everything; tap again to shrink it back. */
+@Composable
+private fun PostTextBubble(
+    text: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    liquidGlass: Boolean,
+    tint: Color,
+    backdrop: GlassBackdrop?,
+    reducedAnimations: Boolean,
+    onHorizontalSwipe: (Float) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val shape = RoundedCornerShape(18.dp)
+    val scroll = rememberScrollState()
+    val screenH = LocalConfiguration.current.screenHeightDp.dp
+    LaunchedEffect(expanded) { if (!expanded) scroll.animateScrollTo(0) }
+    val bubbleModifier = modifier
+        .animateContentSize(
+            animationSpec = if (reducedAnimations) snap()
+            else spring(dampingRatio = 0.84f, stiffness = 320f)
+        )
+        .heightIn(max = if (expanded) screenH * 0.5f else 58.dp)
+        .clip(shape)
+        .horizontalSwipeWatcher(onHorizontalSwipe)
+        .clickable(
+            indication = null, interactionSource = remember { MutableInteractionSource() },
+            onClick = onToggle
+        )
+
+    @Composable
+    fun Body() {
+        Box(Modifier.fillMaxWidth().verticalScroll(scroll).padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Text(
+                text, color = Color.White.copy(alpha = 0.95f),
+                fontSize = 13.sp, lineHeight = 18.sp
+            )
+        }
+    }
+
+    if (liquidGlass) {
+        LiquidGlassSurface(modifier = bubbleModifier, shape = shape, tint = tint, backdrop = backdrop) { Body() }
+    } else {
+        Box(bubbleModifier.background(Color.Black.copy(alpha = 0.55f))) { Body() }
+    }
+}
+
+// ─── Multi-image posts ────────────────────────────────────────────────────────
+
+/** How many tiles go in each row for [count] images (2 → 2; 3 → 2·1;
+ *  4 → 2·2; 5 → 2·2·1; 6 → 2·2·2; 7/8/9 → 3·3·(1/2/3); 10+ → 3·3·3, the
+ *  9th showing "+N" for the rest). */
+private fun gridRowsFor(count: Int): List<Int> = when {
+    count <= 1 -> listOf(1)
+    count == 2 -> listOf(2)
+    count == 3 -> listOf(2, 1)
+    count == 4 -> listOf(2, 2)
+    count == 5 -> listOf(2, 2, 1)
+    count == 6 -> listOf(2, 2, 2)
+    count == 7 -> listOf(3, 3, 1)
+    count == 8 -> listOf(3, 3, 2)
+    else -> listOf(3, 3, 3)
+}
+
+/** Every image of a multi-image post at once: rounded squares with the
+ *  author's profile color as their outline, centered in the space between
+ *  the author row and the bottom bubbles. */
+@Composable
+private fun MultiImageGrid(
+    images: List<MediaGroupItem>,
+    outline: Color,
+    blurred: Boolean,
+    alpha: Float,
+    hiddenIndex: Int?,
+    onTileBounds: (Int, Rect) -> Unit,
+    onAspect: (Int, Float) -> Unit,
+    onTap: (Int) -> Unit
+) {
+    val context = LocalContext.current
+    val count = images.size
+    val rows = remember(count) { gridRowsFor(count) }
+    val starts = remember(rows) { rows.runningFold(0) { acc, n -> acc + n } }
+    val cols = rows.maxOrNull() ?: 1
+    val shape = RoundedCornerShape(16.dp)
+    val rim = remember(outline) {
+        Brush.linearGradient(listOf(lerp(outline, Color.White, 0.35f), outline, lerp(outline, Color.White, 0.2f)))
+    }
+    BoxWithConstraints(
+        Modifier.fillMaxSize().padding(start = 16.dp, end = 16.dp, top = 104.dp, bottom = 176.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        val gap = 8.dp
+        val cellW = (maxWidth - gap * (cols - 1)) / cols
+        val cellH = (maxHeight - gap * (rows.size - 1)) / rows.size
+        val cell = minOf(cellW, cellH).coerceAtLeast(48.dp)
+        Column(
+            verticalArrangement = Arrangement.spacedBy(gap),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .graphicsLayer { this.alpha = alpha }
+                .then(if (blurred) Modifier.blur(90.dp) else Modifier)
+        ) {
+            rows.forEachIndexed { r, n ->
+                Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+                    for (k in 0 until n) {
+                        val i = starts[r] + k
+                        val img = images.getOrNull(i) ?: continue
+                        Box(
+                            Modifier
+                                .size(cell)
+                                .onGloballyPositioned { onTileBounds(i, it.boundsInRoot()) }
+                                .graphicsLayer { this.alpha = if (hiddenIndex == i) 0f else 1f }
+                                .clip(shape)
+                                .background(Color.White.copy(alpha = 0.06f))
+                                .border(2.dp, rim, shape)
+                                .quickTap(i) { onTap(i) }
+                        ) {
+                            AsyncImage(
+                                model = ImageRequest.Builder(context).data(img.thumbUrl.ifBlank { img.mediaUrl }).crossfade(true).build(),
+                                contentDescription = img.altText.ifBlank { null },
+                                contentScale = ContentScale.Crop,
+                                onSuccess = { st ->
+                                    val d = st.result.drawable
+                                    if (d.intrinsicWidth > 0 && d.intrinsicHeight > 0) onAspect(i, d.intrinsicWidth.toFloat() / d.intrinsicHeight)
+                                },
+                                modifier = Modifier.fillMaxSize().padding(2.dp).clip(RoundedCornerShape(14.dp))
+                            )
+                            if (i == 8 && count > 9) {
+                                Box(
+                                    Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.55f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("+${count - 9}", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** The biggest rect of aspect [aspect] (w/h) that fits a [w]×[h] box, centered. */
+private fun fitRect(aspect: Float, w: Float, h: Float): Rect {
+    val a = if (aspect.isFinite() && aspect > 0f) aspect else 1f
+    var fw = w
+    var fh = w / a
+    if (fh > h) { fh = h; fw = h * a }
+    val left = (w - fw) / 2f
+    val top = (h - fh) / 2f
+    return Rect(left, top, left + fw, top + fh)
+}
+
+/** A multi-image post's fullscreen viewer: the picked image zooms from its
+ *  grid tile to full screen (uncropped), then the images can be swiped
+ *  through. [progress] 0 = in its tile, 1 = fullscreen — the zoom flies a
+ *  cropped copy between the tile's rect and the image's fitted rect, so it
+ *  lands exactly where the uncropped pager page takes over. */
+@Composable
+private fun MultiImageViewer(
+    images: List<MediaGroupItem>,
+    pagerState: PagerState,
+    flyPage: Int,
+    progress: Float,
+    settled: Boolean,
+    fromRect: Rect?,
+    aspectFor: (Int) -> Float?,
+    zoomScale: Float,
+    zoomOffset: Offset,
+    interactive: Boolean,
+    onAspect: (Int, Float) -> Unit,
+    onTap: () -> Unit
+) {
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val scope = rememberCoroutineScope()
+    var pendingClose by remember { mutableStateOf<Job?>(null) }
+    BoxWithConstraints(
+        Modifier.fillMaxSize()
+            // A single tap goes back to the grid — held back briefly so a
+            // double-tap (like) doesn't also close it.
+            .pointerInput(interactive) {
+                if (!interactive) return@pointerInput
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    pendingClose?.cancel(); pendingClose = null
+                    var moved = false
+                    var upAt = -1L
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        if (event.changes.count { it.pressed } > 1) moved = true
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if ((change.position - down.position).getDistance() > viewConfiguration.touchSlop) moved = true
+                        if (!change.pressed) { upAt = change.uptimeMillis; break }
+                    }
+                    if (!moved && upAt >= 0 && upAt - down.uptimeMillis < 400L && zoomScale <= 1.02f) {
+                        pendingClose = scope.launch { delay(280); onTap() }
+                    }
+                }
+            }
+    ) {
+        val w = constraints.maxWidth.toFloat()
+        val h = constraints.maxHeight.toFloat()
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.fillMaxSize().graphicsLayer { alpha = if (settled) 1f else 0f },
+            userScrollEnabled = settled && interactive && zoomScale <= 1.02f
+        ) { page ->
+            val img = images[page]
+            Box(
+                Modifier.fillMaxSize().graphicsLayer {
+                    if (page == pagerState.currentPage) {
+                        scaleX = zoomScale; scaleY = zoomScale
+                        translationX = zoomOffset.x; translationY = zoomOffset.y
+                    }
+                },
+                contentAlignment = Alignment.Center
+            ) {
+                AsyncImage(model = img.thumbUrl.ifBlank { img.mediaUrl }, contentDescription = null,
+                    contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+                if (img.mediaUrl.isNotBlank() && img.mediaUrl != img.thumbUrl) {
+                    AsyncImage(
+                        model = ImageRequest.Builder(context).data(img.mediaUrl).crossfade(true).build(),
+                        contentDescription = img.altText.ifBlank { null },
+                        contentScale = ContentScale.Fit,
+                        onSuccess = { st ->
+                            val d = st.result.drawable
+                            if (d.intrinsicWidth > 0 && d.intrinsicHeight > 0) onAspect(page, d.intrinsicWidth.toFloat() / d.intrinsicHeight)
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+            }
+        }
+        if (!settled && fromRect != null && w > 0f && h > 0f) {
+            val page = flyPage.coerceIn(0, images.size - 1)
+            val img = images[page]
+            val tileAspect = if (fromRect.height > 0f) fromRect.width / fromRect.height else 1f
+            val end = fitRect(aspectFor(page) ?: tileAspect, w, h)
+            val p = progress.coerceIn(0f, 1.2f)
+            val left = fromRect.left + (end.left - fromRect.left) * p
+            val top = fromRect.top + (end.top - fromRect.top) * p
+            val rw = (fromRect.width + (end.width - fromRect.width) * p).coerceAtLeast(1f)
+            val rh = (fromRect.height + (end.height - fromRect.height) * p).coerceAtLeast(1f)
+            val corner = (16f * (1f - p.coerceIn(0f, 1f))).dp
+            Box(
+                Modifier
+                    .offset { IntOffset(left.roundToInt(), top.roundToInt()) }
+                    .size(with(density) { rw.toDp() }, with(density) { rh.toDp() })
+                    .clip(RoundedCornerShape(corner))
+            ) {
+                AsyncImage(model = img.thumbUrl.ifBlank { img.mediaUrl }, contentDescription = null,
+                    contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                if (img.mediaUrl.isNotBlank() && img.mediaUrl != img.thumbUrl) {
+                    AsyncImage(model = img.mediaUrl, contentDescription = null,
+                        contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                }
+            }
+        }
+    }
+}
+
+/** Replaces the text bubble while a multi-image post's fullscreen viewer is
+ *  open: every image as a small square (the current one outlined), tap one
+ *  to jump to it or hold and drag along the row to scrub through them. The
+ *  arrows at the screen's edges skip to the previous/next post. */
+@Composable
+private fun ImageSelectorRow(
+    images: List<MediaGroupItem>,
+    currentPage: Int,
+    outline: Color,
+    liquidGlass: Boolean,
+    tint: Color,
+    backdrop: GlassBackdrop?,
+    onSelect: (Int, Boolean) -> Unit,
+    onPrevPost: () -> Unit,
+    onNextPost: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val n = images.size
+    val arrowSize = 40.dp
+    Row(modifier.padding(horizontal = 6.dp).height(52.dp), verticalAlignment = Alignment.CenterVertically) {
+        SelectorArrow(Icons.Default.ChevronLeft, "Previous post", liquidGlass, tint, backdrop, arrowSize, onPrevPost)
+        BoxWithConstraints(Modifier.weight(1f).fillMaxHeight().padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
+            val gap = 5.dp
+            val thumb = ((maxWidth - gap * (n - 1)) / n).coerceIn(20.dp, 44.dp)
+            val stepPx = with(density) { (thumb + gap).toPx() }
+            val latestPage = rememberUpdatedState(currentPage)
+            val latestSelect = rememberUpdatedState(onSelect)
+            Row(
+                Modifier
+                    .horizontalScroll(rememberScrollState())
+                    .pointerInput(n, stepPx) {
+                        // Tap = jump there; hold (or drag) = scrub along the row.
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            fun indexAt(x: Float) = (x / stepPx).toInt().coerceIn(0, n - 1)
+                            var scrubbing = false
+                            var last = indexAt(down.position.x)
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (!change.pressed) {
+                                    if (!scrubbing) latestSelect.value(last, true)
+                                    break
+                                }
+                                val held = change.uptimeMillis - down.uptimeMillis > 220L
+                                val dragged = abs(change.position.x - down.position.x) > viewConfiguration.touchSlop
+                                if (!scrubbing && (held || dragged)) {
+                                    scrubbing = true
+                                    if (last != latestPage.value) latestSelect.value(last, false)
+                                    haptic(context)
+                                }
+                                if (scrubbing) {
+                                    val i = indexAt(change.position.x)
+                                    if (i != last) {
+                                        last = i
+                                        latestSelect.value(i, false)
+                                        haptic(context)
+                                    }
+                                    change.consume()
+                                }
+                            }
+                        }
+                    },
+                horizontalArrangement = Arrangement.spacedBy(gap),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                images.forEachIndexed { i, img ->
+                    val selected = i == currentPage
+                    val thumbScale by animateFloatAsState(if (selected) 1f else 0.86f, spring(dampingRatio = 0.6f, stiffness = 500f), label = "thumbScale")
+                    val shape = RoundedCornerShape(8.dp)
+                    Box(
+                        Modifier
+                            .size(thumb)
+                            .graphicsLayer { scaleX = thumbScale; scaleY = thumbScale; alpha = if (selected) 1f else 0.6f }
+                            .clip(shape)
+                            .background(Color.White.copy(alpha = 0.08f))
+                            .border(
+                                if (selected) 2.dp else 1.dp,
+                                if (selected) lerp(outline, Color.White, 0.3f) else Color.White.copy(alpha = 0.25f),
+                                shape
+                            )
+                    ) {
+                        AsyncImage(
+                            model = ImageRequest.Builder(context).data(img.thumbUrl.ifBlank { img.mediaUrl }).build(),
+                            contentDescription = null, contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
+            }
+        }
+        SelectorArrow(Icons.Default.ChevronRight, "Next post", liquidGlass, tint, backdrop, arrowSize, onNextPost)
+    }
+}
+
+@Composable
+private fun SelectorArrow(
+    icon: ImageVector, description: String, liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
+    size: Dp, onClick: () -> Unit
+) {
+    val m = Modifier.size(size).clip(CircleShape).clickable(onClick = onClick)
+    if (liquidGlass) {
+        LiquidGlassSurface(modifier = m, shape = CircleShape, tint = tint, backdrop = backdrop, contentAlignment = Alignment.Center) {
+            Icon(icon, contentDescription = description, tint = Color.White, modifier = Modifier.size(26.dp))
+        }
+    } else {
+        Box(m.background(Color.Black.copy(0.55f)), contentAlignment = Alignment.Center) {
+            Icon(icon, contentDescription = description, tint = Color.White, modifier = Modifier.size(26.dp))
+        }
     }
 }
 

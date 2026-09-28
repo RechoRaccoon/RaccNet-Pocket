@@ -883,7 +883,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── DMs (item 6) ───────────────────────────────────────────────────────────
     private val _dmConversations = MutableStateFlow<List<DmConversation>>(emptyList())
-    val dmConversations: StateFlow<List<DmConversation>> = _dmConversations
+    // Blocked either way (see BlockedAccounts): never listed, even when an
+    // old chat with them still exists on Bluesky's side.
+    val dmConversations: StateFlow<List<DmConversation>> = combine(_dmConversations, com.mediaviewer.util.BlockedAccounts.version) { list, _ ->
+        list.filterNot { convo -> !convo.isGroup && com.mediaviewer.util.BlockedAccounts.isHidden(convo.member.did) }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     private val _dmConversationsLoading = MutableStateFlow(false)
     val dmConversationsLoading: StateFlow<Boolean> = _dmConversationsLoading
@@ -982,7 +986,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _inboxOpen = MutableStateFlow(false)
     val inboxOpen: StateFlow<Boolean> = _inboxOpen
     private val _inboxItems = MutableStateFlow<List<InboxItem>>(emptyList())
-    val inboxItems: StateFlow<List<InboxItem>> = _inboxItems
+    val inboxItems: StateFlow<List<InboxItem>> = combine(_inboxItems, com.mediaviewer.util.BlockedAccounts.version) { list, _ ->
+        list.mapNotNull { item ->
+            val visible = item.authors.filterNot { com.mediaviewer.util.BlockedAccounts.isHidden(it.did) }
+            when {
+                visible.isEmpty() && item.authors.isNotEmpty() -> null
+                visible.size == item.authors.size -> item
+                else -> item.copy(authors = visible)
+            }
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     private val _inboxLoading = MutableStateFlow(false)
     val inboxLoading: StateFlow<Boolean> = _inboxLoading
     private val _inboxUnreadCount = MutableStateFlow(0)
@@ -1026,37 +1039,68 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun openInbox() {
         if (!_bskyLoggedIn.value) return
         _inboxOpen.value = true
+        // Whatever was prefetched/last loaded shows straight away; the first
+        // page is refreshed underneath it.
         loadInbox(reset = true)
     }
 
+    /** Warms the Inbox's first page in the background (without marking
+     *  anything seen) so opening it is instant. */
+    private fun prefetchInbox() {
+        if (!_bskyLoggedIn.value || _inboxItems.value.isNotEmpty()) return
+        loadInbox(reset = true, markSeen = false)
+    }
+
+    /** Subject posts ("liked your post: …") already looked up, by URI, so
+     *  paging or refreshing never fetches the same post twice. */
+    private val inboxPostCache = java.util.concurrent.ConcurrentHashMap<String, BskyPost>()
+
     fun closeInbox() { _inboxOpen.value = false }
 
-    fun loadMoreInbox() { if (!_inboxLoading.value && inboxCursor != null) loadInbox(reset = false) }
+    fun loadMoreInbox() { if (inboxLoadJob?.isActive != true && inboxCursor != null) loadInbox(reset = false) }
 
-    private fun loadInbox(reset: Boolean) {
-        if (_inboxLoading.value) return
+    private var inboxLoadJob: Job? = null
+    private fun loadInbox(reset: Boolean, markSeen: Boolean = true) {
+        if (inboxLoadJob?.isActive == true) {
+            // A refresh on open while the background prefetch is still going:
+            // let it finish, then just mark everything seen.
+            if (reset && markSeen) viewModelScope.launch(Dispatchers.IO) {
+                inboxLoadJob?.join()
+                _inboxUnreadCount.value = 0
+                bskyRepo.markNotificationsSeen(bskyToken, _bskyDid.value)
+            }
+            return
+        }
         _inboxLoading.value = true
-        viewModelScope.launch(Dispatchers.IO) {
+        inboxLoadJob = viewModelScope.launch(Dispatchers.IO) {
             try {
-                val page = bskyRepo.listNotifications(bskyToken, _bskyDid.value, if (reset) null else inboxCursor).getOrElse {
-                    if (_inboxItems.value.isEmpty()) _errorMessage.value = "Couldn't load your inbox: ${it.message}"
+                // Smaller first page (30) so the list appears quickly; more
+                // pages load as you scroll.
+                val page = bskyRepo.listNotifications(bskyToken, _bskyDid.value, if (reset) null else inboxCursor, limit = if (reset) 30 else 40).getOrElse {
+                    if (_inboxItems.value.isEmpty() && markSeen) _errorMessage.value = "Couldn't load your inbox: ${it.message}"
                     return@launch
+                }
+                if (reset && markSeen) {
+                    // Opening the Inbox is "seeing" it, same as Bluesky —
+                    // sent off on its own, never holding the list up.
+                    _inboxUnreadCount.value = 0
+                    viewModelScope.launch(Dispatchers.IO) { bskyRepo.markNotificationsSeen(bskyToken, _bskyDid.value) }
                 }
                 inboxCursor = page.cursor
                 inboxRaw = if (reset) page.notifications else inboxRaw + page.notifications
-                _inboxItems.value = buildInboxItems(inboxRaw)
-                if (reset) {
-                    // Opening the Inbox is "seeing" it, same as Bluesky.
-                    _inboxUnreadCount.value = 0
-                    bskyRepo.markNotificationsSeen(bskyToken, _bskyDid.value)
-                }
+                // Show the rows right away with whatever previews are already
+                // known, then fill the rest in once their posts arrive.
+                _inboxItems.value = buildInboxItems(inboxRaw, fetchMissing = false)
+                val before = inboxPostCache.size
+                val rebuilt = buildInboxItems(inboxRaw, fetchMissing = true)
+                if (inboxPostCache.size != before) _inboxItems.value = rebuilt
             } finally {
                 _inboxLoading.value = false
             }
         }
     }
 
-    private suspend fun buildInboxItems(raw: List<BskyNotification>): List<InboxItem> {
+    private suspend fun buildInboxItems(raw: List<BskyNotification>, fetchMissing: Boolean = true): List<InboxItem> {
         fun author(a: BskyNotificationAuthor) = AuthorInfo(
             did = a.did, handle = a.handle, displayName = a.displayName?.takeIf { it.isNotBlank() } ?: a.handle, avatarUrl = a.avatar
         )
@@ -1074,7 +1118,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // The posts likes/reposts are about — one batched lookup.
         val subjectUris = groups.mapNotNull { g -> g.first().takeIf { it.reason in groupable && it.reason != "follow" }?.reasonSubject }
             .filter { it.contains("app.bsky.feed.post") }
-        val posts = if (subjectUris.isEmpty()) emptyMap() else bskyRepo.getPostsByUri(bskyToken, _bskyDid.value, subjectUris)
+        val missing = subjectUris.distinct().filterNot { inboxPostCache.containsKey(it) }
+        if (fetchMissing && missing.isNotEmpty()) {
+            inboxPostCache.putAll(bskyRepo.getPostsByUri(bskyToken, _bskyDid.value, missing))
+        }
+        val posts: Map<String, BskyPost> = inboxPostCache
         return groups.map { g ->
             val first = g.first()
             val subject = first.reasonSubject?.let { posts[it] }
@@ -1124,7 +1172,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _newChatState = MutableStateFlow<NewChatState?>(null)
     val newChatState: StateFlow<NewChatState?> = _newChatState
     private val _chatCandidates = MutableStateFlow<List<ChatCandidate>>(emptyList())
-    val chatCandidates: StateFlow<List<ChatCandidate>> = _chatCandidates
+    val chatCandidates: StateFlow<List<ChatCandidate>> = combine(_chatCandidates, com.mediaviewer.util.BlockedAccounts.version) { list, _ ->
+        list.filterNot { com.mediaviewer.util.BlockedAccounts.isHidden(it.author.did) }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     private val _chatSearching = MutableStateFlow(false)
     val chatSearching: StateFlow<Boolean> = _chatSearching
     private val _creatingChat = MutableStateFlow(false)
@@ -1133,21 +1183,77 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun openNewChat(group: Boolean = false, preselected: List<AuthorInfo> = emptyList()) {
         if (!_bskyLoggedIn.value) return
         _newChatState.value = NewChatState(group, preselected)
+        // Fresh follow list every time the popup opens (cheap: one page).
+        chatSuggestionsJob?.cancel()
+        chatSuggestionPool = emptyList(); chatSuggestionCursor = null; chatSuggestionsLoaded = false
         searchChatCandidates("")
     }
-    fun setNewChatGroupMode(group: Boolean) { _newChatState.value = _newChatState.value?.copy(group = group) }
+    fun setNewChatGroupMode(group: Boolean) {
+        _newChatState.value = _newChatState.value?.copy(group = group)
+        if (lastChatQuery.isEmpty()) publishChatSuggestions()
+    }
     fun closeNewChat() { if (!_creatingChat.value) _newChatState.value = null }
 
     private var chatSearchJob: Job? = null
-    /** Blank query: suggestions (people you already chat with, then mutuals). */
+    private var lastChatQuery = ""
+    // "Suggested": the accounts you follow, newest follow first, exactly like
+    // Bluesky's own New chat sheet (InitiateChatFlow) — kept only when they
+    // can actually be messaged (or added to a group, in group mode).
+    private var chatSuggestionPool: List<BskyActorBasic> = emptyList()
+    private var chatSuggestionCursor: String? = null
+    private var chatSuggestionsLoaded = false
+    private var chatSuggestionsJob: Job? = null
+
+    private fun publishChatSuggestions() {
+        val group = _newChatState.value?.group == true
+        _chatCandidates.value = chatSuggestionPool
+            .filter { if (group) it.canBeAddedToGroup else it.canBeMessaged }
+            .distinctBy { it.did }
+            .map { a ->
+                ChatCandidate(
+                    AuthorInfo(did = a.did, handle = a.handle, displayName = a.displayName?.takeIf { it.isNotBlank() } ?: a.handle, avatarUrl = a.avatar),
+                    canMessage = true
+                )
+            }
+    }
+
+    /** Loads the next page(s) of follows for the Suggested list. Keeps going
+     *  until a page adds at least a screenful of messageable people, since
+     *  many follows may not accept messages. */
+    fun loadMoreChatSuggestions() {
+        if (chatSuggestionsJob?.isActive == true) return
+        if (chatSuggestionsLoaded && chatSuggestionCursor == null) return
+        chatSuggestionsJob = viewModelScope.launch(Dispatchers.IO) {
+            if (_chatCandidates.value.isEmpty()) _chatSearching.value = true
+            var added = 0
+            var pages = 0
+            do {
+                val res = bskyRepo.getFollowsForChat(bskyToken, _bskyDid.value, chatSuggestionCursor)
+                val page = res.getOrNull() ?: break
+                chatSuggestionsLoaded = true
+                chatSuggestionCursor = page.second
+                chatSuggestionPool = chatSuggestionPool + page.first
+                added += page.first.count { it.canBeMessaged }
+                pages++
+                if (lastChatQuery.isEmpty()) publishChatSuggestions()
+            } while (chatSuggestionCursor != null && added < 20 && pages < 5)
+            if (lastChatQuery.isEmpty()) _chatSearching.value = false
+        }
+    }
+
+    /** Blank query: suggestions (the people you follow, newest first). */
     fun searchChatCandidates(query: String) {
         chatSearchJob?.cancel()
         val q = query.trim()
+        lastChatQuery = q
         if (q.isEmpty()) {
-            val me = _bskyDid.value
-            _chatCandidates.value = _dmConversations.value.filter { !it.isGroup && it.member.did != me && it.member.did.isNotBlank() }
-                .map { ChatCandidate(it.member, canMessage = true) }.distinctBy { it.author.did }.take(40)
-            _chatSearching.value = false
+            if (chatSuggestionsLoaded) {
+                publishChatSuggestions()
+                _chatSearching.value = chatSuggestionsJob?.isActive == true && _chatCandidates.value.isEmpty()
+            } else {
+                _chatCandidates.value = emptyList()
+                loadMoreChatSuggestions()
+            }
             return
         }
         chatSearchJob = viewModelScope.launch(Dispatchers.IO) {
@@ -1629,7 +1735,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _searchHiddenBehindPost = MutableStateFlow(false)
 
     private val _searchState = MutableStateFlow(SearchState())
-    val searchState: StateFlow<SearchState> = _searchState
+    val searchState: StateFlow<SearchState> = combine(_searchState, com.mediaviewer.util.BlockedAccounts.version) { st, _ ->
+        st.copy(
+            posts = st.posts.filterNot { com.mediaviewer.util.BlockedAccounts.isHidden(it.author.did) },
+            accounts = st.accounts.filterNot { com.mediaviewer.util.BlockedAccounts.isHidden(it.author.did) }
+        )
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, SearchState())
 
     private var searchJob: kotlinx.coroutines.Job? = null
 
@@ -1957,9 +2068,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val subscribedBlogDids: StateFlow<Set<String>> = _subscribedBlogDids
 
     private val _friendsReviews = MutableStateFlow<List<FriendPopfeedReview>>(emptyList())
-    val friendsReviews: StateFlow<List<FriendPopfeedReview>> = _friendsReviews
+    val friendsReviews: StateFlow<List<FriendPopfeedReview>> = combine(_friendsReviews, com.mediaviewer.util.BlockedAccounts.version) { list, _ ->
+        list.filterNot { com.mediaviewer.util.BlockedAccounts.isHidden(it.author.did) }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     private val _friendsBlogs = MutableStateFlow<List<FriendLeafletBlog>>(emptyList())
-    val friendsBlogs: StateFlow<List<FriendLeafletBlog>> = _friendsBlogs
+    val friendsBlogs: StateFlow<List<FriendLeafletBlog>> = combine(_friendsBlogs, com.mediaviewer.util.BlockedAccounts.version) { list, _ ->
+        list.filterNot { com.mediaviewer.util.BlockedAccounts.isHidden(it.author.did) }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     private val _friendsReviewsLoading = MutableStateFlow(false)
     val friendsReviewsLoading: StateFlow<Boolean> = _friendsReviewsLoading
@@ -2346,7 +2461,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // accounts the user follows, so there's no beta-access gate to worry
     // about here.
     private val _liveFriends = MutableStateFlow<List<StreamplaceLiveStream>>(emptyList())
-    val liveFriends: StateFlow<List<StreamplaceLiveStream>> = _liveFriends
+    val liveFriends: StateFlow<List<StreamplaceLiveStream>> = combine(_liveFriends, com.mediaviewer.util.BlockedAccounts.version) { list, _ ->
+        list.filterNot { com.mediaviewer.util.BlockedAccounts.isHidden(it.authorDid) }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     private val _liveFriendsLoading = MutableStateFlow(false)
     val liveFriendsLoading: StateFlow<Boolean> = _liveFriendsLoading
     private var liveFriendsLoaded = false
@@ -2403,7 +2520,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // rather than Mutuals-only, so the two sources stay visually/logically
     // consistent within one section) via the same getAllFollows() list.
     private val _blueskyLiveNow = MutableStateFlow<List<BlueskyLiveNowStream>>(emptyList())
-    val blueskyLiveNow: StateFlow<List<BlueskyLiveNowStream>> = _blueskyLiveNow
+    val blueskyLiveNow: StateFlow<List<BlueskyLiveNowStream>> = combine(_blueskyLiveNow, com.mediaviewer.util.BlockedAccounts.version) { list, _ ->
+        list.filterNot { com.mediaviewer.util.BlockedAccounts.isHidden(it.author.did) }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     private val _blueskyLiveNowLoading = MutableStateFlow(false)
     val blueskyLiveNowLoading: StateFlow<Boolean> = _blueskyLiveNowLoading
     private var blueskyLiveNowLoaded = false
@@ -2835,7 +2954,10 @@ _bskyDid.value          = session.did
             inboxPollingJob = null
             _inboxUnreadCount.value = 0
             _inboxItems.value = emptyList()
+            inboxRaw = emptyList(); inboxCursor = null; inboxPostCache.clear()
             _dmConversations.value = emptyList()
+            _blockedAccounts.value = emptyList()
+            com.mediaviewer.util.BlockedAccounts.clear()
             if (_appMode.value == AppMode.BLUESKY) {
                 _mediaItems.value = emptyList()
                 _screenState.value = ScreenState.SETTINGS
@@ -3084,8 +3206,15 @@ _bskyDid.value          = session.did
      *  no image/video from every feed this app renders. Applied at each fetch
      *  site (rather than as a post-hoc filter on [_mediaItems]) so pagination
      *  cursors and currentIndex math never have to account for hidden items. */
-    private fun filterHidden(items: List<MediaItem>): List<MediaItem> =
-        if (_hideTextOnlyPosts.value) items.filterNot { it.isTextOnly } else items
+    private fun filterHidden(items: List<MediaItem>): List<MediaItem> {
+        // Blocked either way: never in any feed (a post you block from while
+        // viewing it stays on screen as "Blocked" so it can be undone — this
+        // only drops them from what gets loaded).
+        val unblocked = items.filterNot {
+            com.mediaviewer.util.BlockedAccounts.isHidden(it.author.did) || com.mediaviewer.util.BlockedAccounts.isHidden(it.sentByAuthor?.did)
+        }
+        return if (_hideTextOnlyPosts.value) unblocked.filterNot { it.isTextOnly } else unblocked
+    }
 
     fun loadMore() {
         if (feedCursor == null || isLoadingMore) return
@@ -4348,6 +4477,74 @@ _bskyDid.value          = session.did
 
     // ── Block account (item 3) ─────────────────────────────────────────────────
 
+    // Settings → Data and Privacy → Blocked Accounts.
+    private val _blockedAccounts = MutableStateFlow<List<BlockedAccount>>(emptyList())
+    val blockedAccounts: StateFlow<List<BlockedAccount>> = _blockedAccounts
+    private val _blockedAccountsLoading = MutableStateFlow(false)
+    val blockedAccountsLoading: StateFlow<Boolean> = _blockedAccountsLoading
+    private val _blockedAccountsOpen = MutableStateFlow(false)
+    val blockedAccountsOpen: StateFlow<Boolean> = _blockedAccountsOpen
+    /** DIDs with an unblock request in flight (their row shows a spinner). */
+    private val _unblockingDids = MutableStateFlow<Set<String>>(emptySet())
+    val unblockingDids: StateFlow<Set<String>> = _unblockingDids
+
+    fun openBlockedAccounts() {
+        if (!_bskyLoggedIn.value) return
+        _blockedAccountsOpen.value = true
+        loadBlockedAccounts()
+    }
+    fun closeBlockedAccounts() { _blockedAccountsOpen.value = false }
+
+    private var blockedAccountsJob: Job? = null
+    /** Fetches every account you're blocking (most recent first) and seeds
+     *  [com.mediaviewer.util.BlockedAccounts], which the whole app filters by. */
+    fun loadBlockedAccounts() {
+        if (!_bskyLoggedIn.value || blockedAccountsJob?.isActive == true) return
+        blockedAccountsJob = viewModelScope.launch(Dispatchers.IO) {
+            if (_blockedAccounts.value.isEmpty()) _blockedAccountsLoading.value = true
+            var result = bskyRepo.getBlockedAccounts(bskyToken)
+            if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
+                if (refreshBskyTokenIfPossible()) result = bskyRepo.getBlockedAccounts(bskyToken)
+            }
+            result.onSuccess { list ->
+                _blockedAccounts.value = list
+                // Anything already on screen from these accounts goes too.
+                val hidden = list.map { it.author.did }.toSet()
+                if (hidden.isNotEmpty() && _mediaItems.value.any { it.author.did in hidden && !it.isBlocked }) {
+                    val cur = currentItem.value
+                    val kept = _mediaItems.value.filterNot { it.author.did in hidden && !it.isBlocked && it.id != cur?.id }
+                    if (kept.size != _mediaItems.value.size) {
+                        val newIdx = cur?.let { c -> kept.indexOfFirst { it.id == c.id } } ?: -1
+                        _mediaItems.value = kept
+                        _currentIndex.value = if (newIdx >= 0) newIdx else _currentIndex.value.coerceAtMost((kept.size - 1).coerceAtLeast(0))
+                    }
+                }
+            }
+            _blockedAccountsLoading.value = false
+        }
+    }
+
+    /** Unblock from the Blocked Accounts list. */
+    fun unblockAccount(did: String) {
+        val entry = _blockedAccounts.value.firstOrNull { it.author.did == did } ?: return
+        if (did in _unblockingDids.value) return
+        _unblockingDids.value = _unblockingDids.value + did
+        viewModelScope.launch(Dispatchers.IO) {
+            val uri = entry.blockUri.ifBlank { com.mediaviewer.util.BlockedAccounts.blockUriFor(did).orEmpty() }
+            val result = if (uri.isNotBlank()) bskyRepo.unblockUser(bskyToken, _bskyDid.value, uri)
+                else Result.failure<Unit>(IllegalStateException("block record not found"))
+            result.onSuccess {
+                com.mediaviewer.util.BlockedAccounts.removeBlocking(did)
+                _blockedAccounts.value = _blockedAccounts.value.filterNot { it.author.did == did }
+                _mediaItems.value = _mediaItems.value.map {
+                    if (it.author.did == did && it.isBlocked) it.copy(isBlocked = false, blockUri = null) else it
+                }
+                showToast("Unblocked @${entry.author.handle}")
+            }.onFailure { _errorMessage.value = "Unblock failed: ${it.message}" }
+            _unblockingDids.value = _unblockingDids.value - did
+        }
+    }
+
     fun toggleBlockCurrentAuthor() {
         val item = currentItem.value ?: return
         if (_appMode.value != AppMode.BLUESKY) return
@@ -4361,7 +4558,11 @@ _bskyDid.value          = session.did
             viewModelScope.launch(Dispatchers.IO) {
                 if (uri != null) {
                     bskyRepo.unblockUser(bskyToken, _bskyDid.value, uri)
-                        .onSuccess { showToast("Unblocked @${item.author.handle}") }
+                        .onSuccess {
+                            showToast("Unblocked @${item.author.handle}")
+                            com.mediaviewer.util.BlockedAccounts.removeBlocking(targetDid)
+                            _blockedAccounts.value = _blockedAccounts.value.filterNot { it.author.did == targetDid }
+                        }
                         .onFailure {
                             // Revert on failure
                             _mediaItems.value = _mediaItems.value.map { m ->
@@ -4377,6 +4578,9 @@ _bskyDid.value          = session.did
                 bskyRepo.blockUser(bskyToken, _bskyDid.value, targetDid)
                     .onSuccess { uri ->
                         showToast("Blocked @${item.author.handle}")
+                        com.mediaviewer.util.BlockedAccounts.addBlocking(targetDid, uri)
+                        _blockedAccounts.value = listOf(BlockedAccount(item.author, uri)) +
+                            _blockedAccounts.value.filterNot { it.author.did == targetDid }
                         _mediaItems.value = _mediaItems.value.map {
                             if (it.author.did == targetDid) it.copy(isBlocked = true, blockUri = uri) else it
                         }
@@ -4603,6 +4807,10 @@ _bskyDid.value          = session.did
     // and stops retrying once its data has actually loaded (or the user's
     // logged out), so a healthy app isn't left doing pointless work forever.
     private fun startHubBackgroundWarmup() {
+        // Blocked accounts first: everything else filters by them.
+        loadBlockedAccounts()
+        // The Inbox's first page, a little after launch, so it opens instantly.
+        viewModelScope.launch(Dispatchers.IO) { delay(2500); prefetchInbox() }
         viewModelScope.launch(Dispatchers.IO) {
             retryWithBackoff(isDone = { _dmConversations.value.isNotEmpty() || !_bskyLoggedIn.value }) {
                 ensureDmConversationsLoadedSuspend(silent = true)
@@ -5145,8 +5353,71 @@ _bskyDid.value          = session.did
         }
     }
 
+    // Add To's + / − buttons: which lists (by list URI) the picked account
+    // is already on, with the list item to delete when removing them.
+    private val _listMemberships = MutableStateFlow<Map<String, String>>(emptyMap())
+    val listMemberships: StateFlow<Map<String, String>> = _listMemberships
+    private val _listMembershipsLoading = MutableStateFlow(false)
+    val listMembershipsLoading: StateFlow<Boolean> = _listMembershipsLoading
+    /** List URIs with an add/remove in flight. */
+    private val _listMembershipBusy = MutableStateFlow<Set<String>>(emptySet())
+    val listMembershipBusy: StateFlow<Set<String>> = _listMembershipBusy
+    private var listMembershipJob: Job? = null
+
+    private fun loadListMemberships(targetDid: String) {
+        listMembershipJob?.cancel()
+        _listMemberships.value = emptyMap()
+        _listMembershipsLoading.value = true
+        listMembershipJob = viewModelScope.launch(Dispatchers.IO) {
+            bskyRepo.getListMemberships(bskyToken, _bskyDid.value, targetDid)
+                .onSuccess { if (_listPickerTargetDid.value == targetDid) _listMemberships.value = it }
+            if (_listPickerTargetDid.value == targetDid) _listMembershipsLoading.value = false
+        }
+    }
+
+    /** Add To's + / − button: adds the account to [listUri] (and, merged
+     *  with a same-named starter pack, to [additionalListUri] too), or takes
+     *  them back off if they're already on it. The popup stays open. */
+    fun toggleListMembership(listUri: String, additionalListUri: String? = null) {
+        val targetDid = _listPickerTargetDid.value ?: return
+        if (listUri in _listMembershipBusy.value) return
+        val uris = listOfNotNull(listUri, additionalListUri)
+        val removing = _listMemberships.value.containsKey(listUri)
+        _listMembershipBusy.value = _listMembershipBusy.value + listUri
+        tapHaptic()
+        viewModelScope.launch(Dispatchers.IO) {
+            var failed: String? = null
+            for (uri in uris) {
+                if (removing) {
+                    val itemUri = _listMemberships.value[uri] ?: continue
+                    bskyRepo.removeFromList(bskyToken, _bskyDid.value, itemUri)
+                        .onSuccess { _listMemberships.value = _listMemberships.value - uri }
+                        .onFailure { failed = "Couldn't remove them: ${it.message}" }
+                } else {
+                    if (_listMemberships.value.containsKey(uri)) continue
+                    bskyRepo.addToList(bskyToken, _bskyDid.value, uri, targetDid)
+                        .onSuccess { itemUri -> _listMemberships.value = _listMemberships.value + (uri to itemUri) }
+                        .onFailure { failed = "Couldn't add them: ${it.message}" }
+                }
+            }
+            failed?.let { _errorMessage.value = it }
+            // Keep the member counts under each list honest.
+            if (failed == null) {
+                val delta = if (removing) -1 else 1
+                _userLists.value = _userLists.value.map { l ->
+                    if (l.uri in uris) l.copy(itemCount = ((l.itemCount ?: 0) + delta).coerceAtLeast(0)) else l
+                }
+                _userStarterPacks.value = _userStarterPacks.value.map { p ->
+                    if (p.record?.list?.let { it in uris } == true) p.copy(listItemCount = ((p.listItemCount ?: 0) + delta).coerceAtLeast(0)) else p
+                }
+            }
+            _listMembershipBusy.value = _listMembershipBusy.value - listUri
+        }
+    }
+
     private fun openListPicker(targetDid: String) {
         _listPickerTargetDid.value = targetDid
+        loadListMemberships(targetDid)
         // If lists are already cached from prefetch, show immediately
         if (_userLists.value.isNotEmpty() || _userStarterPacks.value.isNotEmpty()) {
             _userListsLoading.value = false
@@ -5170,6 +5441,8 @@ _bskyDid.value          = session.did
 
     fun dismissListPicker() {
         _listPickerTargetDid.value = null
+        listMembershipJob?.cancel()
+        _listMembershipsLoading.value = false
     }
 
     fun addAccountToList(listUri: String, additionalListUri: String? = null) {
@@ -5730,10 +6003,26 @@ _bskyDid.value          = session.did
      *  dataset together — into one file, per the request that Export is a
      *  full backup/share of "their dataset" as a whole rather than picking
      *  one dataset to export. */
+    /** Settings → Media Tagging → Export Dataset: what the row shows while
+     *  the file is being written, and once it's finished. */
+    sealed class DatasetExportState {
+        object Idle : DatasetExportState()
+        data class Working(val stage: String, val postCount: Int = 0) : DatasetExportState()
+        data class Done(val postCount: Int) : DatasetExportState()
+        data class Failed(val message: String) : DatasetExportState()
+    }
+    private val _datasetExportState = MutableStateFlow<DatasetExportState>(DatasetExportState.Idle)
+    val datasetExportState: StateFlow<DatasetExportState> = _datasetExportState
+    private var datasetExportResetJob: Job? = null
+
     fun exportDataset(name: String, uri: android.net.Uri) {
+        if (_datasetExportState.value is DatasetExportState.Working) return
+        datasetExportResetJob?.cancel()
+        _datasetExportState.value = DatasetExportState.Working("Gathering tagged posts…")
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val posts = taggingRepo.exportAllPosts()
+                _datasetExportState.value = DatasetExportState.Working("Writing ${posts.size} posts…", posts.size)
                 val file = DatasetFile(
                     name = name.ifBlank { "Untitled Dataset" },
                     exportedAt = System.currentTimeMillis(),
@@ -5745,8 +6034,16 @@ _bskyDid.value          = session.did
                 getApplication<Application>().contentResolver.openOutputStream(uri)?.use { out ->
                     out.write(json.toByteArray(Charsets.UTF_8))
                 } ?: throw java.io.IOException("Couldn't open the chosen file for writing")
+                _datasetExportState.value = DatasetExportState.Done(posts.size)
+                showToast("Dataset exported (${posts.size} posts)")
             } catch (e: Exception) {
+                _datasetExportState.value = DatasetExportState.Failed(e.message ?: "unknown error")
                 reportDatasetError("Export failed: ${e.message ?: "unknown error"}")
+            }
+            // The finished/failed line stays up for a few seconds, then clears.
+            datasetExportResetJob = viewModelScope.launch {
+                delay(6000)
+                if (_datasetExportState.value !is DatasetExportState.Working) _datasetExportState.value = DatasetExportState.Idle
             }
         }
     }

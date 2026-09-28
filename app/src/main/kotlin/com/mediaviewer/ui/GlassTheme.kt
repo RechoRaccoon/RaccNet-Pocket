@@ -746,7 +746,10 @@ fun FollowButton(
     tint: Color,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    backdrop: GlassBackdrop? = null
+    backdrop: GlassBackdrop? = null,
+    /** You follow them and they follow you: reads "Mutuals" instead of
+     *  "Following" (profile pages). */
+    isMutual: Boolean = false
 ) {
     val shape = RoundedCornerShape(14.dp)
     // Fix 9: one shared light tap on every press, via the shared helper.
@@ -762,7 +765,7 @@ fun FollowButton(
         Box(contentAlignment = Alignment.Center) {
             Text("Following", color = Color.Transparent, fontSize = 11.sp, fontWeight = FontWeight.Medium)
             Text(
-                if (isFollowing) "Following" else "Follow",
+                if (isFollowing && isMutual) "Mutuals" else if (isFollowing) "Following" else "Follow",
                 color = if (liquidGlass) Color.White.copy(alpha = if (isFollowing) 0.65f else 1f)
                         else if (isFollowing) DimGray else Color.White,
                 fontSize = 11.sp, fontWeight = FontWeight.Medium
@@ -770,15 +773,19 @@ fun FollowButton(
         }
     }
 
+    // Centered, so a caller stretching the button (the feed's author row
+    // matches its height to the author bubble beside it) keeps the label
+    // in the middle.
     if (liquidGlass) {
-        LiquidGlassSurface(modifier = clickableModifier, shape = shape, tint = tint, backdrop = backdrop) {
+        LiquidGlassSurface(modifier = clickableModifier, shape = shape, tint = tint, backdrop = backdrop, contentAlignment = Alignment.Center) {
             Box(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) { FollowLabel() }
         }
     } else {
         Box(
             clickableModifier
                 .background(if (isFollowing) Color.White.copy(0.07f) else Color.White.copy(0.14f))
-                .padding(horizontal = 10.dp, vertical = 3.dp)
+                .padding(horizontal = 10.dp, vertical = 3.dp),
+            contentAlignment = Alignment.Center
         ) { FollowLabel() }
     }
 }

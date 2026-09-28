@@ -395,6 +395,7 @@ private fun AppRoot(viewModel: MainViewModel) {
     val customFontName         by viewModel.customFontName.collectAsState()
     val likeTagPhase           by viewModel.likeTagPhase.collectAsState()
     val likeTagPending         by viewModel.likeTagPending.collectAsState()
+    val datasetExportState     by viewModel.datasetExportState.collectAsState()
     // Settings → UI Customization → loading screens on/off (see UiToggles).
     val loadingScreens = com.mediaviewer.util.UiToggles.loadingScreens
 
@@ -803,7 +804,9 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onSwitchBskyAccount = viewModel::switchBskyAccount,
                 onRemoveBskyAccount = viewModel::removeBskyAccount,
                 onDownloadTaggerModel = viewModel::downloadTaggerModel,
-                onDownloadAllE621Saved = viewModel::downloadAllE621SavedMedia
+                onDownloadAllE621Saved = viewModel::downloadAllE621SavedMedia,
+                onOpenBlockedAccounts = viewModel::openBlockedAccounts,
+                datasetExportState = datasetExportState
             ),
             onCancelDownload          = viewModel::cancelDownloadAll,
             tagPostWhenLiked          = tagPostWhenLiked,
@@ -910,7 +913,11 @@ private fun AppRoot(viewModel: MainViewModel) {
             hateFunBlurNsfw           = hateFunBlurNsfw,
             onToggleHateFunBlurNsfw   = viewModel::setHateFunBlurNsfw,
             pinterestThreeColumns     = pinterestThreeColumns,
-            onTogglePinterestThreeColumns = viewModel::setPinterestThreeColumns
+            onTogglePinterestThreeColumns = viewModel::setPinterestThreeColumns,
+            // Share To / Quote Repost / Add To fade the post's own UI away.
+            popupOpen                 = sendPopupTarget != null || quoteRepostTarget != null || listPickerDid != null,
+            likeTagPhase              = likeTagPhase,
+            likeTagPending            = likeTagPending
         )
         } // if (!vrmModeOpen) — see the comment above this call
 
@@ -1167,14 +1174,32 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onSetGroupMode = viewModel::setNewChatGroupMode,
                 onStartChat = viewModel::startChatWith,
                 onCreateGroup = viewModel::createGroupChat,
-                onClose = viewModel::closeNewChat
+                onClose = viewModel::closeNewChat,
+                onLoadMoreSuggestions = viewModel::loadMoreChatSuggestions
             )
         }
 
-        val currentSendTarget = sendPopupTarget
-        if (currentSendTarget != null) {
+        // Settings → Data and Privacy → Blocked Accounts.
+        val blockedAccountsOpen by viewModel.blockedAccountsOpen.collectAsState()
+        if (blockedAccountsOpen) {
+            val blockedAccounts by viewModel.blockedAccounts.collectAsState()
+            val blockedLoading by viewModel.blockedAccountsLoading.collectAsState()
+            val unblocking by viewModel.unblockingDids.collectAsState()
+            com.mediaviewer.ui.BlockedAccountsDialog(
+                accounts = blockedAccounts,
+                loading = blockedLoading,
+                unblocking = unblocking,
+                tint = com.mediaviewer.ui.rememberSelfTint(selfProfile?.author?.avatarUrl, NeutralGlassTint),
+                onUnblock = viewModel::unblockAccount,
+                onClose = viewModel::closeBlockedAccounts
+            )
+        }
+
+        // Share To / Quote Repost fade (and gently scale) in over the post
+        // while its own UI fades away, and reverse that when they close.
+        com.mediaviewer.ui.FadingPopupHost(sendPopupTarget, Modifier.zIndex(10f)) { target ->
             SendDmDialog(
-                target          = currentSendTarget,
+                target          = target,
                 conversations   = dmConversations,
                 loading         = dmConversationsLoading,
                 selected        = sendPopupSelected,
@@ -1188,10 +1213,9 @@ private fun AppRoot(viewModel: MainViewModel) {
             )
         }
 
-        val currentQuoteTarget = quoteRepostTarget
-        if (currentQuoteTarget != null) {
+        com.mediaviewer.ui.FadingPopupHost(quoteRepostTarget, Modifier.zIndex(10f)) { target ->
             QuoteRepostDialog(
-                target      = currentQuoteTarget,
+                target      = target,
                 submitting  = quoteRepostSubmitting,
                 liquidGlass   = liquidGlass,
                 dominantColor = currentDominantColor,
@@ -1210,7 +1234,10 @@ private fun AppRoot(viewModel: MainViewModel) {
             )
         }
 
-        if (listPickerDid != null) {
+        val listMemberships by viewModel.listMemberships.collectAsState()
+        val listMembershipsLoading by viewModel.listMembershipsLoading.collectAsState()
+        val listMembershipBusy by viewModel.listMembershipBusy.collectAsState()
+        com.mediaviewer.ui.FadingPopupHost(listPickerDid, Modifier.zIndex(10f)) { _ ->
             ListPickerDialog(
                 lists         = userLists,
                 starterPacks  = userStarterPacks,
@@ -1220,8 +1247,11 @@ private fun AppRoot(viewModel: MainViewModel) {
                 liquidGlass   = liquidGlass,
                 dominantColor = currentDominantColor,
                 backdrop      = currentBackdrop,
+                memberships   = listMemberships,
+                membershipsLoading = listMembershipsLoading,
+                busy          = listMembershipBusy,
                 onTabChange   = { tab -> viewModel.setPickerTab(tab) },
-                onSelectList  = { listUri, additionalUri -> viewModel.addAccountToList(listUri, additionalUri) },
+                onToggle      = { listUri, additionalUri -> viewModel.toggleListMembership(listUri, additionalUri) },
                 onDismiss     = { viewModel.dismissListPicker() }
             )
         }
@@ -1289,6 +1319,14 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onOpenCamera = viewModel::openCameraMode,
                 onOpenVrm = viewModel::openVrmMode
             )
+            // Settings → App Functionality → "FPS Overlay": the frame rate in
+            // the same color the current page (and the notch ring) wears.
+            if (com.mediaviewer.util.UiToggles.debugOverlay) {
+                com.mediaviewer.ui.DebugOverlay(
+                    tint = notchTint,
+                    modifier = Modifier.align(Alignment.TopCenter).zIndex(14f)
+                )
+            }
         }
 
         // Bug fix (item 3): unconditional opaque backing for the cold-boot
@@ -1309,18 +1347,6 @@ private fun AppRoot(viewModel: MainViewModel) {
         // Space: the old page fading into a drifting starfield + logo.
         com.mediaviewer.ui.SpaceOverlay(controller = pixelController.space, modifier = Modifier.fillMaxSize().zIndex(13f))
 
-        // Settings → App Functionality → "Debug Overlay".
-        if (com.mediaviewer.util.UiToggles.debugOverlay) {
-            val selfAvatar = selfProfile?.author?.avatarUrl
-            val debugTint = com.mediaviewer.ui.rememberSelfTint(selfAvatar, Color.White)
-            com.mediaviewer.ui.DebugOverlay(
-                tint = debugTint,
-                taggingEnabled = tagPostWhenLiked,
-                tagPhase = likeTagPhase,
-                tagPending = likeTagPending,
-                modifier = Modifier.align(Alignment.TopCenter).zIndex(14f)
-            )
-        }
     }
     }
 

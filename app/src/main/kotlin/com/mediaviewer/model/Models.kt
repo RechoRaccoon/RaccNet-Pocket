@@ -314,7 +314,29 @@ data class BskyActorBasic(
     val allowIncomingChat: String get() = runCatching {
         associated?.asJsonObject?.getAsJsonObject("chat")?.get("allowIncoming")?.asString
     }.getOrNull() ?: "following"
+    /** `associated.chat.allowGroupInvites` — null when unset. */
+    val allowGroupInvites: String? get() = runCatching {
+        associated?.asJsonObject?.getAsJsonObject("chat")?.get("allowGroupInvites")?.asString
+    }.getOrNull()
+    /** Bluesky's own canBeMessaged(): "all" yes, "none" no, "following"/unset
+     *  only when they follow you. */
+    val canBeMessaged: Boolean get() = when (allowIncomingChat) {
+        "all" -> true
+        "none" -> false
+        "following" -> viewer?.followedBy != null
+        else -> false
+    }
+    /** Bluesky's own canBeAddedToGroup(). */
+    val canBeAddedToGroup: Boolean get() = when (allowGroupInvites) {
+        "all" -> true
+        "none" -> false
+        "following" -> viewer?.followedBy != null
+        null -> canBeMessaged
+        else -> false
+    }
 }
+/** app.bsky.graph.getFollows with each follow's chat settings + viewer state. */
+data class BskyGetFollowsFullResponse(val follows: List<BskyActorBasic> = emptyList(), val cursor: String? = null)
 data class BskyActorsTypeaheadResponse(val actors: List<BskyActorBasic> = emptyList())
 data class BskyConvoAvailabilityResponse(val canChat: Boolean = false, val convo: BskyConvoView? = null)
 data class BskyCreateGroupRequest(val members: List<String>, val name: String)
@@ -648,11 +670,17 @@ data class BskyProfileBasic(
     val did: String,
     val handle: String,
     val displayName: String? = null,
-    val avatar: String? = null
+    val avatar: String? = null,
+    /** Present on getBlocks/getFollows/getFollowers profile views: carries the
+     *  block record URI (viewer.blocking) used to unblock from Settings. */
+    val viewer: BskyActorViewer? = null
 )
 
 data class BskyGetFollowsResponse(val follows: List<BskyProfileBasic>, val cursor: String? = null)
 data class BskyGetFollowersResponse(val followers: List<BskyProfileBasic>, val cursor: String? = null)
+/** One entry in Settings → Data and Privacy → Blocked Accounts. */
+data class BlockedAccount(val author: AuthorInfo, val blockUri: String)
+
 data class BskyGetBlocksResponse(val blocks: List<BskyProfileBasic>, val cursor: String? = null)
 
 // ── Profile Overhaul ──────────────────────────────────────────────────────────
@@ -954,7 +982,9 @@ data class BskyConvoMember(
     val did: String,
     val handle: String,
     val displayName: String? = null,
-    val avatar: String? = null
+    val avatar: String? = null,
+    /** chat.bsky.actor.defs#profileViewBasic's viewer — blocks either way. */
+    val viewer: BskyActorViewer? = null
 )
 
 data class BskyMessageSender(val did: String)
