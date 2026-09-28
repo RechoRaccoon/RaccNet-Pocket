@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -255,14 +256,24 @@ fun SpaceOverlay(controller: SpaceTransitionController, modifier: Modifier = Mod
             val logoWidth = (maxWidth * 0.74f).coerceAtMost(400.dp)
             val lift = -(maxHeight * 0.12f)
             val breathe by remember { derivedBreathe(time) }
-            Box(Modifier.align(Alignment.Center).offset(y = lift)) {
-                Image(
-                    painter = painterResource(R.drawable.stellar_logo_vector),
-                    contentDescription = null,
-                    modifier = Modifier.width(logoWidth).graphicsLayer {
+            Box(Modifier.align(Alignment.Center).offset(y = lift), contentAlignment = Alignment.Center) {
+                // The glow: a blurred copy of the logo. A blur can only
+                // spread within its own layer, so the layer gets a wide
+                // transparent margin — without it the glow stopped dead at
+                // the logo's rectangle, in a hard flat-edged box.
+                val glowMargin = 48.dp
+                Box(
+                    Modifier.graphicsLayer {
                         scaleX = 1.04f; scaleY = 1.12f; alpha = 0.5f + 0.2f * breathe
                     }.blur(14.dp, edgeTreatment = BlurredEdgeTreatment.Unbounded)
-                )
+                        .padding(glowMargin)
+                ) {
+                    Image(
+                        painter = painterResource(R.drawable.stellar_logo_vector),
+                        contentDescription = null,
+                        modifier = Modifier.width(logoWidth)
+                    )
+                }
                 Image(
                     painter = painterResource(R.drawable.stellar_logo_vector),
                     contentDescription = "Stellar",

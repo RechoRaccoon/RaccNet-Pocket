@@ -529,7 +529,7 @@ fun MainFeedScreen(
                     // Opens your own profile's Likes tab (an overlay), so
                     // the Hub stays underneath it.
                     onShowLikes               = onShowLikes,
-                    onShowFriends             = { onShowFriends(); onSetScreen(ScreenState.FEED) },
+                    onShowFriends             = onShowFriends, // opens straight into Explore (grid) mode itself
                     onShowE621Following       = { onShowE621Following(); onSetScreen(ScreenState.FEED) },
                     onToggleReducedAnimations = onToggleReducedAnimations,
                     classicProfileTabRow      = classicProfileTabRow,

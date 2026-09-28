@@ -271,8 +271,6 @@ private fun BrowserOverlayWindow(
             clippingEnabled = false
         )
     ) {
-        val popupView = androidx.compose.ui.platform.LocalView.current
-        val onScreen = remember { IntArray(2) }
         Box(
             Modifier
                 .size(with(density) { winW.toDp() }, with(density) { winH.toDp() })
@@ -284,26 +282,23 @@ private fun BrowserOverlayWindow(
                 // the finger while dragging, so positions relative to it
                 // would chase their own tail. Buttons on the bar still get
                 // plain taps; a drag only takes over past the touch slop.
+                // Resize: the bottom-right grip. Resizing keeps the window's
+                // top-left fixed, so the window's own coordinates stay
+                // stable under the finger. (Moving is handled by the title
+                // bar below, in real screen coordinates.)
                 .pointerInput(spec.id) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
-                        val inBar = down.position.y <= barPx
                         val inGrip = down.position.x >= size.width - gripPx && down.position.y >= size.height - gripPx
-                        if (!inBar && !inGrip) return@awaitEachGesture
-                        fun screen(p: androidx.compose.ui.geometry.Offset): androidx.compose.ui.geometry.Offset {
-                            popupView.getLocationOnScreen(onScreen)
-                            return androidx.compose.ui.geometry.Offset(p.x + onScreen[0], p.y + onScreen[1])
-                        }
-                        var last = if (inGrip) down.position else screen(down.position)
+                        if (!inGrip) return@awaitEachGesture
+                        var last = down.position
                         var travelled = 0f
                         var dragging = false
                         while (true) {
                             val event = awaitPointerEvent()
                             val ch = event.changes.firstOrNull { it.id == down.id } ?: break
                             if (!ch.pressed) break
-                            // Resizing keeps the window's top-left fixed, so
-                            // window coordinates are stable for the grip.
-                            val now = if (inGrip) ch.position else screen(ch.position)
+                            val now = ch.position
                             val d = now - last
                             last = now
                             if (!dragging) {
@@ -314,12 +309,9 @@ private fun BrowserOverlayWindow(
                             }
                             ch.consume()
                             val c = current
-                            live = if (inGrip) c.copy(
+                            live = c.copy(
                                 w = (c.w + d.x / rootW).coerceIn(minW, 1f),
                                 h = (c.h + d.y / rootH).coerceIn(minH, 1f)
-                            ) else c.copy(
-                                x = (c.x + d.x / rootW).coerceIn(-c.w + 0.1f, 0.9f),
-                                y = (c.y + d.y / rootH).coerceIn(0f, 0.95f)
                             )
                         }
                         if (dragging) latestOnChange(current)
@@ -327,8 +319,64 @@ private fun BrowserOverlayWindow(
                 }
         ) {
             Column(Modifier.fillMaxSize()) {
+                Box(Modifier.fillMaxWidth().height(BAR_HEIGHT).background(barColor)) {
+                // Move: press anywhere on the title bar (except its buttons)
+                // and drag. This used to be measured in the window's own
+                // coordinates — but the window moves under the finger, and
+                // its new position lands a frame or two after each touch,
+                // so every move was measured against a stale position and
+                // the window jittered/flew about. A plain Android view
+                // behind the bar reads the finger's true position on the
+                // SCREEN (rawX/rawY), and the window is placed from where
+                // the drag started + how far the finger has gone — no
+                // build-up of errors. A tap (no drag) edits the address.
+                val slopPx = with(density) { 8.dp.toPx() }
+                val latestRootW by rememberUpdatedState(rootW)
+                val latestRootH by rememberUpdatedState(rootH)
+                AndroidView(
+                    modifier = Modifier.matchParentSize(),
+                    factory = { ctx ->
+                        android.view.View(ctx).apply {
+                            var startX = 0f; var startY = 0f
+                            var startSpec = current
+                            var dragging = false
+                            setOnTouchListener { v, ev ->
+                                when (ev.actionMasked) {
+                                    android.view.MotionEvent.ACTION_DOWN -> {
+                                        startX = ev.rawX; startY = ev.rawY
+                                        startSpec = current; dragging = false
+                                    }
+                                    android.view.MotionEvent.ACTION_MOVE -> {
+                                        val dx = ev.rawX - startX; val dy = ev.rawY - startY
+                                        if (!dragging && kotlin.math.hypot(dx, dy) >= slopPx) {
+                                            dragging = true; editing = false
+                                            v.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+                                        }
+                                        if (dragging) {
+                                            val w = latestRootW.coerceAtLeast(1f); val h = latestRootH.coerceAtLeast(1f)
+                                            live = startSpec.copy(
+                                                x = (startSpec.x + dx / w).coerceIn(-startSpec.w + 0.1f, 0.9f),
+                                                y = (startSpec.y + dy / h).coerceIn(0f, 0.95f)
+                                            )
+                                        }
+                                    }
+                                    android.view.MotionEvent.ACTION_UP -> {
+                                        if (dragging) latestOnChange(current)
+                                        else { urlField = spec.url; editing = true }
+                                        dragging = false
+                                    }
+                                    android.view.MotionEvent.ACTION_CANCEL -> {
+                                        if (dragging) latestOnChange(current)
+                                        dragging = false
+                                    }
+                                }
+                                true
+                            }
+                        }
+                    }
+                )
                 Row(
-                    Modifier.fillMaxWidth().height(BAR_HEIGHT).background(barColor).padding(horizontal = 4.dp),
+                    Modifier.fillMaxWidth().height(BAR_HEIGHT).padding(horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
@@ -350,10 +398,12 @@ private fun BrowserOverlayWindow(
                                 .background(Color.White.copy(0.1f)).padding(horizontal = 6.dp, vertical = 3.dp)
                         )
                     } else {
+                        // Not clickable itself: taps (and drags) fall through
+                        // to the bar's drag view behind it — a tap edits.
                         Text(
                             spec.url.removePrefix("https://").removePrefix("http://").ifBlank { "Tap to enter a URL" },
                             color = Color.White.copy(0.85f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f).clickable { urlField = spec.url; editing = true }.padding(horizontal = 4.dp)
+                            modifier = Modifier.weight(1f).padding(horizontal = 4.dp)
                         )
                     }
                     Box(
@@ -364,6 +414,7 @@ private fun BrowserOverlayWindow(
                         Modifier.size(26.dp).clip(CircleShape).clickable { tap(); onRemove(spec.id) },
                         contentAlignment = Alignment.Center
                     ) { Icon(Icons.Default.Close, contentDescription = "Remove overlay", tint = Color.White.copy(0.8f), modifier = Modifier.size(14.dp)) }
+                }
                 }
                 Box(Modifier.fillMaxWidth().weight(1f)) {
                     AndroidView(

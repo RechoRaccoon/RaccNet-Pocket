@@ -20,6 +20,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -106,8 +107,10 @@ fun DmInboxOverlay(
     // the other side of the conversation. Falls back to profileTint at the
     // conversation-picker screen, where there's no single "other person"
     // yet, and to NeutralGlassTint if the other person has no avatar.
-    val theirTint = if (thread != null) {
-        if (thread.convo.member.avatarUrl != null) rememberDominantColor(thread.convo.member.avatarUrl!!) else NeutralGlassTint
+    // Group chats have no single "other person": they keep your colors.
+    val isGroup = thread?.convo?.isGroup == true
+    val theirTint = if (thread != null && !isGroup) {
+        rememberAuthorProfileTint(thread.convo.member.did, thread.convo.member.avatarUrl)
     } else profileTint
     val headerTint = if (thread != null) theirTint else profileTint
 
@@ -141,7 +144,9 @@ fun DmInboxOverlay(
                 )
         ) {
             if (liquidGlass) {
-                if (thread != null) SpaceSky(theirTint, Modifier.matchParentSize(), bottomColor = profileTint)
+                // The two-tone fade into the other person's color is for 1:1
+                // chats only; group chats stay in your own colors.
+                if (thread != null && !isGroup) SpaceSky(theirTint, Modifier.matchParentSize(), bottomColor = profileTint)
                 else SpaceSky(profileTint, Modifier.matchParentSize())
             }
         }
@@ -166,7 +171,15 @@ fun DmInboxOverlay(
                         tint = Color.White, modifier = Modifier.size(17.dp)
                     )
                 }
-                if (thread != null) {
+                if (thread != null && isGroup) {
+                    DmConvoAvatar(thread.convo, 30.dp)
+                    Column(Modifier.weight(1f)) {
+                        Text(thread.convo.member.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        val count = maxOf(thread.convo.memberCount, thread.members.size + 1, thread.convo.groupMembers.size + 1)
+                        Text("$count members", color = DimGray, fontSize = 11.sp, maxLines = 1)
+                    }
+                } else if (thread != null) {
                     if (thread.convo.member.avatarUrl != null) {
                         AsyncImage(model = thread.convo.member.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
                             modifier = Modifier.size(28.dp).clip(CircleShape).clickable { tap(); onTapAuthor(thread.convo.member) })
@@ -236,15 +249,16 @@ private fun DmConversationPicker(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            if (convo.member.avatarUrl != null) {
-                                AsyncImage(model = convo.member.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                                    modifier = Modifier.size(40.dp).clip(CircleShape))
-                            } else {
-                                Box(Modifier.size(40.dp).clip(CircleShape).background(Color.White.copy(0.15f)))
-                            }
+                            DmConvoAvatar(convo, 40.dp)
                             Column {
+                                // Group chats: the group's name, then its
+                                // newest message (instead of a handle).
                                 Text(convo.member.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text("@${convo.member.handle}", color = DimGray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    if (convo.isGroup) convo.lastMessageText.ifBlank { "${maxOf(convo.memberCount, convo.groupMembers.size + 1)} members" }
+                                    else "@${convo.member.handle}",
+                                    color = DimGray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
                     }
@@ -275,7 +289,10 @@ private fun DmThreadView(
     val scope = rememberCoroutineScope()
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
     var text by remember { mutableStateOf("") }
-    val myDid = selfDid.ifBlank { thread.messages.firstOrNull { it.sender?.did != thread.convo.member.did }?.sender?.did ?: "" }
+    val isGroup = thread.convo.isGroup
+    val myDid = selfDid.ifBlank {
+        if (isGroup) "" else thread.messages.firstOrNull { it.sender?.did != thread.convo.member.did }?.sender?.did ?: ""
+    }
 
     // Item 12: dominant colors for both sides of the conversation, the same
     // pattern used everywhere else in the app for tinting glass to a
@@ -283,9 +300,41 @@ private fun DmThreadView(
     // an avatar isn't available (e.g. no self avatar yet, or the other
     // person has none set).
     val myTint = rememberSelfTint(selfAvatarUrl, VoteGreenTint)
-    val theirTint = if (thread.convo.member.avatarUrl != null) rememberDominantColor(thread.convo.member.avatarUrl!!) else NeutralGlassTint
-    fun isMine(m: BskyMessageView) = m.sender?.did != thread.convo.member.did
-    fun nameOf(m: BskyMessageView) = if (isMine(m)) "yourself" else thread.convo.member.displayName.ifBlank { "@" + thread.convo.member.handle }
+    // 1:1: the other person's profile colors. Group chats: every sender
+    // wears their own (see senderTint).
+    val theirTint = if (isGroup) profileTint else rememberAuthorProfileTint(thread.convo.member.did, thread.convo.member.avatarUrl)
+    fun isMine(m: BskyMessageView) =
+        if (myDid.isNotBlank()) m.sender?.did == myDid else m.sender?.did != thread.convo.member.did
+    /** Who sent [m] (group chats: looked up among the members). */
+    fun senderOf(m: BskyMessageView): com.mediaviewer.model.AuthorInfo {
+        if (!isGroup) return thread.convo.member
+        val did = m.sender?.did.orEmpty()
+        return thread.members[did] ?: thread.convo.groupMembers.firstOrNull { it.did == did }
+            ?: com.mediaviewer.model.AuthorInfo(did = did, handle = did, displayName = "Member", avatarUrl = null)
+    }
+    fun displayNameOf(a: com.mediaviewer.model.AuthorInfo) = a.displayName.ifBlank { "@" + a.handle }
+    fun nameOf(m: BskyMessageView) = if (isMine(m)) "yourself" else displayNameOf(senderOf(m))
+    // Group chats: each sender's profile color, worked out once per sender.
+    val groupTints = remember(thread.convo.convoId) { androidx.compose.runtime.mutableStateMapOf<String, Color>() }
+    fun tintOf(m: BskyMessageView): Color = when {
+        isMine(m) -> myTint
+        !isGroup -> theirTint
+        else -> groupTints[m.sender?.did.orEmpty()] ?: profileTint
+    }
+    if (isGroup) {
+        // Each member's profile colors (banner + avatar blend), the same
+        // colors their profile page wears.
+        val senders = remember(thread.messages, thread.members) {
+            thread.messages.mapNotNull { it.sender?.did }.distinct().filter { it != myDid }
+        }
+        senders.forEach { did ->
+            androidx.compose.runtime.key(did) {
+                val a = thread.members[did]
+                val t = rememberAuthorProfileTint(did, a?.avatarUrl)
+                androidx.compose.runtime.SideEffect { groupTints[did] = t }
+            }
+        }
+    }
 
     // Swipe a message to reply to it (Bluesky's own DM replies).
     var replyTarget by remember(thread.convo.convoId) { mutableStateOf<BskyMessageView?>(null) }
@@ -369,15 +418,48 @@ private fun DmThreadView(
                                 }
                             }
                         }
-                        items(thread.messages, key = { it.id }) { msg ->
+                        itemsIndexed(thread.messages, key = { _, m -> m.id }) { index, msg ->
+                            if (msg.isSystem) {
+                                // Group chats: "X added Y" etc., as a small
+                                // centered note rather than a bubble.
+                                DmSystemNote(msg, thread.members, myDid)
+                                return@itemsIndexed
+                            }
                             val mine = isMine(msg)
+                            val sender = if (isGroup && !mine) senderOf(msg) else null
+                            val prev = thread.messages.getOrNull(index - 1)
+                            val firstOfRun = prev == null || prev.isSystem || prev.sender?.did != msg.sender?.did
+                            Column(Modifier.fillMaxWidth()) {
+                            if (sender != null && firstOfRun) {
+                                // The sender's name above the first message of a run.
+                                Text(
+                                    displayNameOf(sender), color = androidx.compose.ui.graphics.lerp(tintOf(msg), Color.White, 0.5f),
+                                    fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(start = 40.dp, top = 4.dp, bottom = 2.dp)
+                                )
+                            }
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
+                            if (sender != null) {
+                                // Group chats: the sender's avatar beside each of their messages.
+                                val ring = tintOf(msg)
+                                Box(
+                                    Modifier.padding(end = 6.dp, bottom = 2.dp).size(30.dp).clip(CircleShape)
+                                        .background(ring.copy(alpha = 0.35f)).border(1.dp, ring.copy(alpha = 0.8f), CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (sender.avatarUrl != null) AsyncImage(
+                                        model = sender.avatarUrl, contentDescription = displayNameOf(sender),
+                                        contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize().clip(CircleShape)
+                                    ) else Text(displayNameOf(sender).take(1).uppercase(), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
                             DmBubble(
-                                msg, isMine = mine, tint = if (mine) myTint else theirTint,
+                                msg, isMine = mine, tint = tintOf(msg), modifier = Modifier.weight(1f),
                                 liquidGlass = liquidGlass, embedded = thread.embeddedPosts[msg.id],
                                 backdrop = backdrop, onOpenSharedPostsFeed = onOpenSharedPostsFeed,
                                 myDid = myDid,
-                                replyName = msg.replyTo?.let { r -> if (r.sender?.did == thread.convo.member.did) thread.convo.member.displayName.ifBlank { "@" + thread.convo.member.handle } else "You" },
-                                replyTint = msg.replyTo?.let { r -> if (r.sender?.did == thread.convo.member.did) theirTint else myTint } ?: Color.White,
+                                replyName = msg.replyTo?.let { r -> if (isMine(r)) "You" else displayNameOf(senderOf(r)) },
+                                replyTint = msg.replyTo?.let { r -> tintOf(r) } ?: Color.White,
                                 highlighted = highlightId == msg.id,
                                 onReply = { startReply(msg) },
                                 onLongPress = { bounds -> picker = msg to bounds },
@@ -390,6 +472,8 @@ private fun DmThreadView(
                                     }
                                 }
                             )
+                            }
+                            }
                         }
                     }
                 }
@@ -429,7 +513,7 @@ private fun DmThreadView(
                 replyTarget?.let { shown = it }
                 val target = shown
                 if (target != null) {
-                    val accent = if (isMine(target)) myTint else theirTint
+                    val accent = tintOf(target)
                     ReplyPreviewBar(
                         name = nameOf(target),
                         snippet = target.text.ifBlank { if (thread.embeddedPosts[target.id] != null) "Shared a post" else "Message" },
@@ -494,7 +578,7 @@ private fun DmThreadView(
             anchor = bounds,
             alignEnd = mine,
             myReactions = msg.reactions.orEmpty().filter { it.sender?.did == myDid }.map { it.value }.toSet(),
-            tint = if (mine) myTint else theirTint,
+            tint = tintOf(msg),
             liquidGlass = liquidGlass, backdrop = backdrop,
             onPick = { emoji ->
                 view.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM)
@@ -552,7 +636,8 @@ private fun DmBubble(
     onReply: () -> Unit = {},
     onLongPress: (androidx.compose.ui.geometry.Rect) -> Unit = {},
     onToggleReaction: (String) -> Unit = {},
-    onJumpToReply: (String) -> Unit = {}
+    onJumpToReply: (String) -> Unit = {},
+    modifier: Modifier = Modifier
 ) {
     val tap = rememberHapticTap()
     val view = androidx.compose.ui.platform.LocalView.current
@@ -571,7 +656,7 @@ private fun DmBubble(
     val flash by androidx.compose.animation.core.animateFloatAsState(if (highlighted) 1f else 0f, androidx.compose.animation.core.tween(350), label = "replyFlash")
 
     Box(
-        Modifier.fillMaxWidth().pointerInput(msg.id, isMine) {
+        modifier.fillMaxWidth().pointerInput(msg.id, isMine) {
             // +1 = pull right (their messages), -1 = pull left (yours).
             val dir = if (isMine) -1f else 1f
             var raw = 0f
@@ -938,3 +1023,100 @@ private fun PickerAction(label: String, icon: androidx.compose.ui.graphics.vecto
 }
 
 private val VoteGreenTint = Color(0xFF3E9B57)
+
+
+/**
+ * A conversation's picture: the person's avatar for a 1:1 chat, or — for a
+ * group chat — small avatars of its members arranged to fill the same
+ * circle: two overlapping, three in a triangle, four in a square, and for
+ * bigger groups three faces plus a "+N" for everyone else.
+ */
+@Composable
+internal fun DmConvoAvatar(convo: DmConversation, size: androidx.compose.ui.unit.Dp) {
+    if (!convo.isGroup) {
+        if (convo.member.avatarUrl != null) {
+            AsyncImage(model = convo.member.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                modifier = Modifier.size(size).clip(CircleShape))
+        } else {
+            Box(Modifier.size(size).clip(CircleShape).background(Color.White.copy(0.15f)))
+        }
+        return
+    }
+    val members = convo.groupMembers
+    val total = maxOf(convo.memberCount - 1, members.size) // everyone but you
+    // (x, y, diameter) as fractions of [size]; x/y are the circle's top-left.
+    val slots: List<Triple<Float, Float, Float>> = when {
+        total <= 1 -> listOf(Triple(0f, 0f, 1f))
+        total == 2 -> listOf(Triple(0f, 0f, 0.64f), Triple(0.36f, 0.36f, 0.64f))
+        total == 3 -> listOf(Triple(0.24f, 0f, 0.52f), Triple(0f, 0.46f, 0.52f), Triple(0.48f, 0.46f, 0.52f))
+        else -> listOf(Triple(0f, 0f, 0.5f), Triple(0.5f, 0f, 0.5f), Triple(0f, 0.5f, 0.5f), Triple(0.5f, 0.5f, 0.5f))
+    }
+    val shown = if (total > 4) 3 else slots.size
+    val extra = total - shown
+    Box(Modifier.size(size)) {
+        slots.forEachIndexed { i, (fx, fy, fd) ->
+            val d = size * fd
+            val m = Modifier.offset(x = size * fx, y = size * fy).size(d)
+                .clip(CircleShape).background(Color(0xFF1C1C22))
+                .border(maxOf(1.dp, size * 0.03f), Color(0xFF0E0E12), CircleShape)
+            if (i >= shown) {
+                // "+N": everyone who doesn't fit.
+                Box(m.background(Color.White.copy(alpha = 0.16f)), contentAlignment = Alignment.Center) {
+                    Text(
+                        "+${if (extra > 99) 99 else extra}", color = Color.White,
+                        fontSize = (size.value * fd * 0.36f).sp, fontWeight = FontWeight.Bold, maxLines = 1
+                    )
+                }
+            } else {
+                val a = members.getOrNull(i)
+                Box(m, contentAlignment = Alignment.Center) {
+                    if (a?.avatarUrl != null) AsyncImage(
+                        model = a.avatarUrl, contentDescription = a.displayName, contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize().clip(CircleShape)
+                    ) else Text(
+                        (a?.displayName ?: "?").take(1).uppercase(), color = Color.White,
+                        fontSize = (size.value * fd * 0.4f).sp, fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** A group chat's system notice ("Alex added Sam", "Group renamed …"). */
+@Composable
+private fun DmSystemNote(msg: BskyMessageView, members: Map<String, com.mediaviewer.model.AuthorInfo>, myDid: String) {
+    val text = remember(msg.id, members) { describeSystemMessage(msg, members, myDid) }
+    Box(Modifier.fillMaxWidth().padding(vertical = 4.dp), contentAlignment = Alignment.Center) {
+        Text(
+            text, color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(alpha = 0.25f))
+                .padding(horizontal = 10.dp, vertical = 4.dp)
+        )
+    }
+}
+
+private fun describeSystemMessage(msg: BskyMessageView, members: Map<String, com.mediaviewer.model.AuthorInfo>, myDid: String): String {
+    val data = msg.data?.takeIf { it.isJsonObject }?.asJsonObject ?: return "Group updated"
+    val type = runCatching { data.get("\$type")?.asString }.getOrNull().orEmpty().substringAfter('#')
+    fun who(key: String): String {
+        val did = runCatching { data.getAsJsonObject(key)?.get("did")?.asString }.getOrNull() ?: return "Someone"
+        if (did == myDid) return "You"
+        return members[did]?.displayName?.takeIf { it.isNotBlank() } ?: members[did]?.handle ?: "Someone"
+    }
+    fun str(key: String) = runCatching { data.get(key)?.asString }.getOrNull().orEmpty()
+    return when (type) {
+        "systemMessageDataAddMember" -> "${who("addedBy")} added ${who("member")}"
+        "systemMessageDataRemoveMember" -> "${who("removedBy")} removed ${who("member")}"
+        "systemMessageDataMemberJoin" -> "${who("member")} joined"
+        "systemMessageDataMemberLeave" -> "${who("member")} left"
+        "systemMessageDataLockConvo", "systemMessageDataLockConvoPermanently" -> "${who("lockedBy")} locked the group"
+        "systemMessageDataUnlockConvo" -> "${who("unlockedBy")} unlocked the group"
+        "systemMessageDataEditGroup" -> str("newName").takeIf { it.isNotBlank() }?.let { "Group renamed to \"$it\"" } ?: "Group edited"
+        "systemMessageDataCreateJoinLink" -> "Invite link created"
+        "systemMessageDataEditJoinLink" -> "Invite link edited"
+        "systemMessageDataEnableJoinLink" -> "Invite link turned on"
+        "systemMessageDataDisableJoinLink" -> "Invite link turned off"
+        else -> "Group updated"
+    }
+}

@@ -883,7 +883,7 @@ private fun AtProtocolPageContent(
         // lazily at send time), so this quick-access row should show all of
         // them, not just people already messaged. Already sorted by most
         // recent interaction by loadDmRecipients.
-        val friends = remember(dmConversations) { dmConversations.map { it.member } }
+        val friends = remember(dmConversations) { dmConversations.filter { !it.isGroup }.map { it.member } }
         Row(
             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)

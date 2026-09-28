@@ -1112,7 +1112,7 @@ private fun AppRoot(viewModel: MainViewModel) {
         if (currentSendTarget != null) {
             SendDmDialog(
                 target          = currentSendTarget,
-                conversations   = dmConversations,
+                allConversations = dmConversations,
                 loading         = dmConversationsLoading,
                 selected        = sendPopupSelected,
                 sending         = sendPopupSending,
@@ -1189,6 +1189,16 @@ private fun AppRoot(viewModel: MainViewModel) {
             val notchTint = if (vrmModeOpen || cameraModeOpen || composePostOpen) {
                 val selfAvatar = selfProfile?.author?.avatarUrl
                 com.mediaviewer.ui.rememberSelfTint(selfAvatar, currentDominantColor)
+            } else if (dmInboxOpen) {
+                // DMs: in a 1:1 chat the notch wears the other person's
+                // profile colors (like the chat itself); the inbox and group
+                // chats keep yours.
+                val openThread = dmThread
+                if (openThread != null && !openThread.convo.isGroup && openThread.convo.member.did.isNotBlank()) {
+                    com.mediaviewer.ui.rememberAuthorProfileTint(openThread.convo.member.did, openThread.convo.member.avatarUrl)
+                } else {
+                    com.mediaviewer.ui.rememberSelfTint(selfProfile?.author?.avatarUrl, currentDominantColor)
+                }
             } else if (profileVisible && openProfile != null) {
                 // On a profile page the notch wears that profile's own color —
                 // the same banner/avatar blend the page's glass uses.

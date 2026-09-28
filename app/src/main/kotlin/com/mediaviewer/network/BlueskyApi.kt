@@ -317,6 +317,16 @@ interface BlueskyApi {
         @Query("cursor") cursor: String? = null
     ): Response<BskyGetConvoLogResponse>
 
+    // Group chats: the full member list (convoView only lists a few).
+    @Headers("atproto-proxy: did:web:api.bsky.chat#bsky_chat")
+    @GET("xrpc/chat.bsky.convo.getConvoMembers")
+    suspend fun getConvoMembers(
+        @Header("Authorization") token: String,
+        @Query("convoId") convoId: String,
+        @Query("limit") limit: Int = 100,
+        @Query("cursor") cursor: String? = null
+    ): Response<BskyGetConvoMembersResponse>
+
     @Headers("atproto-proxy: did:web:api.bsky.chat#bsky_chat")
     @GET("xrpc/chat.bsky.convo.getMessages")
     suspend fun getMessages(

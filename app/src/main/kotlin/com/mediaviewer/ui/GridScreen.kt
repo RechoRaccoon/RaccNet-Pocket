@@ -513,7 +513,10 @@ private fun SentByTileOverlay(
         val label = message.trim().ifBlank { sender.displayName.ifBlank { "@" + sender.handle } }
         val content: @Composable BoxScope.() -> Unit = {
             Row(
-                Modifier.padding(start = 3.dp, end = 8.dp, top = 3.dp, bottom = 3.dp),
+                // A dark wash under the text, so it stays readable over
+                // bright media.
+                Modifier.clip(shape).background(Color.Black.copy(alpha = 0.38f))
+                    .padding(start = 3.dp, end = 8.dp, top = 3.dp, bottom = 3.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(5.dp)
             ) {

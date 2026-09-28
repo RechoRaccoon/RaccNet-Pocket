@@ -40,6 +40,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -897,7 +898,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Item 12 follow-up: infinite-scroll-up for older messages — separate
         // from `loading` (the initial/full-thread spinner) so scrolling up to
         // fetch more doesn't replace the whole thread view with a spinner.
-        val loadingMore: Boolean = false
+        val loadingMore: Boolean = false,
+        /** Group chats: every member by DID (names/avatars for each sender). */
+        val members: Map<String, AuthorInfo> = emptyMap()
     )
     private val _dmInboxOpen = MutableStateFlow(false)
     val dmInboxOpen: StateFlow<Boolean> = _dmInboxOpen
@@ -1483,13 +1486,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openDmThread(convo: DmConversation) {
         if (convo.convoId.isBlank()) return // no history yet — nothing to show
-        _dmThread.value = DmThreadState(convo = convo, loading = true)
+        _dmThread.value = DmThreadState(
+            convo = convo, loading = true,
+            members = if (convo.isGroup) convo.groupMembers.associateBy { it.did } else emptyMap()
+        )
+        if (convo.isGroup) viewModelScope.launch(Dispatchers.IO) {
+            // Group chats: the whole member list, for every sender's
+            // avatar/name/color (the convo itself only lists a few).
+            bskyRepo.getConvoMembers(bskyToken, _bskyDid.value, convo.convoId).onSuccess { all ->
+                val cur = _dmThread.value
+                if (cur != null && cur.convo.convoId == convo.convoId) {
+                    _dmThread.value = cur.copy(members = cur.members + all.associateBy { it.did })
+                }
+            }
+        }
         viewModelScope.launch(Dispatchers.IO) {
             bskyRepo.getConvoMessages(bskyToken, _bskyDid.value, convo.convoId)
                 .onSuccess { (messages, cursor) ->
-                    _dmThread.value = _dmThread.value?.copy(
+                    val cur = _dmThread.value
+                    _dmThread.value = cur?.copy(
                         messages = messages, embeddedPosts = buildEmbeddedPosts(messages),
-                        loading = false, cursor = cursor
+                        loading = false, cursor = cursor,
+                        members = if (convo.isGroup) groupSenders(messages) + cur.members else cur.members
                     )
                 }
                 .onFailure {
@@ -1548,6 +1566,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closeDmThread() { _dmThread.value = null }
 
+    /** Group chats: the people who sent [messages], as far as known. */
+    private fun groupSenders(messages: List<BskyMessageView>): Map<String, AuthorInfo> =
+        messages.mapNotNull { m -> m.sender?.did?.let { d -> bskyRepo.chatProfiles[d]?.let { d to it } } }.toMap()
+
     // Item 12 follow-up: infinite-scroll-up for older DMs. `cursor` is
     // Bluesky's "further back in time" pagination token from the last fetch
     // (initial load or a previous call to this) — null means there's nothing
@@ -1566,7 +1588,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         messages = olderMessages + current.messages,
                         embeddedPosts = current.embeddedPosts + buildEmbeddedPosts(olderMessages),
                         cursor = newCursor,
-                        loadingMore = false
+                        loadingMore = false,
+                        members = if (current.convo.isGroup) groupSenders(olderMessages) + current.members else current.members
                     )
                 }
                 .onFailure { _dmThread.value = _dmThread.value?.copy(loadingMore = false) }
@@ -1685,9 +1708,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun maybeAutoSubscribeOnProfileOpen(
         author: AuthorInfo, isFollowingOrSelf: Boolean, hasReviews: Boolean, hasBlogs: Boolean
     ) {
-        if (!isFollowingOrSelf) return
         if (!hasReviews && !hasBlogs) return
         viewModelScope.launch(Dispatchers.IO) {
+            // Bug fix (reviews from followed accounts never reaching the
+            // Hub): the reviews/blogs probes usually finish before the full
+            // profile does, and until then the profile's author is just the
+            // one from the post that was tapped — which often doesn't carry
+            // "you follow them" at all. So a followed account looked
+            // unfollowed and was skipped. When it isn't clear yet, wait for
+            // the real profile (or look it up) before deciding.
+            val follows = isFollowingOrSelf || run {
+                val fromOverlay = withTimeoutOrNull(10_000) {
+                    while (true) {
+                        val o = _profileOverlay.value
+                        if (o == null || o.author.did != author.did) break
+                        if (o.profile != null) return@withTimeoutOrNull o.author.isFollowing
+                        delay(150)
+                    }
+                    null
+                }
+                fromOverlay ?: bskyRepo.getFullProfile(bskyToken, author.did).getOrNull()?.author?.isFollowing ?: false
+            }
+            if (!follows) return@launch
             if (hasReviews) prefs.addSubscribedReviewDidIfMissing(author.did)
             if (hasBlogs) prefs.addSubscribedBlogDidIfMissing(author.did)
             // Cheap to just re-run — loadFriendsReviewsIfNeeded's own cache
@@ -1812,6 +1854,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      *  bubble) bypasses the "already loaded this session" guard. */
     fun loadFriendsReviewsIfNeeded(force: Boolean = false) {
         if (reviewsBlogsLoaded && !force) return
+        // A forced reload asked for while one is already running (e.g. a
+        // newly-subscribed account from a profile you just opened) used to
+        // be silently dropped — the running load had already read the old
+        // subscription list, so the new account's reviews never appeared.
+        // Now it's queued and runs as soon as the current load finishes.
         // Bug fix (per feedback — Hub reviews/blogs briefly show cached
         // content on app start, then disappear a few seconds later): this
         // used to be two separate lines — `if (_friendsReviewsLoading.value)
@@ -1840,7 +1887,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // compareAndSet fails (sees `true` already) and returns immediately,
         // the same guarantee `if` + separate assignment was only *supposed*
         // to provide.
-        if (!_friendsReviewsLoading.compareAndSet(false, true)) return
+        if (!_friendsReviewsLoading.compareAndSet(false, true)) {
+            if (!force) return
+            friendsReloadPending = true
+            // The running load may have finished in the meantime (and so
+            // missed the flag) — if so, claim it and go now.
+            if (!_friendsReviewsLoading.compareAndSet(false, true)) return
+            friendsReloadPending = false
+        }
         viewModelScope.launch(Dispatchers.IO) {
             // Bug fix (reviews/blogs getting stuck on "not loading"): the
             // actual network fetch below used to run un-guarded — any
@@ -1951,9 +2005,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } finally {
                 _friendsReviewsLoading.value = false
+                if (friendsReloadPending) {
+                    friendsReloadPending = false
+                    loadFriendsReviewsIfNeeded(force = true)
+                }
             }
         }
     }
+    @Volatile private var friendsReloadPending = false
 
     /** Hub refresh bubble — re-checks Mutuals, Reviews, and Blogs against
      *  the network, bypassing every "already loaded" guard. Live sections
@@ -4153,7 +4212,12 @@ _bskyDid.value          = session.did
                     member = o.get("member")?.let { ctx.deserialize<AuthorInfo>(it, AuthorInfo::class.java) }
                         ?: AuthorInfo(did = "", handle = "", displayName = "", avatarUrl = null),
                     lastSentByUsAt = str("lastSentByUsAt") ?: "",
-                    lastActivityAt = str("lastActivityAt") ?: ""
+                    lastActivityAt = str("lastActivityAt") ?: "",
+                    isGroup = o.get("isGroup")?.takeIf { !it.isJsonNull }?.asBoolean ?: false,
+                    groupMembers = o.get("groupMembers")?.takeIf { it.isJsonArray }?.asJsonArray
+                        ?.map { ctx.deserialize<AuthorInfo>(it, AuthorInfo::class.java) } ?: emptyList(),
+                    memberCount = o.get("memberCount")?.takeIf { !it.isJsonNull }?.asInt ?: 0,
+                    lastMessageText = str("lastMessageText") ?: ""
                 )
             })
             .create()
@@ -4290,9 +4354,21 @@ _bskyDid.value          = session.did
             _dmConversations.value = _dmConversations.value.map { convo ->
                 val latest = byConvo[convo.convoId]?.maxByOrNull { it.message!!.sentAt } ?: return@map convo
                 val msg = latest.message!!
+                val mine = msg.sender?.did == _bskyDid.value
                 convo.copy(
                     lastActivityAt = msg.sentAt,
-                    lastSentByUsAt = if (msg.sender?.did == _bskyDid.value) msg.sentAt else convo.lastSentByUsAt
+                    lastSentByUsAt = if (mine) msg.sentAt else convo.lastSentByUsAt,
+                    // Group chats show the newest message under their name.
+                    lastMessageText = if (!convo.isGroup) convo.lastMessageText else when {
+                        msg.isSystem -> "Group updated"
+                        msg.text.isNotBlank() -> {
+                            val who = if (mine) "You" else (convo.groupMembers.firstOrNull { it.did == msg.sender?.did }
+                                ?: bskyRepo.chatProfiles[msg.sender?.did ?: ""])?.displayName?.substringBefore(' ')
+                            if (who != null) "$who: ${msg.text}" else msg.text
+                        }
+                        msg.embed != null -> "Shared a post"
+                        else -> convo.lastMessageText
+                    }
                 )
             }.sortedByDescending { it.lastActivityAt.ifBlank { it.lastSentByUsAt } }
         }

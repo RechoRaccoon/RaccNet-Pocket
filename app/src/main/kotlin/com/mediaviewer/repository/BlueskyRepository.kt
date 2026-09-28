@@ -1879,6 +1879,7 @@ class BlueskyRepository {
         coroutineScope {
             body.convos.map { convo ->
                 async {
+                    if (convo.isGroup) return@async groupConversation(convo, myDid)
                     val other = convo.members.firstOrNull { it.did != myDid }
                     val author = AuthorInfo(
                         did = other?.did ?: convo.id,
@@ -1903,6 +1904,59 @@ class BlueskyRepository {
                 }
             }.awaitAll()
         }.sortedByDescending { it.lastActivityAt.ifBlank { it.lastSentByUsAt } }
+    }
+
+    /** A Bluesky group chat as a [DmConversation]: its name stands in for a
+     *  person's name, its members (minus you) for their avatar. */
+    private fun groupConversation(convo: BskyConvoView, myDid: String): DmConversation {
+        val others = convo.members.filter { it.did != myDid }.map { it.toAuthorInfo() }
+        val name = convo.groupName.ifBlank {
+            others.take(3).joinToString(", ") { it.displayName }.ifBlank { "Group chat" }
+        }
+        val last = convo.lastMessage
+        val lastText = when {
+            last == null -> ""
+            last.isSystem -> "Group updated"
+            last.text.isNotBlank() -> {
+                val who = if (last.sender?.did == myDid) "You" else
+                    others.firstOrNull { it.did == last.sender?.did }?.displayName?.substringBefore(' ')
+                if (who != null) "$who: ${last.text}" else last.text
+            }
+            last.embed != null -> "Shared a post"
+            else -> ""
+        }
+        return DmConversation(
+            convoId = convo.id,
+            member = AuthorInfo(did = convo.id, handle = "", displayName = name, avatarUrl = others.firstOrNull()?.avatarUrl),
+            lastSentByUsAt = if (last?.sender?.did == myDid) last?.sentAt.orEmpty() else "",
+            lastActivityAt = last?.sentAt ?: "",
+            isGroup = true,
+            groupMembers = others,
+            memberCount = convo.groupMemberCount,
+            lastMessageText = lastText
+        )
+    }
+
+    private fun BskyConvoMember.toAuthorInfo() = AuthorInfo(
+        did = did, handle = handle,
+        displayName = displayName?.takeIf { it.isNotBlank() } ?: handle,
+        avatarUrl = avatar
+    )
+
+    /** Every member of a group chat (paged), you included. */
+    suspend fun getConvoMembers(token: String, myDid: String, convoId: String): Result<List<AuthorInfo>> = runCatching {
+        ensureChatApi(myDid)
+        val out = mutableListOf<AuthorInfo>()
+        var cursor: String? = null
+        var pages = 0
+        do {
+            val resp = chatApi.getConvoMembers("Bearer $token", convoId, 100, cursor)
+            val body = resp.body() ?: error("GetConvoMembers ${resp.code()}: ${errorBodyText(resp)}")
+            out += body.members.map { it.toAuthorInfo() }
+            cursor = body.cursor
+            pages++
+        } while (!cursor.isNullOrBlank() && pages < 10)
+        out.distinctBy { it.did }
     }
 
     /** Real-time-ish DM sync (see MainViewModel's DM polling
@@ -1938,8 +1992,13 @@ class BlueskyRepository {
         ensureChatApi(myDid)
         val resp = chatApi.getMessages("Bearer $token", convoId, 50, cursor)
         val body = resp.body() ?: error("GetMessages ${resp.code()}: ${errorBodyText(resp)}")
+        body.relatedProfiles?.forEach { p -> chatProfiles[p.did] = p.toAuthorInfo() }
         Pair(body.messages.reversed(), body.cursor)
     }
+
+    /** Names/avatars of everyone seen in any chat's messages so far (from
+     *  getMessages' relatedProfiles) — how group chats know who sent what. */
+    val chatProfiles: MutableMap<String, AuthorInfo> = java.util.concurrent.ConcurrentHashMap()
 
     /** Sends [text], optionally with an embedded post (for sharing media via DM). */
     suspend fun sendMessage(
@@ -1997,6 +2056,7 @@ class BlueskyRepository {
                     do {
                         val body = runCatching { chatApi.getMessages("Bearer $token", convo.convoId, 50, cursor) }
                             .getOrNull()?.takeIf { it.isSuccessful }?.body()
+                        val related = body?.relatedProfiles?.associateBy { it.did }.orEmpty()
                         body?.messages?.forEach { msg ->
                             val senderDid = msg.sender?.did
                             if (senderDid != null && (senderDid != myDid || includeSelfSent)) {
@@ -2009,6 +2069,11 @@ class BlueskyRepository {
                                 // it used to always name the other person).
                                 val sender = if (senderDid == myDid) {
                                     selfAuthor ?: AuthorInfo(did = myDid, handle = msg.sender?.did ?: myDid, displayName = "You", avatarUrl = null)
+                                } else if (convo.isGroup) {
+                                    // Group chats: whoever in the group sent it.
+                                    related[senderDid]?.toAuthorInfo()
+                                        ?: convo.groupMembers.firstOrNull { it.did == senderDid }
+                                        ?: AuthorInfo(did = senderDid, handle = senderDid, displayName = convo.member.displayName, avatarUrl = null)
                                 } else convo.member
                                 if (uri != null && cid != null) raw.add(Raw(uri, cid, msg.text, msg.sentAt, sender, convo.convoId))
                             }
@@ -2033,7 +2098,10 @@ class BlueskyRepository {
         raw.sortedByDescending { it.sentAt }.flatMap { r ->
             val post = hydrated[r.uri] ?: return@flatMap emptyList<MediaItem>()
             parseFeedItemSafe(BskyFeedItem(post = post)).map {
-                it.copy(sentByAuthor = r.author, sentByMessage = r.text, sentByConvoId = r.convoId)
+                // A shared quote post parses as "<quoter> reposted: …"; here
+                // it was SENT by a friend, so it's a shared post like any
+                // other ("Sent by …", with their message on the grid tile).
+                it.copy(sentByAuthor = r.author, sentByMessage = r.text, sentByConvoId = r.convoId, sentByIsRepost = false)
             }
         }
     }

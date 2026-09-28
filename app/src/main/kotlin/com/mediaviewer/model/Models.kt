@@ -913,8 +913,13 @@ data class BskyMessageView(
     /** Emoji reactions on this message (chat.bsky.convo.defs#reactionView). */
     val reactions: List<BskyReactionView>? = null,
     /** The message this one replies to, when it's a reply. */
-    val replyTo: BskyMessageView? = null
+    val replyTo: BskyMessageView? = null,
+    /** Group chats: what a system message (…#systemMessageView) is about —
+     *  someone added/removed/joined/left, the group renamed or locked. */
+    val data: JsonElement? = null
 ) {
+    /** A group chat's "X added Y" style notice, not a real message. */
+    val isSystem: Boolean get() = type?.endsWith("#systemMessageView") == true
     val isDeleted: Boolean get() = type?.endsWith("deletedMessageView") == true
 }
 
@@ -936,14 +941,35 @@ data class BskyConvoView(
     val rev: String? = null,
     val members: List<BskyConvoMember> = emptyList(),
     val lastMessage: BskyMessageView? = null,
-    val unreadCount: Int = 0
-)
+    val unreadCount: Int = 0,
+    /** chat.bsky.convo.defs#directConvo or #groupConvo (group chats carry
+     *  their name and member count here). */
+    val kind: JsonElement? = null
+) {
+    val isGroup: Boolean get() = runCatching {
+        kind?.takeIf { it.isJsonObject }?.asJsonObject?.get("\$type")?.asString?.endsWith("#groupConvo") == true
+    }.getOrDefault(false)
+    val groupName: String get() = runCatching {
+        kind?.asJsonObject?.get("name")?.takeIf { it.isJsonPrimitive }?.asString
+    }.getOrNull().orEmpty()
+    val groupMemberCount: Int get() = runCatching {
+        kind?.asJsonObject?.get("memberCount")?.asInt
+    }.getOrNull() ?: members.size
+}
+
+data class BskyGetConvoMembersResponse(val members: List<BskyConvoMember> = emptyList(), val cursor: String? = null)
 
 data class BskyListConvosResponse(val convos: List<BskyConvoView>, val cursor: String? = null)
 
 data class BskyGetConvoForMembersResponse(val convo: BskyConvoView)
 
-data class BskyGetMessagesResponse(val messages: List<BskyMessageView>, val cursor: String? = null)
+data class BskyGetMessagesResponse(
+    val messages: List<BskyMessageView>,
+    val cursor: String? = null,
+    /** Everyone who wrote or reacted to these messages (group chats: the
+     *  senders' names and avatars). */
+    val relatedProfiles: List<BskyConvoMember>? = null
+)
 
 /** One entry from chat.bsky.convo.getLog — a delta feed across every convo
  *  at once. `$type` distinguishes create/update/delete-message and convo-
@@ -970,9 +996,20 @@ data class BskySendMessageRequest(val convoId: String, val message: BskySendMess
 /** A friendly, UI-ready DM conversation — one per person we can message. */
 data class DmConversation(
     val convoId: String,
+    /** 1:1 chats: the other person. Group chats: a stand-in carrying the
+     *  group's name (did = the convo id), see [isGroup]. */
     val member: AuthorInfo,
     val lastSentByUsAt: String,   // ISO timestamp of the most recent message WE sent (empty if none yet)
-    val lastActivityAt: String    // fallback sort key — most recent activity of any kind
+    val lastActivityAt: String,   // fallback sort key — most recent activity of any kind
+    /** Bluesky group chat (chat.bsky.convo.defs#groupConvo). */
+    val isGroup: Boolean = false,
+    /** Group chats: the other members Bluesky listed with the convo (not
+     *  necessarily all of them — see [memberCount]). */
+    val groupMembers: List<AuthorInfo> = emptyList(),
+    /** Group chats: how many people are in it, you included. */
+    val memberCount: Int = 0,
+    /** The newest message's text (shown under a group's name). */
+    val lastMessageText: String = ""
 )
 
 /** A shared post rendered inline inside a DM bubble — item 12. Parsed from a
