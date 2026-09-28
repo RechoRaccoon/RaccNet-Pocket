@@ -275,7 +275,7 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
 
 /** The window exactly as it's on screen (PixelCopy keeps blur and other
  *  render effects); falls back to drawing the view tree, then to black. */
-private suspend fun captureWindow(v: View): Bitmap {
+internal suspend fun captureWindow(v: View): Bitmap {
     val root = v.rootView
     val w = root.width.coerceAtLeast(1)
     val h = root.height.coerceAtLeast(1)
@@ -389,24 +389,47 @@ fun ShatterOverlay(controller: ShatterTransitionController, modifier: Modifier =
  */
 class LoadingTransition(
     val pixels: PixelTransitionController,
-    val shatter: ShatterTransitionController
+    val shatter: ShatterTransitionController,
+    val space: SpaceTransitionController
 ) {
-    private var useShatter by mutableStateOf(false)
-    private val active get() = if (useShatter) shatter.phase else pixels.phase
+    private var active by mutableStateOf(UiToggles.LoadingAnimation.PIXELS)
 
-    val phase: PixelPhase get() = active
+    val phase: PixelPhase get() = when (active) {
+        UiToggles.LoadingAnimation.SHATTER -> shatter.phase
+        UiToggles.LoadingAnimation.SPACE -> space.phase
+        else -> pixels.phase
+    }
 
-    suspend fun start(baseColor: Color) {
-        useShatter = UiToggles.loadingAnimation == UiToggles.LoadingAnimation.SHATTER
-        if (useShatter) shatter.start(baseColor) else pixels.start(baseColor)
+    /** [fromBlack]: cold launch — Space skips its screenshot (there's
+     *  nothing on screen yet); the others ignore it. */
+    suspend fun start(baseColor: Color, fromBlack: Boolean = false) {
+        // Don't switch animations mid-transition (a second start while one
+        // is still covering the screen continues that same one).
+        if (phase == PixelPhase.HIDDEN) {
+            active = UiToggles.loadingAnimation.takeIf { it != UiToggles.LoadingAnimation.NONE }
+                ?: UiToggles.LoadingAnimation.SPACE
+        }
+        when (active) {
+            UiToggles.LoadingAnimation.SHATTER -> shatter.start(baseColor)
+            UiToggles.LoadingAnimation.SPACE -> space.start(fromBlack)
+            else -> pixels.start(baseColor)
+        }
     }
 
     suspend fun updateColor(target: Color) {
-        if (useShatter) shatter.updateColor(target) else pixels.updateColor(target)
+        when (active) {
+            UiToggles.LoadingAnimation.SHATTER -> shatter.updateColor(target)
+            UiToggles.LoadingAnimation.SPACE -> Unit
+            else -> pixels.updateColor(target)
+        }
     }
 
     suspend fun finish() {
-        if (useShatter) shatter.finish() else pixels.finish()
+        when (active) {
+            UiToggles.LoadingAnimation.SHATTER -> shatter.finish()
+            UiToggles.LoadingAnimation.SPACE -> space.finish()
+            else -> pixels.finish()
+        }
     }
 }
 
@@ -414,7 +437,8 @@ class LoadingTransition(
 fun rememberLoadingTransition(): LoadingTransition {
     val pixels = rememberPixelTransitionController()
     val shatter = rememberShatterTransitionController()
-    return remember(pixels, shatter) { LoadingTransition(pixels, shatter) }
+    val space = rememberSpaceTransitionController()
+    return remember(pixels, shatter, space) { LoadingTransition(pixels, shatter, space) }
 }
 
 /** Remembers where the user last touched (for Shatter's point of impact),

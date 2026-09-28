@@ -63,6 +63,7 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.layout.positionInRoot
@@ -371,24 +372,25 @@ fun SettingsSheet(
     val feedDrag = remember { HubFeedDragState() }
 
     Box(modifier = Modifier.fillMaxSize().onGloballyPositioned { feedDrag.rootOrigin = it.positionInRoot() }) {
+        // The Hub's background: a dim wash of your profile color with the
+        // starry sky over it (see SpaceSky). Recorded into
+        // hubBackgroundLayer so every glass bubble on the Hub blurs the
+        // stars behind it.
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .then(
-                    // Item 3/11: the Hub's background gradient now reflects the
-                    // currently-viewed post's own dominant color, same as the
-                    // main feed's post background gradient, instead of a
-                    // hardcoded neutral tint.
                     if (liquidGlass) Modifier
-                        .background(postBackgroundBrush(dominantColor))
                         .onGloballyPositioned { hubBackgroundOrigin = it.positionInRoot() }
                         .drawWithContent {
                             hubBackgroundLayer.record { this@drawWithContent.drawContent() }
-                            drawContent()
+                            drawLayer(hubBackgroundLayer)
                         }
                     else Modifier.background(OledBlack)
                 )
-        )
+        ) {
+            if (liquidGlass) SpaceSky(dominantColor, Modifier.matchParentSize())
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -453,7 +455,7 @@ fun SettingsSheet(
                                     combineListsAndPacks = combineListsAndPacks, onToggleCombineListsPacks = onToggleCombineListsPacks,
                                     autoAddToOnFollow = autoAddToOnFollow, onToggleAutoAddToOnFollow = onToggleAutoAddToOnFollow,
                                     extras = settingsExtras,
-                                    dominantColor = dominantColor, backdrop = backdrop,
+                                    dominantColor = dominantColor, backdrop = hubBackgroundBackdrop ?: backdrop,
                                     liveTwitchUrl = liveTwitchUrl, liveYoutubeUrl = liveYoutubeUrl,
                                     onSaveLiveTwitchUrl = onSaveLiveTwitchUrl, onSaveLiveYoutubeUrl = onSaveLiveYoutubeUrl,
                                     onCreateLiveLinkWidget = onCreateLiveLinkWidget
@@ -471,7 +473,7 @@ fun SettingsSheet(
                             authorChipSelected = pickedFeed == null && authorFeedState != null,
                             onTapAuthorChip = { pickedFeed = null },
                             onLoginBluesky = onLoginBluesky, onOpenSearch = onOpenSearch,
-                            liquidGlass = liquidGlass, dominantColor = dominantColor, backdrop = backdrop,
+                            liquidGlass = liquidGlass, dominantColor = dominantColor, backdrop = hubBackgroundBackdrop ?: backdrop,
                             dmConversations = dmConversations, dmConversationsLoading = dmConversationsLoading,
                             friendsReviews = friendsReviews,
                             friendsReviewsLoading = friendsReviewsLoading, onLoadFriendsReviews = onLoadFriendsReviews,
@@ -801,10 +803,10 @@ private fun AtProtocolPageContent(
             .padding(bottom = 16.dp)
     ) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+            HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
             Text("Feeds", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(horizontal = 10.dp))
-            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+            HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
         }
         Spacer(Modifier.height(6.dp))
 
@@ -818,14 +820,14 @@ private fun AtProtocolPageContent(
 
         Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+            HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
             Text(
                 selfProfile?.author?.displayName?.ifBlank { null } ?: bskyHandle,
                 color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(horizontal = 10.dp)
             )
-            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+            HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
         }
         Spacer(Modifier.height(6.dp))
 
@@ -852,10 +854,10 @@ private fun AtProtocolPageContent(
         // button above, which is a different, broader concept.
         Spacer(Modifier.height(14.dp))
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+            HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
             Text("Mutuals", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(horizontal = 10.dp))
-            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+            HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
         }
         Spacer(Modifier.height(8.dp))
 
@@ -978,10 +980,10 @@ private fun AtProtocolPageContent(
             // this session.
             Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+                HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
                 Text("Livestreams", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.padding(horizontal = 10.dp))
-                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+                HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
             }
             Spacer(Modifier.height(8.dp))
             Row(
@@ -1004,10 +1006,10 @@ private fun AtProtocolPageContent(
             // it's consistent no matter which section ends up first.
             Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+                HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
                 Text("Reviews", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.padding(horizontal = 10.dp))
-                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+                HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
             }
             Spacer(Modifier.height(8.dp))
             // Lazy: only the cards actually on screen are composed (each is
@@ -1035,10 +1037,10 @@ private fun AtProtocolPageContent(
             // consistent no matter which section ends up first.
             Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+                HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
                 Text("Blogs", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.padding(horizontal = 10.dp))
-                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+                HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
             }
             Spacer(Modifier.height(8.dp))
             // Item 5: every Hub blog card now shares one HEIGHT
@@ -1187,10 +1189,10 @@ private fun AtProtocolPageContent(
         if (showSwitchAccountsRow && otherAccounts.isNotEmpty()) {
             Spacer(Modifier.height(14.dp))
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+                HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
                 Text("Switch Accounts", color = DimGray, fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.padding(horizontal = 10.dp))
-                HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.12f))
+                HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
             }
             Spacer(Modifier.height(8.dp))
             Row(

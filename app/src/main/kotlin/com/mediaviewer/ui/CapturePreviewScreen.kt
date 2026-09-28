@@ -139,8 +139,6 @@ fun CapturePreviewScreen(
     val shownAspect = crop.ratio ?: mediaAspect
     val animatedAspect by animateFloatAsState(shownAspect, label = "cropAspect")
 
-    // Page color: your profile color melting into black, behind the media.
-    val pageBrush = Brush.verticalGradient(listOf(lerp(Color.Black, tint, 0.45f), lerp(Color.Black, tint, 0.18f), Color.Black))
     // Live backdrop for the glass buttons (the media behind them blurs).
     val backdropLayer = rememberGraphicsLayer()
     var backdropOrigin by remember { mutableStateOf(Offset.Zero) }
@@ -154,12 +152,13 @@ fun CapturePreviewScreen(
     }
 
     Box(
-        Modifier.fillMaxSize().background(pageBrush)
+        Modifier.fillMaxSize().background(dimSpaceColor(tint))
             .clickable(
                 interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                 indication = null
             ) { cropMenu = false }
     ) {
+        SpaceSky(tint, Modifier.matchParentSize())
         Column(Modifier.fillMaxSize()) {
             Spacer(Modifier.height(rememberTopCutoutClearance() + 56.dp))
             // The capture, as large as fits, at the chosen crop.

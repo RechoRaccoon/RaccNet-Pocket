@@ -88,17 +88,6 @@ import java.io.StringWriter
 // diagnosed just by reopening the app and copying what's on screen.
 private const val CRASH_LOG_FILENAME = "last_crash.txt"
 
-/** Item 8: a fresh content:// Uri, under the one cache subfolder
- *  file_paths.xml actually exposes through this app's FileProvider, for the
- *  system camera app to save the notch button's photo/video capture into —
- *  then handed straight back to us via the TakePicture/CaptureVideo
- *  ActivityResultContract once the person's done. */
-private fun newCameraCaptureUri(context: Context): Uri {
-    val dir = java.io.File(context.cacheDir, "camera_capture").also { it.mkdirs() }
-    val file = java.io.File(dir, "capture_${System.currentTimeMillis()}.jpg")
-    return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-}
-
 private fun installCrashHandler(context: Context) {
     val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
     Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
@@ -314,6 +303,7 @@ private fun AppRoot(viewModel: MainViewModel) {
     val initialComposeImageUri by viewModel.initialComposeImageUri.collectAsState()
     val initialComposeVideoUri by viewModel.initialComposeVideoUri.collectAsState()
     val vrmModeOpen            by viewModel.vrmModeOpen.collectAsState()
+    val cameraModeOpen         by viewModel.cameraModeOpen.collectAsState()
     val capturePreview         by viewModel.capturePreview.collectAsState()
     // Item 12 follow-up: DM-thread "shared posts" feed loading overlay.
     val dmFeedLoadingOverlay   by viewModel.dmFeedLoadingOverlay.collectAsState()
@@ -384,6 +374,27 @@ private fun AppRoot(viewModel: MainViewModel) {
     val selfProfileTint = selfProfile?.author?.avatarUrl?.takeIf { it.isNotBlank() }
         ?.let { com.mediaviewer.ui.rememberSelfProfileTint(it) } ?: NeutralGlassTint
     var currentDominantColor by remember { mutableStateOf(NeutralGlassTint) }
+    // The starry page backgrounds stop ticking while VRM mode is open (it
+    // needs every bit of CPU/GPU it can get).
+    SideEffect { com.mediaviewer.ui.SpaceSkyControl.paused = vrmModeOpen || cameraModeOpen }
+
+    // The audio visualizer is on by default but needs the microphone
+    // permission to hear what the phone is playing (nothing is recorded):
+    // asked once, the first time the feed is opened.
+    val visualizerPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (!granted) com.mediaviewer.util.UiToggles.updateAudioVisualizer(false)
+        else com.mediaviewer.util.AudioVisualizerEngine.watchPlayerSessions(context.applicationContext)
+    }
+    LaunchedEffect(screenState) {
+        if (screenState == ScreenState.FEED &&
+            com.mediaviewer.util.UiToggles.audioVisualizer &&
+            !com.mediaviewer.util.UiToggles.visualizerPermissionAsked &&
+            !com.mediaviewer.util.AudioVisualizerEngine.hasPermission(context)
+        ) {
+            com.mediaviewer.util.UiToggles.markVisualizerPermissionAsked()
+            runCatching { visualizerPermission.launch(android.Manifest.permission.RECORD_AUDIO) }
+        }
+    }
 
     // ── Retro pixel-matrix transition/loading overlay ──────────────────────
     // One shared controller drives every scenario described in the design
@@ -449,7 +460,7 @@ private fun AppRoot(viewModel: MainViewModel) {
         // means the "swiping in and covering it with white pixels" motion
         // is actually visible against the black scrim, before it hue-shifts
         // into the user's profile color once that's fetched.
-        if (com.mediaviewer.util.UiToggles.loadingScreens) pixelController.start(Color.White)
+        if (com.mediaviewer.util.UiToggles.loadingScreens) pixelController.start(Color.White, fromBlack = true)
     }
     LaunchedEffect(appInitialized, bskyLoggedIn, selfProfile) {
         if (!appInitialized) return@LaunchedEffect
@@ -608,52 +619,14 @@ private fun AppRoot(viewModel: MainViewModel) {
     // and should stay instant.
     // The Hub's Timeline/Explore buttons open a picked feed in that view;
     // picking a feed from Explore mode's own tab row stays in Explore.
+    // Feeds open instantly — no loading transition (those are for profiles
+    // and app launch now). selectFeedFromAnyContext clears the previous
+    // feed's posts synchronously when it has to load a new one, so the
+    // feed/grid shows placeholders instead of the old feed's content until
+    // the new posts arrive (see MainViewModel.selectFeed).
     val handleOpenFeed: (String?, ScreenState) -> Unit = { uri, targetScreen ->
-        rootScope.launch {
-            if (!com.mediaviewer.util.UiToggles.loadingScreens) {
-                // Loading screens off: straight into the feed, which shows
-                // its posts as they load.
-                viewModel.selectFeedFromAnyContext(uri)
-                viewModel.setScreen(targetScreen)
-                return@launch
-            }
-            // Bug fix (item 4): this used to start from `currentDominantColor`
-            // — the live backdrop color of whatever post happens to be on
-            // screen right now, which is essentially "the color the *previous*
-            // transition happened to end on" (it tracks whatever the last
-            // reveal settled the feed on). Every other transition after the
-            // cold-boot one is supposed to always start from the user's own
-            // profile color, same as Scenario B — so start from
-            // `selfThemeColor` here too.
-            pixelController.start(selfThemeColor)
-            viewModel.selectFeedFromAnyContext(uri)
-            // selectFeedFromAnyContext's "same feed, restore exactly from
-            // cache" fast-path (see its own doc comment) never flips
-            // isLoading at all — this short timeout only disambiguates
-            // that real, instant code path from a genuine network fetch;
-            // it is not standing in for network latency itself.
-            withTimeoutOrNull(300) { viewModel.isLoading.first { it } }
-            viewModel.isLoading.first { !it }
-            val firstMedia = viewModel.mediaItems.value.firstOrNull()
-            val feedColor = if (firstMedia != null) {
-                fetchDominantColor(context, firstMedia.thumbUrl.ifBlank { firstMedia.mediaUrl })
-            } else currentDominantColor
-            pixelController.updateColor(feedColor)
-            // Bug fix (item 12): the screen is already fully covered by the
-            // opaque pixel curtain at this point, so the FEED screen
-            // switching in underneath should be invisible either way — but
-            // MainFeedScreen's AnimatedContent normally plays a slide/scroll
-            // transition on every SETTINGS -> FEED switch, regardless of
-            // what triggered it. That's correct for the explicit "Return to
-            // Feed" button (which has no pixel curtain covering it), but for
-            // this feed-menu path it means a slide animation is quietly
-            // happening underneath — and sometimes bleeding through — the
-            // wipe. Flip this flag right before switching so MainFeedScreen
-            // skips the slide just this once.
-            skipFeedEntryAnim = true
-            viewModel.setScreen(targetScreen)
-            pixelController.finish()
-        }
+        viewModel.selectFeedFromAnyContext(uri)
+        viewModel.setScreen(targetScreen)
     }
     val handleSelectFeed: (String?) -> Unit = { uri -> handleOpenFeed(uri, ScreenState.GRID) }
 
@@ -924,6 +897,27 @@ private fun AppRoot(viewModel: MainViewModel) {
             )
         }
 
+        if (cameraModeOpen) {
+            // The notch bubble's Camera page — above the posting page (10.5)
+            // when opened from it, below the notch bubble itself (11).
+            val cameraTint = run {
+                val selfAvatar = selfProfile?.author?.avatarUrl
+                if (!selfAvatar.isNullOrBlank()) com.mediaviewer.ui.rememberSelfProfileTint(selfAvatar) else currentDominantColor
+            }
+            Box(Modifier.fillMaxSize().zIndex(10.8f)) {
+                com.mediaviewer.ui.CameraModeScreen(
+                    liquidGlass = liquidGlass,
+                    tint = cameraTint,
+                    onClose = viewModel::closeCameraMode,
+                    onCapture = { imageUri, videoUri ->
+                        val uri = videoUri ?: imageUri
+                        if (uri != null) viewModel.onCameraCapture(uri, isVideo = videoUri != null)
+                        else viewModel.closeCameraMode()
+                    }
+                )
+            }
+        }
+
         val currentCapturePreview = capturePreview
         if (currentCapturePreview != null) {
             val selfAvatar = selfProfile?.author?.avatarUrl
@@ -1076,7 +1070,9 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onClose         = viewModel::closeDmInbox,
                 onTapAuthor     = { author -> viewModel.closeDmInbox(); viewModel.openProfile(author) },
                 onLoadMoreMessages   = viewModel::loadMoreDmMessages,
-                onOpenSharedPostsFeed = viewModel::openDmThreadSharedPostsFeed
+                onOpenSharedPostsFeed = viewModel::openDmThreadSharedPostsFeed,
+                onToggleReaction     = viewModel::toggleDmReaction,
+                selfDid              = bskyDid
             )
         }
 
@@ -1145,27 +1141,6 @@ private fun AppRoot(viewModel: MainViewModel) {
         // to the draft); everywhere else it's a passive ring that
         // lets touches fall through to whatever is underneath.
         run {
-            val cameraCaptureUri = remember { mutableStateOf<android.net.Uri?>(null) }
-            // Photo capture via StartActivityForResult with an EXPLICITLY
-            // resolved camera component, not ActivityResultContracts.TakePicture().
-            // TakePicture() was throwing ActivityNotFoundException on a device
-            // that demonstrably has a camera app — its internally-built intent
-            // wasn't resolving there. Resolving ACTION_IMAGE_CAPTURE against
-            // the PackageManager ourselves (the manifest's <queries> block
-            // makes this definitive on API 30+) and launching that exact
-            // component removes the contract's intent-building from the path
-            // entirely. If the platform truly has no IMAGE_CAPTURE handler,
-            // resolveActivity returns null and we say so instead of crashing.
-            val capturePhoto = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-                val uri = cameraCaptureUri.value
-                if (result.resultCode == android.app.Activity.RESULT_OK && uri != null) {
-                    viewModel.openComposePostWithCapturedMedia(imageUri = uri, videoUri = null)
-                }
-            }
-            // Item 8 follow-up: only photo capture is wired to the single
-            // "Camera" tap for now — CaptureVideo() is the identical
-            // pattern (see capturePhoto just above) if/when video capture
-            // gets its own control (e.g. press-and-hold).
             // The notch button wears the feed's current dominant color — except
             // while the Hub (SettingsSheet) is open, where every other piece
             // of hub UI tints itself with the logged-in user's OWN profile
@@ -1175,11 +1150,11 @@ private fun AppRoot(viewModel: MainViewModel) {
             val profileVisible = profileOverlay?.let { !it.hidden && profileRevealArmed } == true
             // The posting page always gets a working notch (it may have been
             // opened on top of Search/DMs, whose flags stay set underneath).
-            val notchInteractive = !vrmModeOpen && (composePostOpen || (
+            val notchInteractive = !vrmModeOpen && !cameraModeOpen && (composePostOpen || (
                 !searchOpen && !dmInboxOpen && !taggingOverlayOpen && playingLive == null &&
                     (profileVisible || screenState == ScreenState.SETTINGS)))
             val openProfile = profileOverlay
-            val notchTint = if (vrmModeOpen || composePostOpen) {
+            val notchTint = if (vrmModeOpen || cameraModeOpen || composePostOpen) {
                 val selfAvatar = selfProfile?.author?.avatarUrl
                 if (!selfAvatar.isNullOrBlank()) com.mediaviewer.ui.rememberSelfProfileTint(selfAvatar) else currentDominantColor
             } else if (profileVisible && openProfile != null) {
@@ -1204,33 +1179,8 @@ private fun AppRoot(viewModel: MainViewModel) {
                 tint = notchTint,
                 interactive = notchInteractive,
                 modifier = Modifier.zIndex(11f),
-                onOpenCamera = {
-                    // ACTION_IMAGE_CAPTURE doesn't need this app to hold the
-                    // CAMERA permission itself — the system camera app handles
-                    // that on its own.
-                    //
-                    // No resolveActivity() pre-check that gates on a boolean
-                    // and toasts: we resolve the handler and, if one exists,
-                    // launch THAT component directly. The whole thing (Uri
-                    // creation included) is inside the runCatching so a
-                    // FileProvider failure toasts instead of crashing the tap.
-                    runCatching {
-                        val uri = newCameraCaptureUri(context)
-                        cameraCaptureUri.value = uri
-                        val intent = android.content.Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE)
-                            .putExtra(android.provider.MediaStore.EXTRA_OUTPUT, uri)
-                        val component = intent.resolveActivity(context.packageManager)
-                            ?: throw android.content.ActivityNotFoundException("no IMAGE_CAPTURE handler")
-                        intent.component = component
-                        capturePhoto.launch(intent)
-                    }.onFailure { e ->
-                            if (e is android.content.ActivityNotFoundException) {
-                                Toast.makeText(context, "No camera app found on this device", Toast.LENGTH_SHORT).show()
-                            } else {
-                                Toast.makeText(context, "Couldn't open the camera", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                },
+                // Camera: Stellar's own camera page (see CameraModeScreen).
+                onOpenCamera = viewModel::openCameraMode,
                 onOpenVrm = viewModel::openVrmMode
             )
         }
@@ -1250,6 +1200,8 @@ private fun AppRoot(viewModel: MainViewModel) {
         PixelMatrixOverlay(controller = pixelController.pixels, modifier = Modifier.fillMaxSize().zIndex(13f))
         // Shatter: the screenshot-of-the-old-page glass, cracking and falling away.
         ShatterOverlay(controller = pixelController.shatter, modifier = Modifier.fillMaxSize().zIndex(13f))
+        // Space: the old page fading into a drifting starfield + logo.
+        com.mediaviewer.ui.SpaceOverlay(controller = pixelController.space, modifier = Modifier.fillMaxSize().zIndex(13f))
 
         // Settings → App Functionality → "Debug Overlay".
         if (com.mediaviewer.util.UiToggles.debugOverlay) {

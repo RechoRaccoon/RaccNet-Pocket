@@ -1,5 +1,6 @@
 package com.mediaviewer.ui
 
+import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.foundation.background
@@ -177,12 +178,15 @@ fun SearchOverlay(
             Modifier.fillMaxSize()
                 .onGloballyPositioned { backdropOrigin = it.positionInRoot() }
                 .then(
-                    if (liquidGlass) Modifier.background(postBackgroundBrush(profileTint)).drawWithContent {
+                    if (liquidGlass) Modifier.drawWithContent {
                         backdropLayer.record { this@drawWithContent.drawContent() }
-                        drawContent()
+                        drawLayer(backdropLayer)
                     } else Modifier.background(OledBlack)
                 )
-        )
+        ) {
+            // Dim profile color + stars, blurred by the glass on top.
+            if (liquidGlass) SpaceSky(profileTint, Modifier.matchParentSize())
+        }
 
         // The bar sits right under the camera cutout — the same line profile
         // banners (and the Hub's search bar) start on.

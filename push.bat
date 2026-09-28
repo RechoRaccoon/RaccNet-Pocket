@@ -4,7 +4,7 @@
 ::  FIRST TIME SETUP: Replace the URL below with your repo URL
 ::  Example: https://github.com/YourName/MediaViewer.git
 :: ============================================================
-set REPO_URL=https://github.com/RechoRaccoon/RaccNetLite.git
+set REPO_URL=https://github.com/RechoRaccoon/Stellar.git
 
 :: Check if git is set up in this folder already
 if not exist ".git" (

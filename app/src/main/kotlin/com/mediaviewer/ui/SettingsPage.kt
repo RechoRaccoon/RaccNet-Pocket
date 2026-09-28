@@ -353,8 +353,15 @@ internal fun SettingsPageContent(
 
         ToggleBubble("Reduced Animations", reducedAnimations, onToggleReducedAnimations, liquidGlass, tint, backdrop)
         ToggleBubble("Rounded Grid Tiles", squareGridRounded, onToggleSquareGridRounded, liquidGlass, tint, backdrop)
+        // Twinkling stars + the odd shooting star behind every page (the
+        // dim profile-color background stays either way).
+        ToggleBubble(
+            "Starry Background", com.mediaviewer.util.UiToggles.starryBackground,
+            { com.mediaviewer.util.UiToggles.updateStarryBackground(it) }, liquidGlass, tint, backdrop
+        )
         // Which transition plays while a page loads: None (pages open
-        // instantly and fill in as their data arrives), Pixels, or Shatter.
+        // instantly and fill in as their data arrives), Pixels, Shatter or
+        // Space (the default).
         SettingsBubble(liquidGlass, tint, backdrop) {
             var animMenuExpanded by remember { mutableStateOf(false) }
             val currentAnim = com.mediaviewer.util.UiToggles.loadingAnimation

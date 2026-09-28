@@ -15,6 +15,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -151,7 +154,9 @@ fun GridScreen(
             ?: freshGridState.also { GridScrollMemory.state = it; GridScrollMemory.stateScope = memoryScope }
     }
     val gridScope = androidx.compose.runtime.rememberCoroutineScope()
-    val showScrollTop by remember(gridState) { androidx.compose.runtime.derivedStateOf { gridState.firstVisibleItemIndex >= 6 + GRID_HEADER_ITEMS } }
+    // Shows as soon as the feed + content-type rows (the header item) have
+    // scrolled off the top.
+    val showScrollTop by remember(gridState) { androidx.compose.runtime.derivedStateOf { gridState.firstVisibleItemIndex >= GRID_HEADER_ITEMS } }
     // Pull-down-at-top → Hub. Tracked straight off the finger (see the
     // pointerInput on the grid below) rather than from nested-scroll
     // leftovers, which the grid's own overscroll stretch could swallow:
@@ -241,8 +246,9 @@ fun GridScreen(
                 if (liquidGlass) backdropLayer.record { this@drawWithContent.drawContent() }
                 drawContent()
             }
-            .then(if (liquidGlass) Modifier.background(postBackgroundBrush(tint)) else Modifier.background(OledBlack))
+            .then(if (liquidGlass) Modifier else Modifier.background(OledBlack))
     ) {
+        if (liquidGlass) SpaceSky(tint, Modifier.matchParentSize())
         // The feed/content-type rows are the grid's first item now, so they
         // scroll away with the posts instead of staying pinned in place.
         val topClearance = rememberTopCutoutClearance()
@@ -380,9 +386,18 @@ fun GridScreen(
                 }
             }
             if (items.isEmpty()) {
-                item(key = "grid_empty_loading", span = StaggeredGridItemSpan.FullLine) {
-                    Box(Modifier.fillMaxWidth().padding(vertical = 160.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = Color.White, strokeWidth = 1.5.dp)
+                if (isLoading) {
+                    // A feed that's still loading (e.g. one just switched to)
+                    // shows placeholder tiles instead of the previous
+                    // feed's posts.
+                    items(count = 18, key = { i -> "grid_placeholder_$i" }, contentType = { "grid_placeholder" }) { i ->
+                        GridPlaceholderTile(i, spec.lanes, tint, roundedGridTiles || gridMode != 2)
+                    }
+                } else {
+                    item(key = "grid_empty", span = StaggeredGridItemSpan.FullLine) {
+                        Box(Modifier.fillMaxWidth().padding(vertical = 160.dp), contentAlignment = Alignment.Center) {
+                            Text("Nothing here yet", color = DimGray, fontSize = 13.sp)
+                        }
                     }
                 }
             }
@@ -392,20 +407,25 @@ fun GridScreen(
                 contentType = { gridMode * 10 + kind.ordinal }
             ) { i ->
                 val item = matched[i]
-                PostResultTile(
-                    item = item, filter = kind, gridMode = gridMode, tint = tint,
-                    liquidGlass = liquidGlass, roundedGridTiles = roundedGridTiles,
-                    onSeedSubImageIndex = { id, page -> pendingSeed[0] = id to page },
-                    onClick = {
-                        val idx = latestItems.indexOfFirst { it.id == item.id }
-                        if (idx >= 0) {
-                            val seed = pendingSeed[0]?.takeIf { it.first == item.id }?.second ?: 0
-                            pendingSeed[0] = null
-                            exitFeedIndex = idx
-                            onItemClick(idx, seed)
+                val tile: @Composable () -> Unit = {
+                    PostResultTile(
+                        item = item, filter = kind, gridMode = gridMode, tint = tint,
+                        liquidGlass = liquidGlass, roundedGridTiles = roundedGridTiles,
+                        onSeedSubImageIndex = { id, page -> pendingSeed[0] = id to page },
+                        onClick = {
+                            val idx = latestItems.indexOfFirst { it.id == item.id }
+                            if (idx >= 0) {
+                                val seed = pendingSeed[0]?.takeIf { it.first == item.id }?.second ?: 0
+                                pendingSeed[0] = null
+                                exitFeedIndex = idx
+                                onItemClick(idx, seed)
+                            }
                         }
-                    }
-                )
+                    )
+                }
+                // From Friends: who sent it, and what they said, on the tile.
+                val sender = item.sentByAuthor?.takeIf { !item.sentByIsRepost }
+                if (sender != null) SentByTileOverlay(sender, item.sentByMessage, tint, liquidGlass, tile) else tile()
             }
             if (isLoading && items.isNotEmpty()) {
                 item(key = "grid_loading_more", span = StaggeredGridItemSpan.FullLine) {
@@ -439,6 +459,81 @@ fun GridScreen(
                     if (reducedAnimations) gridState.scrollToItem(0) else gridState.animateScrollToItem(0)
                 }
             }
+        }
+    }
+}
+
+/** A grey, softly pulsing stand-in tile while a feed loads. Heights vary a
+ *  little in the masonry layouts so it reads like the real grid. */
+@Composable
+private fun GridPlaceholderTile(index: Int, lanes: Int, tint: Color, rounded: Boolean) {
+    val pulse = androidx.compose.animation.core.rememberInfiniteTransition(label = "gridPlaceholder")
+    val a by pulse.animateFloat(
+        initialValue = 0.05f, targetValue = 0.12f,
+        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+            androidx.compose.animation.core.tween(900, delayMillis = (index % lanes) * 120),
+            androidx.compose.animation.core.RepeatMode.Reverse
+        ),
+        label = "gridPlaceholderAlpha"
+    )
+    val ratio = if (lanes >= 3) 1f else listOf(0.8f, 1.15f, 0.66f, 1f, 0.75f, 1.3f)[index % 6]
+    val shape = if (rounded) RoundedCornerShape(14.dp) else RoundedCornerShape(0.dp)
+    Box(
+        Modifier.fillMaxWidth().aspectRatio(ratio).clip(shape)
+            .drawBehind { drawRect(androidx.compose.ui.graphics.lerp(Color.White, tint, 0.35f).copy(alpha = a)) }
+    )
+}
+
+/**
+ * From Friends grid: a small glass bubble over the tile with the sender's
+ * avatar and their message. The tile is recorded into its own layer so the
+ * bubble can blur the media right behind it (real blur on Android 12+).
+ */
+@Composable
+private fun SentByTileOverlay(
+    sender: com.mediaviewer.model.AuthorInfo,
+    message: String,
+    tint: Color,
+    liquidGlass: Boolean,
+    tile: @Composable () -> Unit
+) {
+    val layer = androidx.compose.ui.graphics.rememberGraphicsLayer()
+    var origin by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
+    val backdrop = remember(layer) { GlassBackdrop(layer) { origin } }
+    Box(Modifier.fillMaxWidth()) {
+        Box(
+            Modifier
+                .onGloballyPositioned { origin = it.positionInRoot() }
+                .drawWithContent {
+                    layer.record { this@drawWithContent.drawContent() }
+                    drawLayer(layer)
+                }
+        ) { tile() }
+        val shape = RoundedCornerShape(12.dp)
+        val label = message.trim().ifBlank { sender.displayName.ifBlank { "@" + sender.handle } }
+        val content: @Composable BoxScope.() -> Unit = {
+            Row(
+                Modifier.padding(start = 3.dp, end = 8.dp, top = 3.dp, bottom = 3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                coil.compose.AsyncImage(
+                    model = sender.avatarUrl, contentDescription = sender.displayName,
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    modifier = Modifier.size(18.dp).clip(CircleShape).background(Color.White.copy(0.12f))
+                )
+                Text(
+                    label, color = Color.White, fontSize = 10.sp, lineHeight = 12.sp,
+                    fontWeight = FontWeight.Medium, maxLines = 2,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                )
+            }
+        }
+        val bubbleModifier = Modifier.align(Alignment.TopStart).padding(6.dp).widthIn(max = 220.dp)
+        if (liquidGlass) {
+            LiquidGlassSurface(bubbleModifier, shape = shape, tint = tint, backdrop = backdrop, contentAlignment = Alignment.CenterStart, content = content)
+        } else {
+            Box(bubbleModifier.clip(shape).background(Color.Black.copy(alpha = 0.6f)), contentAlignment = Alignment.CenterStart, content = content)
         }
     }
 }

@@ -151,6 +151,9 @@ object AvatarRetargeter {
     private const val TAU_LIMB = 0.07f
     private const val TAU_FINGER = 0.06f
     private const val TAU_HAND = 0.06f
+    /** Bone gap (radians) at which [PoseContext.drive]'s easing is already
+     *  twice as fast; it keeps speeding up quadratically beyond that. */
+    private const val ADAPTIVE_GAP_RAD = 0.12f
 
     /** Typical adult shoulder→wrist length (m): maps your hand's reach
      *  onto the avatar's own arm length. */
@@ -550,7 +553,17 @@ object AvatarRetargeter {
         fun drive(bone: String, desired: Quaternion, tau: Float): Quaternion {
             val info = target.bones[bone] ?: return desired
             val previous = target.smoothed[bone]
-            val t = tau * smoothingScale
+            var t = tau * smoothingScale
+            if (previous != null && t > 1e-4f) {
+                // Motion-adaptive easing (the same idea as the One-Euro
+                // filters upstream): tiny differences — tracking jitter —
+                // keep the full smoothing, while a real, fast movement
+                // shortens the time constant so the bone catches up almost
+                // immediately instead of trailing ~tau behind the tracking.
+                val dot = kotlin.math.abs(previous.x * desired.x + previous.y * desired.y + previous.z * desired.z + previous.w * desired.w)
+                val gapRad = 2f * kotlin.math.acos(dot.coerceIn(0f, 1f))
+                t /= 1f + (gapRad / ADAPTIVE_GAP_RAD) * (gapRad / ADAPTIVE_GAP_RAD)
+            }
             val d = if (previous == null || t <= 1e-4f) desired
             else Quaternion.slerp(previous, desired, 1f - exp(-dt / t))
             target.smoothed[bone] = d

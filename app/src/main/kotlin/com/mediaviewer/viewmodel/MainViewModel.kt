@@ -366,6 +366,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var feedCursor: String?  = null
     private var isLoadingMore        = false
+    /** Bumped by every feed reset/switch — see loadFeed. */
+    @Volatile private var feedLoadGeneration = 0
 
     // Tracks what kind of feed is active so loadMore() uses the right endpoint
     private enum class ActiveFeedMode { NORMAL, AUTHOR, LIKES, FRIENDS, SAVES, HISTORY }
@@ -1004,9 +1006,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun closeVrmMode() { _vrmModeOpen.value = false }
 
+    // The notch bubble's "Camera" page (CameraModeScreen): VRM mode's page
+    // with the real camera. Opened over the posting page it stacks on top
+    // instead of replacing it, and a capture goes straight into that draft.
+    private val _cameraModeOpen = MutableStateFlow(false)
+    val cameraModeOpen: StateFlow<Boolean> = _cameraModeOpen
+    private var cameraOpenedFromComposer = false
+    fun openCameraMode() {
+        cameraOpenedFromComposer = _composePostOpen.value
+        _cameraModeOpen.value = true
+    }
+    fun closeCameraMode() { _cameraModeOpen.value = false }
+    /** A photo/video taken on the Camera page. */
+    fun onCameraCapture(uri: android.net.Uri, isVideo: Boolean) {
+        if (cameraOpenedFromComposer && _composePostOpen.value) {
+            _cameraModeOpen.value = false
+            openComposePostWithCapturedMedia(if (isVideo) null else uri, if (isVideo) uri else null)
+        } else {
+            _cameraModeOpen.value = false
+            _capturePreview.value = CapturePreview(uri, isVideo, fromCamera = true)
+        }
+    }
+
     /** A photo/video just taken in VRM mode, shown on its own review page
      *  (CapturePreviewScreen) with VRM mode closed — see [openCapturePreview]. */
-    data class CapturePreview(val uri: android.net.Uri, val isVideo: Boolean)
+    data class CapturePreview(val uri: android.net.Uri, val isVideo: Boolean, val fromCamera: Boolean = false)
     private val _capturePreview = MutableStateFlow<CapturePreview?>(null)
     val capturePreview: StateFlow<CapturePreview?> = _capturePreview
     /** Closes VRM mode (camera, trackers and renderer all shut down) and
@@ -1017,8 +1041,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
     /** Review page's X: back into VRM mode. */
     fun returnToVrmFromPreview() {
+        val fromCamera = _capturePreview.value?.fromCamera == true
         _capturePreview.value = null
-        _vrmModeOpen.value = true
+        if (fromCamera) { cameraOpenedFromComposer = false; _cameraModeOpen.value = true } else _vrmModeOpen.value = true
     }
     /** Review page's "Create Post": into the composer with the (cropped) capture. */
     fun createPostFromPreview(uri: android.net.Uri, isVideo: Boolean) {
@@ -1215,7 +1240,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // Alt text never carries a custom emoji's name — just drop the
                 // token entirely rather than exposing it as a `:name:` shortcode.
                 val altText = emoji.stripEmoji(draft.textshotText)
-                bskyRepo.createTextshotPost(bskyToken, did, bitmap, altText, draft.selfLabels, hasEmoji).getOrElse { throw it }
+                bskyRepo.createTextshotPost(bskyToken, did, bitmap, altText, draft.selfLabels, hasEmoji, postText = draft.textshotPostText).getOrElse { throw it }
             }
             com.mediaviewer.ui.ComposeMode.VIDEO -> {
                 val uri = draft.videoUri
@@ -2048,14 +2073,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun openLivePlayer(url: String, title: String, subtitle: String) { _playingLive.value = PlayingLiveStream(url, title, subtitle) }
     fun closeLivePlayer() { _playingLive.value = null }
 
-    fun sendDmThreadReply(text: String) {
+    fun sendDmThreadReply(text: String, replyToMessageId: String? = null) {
         val thread = _dmThread.value ?: return
         if (text.isBlank() || thread.convo.convoId.isBlank()) return
         // Item 8: haptic tap on sending a DM.
         tapHaptic()
         _dmThread.value = thread.copy(sending = true)
         viewModelScope.launch(Dispatchers.IO) {
-            bskyRepo.sendMessage(bskyToken, _bskyDid.value, thread.convo.convoId, text)
+            bskyRepo.sendMessage(bskyToken, _bskyDid.value, thread.convo.convoId, text, replyToMessageId = replyToMessageId)
                 .onSuccess {
                     // Re-fetch the thread so the new message shows up in the linear history.
                     val refreshed = bskyRepo.getConvoMessages(bskyToken, _bskyDid.value, thread.convo.convoId)
@@ -2069,6 +2094,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .onFailure {
                     _dmThread.value = _dmThread.value?.copy(sending = false)
                     showToast("Failed to send")
+                }
+        }
+    }
+
+    /** Long-press emoji reactions on a DM (Bluesky's own chat reactions):
+     *  toggles the signed-in account's [emoji] on [messageId]. Shown
+     *  immediately, then replaced by what the server returns (or undone if
+     *  it refuses). */
+    fun toggleDmReaction(messageId: String, emoji: String) {
+        val thread = _dmThread.value ?: return
+        val convoId = thread.convo.convoId
+        if (convoId.isBlank() || emoji.isBlank()) return
+        val me = _bskyDid.value
+        val msg = thread.messages.firstOrNull { it.id == messageId } ?: return
+        val mine = msg.reactions.orEmpty().any { it.value == emoji && it.sender?.did == me }
+        val optimistic = msg.copy(
+            reactions = if (mine) msg.reactions.orEmpty().filterNot { it.value == emoji && it.sender?.did == me }
+            else msg.reactions.orEmpty() + BskyReactionView(emoji, BskyMessageSender(me), java.time.Instant.now().toString())
+        )
+        fun replace(m: BskyMessageView) {
+            val cur = _dmThread.value ?: return
+            if (cur.convo.convoId != convoId) return
+            _dmThread.value = cur.copy(messages = cur.messages.map { if (it.id == m.id) m else it })
+        }
+        replace(optimistic)
+        viewModelScope.launch(Dispatchers.IO) {
+            bskyRepo.setMessageReaction(bskyToken, me, convoId, messageId, emoji, add = !mine)
+                .onSuccess { updated ->
+                    // Keep whatever the message already knew it replied to if
+                    // the server's copy leaves that out.
+                    if (updated != null) replace(updated.copy(replyTo = updated.replyTo ?: msg.replyTo))
+                }
+                .onFailure {
+                    replace(msg)
+                    showToast(if (it.message?.contains("ReactionLimitReached") == true) "Reaction limit reached" else "Couldn't react")
                 }
         }
     }
@@ -2591,6 +2651,11 @@ _bskyDid.value          = session.did
         Log.d("Stellar-FeedState", "loadFeed(reset=$reset)", Exception("trace"))
         if (_appMode.value == AppMode.E621) { loadE621Posts(reset); return }
         if (!_bskyLoggedIn.value) return
+        // Every reset starts a new "generation": a slower response for a
+        // feed the person has already switched away from is dropped instead
+        // of overwriting (or being appended to) the new feed.
+        if (reset) feedLoadGeneration++
+        val generation = feedLoadGeneration
         viewModelScope.launch(Dispatchers.IO) {
             if (reset) {
                 _isLoading.value = true; feedCursor = null; _currentIndex.value = 0
@@ -2616,6 +2681,11 @@ _bskyDid.value          = session.did
             if (result.isFailure && isRateLimitError(result.exceptionOrNull()?.message)) {
                 delay(4000)
                 result = attempt()
+            }
+            if (generation != feedLoadGeneration) {
+                // Superseded by a newer feed load — that one owns the flags.
+                if (!reset) isLoadingMore = false
+                return@launch
             }
             result.onSuccess { (items, cursor) ->
                 feedCursor = cursor
@@ -3575,6 +3645,14 @@ _bskyDid.value          = session.did
     }
 
     fun selectFeed(uri: String?) {
+        // Switching feeds: drop the old feed's posts immediately, so the
+        // feed/grid (which opens instantly) shows placeholders rather than
+        // the previous feed's content until the new one arrives.
+        if (_bskyLoggedIn.value || _appMode.value == AppMode.E621) {
+            _mediaItems.value = emptyList()
+            _currentIndex.value = 0
+            _isLoading.value = true
+        }
         _selectedFeedUri.value = uri
         // Bug fix: any explicit selection — including picking the null-URI
         // "Following" entry on purpose — counts as "the user has made a
@@ -3758,8 +3836,32 @@ _bskyDid.value          = session.did
             activeFeedMode = ActiveFeedMode.FRIENDS
             activeFeedActorDid = null
             _mediaItems.value = filterHidden(items)
-            _screenState.value = ScreenState.FEED
+            // "From Friends" opens in Explore (grid) mode, each tile wearing
+            // a little bubble with who sent it and what they said.
+            _screenState.value = ScreenState.GRID
         }
+    }
+
+    /** Opens the (still empty) From Friends grid straight away while its
+     *  posts load — no loading screen, no old feed showing in the meantime. */
+    private fun beginFriendsFeedLoad() {
+        _currentIndex.value = 0
+        if (_authorFeedState.value == null) {
+            _authorFeedState.value = AuthorFeedSavedState(
+                author       = AuthorInfo(_bskyDid.value, bskyHandle, "From Friends", null),
+                items        = _mediaItems.value,
+                currentIndex = _currentIndex.value,
+                cursor       = feedCursor,
+                feedUri      = _selectedFeedUri.value
+            )
+        }
+        feedLoadGeneration++
+        feedCursor = null
+        activeFeedMode = ActiveFeedMode.FRIENDS
+        activeFeedActorDid = null
+        _mediaItems.value = emptyList()
+        _isLoading.value = true
+        _screenState.value = ScreenState.GRID
     }
 
     fun showFriendsFeed() {
@@ -3775,19 +3877,24 @@ _bskyDid.value          = session.did
             refreshFriendsFeedInBackground()
             return
         }
-        // Not ready yet: show the full-screen "Loading From Friends feed…" overlay
-        // (handled in the UI layer) while we fetch it live.
+        // Not ready yet: open the grid right away (showing placeholder
+        // tiles) and fill it in once the fetch lands — feeds no longer get a
+        // loading screen.
+        beginFriendsFeedLoad()
+        val generation = feedLoadGeneration
         viewModelScope.launch(Dispatchers.IO) {
-            _friendsFeedLoadingOverlay.value = true
             ensureDmConversationsLoadedSuspend(silent = true)
             val realConvos = _dmConversations.value.filter { it.convoId.isNotBlank() }
-            bskyRepo.getFriendsSharedPosts(bskyToken, _bskyDid.value, realConvos)
-                .onSuccess { items ->
-                    _friendsFeedCache.value = items
-                    openFriendsFeed(items)
-                }
-                .onFailure { showToast("Feed Empty") }
-            _friendsFeedLoadingOverlay.value = false
+            val result = bskyRepo.getFriendsSharedPosts(bskyToken, _bskyDid.value, realConvos)
+            // The person may have left for another feed while this loaded.
+            val stillHere = generation == feedLoadGeneration && activeFeedMode == ActiveFeedMode.FRIENDS
+            result.onSuccess { items ->
+                _friendsFeedCache.value = items
+                if (stillHere) openFriendsFeed(items)
+            }.onFailure {
+                if (stillHere) openFriendsFeed(emptyList())
+            }
+            if (stillHere) _isLoading.value = false
         }
     }
 

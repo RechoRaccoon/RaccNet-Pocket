@@ -18,6 +18,8 @@ object UiToggles {
     private const val KEY_AUDIO_VISUALIZER = "audio_visualizer"
     private const val KEY_VISUALIZER_DURING_CALLS = "audio_visualizer_during_calls" // old on/off switch
     private const val KEY_VISUALIZER_CALL_MODE = "audio_visualizer_call_mode"
+    private const val KEY_VISUALIZER_PERMISSION_ASKED = "audio_visualizer_permission_asked"
+    private const val KEY_STARRY_BACKGROUND = "starry_background"
 
     /** Settings → UI Customization → "Loading Animation". */
     enum class LoadingAnimation(val label: String) {
@@ -26,7 +28,10 @@ object UiToggles {
         /** The retro pixel-matrix wipe. */
         PIXELS("Pixels"),
         /** The screen shatters like glass from where you tapped. */
-        SHATTER("Shatter")
+        SHATTER("Shatter"),
+        /** The old page fades into a drifting starfield with the Stellar
+         *  logo, which then fades away to reveal the loaded page. */
+        SPACE("Space")
     }
 
     private var prefs: SharedPreferences? = null
@@ -36,13 +41,18 @@ object UiToggles {
     var debugOverlay by mutableStateOf(false)
         private set
 
-    /** Which loading transition plays (default: none). */
-    var loadingAnimation by mutableStateOf(LoadingAnimation.NONE)
+    /** Which loading transition plays (default: Space). */
+    var loadingAnimation by mutableStateOf(LoadingAnimation.SPACE)
         private set
 
     /** Settings → UI Customization → "Audio Visualizer": bars above the
      *  feed's interaction bar that move to whatever music is playing. */
-    var audioVisualizer by mutableStateOf(false)
+    var audioVisualizer by mutableStateOf(true)
+        private set
+
+    /** Settings → UI Customization → "Starry Background": the twinkling
+     *  stars / shooting stars behind every page (on by default). */
+    var starryBackground by mutableStateOf(true)
         private set
 
     /** Settings → Audio Visualizer → "During Calls". */
@@ -68,8 +78,9 @@ object UiToggles {
         debugOverlay = p.getBoolean(KEY_DEBUG_OVERLAY, false)
         loadingAnimation = p.getString(KEY_LOADING_ANIMATION, null)
             ?.let { name -> LoadingAnimation.entries.firstOrNull { it.name == name } }
-            ?: LoadingAnimation.NONE
-        audioVisualizer = p.getBoolean(KEY_AUDIO_VISUALIZER, false)
+            ?: LoadingAnimation.SPACE
+        audioVisualizer = p.getBoolean(KEY_AUDIO_VISUALIZER, true)
+        starryBackground = p.getBoolean(KEY_STARRY_BACKGROUND, true)
         visualizerCallMode = p.getString(KEY_VISUALIZER_CALL_MODE, null)
             ?.let { name -> VisualizerCallMode.entries.firstOrNull { it.name == name } }
             ?: if (p.getBoolean(KEY_VISUALIZER_DURING_CALLS, false)) VisualizerCallMode.MUSIC_ONLY else VisualizerCallMode.PAUSE
@@ -83,6 +94,21 @@ object UiToggles {
     fun updateAudioVisualizer(enabled: Boolean) {
         audioVisualizer = enabled
         prefs?.edit()?.putBoolean(KEY_AUDIO_VISUALIZER, enabled)?.apply()
+    }
+
+    fun updateStarryBackground(enabled: Boolean) {
+        starryBackground = enabled
+        prefs?.edit()?.putBoolean(KEY_STARRY_BACKGROUND, enabled)?.apply()
+    }
+
+    /** The visualizer is on by default but needs the microphone permission
+     *  to hear the phone's audio; it's asked for once, the first time the
+     *  feed shows it. */
+    val visualizerPermissionAsked: Boolean
+        get() = prefs?.getBoolean(KEY_VISUALIZER_PERMISSION_ASKED, false) ?: true
+
+    fun markVisualizerPermissionAsked() {
+        prefs?.edit()?.putBoolean(KEY_VISUALIZER_PERMISSION_ASKED, true)?.apply()
     }
 
     fun updateDebugOverlay(enabled: Boolean) {

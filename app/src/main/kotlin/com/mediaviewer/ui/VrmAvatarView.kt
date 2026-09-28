@@ -539,7 +539,15 @@ internal class ViewerSession {
             // it throttles, which is part of why tracking got laggier the
             // longer VRM mode stayed open.
             val minInterval = 1_000_000_000L / maxFps.coerceIn(15, 120) - 2_000_000L
-            if (lastFrameNanos != 0L && frameTimeNanos - lastFrameNanos < minInterval) return
+            if (lastFrameNanos != 0L && frameTimeNanos - lastFrameNanos < minInterval) {
+                // Fresh tracking arrived mid-interval: show it now (at most
+                // ~60 fps) rather than up to a whole capped frame later.
+                // Only happens as often as tracking updates, so the cap
+                // still holds for everything else.
+                val eager = frameTimeNanos - lastFrameNanos >= EAGER_MIN_INTERVAL_NANOS &&
+                    runCatching { frameHook?.hasNewData() == true }.getOrDefault(false)
+                if (!eager) return
+            }
             val dt = if (lastFrameNanos == 0L) 0f else ((frameTimeNanos - lastFrameNanos) / 1e9f).coerceIn(0f, 0.25f)
             lastFrameNanos = frameTimeNanos
             // Tracking → skeleton/expressions, in step with rendering (it
@@ -825,6 +833,10 @@ private fun captureRootTransform(viewer: ModelViewer): FloatArray? {
  *  returns where to frame it (null = no placement known yet). */
 fun interface VrmFrameHook {
     fun beforeFrame(): AvatarFraming?
+    /** True when tracking results have arrived that the avatar hasn't been
+     *  posed with yet — the frame loop then renders on the next vsync
+     *  instead of waiting out its frame-rate cap. */
+    fun hasNewData(): Boolean = false
 }
 
 /** Where the user's eyes are in the upright tracking frame. [anchorX] and
@@ -1151,6 +1163,8 @@ private fun addFlatAmbientLight(engine: Engine, scene: com.google.android.filame
 }
 
 private const val TAG = "VrmAvatarView"
+/** Minimum spacing for an early (fresh-tracking) render: ~60 fps. */
+private const val EAGER_MIN_INTERVAL_NANOS = 14_500_000L
 
 /** The single camera-relative key light (lux) — see [addCameraLightRig]. */
 private val LIGHT_RIG_INTENSITIES = floatArrayOf(60_000f)

@@ -28,17 +28,17 @@ jobs:
       - name: Build release APK
         run: gradle assembleRelease --stacktrace
 
-      # The signing key itself is unchanged (same keystore contents, alias
-      # and passwords), so Stellar installs as an update over existing
-      # RaccNet builds. Only the file names changed.
+      # Stellar's own signing key (CN=Stellar, alias "stellar"). The
+      # applicationId is rechoraccoon.stellar, so this installs as its own
+      # app alongside/in place of the old RaccNet Lite package.
       - name: Sign APK with committed keystore
         run: |
           BUILD_TOOLS=$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)
           $ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner sign \
             --ks stellar-release.jks \
-            --ks-key-alias raccnetlite \
-            --ks-pass pass:RaccNetLite2024 \
-            --key-pass pass:RaccNetLite2024 \
+            --ks-key-alias stellar \
+            --ks-pass pass:Stellar2026 \
+            --key-pass pass:Stellar2026 \
             --out app/build/outputs/apk/release/Stellar.apk \
             app/build/outputs/apk/release/app-release-unsigned.apk
 

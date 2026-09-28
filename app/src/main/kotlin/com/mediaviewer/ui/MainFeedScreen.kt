@@ -1189,7 +1189,6 @@ private fun PostContent(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .then(if (liquidGlass) Modifier.background(postBackgroundBrush(dominantColor)) else Modifier)
                 .onSizeChanged { containerSize = it }
                 .then(if (liquidGlass) Modifier.onGloballyPositioned { backdropOrigin = it.positionInRoot() } else Modifier)
                 .then(
@@ -1394,6 +1393,8 @@ private fun PostContent(
                 },
             contentAlignment = Alignment.Center
         ) {
+            // The post's background: its own color, dimmed, under the stars.
+            if (liquidGlass) SpaceSky(dominantColor, Modifier.matchParentSize())
             val mediaModifier = Modifier.fillMaxSize().graphicsLayer {
                 scaleX = scale; scaleY = scale; translationX = offset.x; translationY = offset.y
             }.let { if (item.isBlocked || nsfwBlurred) it.blur(90.dp) else it }

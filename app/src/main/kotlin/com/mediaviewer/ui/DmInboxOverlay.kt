@@ -1,6 +1,21 @@
 package com.mediaviewer.ui
 
+import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.foundation.background
+import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.material.icons.automirrored.filled.Reply
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onSizeChanged
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -60,7 +75,8 @@ fun DmInboxOverlay(
     selfAvatarUrl: String? = null,
     onSelectConvo: (DmConversation) -> Unit,
     onCloseThread: () -> Unit,
-    onSendReply: (String) -> Unit,
+    /** Text, and the id of the message it replies to (null = not a reply). */
+    onSendReply: (String, String?) -> Unit,
     onClose: () -> Unit,
     // Item 27: tapping the other person's avatar/name in the thread header
     // should open their profile.
@@ -69,7 +85,11 @@ fun DmInboxOverlay(
     onLoadMoreMessages: () -> Unit = {},
     // Item 12 follow-up: tapping a shared-post card opens a feed made of
     // every post shared in this conversation.
-    onOpenSharedPostsFeed: () -> Unit = {}
+    onOpenSharedPostsFeed: () -> Unit = {},
+    /** Long-press emoji reactions: (messageId, emoji) toggles yours. */
+    onToggleReaction: (String, String) -> Unit = { _, _ -> },
+    /** The signed-in account (whose reactions/messages are "mine"). */
+    selfDid: String = ""
 ) {
     val tap = rememberHapticTap()
     // Item 8: background/chrome now reflect the logged-in user's own
@@ -114,15 +134,17 @@ fun DmInboxOverlay(
                     // gradient while a thread is open; the plain single-tint
                     // gradient everywhere else (no "other person" yet on the
                     // conversation picker).
-                    if (liquidGlass) Modifier.background(
-                        if (thread != null) dmThreadBackgroundBrush(bottomColor = profileTint, topColor = theirTint)
-                        else postBackgroundBrush(profileTint)
-                    ).drawWithContent {
+                    if (liquidGlass) Modifier.drawWithContent {
                         backdropLayer.record { this@drawWithContent.drawContent() }
-                        drawContent()
+                        drawLayer(backdropLayer)
                     } else Modifier.background(OledBlack)
                 )
-        )
+        ) {
+            if (liquidGlass) {
+                if (thread != null) SpaceSky(theirTint, Modifier.matchParentSize(), bottomColor = profileTint)
+                else SpaceSky(profileTint, Modifier.matchParentSize())
+            }
+        }
 
         Column(Modifier.fillMaxSize().padding(top = rememberTopCutoutClearance())) {
             // ── Header ──
@@ -169,7 +191,8 @@ fun DmInboxOverlay(
                     thread = thread, liquidGlass = liquidGlass, selfAvatarUrl = selfAvatarUrl,
                     profileTint = profileTint,
                     backdrop = dmBackdrop, onSendReply = onSendReply,
-                    onLoadMoreMessages = onLoadMoreMessages, onOpenSharedPostsFeed = onOpenSharedPostsFeed
+                    onLoadMoreMessages = onLoadMoreMessages, onOpenSharedPostsFeed = onOpenSharedPostsFeed,
+                    onToggleReaction = onToggleReaction, selfDid = selfDid
                 )
             }
         }
@@ -241,13 +264,18 @@ private fun DmThreadView(
     // from `myTint` below which stays specific to "my" chat bubbles.
     profileTint: Color = NeutralGlassTint,
     backdrop: GlassBackdrop?,
-    onSendReply: (String) -> Unit,
+    onSendReply: (String, String?) -> Unit,
     onLoadMoreMessages: () -> Unit,
-    onOpenSharedPostsFeed: () -> Unit
+    onOpenSharedPostsFeed: () -> Unit,
+    onToggleReaction: (String, String) -> Unit,
+    selfDid: String
 ) {
     val tap = rememberHapticTap()
+    val view = androidx.compose.ui.platform.LocalView.current
+    val scope = rememberCoroutineScope()
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
     var text by remember { mutableStateOf("") }
-    val myDid = thread.messages.firstOrNull { it.sender?.did != thread.convo.member.did }?.sender?.did
+    val myDid = selfDid.ifBlank { thread.messages.firstOrNull { it.sender?.did != thread.convo.member.did }?.sender?.did ?: "" }
 
     // Item 12: dominant colors for both sides of the conversation, the same
     // pattern used everywhere else in the app for tinting glass to a
@@ -256,9 +284,38 @@ private fun DmThreadView(
     // person has none set).
     val myTint = if (selfAvatarUrl != null) rememberSelfProfileTint(selfAvatarUrl) else VoteGreenTint
     val theirTint = if (thread.convo.member.avatarUrl != null) rememberDominantColor(thread.convo.member.avatarUrl!!) else NeutralGlassTint
+    fun isMine(m: BskyMessageView) = m.sender?.did != thread.convo.member.did
+    fun nameOf(m: BskyMessageView) = if (isMine(m)) "yourself" else thread.convo.member.displayName.ifBlank { "@" + thread.convo.member.handle }
 
+    // Swipe a message to reply to it (Bluesky's own DM replies).
+    var replyTarget by remember(thread.convo.convoId) { mutableStateOf<BskyMessageView?>(null) }
+    val inputFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    fun startReply(m: BskyMessageView) {
+        replyTarget = m
+        scope.launch {
+            androidx.compose.runtime.withFrameNanos { }
+            runCatching { inputFocus.requestFocus() }
+            keyboard?.show()
+        }
+    }
+    fun send() {
+        if (text.isBlank() || thread.sending) return
+        onSendReply(text.trim(), replyTarget?.id)
+        text = ""
+        replyTarget = null
+    }
+
+    // Long press: the emoji reaction picker, anchored to the pressed bubble.
+    var picker by remember { mutableStateOf<Pair<BskyMessageView, androidx.compose.ui.geometry.Rect>?>(null) }
+    val listBlur by androidx.compose.animation.core.animateDpAsState(if (picker != null) 8.dp else 0.dp, label = "dmBlur")
+    // Tapping a reply's quote scrolls to (and briefly lights up) the original.
+    var highlightId by remember { mutableStateOf<String?>(null) }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+
+    Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize()) {
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        Box(Modifier.weight(1f).fillMaxWidth().then(if (listBlur > 0.dp) Modifier.blur(listBlur) else Modifier)) {
             when {
                 thread.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 1.5.dp)
@@ -267,8 +324,6 @@ private fun DmThreadView(
                     Text("No messages yet", color = DimGray, fontSize = 13.sp)
                 }
                 else -> {
-                    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-
                     // Bug fix: this used to unconditionally scroll to the
                     // bottom any time thread.messages.size changed — which
                     // also fired when *older* messages were prepended by
@@ -281,7 +336,7 @@ private fun DmThreadView(
                     LaunchedEffect(thread.messages.lastOrNull()?.id) {
                         val newLastId = thread.messages.lastOrNull()?.id
                         if (newLastId != null && newLastId != lastMessageId && thread.messages.isNotEmpty()) {
-                            listState.animateScrollToItem(thread.messages.size - 1)
+                            listState.animateScrollToItem(thread.messages.size - 1 + if (thread.loadingMore) 1 else 0)
                         }
                         lastMessageId = newLastId
                     }
@@ -299,6 +354,9 @@ private fun DmThreadView(
                                 }
                             }
                     }
+                    LaunchedEffect(highlightId) {
+                        if (highlightId != null) { kotlinx.coroutines.delay(1400); highlightId = null }
+                    }
 
                     LazyColumn(
                         Modifier.fillMaxSize(), state = listState,
@@ -312,11 +370,25 @@ private fun DmThreadView(
                             }
                         }
                         items(thread.messages, key = { it.id }) { msg ->
-                            val isMine = msg.sender?.did != thread.convo.member.did
+                            val mine = isMine(msg)
                             DmBubble(
-                                msg, isMine = isMine, tint = if (isMine) myTint else theirTint,
+                                msg, isMine = mine, tint = if (mine) myTint else theirTint,
                                 liquidGlass = liquidGlass, embedded = thread.embeddedPosts[msg.id],
-                                backdrop = backdrop, onOpenSharedPostsFeed = onOpenSharedPostsFeed
+                                backdrop = backdrop, onOpenSharedPostsFeed = onOpenSharedPostsFeed,
+                                myDid = myDid,
+                                replyName = msg.replyTo?.let { r -> if (r.sender?.did == thread.convo.member.did) thread.convo.member.displayName.ifBlank { "@" + thread.convo.member.handle } else "You" },
+                                replyTint = msg.replyTo?.let { r -> if (r.sender?.did == thread.convo.member.did) theirTint else myTint } ?: Color.White,
+                                highlighted = highlightId == msg.id,
+                                onReply = { startReply(msg) },
+                                onLongPress = { bounds -> picker = msg to bounds },
+                                onToggleReaction = { emoji -> onToggleReaction(msg.id, emoji) },
+                                onJumpToReply = { id ->
+                                    val idx = thread.messages.indexOfFirst { it.id == id }
+                                    if (idx >= 0) {
+                                        scope.launch { listState.animateScrollToItem(idx + if (thread.loadingMore) 1 else 0) }
+                                        highlightId = id
+                                    }
+                                }
                             )
                         }
                     }
@@ -339,18 +411,35 @@ private fun DmThreadView(
         // (rather than stacking two separate `.imePadding()` /
         // `.navigationBarsPadding()` modifiers, which would add both insets
         // together and leave a gap above the keyboard on 3-button nav)
-        // takes whichever of the two is currently larger — the nav bar's
-        // own inset while the keyboard is closed, the keyboard's height
-        // once it's open. Because this Column is `fillMaxSize()` and the
-        // message list above is the only `weight(1f)` child, this row
-        // growing to make room for the keyboard is what shrinks that list
-        // rather than the keyboard just covering it — see the doc comment
-        // on the outer Column in DmInboxOverlay for why that in turn never
-        // touches the page header.
-        Row(
+        // takes whichever of the two is currently larger.
+        Column(
             Modifier.fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
-                .padding(horizontal = 10.dp, vertical = 10.dp),
+                .padding(horizontal = 10.dp, vertical = 10.dp)
+        ) {
+            // "Replying to …" — slides in above the field while a reply is set.
+            androidx.compose.animation.AnimatedVisibility(
+                visible = replyTarget != null,
+                enter = androidx.compose.animation.expandVertically(androidx.compose.animation.core.spring(stiffness = 700f)) +
+                    androidx.compose.animation.fadeIn(),
+                exit = androidx.compose.animation.shrinkVertically() + androidx.compose.animation.fadeOut()
+            ) {
+                // Holds the last target through the exit animation.
+                var shown by remember { mutableStateOf<BskyMessageView?>(null) }
+                replyTarget?.let { shown = it }
+                val target = shown
+                if (target != null) {
+                    val accent = if (isMine(target)) myTint else theirTint
+                    ReplyPreviewBar(
+                        name = nameOf(target),
+                        snippet = target.text.ifBlank { if (thread.embeddedPosts[target.id] != null) "Shared a post" else "Message" },
+                        accent = accent, liquidGlass = liquidGlass, tint = profileTint, backdrop = backdrop,
+                        onCancel = { tap(); replyTarget = null }
+                    )
+                }
+            }
+        Row(
+            Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -364,12 +453,10 @@ private fun DmThreadView(
                         textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
                         cursorBrush = SolidColor(Color.White),
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(onSend = {
-                            if (text.isNotBlank() && !thread.sending) { onSendReply(text.trim()); text = "" }
-                        }),
-                        modifier = Modifier.fillMaxWidth()
+                        keyboardActions = KeyboardActions(onSend = { send() }),
+                        modifier = Modifier.fillMaxWidth().focusRequester(inputFocus)
                     )
-                    if (text.isEmpty()) Text("Message…", color = DimGray, fontSize = 14.sp)
+                    if (text.isEmpty()) Text(if (replyTarget != null) "Reply…" else "Message…", color = DimGray, fontSize = 14.sp)
                 }
             }
             if (liquidGlass) {
@@ -387,7 +474,7 @@ private fun DmThreadView(
                 }
             }
             val sendModifier = Modifier.size(46.dp).clickable(enabled = text.isNotBlank() && !thread.sending) {
-                tap(); onSendReply(text.trim()); text = ""
+                tap(); send()
             }
             if (liquidGlass) {
                 LiquidGlassSurface(sendModifier, shape = sendShape, tint = profileTint, backdrop = backdrop) { SendButtonContent() }
@@ -395,16 +482,137 @@ private fun DmThreadView(
                 Box(sendModifier.clip(sendShape).background(Color.White.copy(0.14f))) { SendButtonContent() }
             }
         }
+        }
+    }
+
+    // ── Reaction picker (long press) ──
+    val current = picker
+    if (current != null) {
+        val (msg, bounds) = current
+        val mine = isMine(msg)
+        ReactionPickerOverlay(
+            anchor = bounds,
+            alignEnd = mine,
+            myReactions = msg.reactions.orEmpty().filter { it.sender?.did == myDid }.map { it.value }.toSet(),
+            tint = if (mine) myTint else theirTint,
+            liquidGlass = liquidGlass, backdrop = backdrop,
+            onPick = { emoji ->
+                view.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM)
+                onToggleReaction(msg.id, emoji)
+                picker = null
+            },
+            onReply = { tap(); picker = null; startReply(msg) },
+            onCopy = if (msg.text.isNotBlank()) ({
+                tap(); clipboard.setText(androidx.compose.ui.text.AnnotatedString(msg.text)); picker = null
+            }) else null,
+            onDismiss = { picker = null }
+        )
+    }
     }
 }
 
+/** The strip above the message field while replying: an accent bar in the
+ *  replied-to sender's color, "Replying to …", the message, and an X. */
+@Composable
+private fun ReplyPreviewBar(
+    name: String, snippet: String, accent: Color,
+    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
+    onCancel: () -> Unit
+) {
+    val shape = RoundedCornerShape(16.dp)
+    val content: @Composable () -> Unit = {
+        Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.width(3.dp).height(30.dp).clip(RoundedCornerShape(2.dp)).background(accent))
+            Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Replying to $name", color = accent.copy(alpha = 1f).let { androidx.compose.ui.graphics.lerp(it, Color.White, 0.45f) },
+                    fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(snippet, color = Color.White.copy(0.75f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Box(Modifier.size(30.dp).clip(CircleShape).clickable(onClick = onCancel), contentAlignment = Alignment.Center) {
+                Icon(Icons.Default.Close, contentDescription = "Cancel reply", tint = Color.White.copy(0.8f), modifier = Modifier.size(16.dp))
+            }
+        }
+    }
+    Box(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+        if (liquidGlass) LiquidGlassSurface(Modifier.fillMaxWidth(), shape = shape, tint = tint, backdrop = backdrop) { content() }
+        else Box(Modifier.fillMaxWidth().clip(shape).background(Color.White.copy(0.08f))) { content() }
+    }
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun DmBubble(
     msg: BskyMessageView, isMine: Boolean, tint: Color, liquidGlass: Boolean, embedded: DmEmbeddedPost?,
-    backdrop: GlassBackdrop?, onOpenSharedPostsFeed: () -> Unit
+    backdrop: GlassBackdrop?, onOpenSharedPostsFeed: () -> Unit,
+    myDid: String = "",
+    replyName: String? = null,
+    replyTint: Color = Color.White,
+    highlighted: Boolean = false,
+    onReply: () -> Unit = {},
+    onLongPress: (androidx.compose.ui.geometry.Rect) -> Unit = {},
+    onToggleReaction: (String) -> Unit = {},
+    onJumpToReply: (String) -> Unit = {}
 ) {
     val tap = rememberHapticTap()
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isMine) Arrangement.End else Arrangement.Start) {
+    val view = androidx.compose.ui.platform.LocalView.current
+    val scope = rememberCoroutineScope()
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    // Swipe right to reply: the bubble follows the finger (with a little
+    // resistance), a reply arrow grows in behind it, and crossing the
+    // threshold ticks — let go past it to reply.
+    val dragX = remember { androidx.compose.animation.core.Animatable(0f) }
+    val thresholdPx = with(density) { 64.dp.toPx() }
+    val maxPx = with(density) { 96.dp.toPx() }
+    var armed by remember { mutableStateOf(false) }
+    val latestOnReply by rememberUpdatedState(onReply)
+    val bubbleBounds = remember { arrayOfNulls<androidx.compose.ui.geometry.Rect>(1) }
+    val flash by androidx.compose.animation.core.animateFloatAsState(if (highlighted) 1f else 0f, androidx.compose.animation.core.tween(350), label = "replyFlash")
+
+    Box(
+        Modifier.fillMaxWidth().pointerInput(msg.id) {
+            var raw = 0f
+            detectHorizontalDragGestures(
+                onDragStart = { raw = 0f },
+                onDragEnd = {
+                    if (armed) latestOnReply()
+                    armed = false
+                    scope.launch { dragX.animateTo(0f, androidx.compose.animation.core.spring(dampingRatio = 0.6f, stiffness = 500f)) }
+                },
+                onDragCancel = {
+                    armed = false
+                    scope.launch { dragX.animateTo(0f, androidx.compose.animation.core.spring(dampingRatio = 0.6f, stiffness = 500f)) }
+                }
+            ) { change, amount ->
+                raw = (raw + amount).coerceAtLeast(0f)
+                if (raw > 0f) change.consume()
+                // Rubber-band: follows 1:1 at first, then stiffens.
+                val shown = if (raw <= thresholdPx) raw else thresholdPx + (raw - thresholdPx) * 0.35f
+                scope.launch { dragX.snapTo(shown.coerceAtMost(maxPx)) }
+                val nowArmed = raw >= thresholdPx
+                if (nowArmed != armed) {
+                    armed = nowArmed
+                    if (nowArmed) view.performHapticFeedback(android.view.HapticFeedbackConstants.CONTEXT_CLICK)
+                }
+            }
+        }
+    ) {
+        // The reply arrow, revealed behind the bubble as it slides.
+        val progress = (dragX.value / thresholdPx).coerceIn(0f, 1f)
+        if (progress > 0f) {
+            Box(
+                Modifier.align(Alignment.CenterStart).padding(start = 4.dp).size(30.dp)
+                    .graphicsLayer { alpha = progress; scaleX = 0.5f + 0.5f * progress; scaleY = 0.5f + 0.5f * progress }
+                    .clip(CircleShape).background(tint.copy(alpha = if (armed) 0.65f else 0.3f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.AutoMirrored.Filled.Reply, contentDescription = null, tint = Color.White, modifier = Modifier.size(17.dp))
+            }
+        }
+    Column(
+        Modifier.fillMaxWidth().offset { androidx.compose.ui.unit.IntOffset(dragX.value.toInt(), 0) },
+        horizontalAlignment = if (isMine) Alignment.End else Alignment.Start
+    ) {
         val shape = RoundedCornerShape(
             topStart = 16.dp, topEnd = 16.dp,
             bottomStart = if (isMine) 16.dp else 4.dp, bottomEnd = if (isMine) 4.dp else 16.dp
@@ -414,12 +622,48 @@ private fun DmBubble(
             // now, so this bubble needs more room to show them well —
             // widened from 260.dp.
             Modifier.widthIn(max = 300.dp)
+                .onGloballyPositioned { bubbleBounds[0] = it.boundsInRoot() }
                 .then(
                     if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
                     else Modifier.clip(shape).background(tint.copy(alpha = if (isMine) 0.55f else 0.35f))
                 )
+                .then(if (flash > 0f) Modifier.background(Color.White.copy(alpha = 0.18f * flash)) else Modifier)
+                .combinedClickable(
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null,
+                    onClick = {},
+                    // (combinedClickable gives the long-press haptic itself.)
+                    onLongClick = { bubbleBounds[0]?.let(onLongPress) }
+                )
                 .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
+            // A reply: a compact quote of the message it answers — tap it to
+            // jump there.
+            val quoted = msg.replyTo
+            if (quoted != null) {
+                Row(
+                    Modifier.clip(RoundedCornerShape(10.dp))
+                        .background(Color.Black.copy(alpha = 0.22f))
+                        .clickable { tap(); if (!quoted.isDeleted) onJumpToReply(quoted.id) }
+                        .padding(end = 10.dp)
+                        .height(IntrinsicSize.Min),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(Modifier.width(3.dp).fillMaxHeight().background(replyTint))
+                    Column(Modifier.padding(start = 8.dp, top = 5.dp, bottom = 5.dp)) {
+                        Text(
+                            replyName ?: "Reply", color = androidx.compose.ui.graphics.lerp(replyTint, Color.White, 0.5f),
+                            fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1
+                        )
+                        Text(
+                            if (quoted.isDeleted) "Deleted message" else quoted.text.ifBlank { "Shared a post" },
+                            color = Color.White.copy(0.7f), fontSize = 12.sp, lineHeight = 15.sp,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+            }
             if (msg.text.isNotBlank()) {
                 Text(msg.text, color = Color.White, fontSize = 14.sp, lineHeight = 18.sp)
             }
@@ -468,6 +712,218 @@ private fun DmBubble(
                 }
             }
         }
+        // Reactions: one chip per emoji with its count; yours are outlined
+        // in your color. Tap a chip to add/remove your own.
+        val reactions = msg.reactions.orEmpty()
+        if (reactions.isNotEmpty()) {
+            val grouped = remember(reactions, myDid) {
+                reactions.groupBy { it.value }.map { (emoji, list) -> Triple(emoji, list.size, list.any { it.sender?.did == myDid }) }
+            }
+            Row(
+                Modifier.padding(top = 3.dp, start = 4.dp, end = 4.dp).animateContentSize(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                for ((emoji, count, mine) in grouped) {
+                    androidx.compose.runtime.key(emoji) {
+                        val pop = remember { androidx.compose.animation.core.Animatable(0.6f) }
+                        LaunchedEffect(Unit) { pop.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.45f, stiffness = 600f)) }
+                        val chipShape = RoundedCornerShape(12.dp)
+                        Row(
+                            Modifier.graphicsLayer { scaleX = pop.value; scaleY = pop.value }
+                                .clip(chipShape)
+                                .background(if (mine) tint.copy(alpha = 0.45f) else Color.Black.copy(alpha = 0.35f))
+                                .border(1.dp, if (mine) androidx.compose.ui.graphics.lerp(tint, Color.White, 0.35f) else Color.White.copy(0.15f), chipShape)
+                                .clickable {
+                                    view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+                                    onToggleReaction(emoji)
+                                }
+                                .padding(horizontal = 7.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(emoji, fontSize = 13.sp)
+                            if (count > 1) {
+                                Spacer(Modifier.width(3.dp))
+                                Text("$count", color = Color.White.copy(0.85f), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    }
+}
+
+/** Quick reactions, then the full set behind "+". Every value is a single
+ *  emoji (one grapheme), which is all Bluesky's reactions accept. */
+private val QUICK_REACTIONS = listOf("❤️", "😂", "😮", "😢", "😡", "👍", "🔥")
+private val ALL_REACTIONS = listOf(
+    "😀", "😃", "😄", "😁", "😆", "😅", "🤣", "😂", "🙂", "🙃", "😉", "😊", "😇", "🥰", "😍", "🤩",
+    "😘", "😗", "😚", "😙", "😋", "😛", "😜", "🤪", "😝", "🤑", "🤗", "🤭", "🤫", "🤔", "🤐", "🤨",
+    "😐", "😑", "😶", "😏", "😒", "🙄", "😬", "😮‍💨", "🤥", "😌", "😔", "😪", "🤤", "😴", "😷", "🤒",
+    "🤕", "🤢", "🤮", "🥵", "🥶", "🥴", "😵", "🤯", "🤠", "🥳", "😎", "🤓", "🧐", "😕", "😟", "🙁",
+    "😮", "😯", "😲", "😳", "🥺", "🥹", "😦", "😧", "😨", "😰", "😥", "😢", "😭", "😱", "😖", "😣",
+    "😞", "😓", "😩", "😫", "🥱", "😤", "😡", "😠", "🤬", "😈", "👿", "💀", "☠️", "💩", "🤡", "👻",
+    "👽", "🤖", "😺", "😸", "😹", "😻", "😼", "😽", "🙀", "😿", "😾", "🙈", "🙉", "🙊",
+    "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔", "❤️‍🔥", "💕", "💞", "💓", "💗", "💖",
+    "💘", "💝", "💯", "💢", "💥", "💫", "💦", "💨", "💬", "💭", "💤",
+    "👍", "👎", "👏", "🙌", "👐", "🤲", "🤝", "🙏", "✌️", "🤞", "🤟", "🤘", "👌", "🤌", "🤏", "👈",
+    "👉", "👆", "👇", "☝️", "✋", "🤚", "🖐️", "🖖", "👋", "🤙", "💪", "🫶", "🫡", "🫠", "🫣", "🫢",
+    "👀", "👁️", "🧠", "🫀", "🦷", "👅", "👄",
+    "🔥", "✨", "🌟", "⭐", "⚡", "🌈", "☀️", "🌙", "☁️", "❄️", "🌊", "🌸", "🌹", "🌻", "🍀", "🌵",
+    "🦝", "🐶", "🐱", "🦊", "🐻", "🐼", "🐨", "🐯", "🦁", "🐮", "🐷", "🐸", "🐵", "🐔", "🐧", "🐦",
+    "🦄", "🐝", "🦋", "🐢", "🐍", "🐙", "🦈", "🐬", "🐳", "🦖", "🐉",
+    "🍕", "🍔", "🍟", "🌮", "🍣", "🍩", "🍪", "🎂", "🍰", "🍫", "🍿", "🍎", "🍓", "🍑", "🍒", "🥑",
+    "☕", "🍵", "🧋", "🍺", "🍷", "🥂",
+    "🎉", "🎊", "🎈", "🎁", "🏆", "🥇", "🎮", "🎧", "🎵", "🎶", "🎨", "📸", "🎬", "📚", "💡", "💎",
+    "💰", "🚀", "✈️", "🚗", "🏠", "⏰", "📌", "🔒", "🔑",
+    "✅", "❌", "❓", "❗", "‼️", "⁉️", "⚠️", "🚫", "💤", "🆗", "🆒", "🆕", "🔝", "♻️", "➕", "➖"
+).distinct()
+
+/** Long-press menu for a DM: a row of quick emoji reactions (a "+" opens
+ *  every emoji), plus Reply and Copy. Glass in the message's own color,
+ *  popping in from the pressed bubble over the softly blurred thread. */
+@Composable
+private fun ReactionPickerOverlay(
+    anchor: androidx.compose.ui.geometry.Rect,
+    alignEnd: Boolean,
+    myReactions: Set<String>,
+    tint: Color,
+    liquidGlass: Boolean,
+    backdrop: GlassBackdrop?,
+    onPick: (String) -> Unit,
+    onReply: () -> Unit,
+    onCopy: (() -> Unit)?,
+    onDismiss: () -> Unit
+) {
+    androidx.activity.compose.BackHandler(onBack = onDismiss)
+    val view = androidx.compose.ui.platform.LocalView.current
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    var expanded by remember { mutableStateOf(false) }
+    var origin by remember { mutableStateOf(Offset.Zero) }
+    var boxSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+    var cardSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+    val appear = remember { androidx.compose.animation.core.Animatable(0f) }
+    LaunchedEffect(Unit) { appear.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.62f, stiffness = 480f)) }
+    Box(
+        Modifier.fillMaxSize()
+            .onGloballyPositioned { origin = it.positionInRoot(); boxSize = it.size }
+            .graphicsLayer { alpha = appear.value.coerceIn(0f, 1f) }
+            .background(Color.Black.copy(alpha = 0.35f))
+            .clickable(
+                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                indication = null, onClick = onDismiss
+            )
+    ) {
+        // Above the bubble when there's room, otherwise just below it.
+        val gap = with(density) { 8.dp.toPx() }
+        val margin = with(density) { 12.dp.toPx() }
+        val aboveY = anchor.top - origin.y - cardSize.height - gap
+        val y = if (aboveY >= margin) aboveY else (anchor.bottom - origin.y + gap)
+            .coerceAtMost((boxSize.height - cardSize.height - margin).coerceAtLeast(margin))
+        val x = if (alignEnd) (anchor.right - origin.x - cardSize.width).coerceAtLeast(margin)
+            else (anchor.left - origin.x).coerceIn(margin, (boxSize.width - cardSize.width - margin).coerceAtLeast(margin))
+        val shape = RoundedCornerShape(24.dp)
+        Box(
+            Modifier
+                .offset { androidx.compose.ui.unit.IntOffset(x.toInt(), y.toInt()) }
+                .onSizeChanged { cardSize = it }
+                .widthIn(max = 340.dp)
+                .graphicsLayer {
+                    val sc = 0.8f + 0.2f * appear.value
+                    scaleX = sc; scaleY = sc
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(if (alignEnd) 1f else 0f, if (aboveY >= margin) 1f else 0f)
+                }
+                // Swallow taps on the card itself.
+                .clickable(
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null
+                ) { }
+        ) {
+            val content: @Composable () -> Unit = {
+                Column(Modifier.animateContentSize().padding(horizontal = 8.dp, vertical = 8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        QUICK_REACTIONS.forEachIndexed { i, emoji ->
+                            // A little staggered pop for each emoji.
+                            val pop = remember { androidx.compose.animation.core.Animatable(0.4f) }
+                            LaunchedEffect(Unit) {
+                                kotlinx.coroutines.delay(25L * i)
+                                pop.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.5f, stiffness = 700f))
+                            }
+                            ReactionEmojiCell(emoji, selected = emoji in myReactions, tint = tint, size = 38.dp, scale = pop.value) { onPick(emoji) }
+                        }
+                        Box(
+                            Modifier.size(34.dp).clip(CircleShape).background(Color.White.copy(0.12f))
+                                .clickable {
+                                    view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+                                    expanded = !expanded
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                if (expanded) Icons.Default.Close else Icons.Default.Add,
+                                contentDescription = if (expanded) "Fewer emoji" else "More emoji",
+                                tint = Color.White, modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                    if (expanded) {
+                        androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
+                            columns = androidx.compose.foundation.lazy.grid.GridCells.Fixed(8),
+                            modifier = Modifier.padding(top = 6.dp).width(304.dp).height(220.dp)
+                        ) {
+                            items(ALL_REACTIONS.size) { i ->
+                                val emoji = ALL_REACTIONS[i]
+                                ReactionEmojiCell(emoji, selected = emoji in myReactions, tint = tint, size = 38.dp) { onPick(emoji) }
+                            }
+                        }
+                    }
+                    HorizontalDivider(Modifier.padding(vertical = 6.dp), color = Color.White.copy(0.1f))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        PickerAction("Reply", Icons.AutoMirrored.Filled.Reply, onReply)
+                        if (onCopy != null) PickerAction("Copy", Icons.Default.ContentCopy, onCopy)
+                    }
+                }
+            }
+            if (liquidGlass) {
+                LiquidGlassSurface(Modifier, shape = shape, tint = tint, backdrop = backdrop) {
+                    Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.3f)))
+                    content()
+                }
+            } else {
+                Box(
+                    Modifier.clip(shape).background(androidx.compose.ui.graphics.lerp(Color(0xFF141418), tint, 0.25f))
+                        .border(1.dp, tint.copy(alpha = 0.5f), shape)
+                ) { content() }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReactionEmojiCell(emoji: String, selected: Boolean, tint: Color, size: androidx.compose.ui.unit.Dp, scale: Float = 1f, onClick: () -> Unit) {
+    Box(
+        Modifier.size(size)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(CircleShape)
+            .then(if (selected) Modifier.background(tint.copy(alpha = 0.5f)).border(1.dp, androidx.compose.ui.graphics.lerp(tint, Color.White, 0.4f), CircleShape) else Modifier)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(emoji, fontSize = (size.value * 0.52f).sp)
+    }
+}
+
+@Composable
+private fun PickerAction(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
+    Row(
+        Modifier.clip(RoundedCornerShape(14.dp)).background(Color.White.copy(0.1f))
+            .clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(15.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 

@@ -63,12 +63,23 @@ fun InlineVideoPlayer(uri: Uri, modifier: Modifier = Modifier) {
                 }
             }
             DisposableEffect(player) { onDispose { player.release() } }
+            // TextureView-backed (inflated — the surface type can only be
+            // set from XML): a SurfaceView punches its own hole in the
+            // window, which ignored this box's clipping/position inside the
+            // scrolling composer and drew the video offset from its frame.
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
-                    PlayerView(ctx).apply {
+                    (android.view.LayoutInflater.from(ctx).inflate(com.mediaviewer.R.layout.player_view_texture, null) as PlayerView).apply {
+                        layoutParams = android.view.ViewGroup.LayoutParams(
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                        resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+                        setShutterBackgroundColor(android.graphics.Color.BLACK)
                         this.player = player
                         useController = true
+                        setShowNextButton(false)
+                        setShowPreviousButton(false)
                     }
                 },
                 onRelease = { it.player = null }

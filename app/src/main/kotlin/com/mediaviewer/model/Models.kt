@@ -901,13 +901,35 @@ data class BskyConvoMember(
 data class BskyMessageSender(val did: String)
 
 data class BskyMessageView(
+    /** "chat.bsky.convo.defs#messageView" or "…#deletedMessageView" (the
+     *  latter shows up as a replied-to message that has since been deleted). */
+    @com.google.gson.annotations.SerializedName("\$type") val type: String? = null,
     val id: String = "",
     val text: String = "",
     val facets: List<JsonElement>? = null,
     val embed: JsonElement? = null,
     val sender: BskyMessageSender? = null,
-    val sentAt: String = ""
+    val sentAt: String = "",
+    /** Emoji reactions on this message (chat.bsky.convo.defs#reactionView). */
+    val reactions: List<BskyReactionView>? = null,
+    /** The message this one replies to, when it's a reply. */
+    val replyTo: BskyMessageView? = null
+) {
+    val isDeleted: Boolean get() = type?.endsWith("deletedMessageView") == true
+}
+
+/** One emoji reaction on a DM (chat.bsky.convo.defs#reactionView). */
+data class BskyReactionView(
+    val value: String = "",
+    val sender: BskyMessageSender? = null,
+    val createdAt: String = ""
 )
+
+/** chat.bsky.convo.addReaction / removeReaction input. */
+data class BskyReactionRequest(val convoId: String, val messageId: String, val value: String)
+
+/** chat.bsky.convo.addReaction / removeReaction output: the updated message. */
+data class BskyMessageResponse(val message: BskyMessageView? = null)
 
 data class BskyConvoView(
     val id: String,
@@ -938,7 +960,9 @@ data class BskyGetConvoLogResponse(val logs: List<BskyConvoLogEntry> = emptyList
 data class BskySendMessageInput(
     val text: String,
     val facets: List<Map<String, Any>>? = null,
-    val embed: Map<String, Any>? = null
+    val embed: Map<String, Any>? = null,
+    /** chat.bsky.convo.defs#replyRef — Bluesky's own DM replies. */
+    val replyTo: Map<String, String>? = null
 )
 
 data class BskySendMessageRequest(val convoId: String, val message: BskySendMessageInput)

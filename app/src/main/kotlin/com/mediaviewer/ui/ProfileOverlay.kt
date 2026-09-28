@@ -677,7 +677,6 @@ fun ProfileOverlay(
                     if (liquidGlass) backdropLayer.record { this@drawWithContent.drawContent() }
                     drawContent()
                 }
-                .background(postBackgroundBrush(blended))
                 // Pinch-out detection: watched passively (PointerEventPass.Initial,
                 // never consumed) purely to peek at 2-finger spread without
                 // interfering with the LazyColumn's own single-finger scroll
@@ -709,6 +708,9 @@ fun ProfileOverlay(
                     }
                 }
         ) {
+        // Dim profile color + stars, recorded with the page so the glass
+        // blurs them.
+        SpaceSky(blended, Modifier.matchParentSize())
         LazyColumn(
             state = listState,
             // Bug fix (per feedback): the last item in a tab (e.g. the
@@ -3846,8 +3848,9 @@ fun TitleDetailOverlay(
                     if (liquidGlass) backdropLayer.record { this@drawWithContent.drawContent() }
                     drawContent()
                 }
-                .then(if (liquidGlass) Modifier.background(postBackgroundBrush(tint)) else Modifier.background(OledBlack))
+                .then(if (liquidGlass) Modifier else Modifier.background(OledBlack))
         ) {
+            if (liquidGlass) SpaceSky(tint, Modifier.matchParentSize())
             Box(Modifier.fillMaxWidth().height(bannerHeight)) {
                 if (bannerImage != null) {
                     AsyncImage(model = bannerImage, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())

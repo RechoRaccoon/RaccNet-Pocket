@@ -1932,7 +1932,9 @@ class BlueskyRepository {
     /** Sends [text], optionally with an embedded post (for sharing media via DM). */
     suspend fun sendMessage(
         token: String, myDid: String, convoId: String, text: String,
-        embedPostUri: String? = null, embedPostCid: String? = null
+        embedPostUri: String? = null, embedPostCid: String? = null,
+        /** Reply to this message (Bluesky's own DM replies). */
+        replyToMessageId: String? = null
     ): Result<Unit> = runCatching {
         ensureChatApi(myDid)
         val facets = buildHashtagFacets(text).takeIf { it.isNotEmpty() }
@@ -1940,8 +1942,21 @@ class BlueskyRepository {
             "\$type" to "app.bsky.embed.record",
             "record" to mapOf("uri" to embedPostUri, "cid" to embedPostCid)
         ) else null
-        val resp = chatApi.sendMessage("Bearer $token", BskySendMessageRequest(convoId, BskySendMessageInput(text, facets, embed)))
+        val replyTo = replyToMessageId?.takeIf { it.isNotBlank() }?.let { mapOf("messageId" to it) }
+        val resp = chatApi.sendMessage("Bearer $token", BskySendMessageRequest(convoId, BskySendMessageInput(text, facets, embed, replyTo)))
         if (!resp.isSuccessful) error("SendMessage ${resp.code()}: ${errorBodyText(resp)}")
+    }
+
+    /** Adds ([add]) or removes an emoji reaction on a DM; returns the
+     *  message as the server now has it. */
+    suspend fun setMessageReaction(
+        token: String, myDid: String, convoId: String, messageId: String, emoji: String, add: Boolean
+    ): Result<BskyMessageView?> = runCatching {
+        ensureChatApi(myDid)
+        val req = BskyReactionRequest(convoId, messageId, emoji)
+        val resp = if (add) chatApi.addReaction("Bearer $token", req) else chatApi.removeReaction("Bearer $token", req)
+        if (!resp.isSuccessful) error("${if (add) "AddReaction" else "RemoveReaction"} ${resp.code()}: ${errorBodyText(resp)}")
+        resp.body()?.message
     }
 
     private fun errorBodyText(resp: retrofit2.Response<*>): String =
@@ -2325,7 +2340,7 @@ class BlueskyRepository {
      *  Textshot image apart from a regular attached image when loading a
      *  profile, and show it in the Text Post tab instead of Images — see
      *  isTextshotAltText/textshotTextFromAlt below. */
-    suspend fun createTextshotPost(token: String, did: String, textshotBitmap: android.graphics.Bitmap, textshotText: String, selfLabels: List<String> = emptyList(), hasEmoji: Boolean = false): Result<BskyRef> =
+    suspend fun createTextshotPost(token: String, did: String, textshotBitmap: android.graphics.Bitmap, textshotText: String, selfLabels: List<String> = emptyList(), hasEmoji: Boolean = false, postText: String = ""): Result<BskyRef> =
         withContext(Dispatchers.IO) {
             runCatching {
                 val out = java.io.ByteArrayOutputStream()
@@ -2335,7 +2350,8 @@ class BlueskyRepository {
                 val resp = api.uploadBlob("Bearer $token", "image/png", body)
                 val blob = resp.body()?.blob ?: error("uploadBlob ${resp.code()}: ${resp.errorBody()?.string()}")
                 val alt = (if (hasEmoji) TEXTSHOT_EMOJI_ALT_PREFIX else TEXTSHOT_ALT_PREFIX) + textshotText
-                createPost(token, did, "", listOf(UploadedImage(blob, textshotBitmap.width, textshotBitmap.height)), imageAlts = listOf(alt), selfLabels = selfLabels).getOrElse { throw it }
+                // postText: the separate text typed above the Textshot (hashtags, a caption…).
+                createPost(token, did, postText, listOf(UploadedImage(blob, textshotBitmap.width, textshotBitmap.height)), imageAlts = listOf(alt), selfLabels = selfLabels).getOrElse { throw it }
             }
         }
 
@@ -2360,6 +2376,7 @@ class BlueskyRepository {
             // thumbnail beats a failed post).
             val uploadUri = if (thumbnailUri != null) {
                 runCatching { com.mediaviewer.util.VideoThumbnailStitcher.stitch(context, videoUri, thumbnailUri) }
+                    .onFailure { android.util.Log.e("BlueskyRepository", "Custom thumbnail couldn't be added — posting without it", it) }
                     .getOrDefault(videoUri)
             } else videoUri
             // Bug fix ("posting videos loads for a bit then fails"): the

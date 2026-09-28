@@ -43,6 +43,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -190,6 +194,9 @@ data class ComposePostDraft(
     val videoTitle: String = "",
     val videoDescription: String = "",
     val textshotText: String = "",
+    /** Textshot mode: the post's own (regular Bluesky) text, separate from
+     *  the text rendered into the image — for hashtags, a caption… */
+    val textshotPostText: String = "",
     // Item 10: the title being reviewed, and the picked star rating on
     // Popfeed's own native 0–10 half-star scale (so 0 = unrated, 10 = full
     // 5 stars) — both only populated for ComposeMode.REVIEW. Image
@@ -288,6 +295,12 @@ fun ComposePostScreen(
     // see ComposePostDraft.reviewContainsSpoilers.
     var reviewContainsSpoilers by remember { mutableStateOf(false) }
     var singleText by remember { mutableStateOf(TextFieldValue("")) }
+    // Textshot mode's separate post text (see ComposePostDraft.textshotPostText).
+    var textshotPostText by remember { mutableStateOf(TextFieldValue("")) }
+    var textshotPostFocused by remember { mutableStateOf(false) }
+    val textshotPostFocus = remember { FocusRequester() }
+    // A pending "remove this?" question (attached media, a thread post).
+    var confirmRemoval by remember { mutableStateOf<RemovalRequest?>(null) }
     // Item 8: pre-seeded straight from the camera-notch button's "Camera"
     // action, if that's how this composer was opened.
     var images by remember { mutableStateOf(initialImageUri?.let { listOf(it) } ?: emptyList()) }
@@ -533,6 +546,25 @@ fun ComposePostScreen(
         }
     }
 
+    /** The X on a thread divider: drops that post (text and media). Down to
+     *  one post again, the draft goes back to being a plain post. */
+    fun removeThreadPost(index: Int) {
+        if (threadPosts.size <= 1 || index !in threadPosts.indices) return
+        val list = threadPosts.toMutableList().also { it.removeAt(index) }
+        if (list.size == 1 && list[0].video == null) {
+            val only = list[0]
+            singleText = TextFieldValue(only.text.text, TextRange(only.text.text.length))
+            images = only.images
+            threadPosts = listOf(ThreadPostState(TextFieldValue("")))
+            activeThreadIndex = 0
+            mode = ComposeMode.SINGLE
+            refocusTick++
+        } else {
+            threadPosts = list
+            activeThreadIndex = (if (activeThreadIndex >= index) activeThreadIndex - 1 else activeThreadIndex).coerceIn(0, list.lastIndex)
+        }
+    }
+
     // [keepValue] carries the exact text *and* caret through when typing/
     // pasting past the limit triggers this automatically; the Textshot
     // button itself leaves it null and re-seeds from whatever is current.
@@ -551,6 +583,14 @@ fun ComposePostScreen(
     // Format on, same as typing past the limit does anywhere else.
     fun disableTextshot() {
         emojiTokensToShortcodes()
+        // The separate post text (hashtags etc.) isn't lost on the way out:
+        // it joins the end of the text.
+        val extra = textshotPostText.text.trim()
+        if (extra.isNotEmpty()) {
+            val joined = singleText.text.trimEnd() + (if (singleText.text.isBlank()) "" else "\n\n") + extra
+            singleText = TextFieldValue(joined, TextRange(joined.length))
+            textshotPostText = TextFieldValue("")
+        }
         if (singleText.text.length > POST_CHAR_LIMIT) {
             growTextIntoThread(singleText.text, floor = 1)
         } else {
@@ -686,7 +726,7 @@ fun ComposePostScreen(
                     post.copy(video = videoPick, images = emptyList())
                 } else {
                     val room = (MAX_IMAGES - post.images.size).coerceAtLeast(0)
-                    post.copy(images = (post.images + uris.take(room)).take(MAX_IMAGES))
+                    post.copy(images = (post.images + uris.filterNot { it in post.images }.take(room)).take(MAX_IMAGES))
                 }
             }
         } else if (videoPick != null) {
@@ -696,7 +736,7 @@ fun ComposePostScreen(
             if (mode != ComposeMode.TEXTSHOT) mode = ComposeMode.VIDEO
         } else if (mode != ComposeMode.TEXTSHOT) {
             val room = (MAX_IMAGES - images.size).coerceAtLeast(0)
-            images = (images + uris.take(room)).take(MAX_IMAGES)
+            images = (images + uris.filterNot { it in images }.take(room)).take(MAX_IMAGES)
         }
     }
     // Item 12: blog images (no videos) land right after the selected row,
@@ -723,7 +763,8 @@ fun ComposePostScreen(
     val activeBudget: Pair<Int, Int> = when (mode) { // used -> limit
         ComposeMode.VIDEO -> (videoTitle.text.length + videoDescription.text.length) to POST_CHAR_LIMIT
         ComposeMode.THREAD -> threadPosts.getOrNull(activeThreadIndex)?.text?.text?.length.orZero() to POST_CHAR_LIMIT
-        ComposeMode.TEXTSHOT -> singleText.text.length to Int.MAX_VALUE
+        ComposeMode.TEXTSHOT -> if (textshotPostFocused) textshotPostText.text.length to POST_CHAR_LIMIT
+            else singleText.text.length to Int.MAX_VALUE
         // Item 10: "the character indicator shouldn't have a limit" — same
         // unlimited treatment as Textshot above.
         ComposeMode.REVIEW -> singleText.text.length to Int.MAX_VALUE
@@ -766,7 +807,10 @@ fun ComposePostScreen(
                     ThreadPostDraft(text = post.text.text.trimEnd(), images = post.images, video = post.video)
                 }
             )
-            ComposeMode.TEXTSHOT -> ComposePostDraft(mode = ComposeMode.TEXTSHOT, textshotText = singleText.text)
+            ComposeMode.TEXTSHOT -> ComposePostDraft(
+                mode = ComposeMode.TEXTSHOT, textshotText = singleText.text,
+                textshotPostText = textshotPostText.text.trim()
+            )
             ComposeMode.REVIEW -> ComposePostDraft(
                 mode = ComposeMode.REVIEW,
                 posts = listOf(ThreadPostDraft(text = singleText.text)),
@@ -819,7 +863,7 @@ fun ComposePostScreen(
     // notch on the posting page.
     Box(
         Modifier.fillMaxSize().zIndex(10.5f)
-            .background(postBackgroundBrush(dominantColor))
+            .background(dimSpaceColor(dominantColor))
             // Item 1: without this, blank space here (Spacers, dividers,
             // anything with no click handler of its own) isn't claimed by
             // this overlay at all, so the tap falls straight through to
@@ -850,7 +894,9 @@ fun ComposePostScreen(
         val backdropLayer = rememberGraphicsLayer()
         var backdropOrigin by remember { mutableStateOf(Offset.Zero) }
         val backdrop = if (liquidGlass) remember(backdropLayer) { GlassBackdrop(backdropLayer) { backdropOrigin } } else null
-        Box(Modifier.fillMaxSize()) {
+        // The draft blurs softly behind a "remove this?" question.
+        val pageBlur by androidx.compose.animation.core.animateDpAsState(if (confirmRemoval != null) 10.dp else 0.dp, label = "composeBlur")
+        Box(Modifier.fillMaxSize().then(if (pageBlur > 0.dp) Modifier.blur(pageBlur) else Modifier)) {
             // ── Scrollable content ──────────────────────────────────────
             // Fills the whole screen down to the keyboard/nav bar (instead
             // of stopping at the top of the button bar) so text scrolls
@@ -863,8 +909,10 @@ fun ComposePostScreen(
                         if (liquidGlass) backdropLayer.record { this@drawWithContent.drawContent() }
                         drawContent()
                     }
-                    .background(postBackgroundBrush(dominantColor))
             ) {
+            // Dim profile color + stars behind the draft (recorded, so the
+            // bottom bar's glass blurs them).
+            SpaceSky(dominantColor, Modifier.matchParentSize())
             CompositionLocalProvider(LocalBottomBarClearance provides bottomBarHeight) {
             Column(
                 Modifier.fillMaxSize().then(bottomInsetModifier)
@@ -981,7 +1029,17 @@ fun ComposePostScreen(
                             // the very first post, same as SINGLE mode has
                             // no divider above its own field.
                             if (index > 0) {
-                                HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp), color = Color.White.copy(alpha = 0.12f))
+                                // The divider's X (right end) removes the post
+                                // below it — asking first if it has anything in it.
+                                ThreadPostDivider(tint = dominantColor, onRemove = {
+                                    val p = threadPosts.getOrNull(index)
+                                    if (p == null || (p.text.text.isBlank() && p.images.isEmpty() && p.video == null)) removeThreadPost(index)
+                                    else confirmRemoval = RemovalRequest(
+                                        title = "Remove this post?",
+                                        message = "It'll be taken out of the thread, along with anything attached to it.",
+                                        preview = p.images.firstOrNull()
+                                    ) { removeThreadPost(index) }
+                                })
                             }
                             GrowingTextField(
                                 value = post.text,
@@ -990,6 +1048,15 @@ fun ComposePostScreen(
                                         threadPosts = threadPosts.toMutableList().also {
                                             it[index] = post.copy(text = capBudget(newVal, POST_CHAR_LIMIT))
                                         }
+                                        activeThreadIndex = index
+                                    } else if (newVal.text == post.text.text) {
+                                        // Only the selection/caret (or the
+                                        // keyboard's composing region) moved —
+                                        // nothing to re-flow. Re-flowing here
+                                        // used to collapse every selection
+                                        // back to a caret, so text couldn't be
+                                        // selected with Auto Format on.
+                                        threadPosts = threadPosts.toMutableList().also { it[index] = post.copy(text = newVal) }
                                         activeThreadIndex = index
                                     } else {
                                         val priorLength = threadPosts.take(index).sumOf { it.text.text.length }
@@ -1011,7 +1078,13 @@ fun ComposePostScreen(
                                         // reflow only ever moves text between posts, never media.
                                         threadPosts = chunks.mapIndexed { i, text ->
                                             val old = threadPosts.getOrNull(i)
-                                            val tfv = if (i == caretChunk) TextFieldValue(text, TextRange(remainingCaret)) else TextFieldValue(text)
+                                            val tfv = when {
+                                                // The edit stayed inside this post: keep the
+                                                // field's own value (selection + IME state).
+                                                i == index && caretChunk == index && text == newVal.text -> newVal
+                                                i == caretChunk -> TextFieldValue(text, TextRange(remainingCaret))
+                                                else -> TextFieldValue(text)
+                                            }
                                             ThreadPostState(tfv, images = old?.images ?: emptyList(), video = old?.video)
                                         }
                                         activeThreadIndex = caretChunk
@@ -1027,23 +1100,55 @@ fun ComposePostScreen(
                             if (post.video != null) {
                                 Spacer(Modifier.height(8.dp))
                                 ThreadVideoPreview(uri = post.video, onRemove = {
-                                    threadPosts = threadPosts.toMutableList().also { it[index] = post.copy(video = null) }
+                                    confirmRemoval = RemovalRequest("Remove this video?", "It'll be taken off this post.") {
+                                        threadPosts = threadPosts.toMutableList().also { list ->
+                                            list.getOrNull(index)?.let { list[index] = it.copy(video = null) }
+                                        }
+                                    }
                                 })
                             } else if (post.images.isNotEmpty()) {
                                 Spacer(Modifier.height(8.dp))
-                                ImageGrid(images = post.images, onRemove = { uri ->
-                                    threadPosts = threadPosts.toMutableList().also { it[index] = post.copy(images = post.images - uri) }
-                                })
+                                ImageGrid(
+                                    images = post.images,
+                                    onRemove = { uri ->
+                                        confirmRemoval = RemovalRequest("Remove this image?", "It'll be taken off this post.", preview = uri) {
+                                            threadPosts = threadPosts.toMutableList().also { list ->
+                                                list.getOrNull(index)?.let { list[index] = it.copy(images = it.images - uri) }
+                                            }
+                                        }
+                                    },
+                                    onMove = { from, to ->
+                                        threadPosts = threadPosts.toMutableList().also { list ->
+                                            list.getOrNull(index)?.let { list[index] = it.copy(images = it.images.moved(from, to)) }
+                                        }
+                                    }
+                                )
                             }
                             Spacer(Modifier.height(10.dp))
                         }
                     }
 
                     ComposeMode.TEXTSHOT -> {
+                        // The post's own text (hashtags, a caption…) — posted
+                        // as regular text alongside the image. Its own field
+                        // and focus target, so the auto-switch into Textshot
+                        // (typing past the limit) keeps typing flowing into
+                        // the Textshot text below, never into this one.
+                        HubDivider("Post Text")
+                        GrowingTextField(
+                            value = textshotPostText,
+                            onValueChange = { textshotPostText = capBudget(it, POST_CHAR_LIMIT) },
+                            placeholder = "Post text (optional) — #hashtags, a caption…",
+                            onFocus = { textshotPostFocused = true },
+                            focusRequester = textshotPostFocus,
+                            textStyle = TextStyle(color = Color.White, fontSize = 14.sp, lineHeight = 20.sp)
+                        )
+                        HubDivider("Textshot")
                         GrowingTextField(
                             value = singleText,
                             onValueChange = { singleText = it },
                             placeholder = "What's on your mind?",
+                            onFocus = { textshotPostFocused = false },
                             focusRequester = singleFocusRequester,
                             emojiStore = emojiStore
                         )
@@ -1092,7 +1197,15 @@ fun ComposePostScreen(
                         )
                         if (images.isNotEmpty()) {
                             Spacer(Modifier.height(10.dp))
-                            ImageGrid(images = images, onRemove = { uri -> images = images - uri })
+                            ImageGrid(
+                                images = images,
+                                onRemove = { uri ->
+                                    confirmRemoval = RemovalRequest("Remove this image?", "It'll be taken off your post.", preview = uri) {
+                                        images = images - uri
+                                    }
+                                },
+                                onMove = { from, to -> images = images.moved(from, to) }
+                            )
                         }
                     }
 
@@ -1395,6 +1508,14 @@ fun ComposePostScreen(
                         .padding(bottom = if (emojiTabEditing) imeDp else 0.dp)
                 )
             }
+        }
+
+        confirmRemoval?.let { request ->
+            RemovalConfirmPopup(
+                request = request, liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
+                onConfirm = { confirmRemoval = null; request.onConfirm() },
+                onDismiss = { confirmRemoval = null }
+            )
         }
 
         if (labelsOpen) {
@@ -1921,30 +2042,224 @@ private fun emojiVisualTransformation(store: EmojiStore) = VisualTransformation 
     TransformedText(shown, OffsetMapping.Identity)
 }
 
-/** Up to 10 attached images, 5 per row, edge-to-edge square tiles. Hand-
- *  rolled (not LazyVerticalGrid) since it's capped at 10 items and lives
- *  inside an already-scrolling Column — this way it sizes to exactly the
- *  images present instead of reserving a fixed max height.
+/** Up to 10 attached images as square tiles: one stretched row while
+ *  there are 5 or fewer; past 5, a fixed 5-column grid, so the 6th–10th are
+ *  exactly the same size as the first five instead of stretching to fill
+ *  their row.
  *
- *  Item 5: every row's tiles are weighted against that row's own item count
- *  (not a fixed 5), so a row of 1–4 images stretches edge-to-edge and grows
- *  a little bigger instead of only filling that fraction of the row width
- *  with the rest padded out as empty space — the old behavior looked
- *  "perfect" only when the count happened to be an exact multiple of 5. */
+ *  Tap a tile to remove it (after a confirmation); press and hold one to
+ *  pick it up and drag it to a new spot — the others slide out of the way,
+ *  with a haptic tick each time it takes a new place. */
 @Composable
-private fun ImageGrid(images: List<Uri>, onRemove: (Uri) -> Unit) {
+private fun ImageGrid(images: List<Uri>, onRemove: (Uri) -> Unit, onMove: (from: Int, to: Int) -> Unit) {
     val tap = rememberHapticTap()
-    Column(Modifier.fillMaxWidth()) {
-        images.chunked(5).forEach { row ->
-            Row(Modifier.fillMaxWidth()) {
-                row.forEach { uri ->
-                    Box(Modifier.weight(1f).aspectRatio(1f).clickable { tap(); onRemove(uri) }) {
+    val view = androidx.compose.ui.platform.LocalView.current
+    val columns = if (images.size > 5) 5 else images.size.coerceAtLeast(1)
+    val rows = (images.size + columns - 1) / columns
+    val latestImages by rememberUpdatedState(images)
+    val latestOnMove by rememberUpdatedState(onMove)
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val cellPx = constraints.maxWidth / columns.toFloat()
+        val cellDp = maxWidth / columns
+        // Read by the (long-lived) drag gesture, so it always has the current size.
+        val latestCell by rememberUpdatedState(cellPx)
+        var dragging by remember { mutableStateOf<Uri?>(null) }
+        var dragPos by remember { mutableStateOf(Offset.Zero) }
+        fun slotOf(i: Int) = Offset((i % columns) * cellPx, (i / columns) * cellPx)
+        Box(Modifier.fillMaxWidth().height(cellDp * rows)) {
+            images.forEachIndexed { index, uri ->
+                key(uri) {
+                    val isDragged = dragging == uri
+                    val slot by androidx.compose.animation.core.animateOffsetAsState(slotOf(index), label = "imageSlot")
+                    val lift by androidx.compose.animation.core.animateFloatAsState(if (isDragged) 1f else 0f, label = "imageLift")
+                    Box(
+                        Modifier
+                            .offset {
+                                val p = if (isDragged) dragPos else slot
+                                IntOffset(p.x.roundToInt(), p.y.roundToInt())
+                            }
+                            .size(cellDp)
+                            .zIndex(if (isDragged) 2f else if (lift > 0f) 1f else 0f)
+                            .graphicsLayer {
+                                val sc = 1f + 0.08f * lift
+                                scaleX = sc; scaleY = sc
+                                shadowElevation = 14f * lift
+                                shape = RoundedCornerShape(6.dp)
+                                clip = lift > 0f
+                            }
+                            .pointerInput(uri) {
+                                detectDragGesturesAfterLongPress(
+                                    onDragStart = {
+                                        val from = latestImages.indexOf(uri)
+                                        if (from >= 0) {
+                                            val cols = if (latestImages.size > 5) 5 else latestImages.size.coerceAtLeast(1)
+                                            dragPos = Offset((from % cols) * latestCell, (from / cols) * latestCell)
+                                            dragging = uri
+                                            view.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                                        }
+                                    },
+                                    onDragEnd = {
+                                        if (dragging == uri) view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                                        dragging = null
+                                    },
+                                    onDragCancel = { dragging = null }
+                                ) { change, amount ->
+                                    if (dragging != uri) return@detectDragGesturesAfterLongPress
+                                    change.consume()
+                                    val list = latestImages
+                                    val cols = if (list.size > 5) 5 else list.size.coerceAtLeast(1)
+                                    val rowCount = (list.size + cols - 1) / cols
+                                    val maxX = (cols - 1) * latestCell
+                                    val maxY = (rowCount - 1) * latestCell
+                                    dragPos = Offset((dragPos.x + amount.x).coerceIn(-latestCell * 0.3f, maxX + latestCell * 0.3f), (dragPos.y + amount.y).coerceIn(-latestCell * 0.3f, maxY + latestCell * 0.3f))
+                                    val col = ((dragPos.x + latestCell / 2f) / latestCell).toInt().coerceIn(0, cols - 1)
+                                    val row = ((dragPos.y + latestCell / 2f) / latestCell).toInt().coerceIn(0, rowCount - 1)
+                                    val target = (row * cols + col).coerceIn(0, list.lastIndex)
+                                    val from = list.indexOf(uri)
+                                    if (from >= 0 && target != from) {
+                                        latestOnMove(from, target)
+                                        view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+                                    }
+                                }
+                            }
+                            .clickable { tap(); onRemove(uri) }
+                    ) {
                         AsyncImage(model = uri, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                     }
                 }
             }
         }
     }
+}
+
+/** A thread divider with its remove-post X at the right end. */
+@Composable
+private fun ThreadPostDivider(tint: Color, onRemove: () -> Unit) {
+    val tap = rememberHapticTap()
+    Box(Modifier.fillMaxWidth().padding(vertical = 4.dp), contentAlignment = Alignment.CenterEnd) {
+        HorizontalDivider(
+            modifier = Modifier.fillMaxWidth().padding(end = 30.dp).align(Alignment.CenterStart),
+            color = Color.White.copy(alpha = 0.12f)
+        )
+        Box(
+            Modifier.size(22.dp).clip(CircleShape)
+                .background(androidx.compose.ui.graphics.lerp(Color(0xFF16161A), tint, 0.3f).copy(alpha = 0.85f))
+                .border(1.dp, tint.copy(alpha = 0.55f), CircleShape)
+                .clickable { tap(); onRemove() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.Default.Close, contentDescription = "Remove this post from the thread", tint = Color.White.copy(0.85f), modifier = Modifier.size(13.dp))
+        }
+    }
+}
+
+/** A "remove this?" question from the composer. */
+private class RemovalRequest(
+    val title: String,
+    val message: String,
+    /** An image to show in the popup (the one being removed). */
+    val preview: Any? = null,
+    val onConfirm: () -> Unit
+)
+
+/** The composer's confirmation popup: centred glass in the profile color
+ *  that blurs the draft behind it (the draft itself is softly blurred and
+ *  dimmed too), popping in with a haptic. Cancel / Remove. */
+@Composable
+private fun RemovalConfirmPopup(
+    request: RemovalRequest,
+    liquidGlass: Boolean,
+    tint: Color,
+    backdrop: GlassBackdrop?,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    BackHandler(onBack = onDismiss)
+    val tap = rememberHapticTap()
+    val view = androidx.compose.ui.platform.LocalView.current
+    val appear = remember { androidx.compose.animation.core.Animatable(0f) }
+    LaunchedEffect(request) {
+        view.performHapticFeedback(android.view.HapticFeedbackConstants.CONTEXT_CLICK)
+        appear.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.72f, stiffness = 520f))
+    }
+    val shape = RoundedCornerShape(22.dp)
+    Box(
+        Modifier.fillMaxSize().zIndex(6f)
+            .graphicsLayer { alpha = appear.value.coerceIn(0f, 1f) }
+            .background(Color.Black.copy(alpha = 0.45f))
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss),
+        contentAlignment = Alignment.Center
+    ) {
+        val cardModifier = Modifier
+            .padding(horizontal = 36.dp).widthIn(max = 360.dp).fillMaxWidth()
+            .graphicsLayer {
+                val sc = 0.88f + 0.12f * appear.value
+                scaleX = sc; scaleY = sc
+            }
+            // Swallow taps on the card itself so only the scrim dismisses.
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { }
+        val content: @Composable () -> Unit = {
+            Column(Modifier.fillMaxWidth().padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                if (request.preview != null) {
+                    AsyncImage(
+                        model = request.preview, contentDescription = null, contentScale = ContentScale.Crop,
+                        modifier = Modifier.size(72.dp).clip(RoundedCornerShape(12.dp))
+                            .border(1.dp, tint.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                    )
+                    Spacer(Modifier.height(12.dp))
+                }
+                Text(request.title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                Spacer(Modifier.height(6.dp))
+                Text(request.message, color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp, lineHeight = 18.sp,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                Spacer(Modifier.height(16.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    val pill = RoundedCornerShape(19.dp)
+                    val cancelMod = Modifier.weight(1f).height(38.dp).clip(pill).clickable { tap(); onDismiss() }
+                    val removeMod = Modifier.weight(1f).height(38.dp).clip(pill).clickable {
+                        view.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                        onConfirm()
+                    }
+                    if (liquidGlass) {
+                        LiquidGlassSurface(cancelMod, shape = pill, tint = tint, contentAlignment = Alignment.Center) {
+                            Text("Cancel", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                        LiquidGlassSurface(removeMod, shape = pill, tint = Color(0xFFE0245E), contentAlignment = Alignment.Center) {
+                            Text("Remove", color = Color(0xFFFF6B8A), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    } else {
+                        Box(cancelMod.background(Color.White.copy(0.10f)).border(1.dp, Color.White.copy(0.18f), pill), contentAlignment = Alignment.Center) {
+                            Text("Cancel", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                        Box(removeMod.background(Color(0xFFE0245E).copy(0.22f)).border(1.dp, Color(0xFFE0245E).copy(0.6f), pill), contentAlignment = Alignment.Center) {
+                            Text("Remove", color = Color(0xFFFF6B8A), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+            }
+        }
+        if (liquidGlass) {
+            LiquidGlassSurface(cardModifier, shape = shape, tint = tint, backdrop = backdrop) {
+                // A little extra dark behind the text, like the app's other
+                // popups, so it reads over any photo.
+                Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.3f)))
+                content()
+            }
+        } else {
+            Box(
+                cardModifier.clip(shape)
+                    .background(androidx.compose.ui.graphics.lerp(Color(0xFF141418), tint, 0.25f))
+                    .border(1.dp, tint.copy(alpha = 0.5f), shape)
+            ) { content() }
+        }
+    }
+}
+
+/** [from]'s item moved to [to], everything between shifting over. */
+private fun <T> List<T>.moved(from: Int, to: Int): List<T> {
+    if (from !in indices || to !in indices || from == to) return this
+    return toMutableList().also { it.add(to, it.removeAt(from)) }
 }
 
 /** Item 2: one thread post's attached video — a small 16:9 preview with a
@@ -1990,7 +2305,8 @@ private fun VideoAndThumbnailRow(
             contentAlignment = Alignment.Center
         ) {
             if (thumbnailUri != null) {
-                AsyncImage(model = thumbnailUri, contentDescription = "Thumbnail", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+                // Cropped to the video's shape — exactly how it's stitched in.
+                AsyncImage(model = thumbnailUri, contentDescription = "Thumbnail", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
             } else {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(Icons.Default.Image, contentDescription = null, tint = DimGray, modifier = Modifier.size(24.dp))

@@ -333,6 +333,20 @@ interface BlueskyApi {
         @Body request: BskySendMessageRequest
     ): Response<com.google.gson.JsonElement>
 
+    @Headers("atproto-proxy: did:web:api.bsky.chat#bsky_chat")
+    @POST("xrpc/chat.bsky.convo.addReaction")
+    suspend fun addReaction(
+        @Header("Authorization") token: String,
+        @Body request: BskyReactionRequest
+    ): Response<BskyMessageResponse>
+
+    @Headers("atproto-proxy: did:web:api.bsky.chat#bsky_chat")
+    @POST("xrpc/chat.bsky.convo.removeReaction")
+    suspend fun removeReaction(
+        @Header("Authorization") token: String,
+        @Body request: BskyReactionRequest
+    ): Response<BskyMessageResponse>
+
     // ── Bookmarks / Saves (Settings Update) ──────────────────────────────────
     @GET("xrpc/app.bsky.bookmark.getBookmarks")
     suspend fun getBookmarks(

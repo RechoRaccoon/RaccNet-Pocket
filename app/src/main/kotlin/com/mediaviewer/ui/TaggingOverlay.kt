@@ -1,5 +1,6 @@
 package com.mediaviewer.ui
 
+import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -79,12 +80,14 @@ fun TaggingOverlay(
             Modifier.fillMaxSize()
                 .onGloballyPositioned { backdropOrigin = it.positionInRoot() }
                 .then(
-                    if (liquidGlass) Modifier.background(postBackgroundBrush(profileTint)).drawWithContent {
+                    if (liquidGlass) Modifier.drawWithContent {
                         backdropLayer.record { this@drawWithContent.drawContent() }
-                        drawContent()
+                        drawLayer(backdropLayer)
                     } else Modifier.background(OledBlack)
                 )
-        )
+        ) {
+            if (liquidGlass) SpaceSky(profileTint, Modifier.matchParentSize())
+        }
 
         val modelState = state.modelState
         val currentItem = state.currentItem

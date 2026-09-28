@@ -8,7 +8,8 @@ import android.webkit.WebViewClient
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -59,6 +60,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.roundToInt
@@ -109,7 +112,9 @@ object BrowserOverlayStore {
             put("x", s.x.toDouble()); put("y", s.y.toDouble()); put("w", s.w.toDouble()); put("h", s.h.toDouble())
             put("inCapture", s.inCapture)
         })
-        store.put(KEY, arr.toString())
+        // Written straight to disk: a later crash or the app being swiped
+        // away can't lose where the windows were.
+        store.putNow(KEY, arr.toString())
     }
 
     /** "twitch.tv/popout/x/chat" → "https://twitch.tv/popout/x/chat". */
@@ -144,9 +149,26 @@ class BrowserOverlayRegistry {
 }
 
 /**
- * All of VRM mode's browser overlays, drawn over the avatar. Each one:
- * a slim tinted bar (drag handle, address — tap to edit —, reload, close)
- * above a live WebView, with a resize grip in the bottom-right corner.
+ * All of VRM mode's (and the Camera page's) browser windows, floating over
+ * the page. Each one: a slim tinted title bar (drag anywhere on it to move;
+ * address — tap to edit —, reload, close) above a live web page, with a
+ * resize grip in the bottom-right corner.
+ *
+ * Performance: every window is its own lightweight system window (a
+ * [Popup]), not part of the VRM screen's own drawing. A chat or alert
+ * widget animates constantly; inside the VRM window each of its frames
+ * forced the whole screen — the avatar's render, the blurred glass buttons,
+ * everything — to be recomposited, at the panel's full 90/120 Hz. As
+ * separate windows, a page only ever redraws itself.
+ *
+ * The page itself is laid out at a fixed [PAGE_WIDTH_DP]-wide viewport and
+ * scaled to the window, so the WHOLE page is always visible: making the
+ * window smaller shrinks the page instead of cutting it off, and changing
+ * its shape just makes the page taller/shorter.
+ *
+ * [hidden] parks the windows off-screen (pages keep their state, paused)
+ * while one of the page's own popups is open, since system windows would
+ * otherwise sit on top of it.
  */
 @Composable
 fun VrmBrowserOverlays(
@@ -155,7 +177,8 @@ fun VrmBrowserOverlays(
     registry: BrowserOverlayRegistry,
     onChange: (BrowserOverlaySpec) -> Unit,
     onRemove: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    hidden: Boolean = false
 ) {
     BoxWithConstraints(modifier.fillMaxSize()) {
         val density = LocalDensity.current
@@ -163,11 +186,30 @@ fun VrmBrowserOverlays(
         val rootH = with(density) { maxHeight.toPx() }
         for (spec in overlays) {
             androidx.compose.runtime.key(spec.id) {
-                BrowserOverlayWindow(spec, tint, rootW, rootH, registry, onChange, onRemove)
+                BrowserOverlayWindow(spec, tint, rootW, rootH, registry, onChange, onRemove, hidden)
             }
         }
     }
 }
+
+/** The CSS width every overlay page is laid out at (then scaled to fit). */
+private const val PAGE_WIDTH_DP = 360f
+private val BAR_HEIGHT = 30.dp
+private val GRIP_SIZE = 28.dp
+
+/** Tells the window when the page was touched (so it can check whether a
+ *  text field got focus and the window should take the keyboard). */
+private class OverlayPageContainer(context: android.content.Context, val onPageTouched: () -> Unit) :
+    android.widget.FrameLayout(context) {
+    override fun onInterceptTouchEvent(ev: android.view.MotionEvent): Boolean {
+        if (ev.actionMasked == android.view.MotionEvent.ACTION_UP) onPageTouched()
+        return false
+    }
+}
+
+private const val FOCUSED_EDITABLE_JS =
+    "(function(){var e=document.activeElement;if(!e)return false;var t=(e.tagName||'').toUpperCase();" +
+        "return e.isContentEditable||t==='INPUT'||t==='TEXTAREA'||t==='IFRAME';})()"
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -178,136 +220,233 @@ private fun BrowserOverlayWindow(
     rootH: Float,
     registry: BrowserOverlayRegistry,
     onChange: (BrowserOverlaySpec) -> Unit,
-    onRemove: (String) -> Unit
+    onRemove: (String) -> Unit,
+    hidden: Boolean
 ) {
     val density = LocalDensity.current
     val tap = com.mediaviewer.util.rememberHapticTap()
-    // Dragging edits a local copy (smooth), committed when the finger lifts.
+    // Moving/resizing edits a local copy (smooth), committed when the finger lifts.
     var live by remember(spec.id) { mutableStateOf(spec) }
     androidx.compose.runtime.LaunchedEffect(spec) { live = spec }
     val current by rememberUpdatedState(live)
+    val latestOnChange by rememberUpdatedState(onChange)
     val minW = with(density) { 140.dp.toPx() } / rootW.coerceAtLeast(1f)
     val minH = with(density) { 100.dp.toPx() } / rootH.coerceAtLeast(1f)
     var editing by remember { mutableStateOf(false) }
+    // The page has a text field focused: the window takes the keyboard
+    // until you tap outside it (or press back).
+    var typing by remember { mutableStateOf(false) }
     var urlField by remember(spec.url) { mutableStateOf(spec.url) }
-    val barColor = androidx.compose.ui.graphics.lerp(Color(0xFF101014), tint, 0.35f).copy(alpha = 0.92f)
+    val barColor = androidx.compose.ui.graphics.lerp(Color(0xFF101014), tint, 0.35f).copy(alpha = 0.94f)
     val shape = RoundedCornerShape(12.dp)
+    val barPx = with(density) { BAR_HEIGHT.toPx() }
+    val gripPx = with(density) { GRIP_SIZE.toPx() }
 
-    Box(
-        Modifier
-            .offset { IntOffset((live.x * rootW).roundToInt(), (live.y * rootH).roundToInt()) }
-            .size(with(density) { (live.w * rootW).toDp() }, with(density) { (live.h * rootH).toDp() })
-            .clip(shape)
-            .border(1.dp, tint.copy(alpha = 0.7f), shape)
+    val winX = (live.x * rootW).roundToInt()
+    val winY = (live.y * rootH).roundToInt()
+    val winW = (live.w * rootW).roundToInt().coerceAtLeast(1)
+    val winH = (live.h * rootH).roundToInt().coerceAtLeast(1)
+    // Page geometry: the committed size decides the page's layout height
+    // (so it doesn't re-layout on every resize frame); the live width
+    // decides its scale (so it grows/shrinks smoothly while resizing).
+    val virtualW = (PAGE_WIDTH_DP * density.density).roundToInt()
+    val committedScale = ((spec.w * rootW) / virtualW).coerceAtLeast(0.05f)
+    val virtualH = (((spec.h * rootH) - barPx) / committedScale).roundToInt().coerceAtLeast(1)
+    val liveScale = (winW / virtualW.toFloat()).coerceAtLeast(0.05f)
+
+    // Where the page sits on the VRM screen (for capture snapshots).
+    androidx.compose.runtime.SideEffect {
+        registry.bounds[spec.id] = Rect(winX.toFloat(), winY + barPx, (winX + winW).toFloat(), (winY + winH).toFloat())
+    }
+
+    val focusable = editing || typing
+    Popup(
+        alignment = Alignment.TopStart,
+        offset = if (hidden) IntOffset(-100_000, -100_000) else IntOffset(winX, winY),
+        onDismissRequest = { editing = false; typing = false },
+        properties = PopupProperties(
+            focusable = focusable,
+            dismissOnBackPress = true,
+            dismissOnClickOutside = focusable,
+            clippingEnabled = false
+        )
     ) {
-        Column(Modifier.fillMaxSize()) {
-            Row(
-                Modifier.fillMaxWidth().height(28.dp).background(barColor).padding(horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    Modifier.size(24.dp).pointerInput(spec.id) {
-                        detectDragGestures(
-                            onDragEnd = { onChange(current) },
-                            onDragCancel = { onChange(current) }
-                        ) { change, drag ->
-                            change.consume()
+        val popupView = androidx.compose.ui.platform.LocalView.current
+        val onScreen = remember { IntArray(2) }
+        Box(
+            Modifier
+                .size(with(density) { winW.toDp() }, with(density) { winH.toDp() })
+                .clip(shape)
+                .border(if (typing) 1.5.dp else 1.dp, tint.copy(alpha = if (typing) 1f else 0.7f), shape)
+                // Move (press anywhere on the title bar and drag) and resize
+                // (the bottom-right grip) — handled here, on the window's
+                // root, in screen coordinates: the window itself moves under
+                // the finger while dragging, so positions relative to it
+                // would chase their own tail. Buttons on the bar still get
+                // plain taps; a drag only takes over past the touch slop.
+                .pointerInput(spec.id) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val inBar = down.position.y <= barPx
+                        val inGrip = down.position.x >= size.width - gripPx && down.position.y >= size.height - gripPx
+                        if (!inBar && !inGrip) return@awaitEachGesture
+                        fun screen(p: androidx.compose.ui.geometry.Offset): androidx.compose.ui.geometry.Offset {
+                            popupView.getLocationOnScreen(onScreen)
+                            return androidx.compose.ui.geometry.Offset(p.x + onScreen[0], p.y + onScreen[1])
+                        }
+                        var last = if (inGrip) down.position else screen(down.position)
+                        var travelled = 0f
+                        var dragging = false
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val ch = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!ch.pressed) break
+                            // Resizing keeps the window's top-left fixed, so
+                            // window coordinates are stable for the grip.
+                            val now = if (inGrip) ch.position else screen(ch.position)
+                            val d = now - last
+                            last = now
+                            if (!dragging) {
+                                travelled += d.getDistance()
+                                if (travelled < viewConfiguration.touchSlop) continue
+                                dragging = true
+                                editing = false
+                            }
+                            ch.consume()
                             val c = current
-                            live = c.copy(
-                                x = (c.x + drag.x / rootW).coerceIn(-c.w + 0.1f, 0.9f),
-                                y = (c.y + drag.y / rootH).coerceIn(0f, 0.95f)
+                            live = if (inGrip) c.copy(
+                                w = (c.w + d.x / rootW).coerceIn(minW, 1f),
+                                h = (c.h + d.y / rootH).coerceIn(minH, 1f)
+                            ) else c.copy(
+                                x = (c.x + d.x / rootW).coerceIn(-c.w + 0.1f, 0.9f),
+                                y = (c.y + d.y / rootH).coerceIn(0f, 0.95f)
                             )
                         }
-                    },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(Icons.Default.DragIndicator, contentDescription = "Move", tint = Color.White.copy(0.8f), modifier = Modifier.size(16.dp))
-                }
-                if (editing) {
-                    BasicTextField(
-                        value = urlField, onValueChange = { urlField = it }, singleLine = true,
-                        textStyle = TextStyle(color = Color.White, fontSize = 11.sp),
-                        cursorBrush = SolidColor(Color.White),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go, autoCorrect = false),
-                        keyboardActions = KeyboardActions(onGo = {
-                            editing = false
-                            val u = BrowserOverlayStore.normalizeUrl(urlField)
-                            if (u.isNotBlank()) onChange(current.copy(url = u))
-                        }),
-                        modifier = Modifier.weight(1f).clip(RoundedCornerShape(6.dp))
-                            .background(Color.White.copy(0.1f)).padding(horizontal = 6.dp, vertical = 3.dp)
-                    )
-                } else {
-                    Text(
-                        spec.url.removePrefix("https://").removePrefix("http://").ifBlank { "Tap to enter a URL" },
-                        color = Color.White.copy(0.85f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f).clickable { urlField = spec.url; editing = true }.padding(horizontal = 4.dp)
-                    )
-                }
-                Box(
-                    Modifier.size(24.dp).clip(CircleShape).clickable { tap(); registry.webViews[spec.id]?.reload() },
-                    contentAlignment = Alignment.Center
-                ) { Icon(Icons.Default.Refresh, contentDescription = "Reload", tint = Color.White.copy(0.8f), modifier = Modifier.size(14.dp)) }
-                Box(
-                    Modifier.size(24.dp).clip(CircleShape).clickable { tap(); onRemove(spec.id) },
-                    contentAlignment = Alignment.Center
-                ) { Icon(Icons.Default.Close, contentDescription = "Remove overlay", tint = Color.White.copy(0.8f), modifier = Modifier.size(14.dp)) }
-            }
-            Box(
-                Modifier.fillMaxWidth().weight(1f)
-                    .onGloballyPositioned { registry.bounds[spec.id] = it.boundsInRoot() }
-            ) {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { ctx ->
-                        WebView(ctx).apply {
-                            // Transparent pages (chat/alert widgets made for
-                            // OBS) show the avatar through them.
-                            setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                            settings.javaScriptEnabled = true
-                            settings.domStorageEnabled = true
-                            settings.mediaPlaybackRequiresUserGesture = false
-                            settings.loadWithOverviewMode = true
-                            settings.useWideViewPort = true
-                            webViewClient = WebViewClient()
-                            webChromeClient = WebChromeClient()
-                            registry.webViews[spec.id] = this
-                            if (spec.url.isNotBlank()) loadUrl(spec.url)
-                            tag = spec.url
-                        }
-                    },
-                    update = { view ->
-                        if (view.tag != spec.url && spec.url.isNotBlank()) {
-                            view.tag = spec.url
-                            view.loadUrl(spec.url)
-                        }
+                        if (dragging) latestOnChange(current)
                     }
-                )
-            }
-        }
-        // Resize grip.
-        Box(
-            Modifier.align(Alignment.BottomEnd).size(26.dp)
-                .clip(RoundedCornerShape(topStart = 10.dp))
-                .background(barColor)
-                .pointerInput(spec.id) {
-                    detectDragGestures(
-                        onDragEnd = { onChange(current) },
-                        onDragCancel = { onChange(current) }
-                    ) { change, drag ->
-                        change.consume()
-                        val c = current
-                        live = c.copy(
-                            w = (c.w + drag.x / rootW).coerceIn(minW, 1f),
-                            h = (c.h + drag.y / rootH).coerceIn(minH, 1f)
+                }
+        ) {
+            Column(Modifier.fillMaxSize()) {
+                Row(
+                    Modifier.fillMaxWidth().height(BAR_HEIGHT).background(barColor).padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.DragIndicator, contentDescription = "Move",
+                        tint = Color.White.copy(0.8f), modifier = Modifier.padding(horizontal = 4.dp).size(16.dp)
+                    )
+                    if (editing) {
+                        BasicTextField(
+                            value = urlField, onValueChange = { urlField = it }, singleLine = true,
+                            textStyle = TextStyle(color = Color.White, fontSize = 11.sp),
+                            cursorBrush = SolidColor(Color.White),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go, autoCorrect = false),
+                            keyboardActions = KeyboardActions(onGo = {
+                                editing = false
+                                val u = BrowserOverlayStore.normalizeUrl(urlField)
+                                if (u.isNotBlank()) latestOnChange(current.copy(url = u))
+                            }),
+                            modifier = Modifier.weight(1f).clip(RoundedCornerShape(6.dp))
+                                .background(Color.White.copy(0.1f)).padding(horizontal = 6.dp, vertical = 3.dp)
+                        )
+                    } else {
+                        Text(
+                            spec.url.removePrefix("https://").removePrefix("http://").ifBlank { "Tap to enter a URL" },
+                            color = Color.White.copy(0.85f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f).clickable { urlField = spec.url; editing = true }.padding(horizontal = 4.dp)
                         )
                     }
-                },
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(Icons.Default.OpenInFull, contentDescription = "Resize", tint = Color.White.copy(0.8f),
-                modifier = Modifier.size(13.dp).rotate(90f))
+                    Box(
+                        Modifier.size(26.dp).clip(CircleShape).clickable { tap(); registry.webViews[spec.id]?.reload() },
+                        contentAlignment = Alignment.Center
+                    ) { Icon(Icons.Default.Refresh, contentDescription = "Reload", tint = Color.White.copy(0.8f), modifier = Modifier.size(14.dp)) }
+                    Box(
+                        Modifier.size(26.dp).clip(CircleShape).clickable { tap(); onRemove(spec.id) },
+                        contentAlignment = Alignment.Center
+                    ) { Icon(Icons.Default.Close, contentDescription = "Remove overlay", tint = Color.White.copy(0.8f), modifier = Modifier.size(14.dp)) }
+                }
+                Box(Modifier.fillMaxWidth().weight(1f)) {
+                    AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = { ctx ->
+                            val web = WebView(ctx).apply {
+                                // Transparent pages (chat/alert widgets made for
+                                // OBS) show the avatar through them.
+                                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                                settings.javaScriptEnabled = true
+                                settings.domStorageEnabled = true
+                                settings.mediaPlaybackRequiresUserGesture = false
+                                settings.loadWithOverviewMode = true
+                                settings.useWideViewPort = true
+                                // Scaled by its parent below, never by the page.
+                                settings.setSupportZoom(false)
+                                webViewClient = WebViewClient()
+                                webChromeClient = WebChromeClient()
+                                pivotX = 0f
+                                pivotY = 0f
+                                registry.webViews[spec.id] = this
+                                if (spec.url.isNotBlank()) loadUrl(spec.url)
+                                tag = spec.url
+                            }
+                            OverlayPageContainer(ctx) {
+                                // A tap in the page: if it landed in a text
+                                // field, let this window take the keyboard.
+                                web.postDelayed({
+                                    runCatching {
+                                        web.evaluateJavascript(FOCUSED_EDITABLE_JS) { result ->
+                                            if (result == "true") typing = true
+                                        }
+                                    }
+                                }, 120)
+                            }.apply {
+                                clipChildren = true
+                                addView(web, android.widget.FrameLayout.LayoutParams(virtualW, virtualH))
+                            }
+                        },
+                        update = { container ->
+                            val web = container.getChildAt(0) as? WebView ?: return@AndroidView
+                            val lp = web.layoutParams
+                            if (lp.width != virtualW || lp.height != virtualH) {
+                                lp.width = virtualW; lp.height = virtualH
+                                web.layoutParams = lp
+                            }
+                            if (web.scaleX != liveScale) { web.scaleX = liveScale; web.scaleY = liveScale }
+                            if (web.tag != spec.url && spec.url.isNotBlank()) {
+                                web.tag = spec.url
+                                web.loadUrl(spec.url)
+                            }
+                        }
+                    )
+                }
+            }
+            // Resize grip (the gesture itself is handled by the root above).
+            Box(
+                Modifier.align(Alignment.BottomEnd).size(GRIP_SIZE)
+                    .clip(RoundedCornerShape(topStart = 10.dp))
+                    .background(barColor),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.OpenInFull, contentDescription = "Resize", tint = Color.White.copy(0.8f),
+                    modifier = Modifier.size(13.dp).rotate(90f))
+            }
         }
+        // Typing: once the window can take focus, bring the keyboard up for
+        // the field that was tapped.
+        androidx.compose.runtime.LaunchedEffect(typing) {
+            if (!typing) return@LaunchedEffect
+            kotlinx.coroutines.delay(150)
+            val web = registry.webViews[spec.id] ?: return@LaunchedEffect
+            runCatching {
+                web.requestFocus()
+                val imm = web.context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+                imm?.showSoftInput(web, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+            }
+        }
+    }
+    // Parked off-screen: pause the page (timers, animations, media).
+    androidx.compose.runtime.LaunchedEffect(hidden) {
+        val web = registry.webViews[spec.id] ?: return@LaunchedEffect
+        runCatching { if (hidden) web.onPause() else web.onResume() }
     }
     DisposableEffect(spec.id) {
         onDispose {

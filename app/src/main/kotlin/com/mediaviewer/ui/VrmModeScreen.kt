@@ -60,6 +60,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.material.icons.filled.Mic
@@ -193,6 +194,14 @@ fun VrmModeScreen(
     var smoothing by remember { mutableStateOf(store.int(K.SMOOTHING, K.DEFAULT_SMOOTHING).coerceIn(0, 10)) }
     // ~30 fps tracking instead of ~15 fps (more battery/heat).
     var fastTracking by remember { mutableStateOf(store.bool(K.FAST_TRACKING, false)) }
+    // Performance mode: the buttons stop live-blurring the avatar (no
+    // per-frame copy of the render + blur passes competing with the
+    // trackers for the GPU).
+    var performanceMode by remember { mutableStateOf(store.bool(K.PERFORMANCE_MODE, false)) }
+    androidx.compose.runtime.LaunchedEffect(performanceMode) { store.put(K.PERFORMANCE_MODE, performanceMode) }
+    // The avatar never renders above 60 fps, so a 90/120 Hz screen only
+    // burns power (and wakes the frame loop twice as often) — ask for 60.
+    DisplayRefreshCap(60f)
     // Manual eyes: blink tracking off, openness set by the slider.
     var manualEyes by remember { mutableStateOf(store.bool(K.MANUAL_EYES, false)) }
     var eyeClosed by remember { mutableStateOf(store.float(K.EYE_CLOSED, 0f).coerceIn(0f, 1f)) }
@@ -533,7 +542,17 @@ fun VrmModeScreen(
     // race a close() on another thread (a native crash, and one of the ways
     // the X button used to take the app down). Nothing here ever blocks the
     // UI thread waiting on it.
-    val trackingExecutor = remember { Executors.newSingleThreadExecutor() }
+    // Raised priority: with another app on screen (split screen, a floating
+    // window) or a stream encoding, a normal-priority analyzer thread got
+    // starved and every frame reached the trackers late.
+    val trackingExecutor = remember {
+        Executors.newSingleThreadExecutor { r ->
+            Thread({
+                runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DISPLAY) }
+                r.run()
+            }, "vrm-tracking")
+        }
+    }
 
     androidx.compose.runtime.LaunchedEffect(Unit) {
         // Genuinely off the UI thread this time. The old version ran inside
@@ -703,8 +722,8 @@ fun VrmModeScreen(
     // every bubble can blur whatever part of the avatar sits behind it.
     val backdropLayer = androidx.compose.ui.graphics.rememberGraphicsLayer()
     var backdropOrigin by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
-    val backdrop = remember(liquidGlass, backdropLayer) {
-        if (liquidGlass) GlassBackdrop(backdropLayer) { backdropOrigin } else null
+    val backdrop = remember(liquidGlass, performanceMode, backdropLayer) {
+        if (liquidGlass && !performanceMode) GlassBackdrop(backdropLayer) { backdropOrigin } else null
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -752,8 +771,10 @@ fun VrmModeScreen(
                             if (backdrop != null) Modifier
                                 .onGloballyPositioned { backdropOrigin = it.positionInRoot() }
                                 .drawWithContent {
+                                    // Recorded once, then that recording is
+                                    // what's drawn (not a second draw).
                                     backdropLayer.record { this@drawWithContent.drawContent() }
-                                    drawContent()
+                                    drawLayer(backdropLayer)
                                 }
                             else Modifier
                         ),
@@ -864,16 +885,11 @@ fun VrmModeScreen(
             Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(20.dp))
         }
 
-        // Bottom bar: [mic] [photo/video mode] [capture] [Live] [settings].
-        // The capture button shows what it will do (camera or video icon;
-        // stop while recording; "Live" while streaming); the second bubble
-        // shows the OTHER photo/video mode and switches to it. While
-        // recording or live, a timer sits above.
-        androidx.compose.foundation.layout.Column(
-            Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 28.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            val status = when {
+        // Bottom bar: [mic] [photo/video mode] [capture] [Live] [settings] —
+        // shared with the Camera page (see CaptureControlsBar).
+        CaptureControlsBar(
+            liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+            status = when {
                 captureError != null -> captureError
                 liveState == com.mediaviewer.stream.LiveStreamer.State.CONNECTING -> "Connecting…"
                 liveState == com.mediaviewer.stream.LiveStreamer.State.RECONNECTING -> "Reconnecting…"
@@ -881,100 +897,19 @@ fun VrmModeScreen(
                 captureBusy -> if (videoMode) "Saving video…" else "Saving photo…"
                 recording -> "%d:%02d".format(maxOf(1, recordingElapsedS) / 60, maxOf(1, recordingElapsedS) % 60)
                 else -> null
-            }
-            Box(Modifier.height(30.dp), contentAlignment = Alignment.Center) {
-                if (status != null) {
-                    Row(
-                        Modifier.clip(RoundedCornerShape(14.dp)).background(Color.Black.copy(alpha = 0.45f))
-                            .padding(horizontal = 12.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if ((recording || liveState == com.mediaviewer.stream.LiveStreamer.State.LIVE) && captureError == null) {
-                            Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFFFF3B30)))
-                            Spacer(Modifier.width(6.dp))
-                        }
-                        Text(status, color = Color.White, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
-                    }
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-            val gap = 14.dp
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                // Far left: mic mute. Locked mid-recording (a MediaRecorder
-                // can't add/drop its audio track once started); live, it
-                // mutes the stream instantly.
-                val micEnabled = !recording && !captureBusy
-                VrmGlassBubble(
-                    size = 48.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
-                    enabled = micEnabled,
-                    onClick = { tap(); micMuted = !micMuted }
-                ) {
-                    Icon(
-                        if (micMuted) Icons.Default.MicOff else Icons.Default.Mic,
-                        contentDescription = if (micMuted) "Unmute microphone" else "Mute microphone",
-                        tint = (if (micMuted) Color(0xFFFF6B61) else Color.White).copy(alpha = if (micEnabled) 1f else 0.35f),
-                        modifier = Modifier.size(21.dp)
-                    )
-                }
-                Spacer(Modifier.width(gap))
-                // Switch photo ↔ video (disabled while recording/saving/live).
-                val swapEnabled = !recording && !captureBusy && !isLive
-                VrmGlassBubble(
-                    size = 48.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
-                    enabled = swapEnabled,
-                    onClick = { tap(); videoMode = !videoMode }
-                ) {
-                    Icon(
-                        if (videoMode) Icons.Default.PhotoCamera else Icons.Default.Videocam,
-                        contentDescription = if (videoMode) "Switch to photo" else "Switch to video",
-                        tint = Color.White.copy(alpha = if (swapEnabled) 1f else 0.35f),
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
-                Spacer(Modifier.width(gap))
-                // Centre: capture — or, while streaming, the Live button.
-                VrmGlassBubble(
-                    size = 72.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
-                    enabled = !captureBusy,
-                    border = if (recording || isLive) Color(0xFFFF3B30) else null,
-                    onClick = { tap(); onCapturePressed() }
-                ) {
-                    when {
-                        liveState == com.mediaviewer.stream.LiveStreamer.State.CONNECTING -> androidx.compose.material3.CircularProgressIndicator(
-                            color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(26.dp)
-                        )
-                        isLive -> Text("Live", color = Color(0xFFFF3B30), fontSize = 17.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
-                        captureBusy -> androidx.compose.material3.CircularProgressIndicator(
-                            color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(26.dp)
-                        )
-                        recording -> Icon(Icons.Default.Stop, contentDescription = "Stop recording", tint = Color(0xFFFF3B30), modifier = Modifier.size(34.dp))
-                        videoMode -> Icon(Icons.Default.Videocam, contentDescription = "Record video", tint = Color.White, modifier = Modifier.size(32.dp))
-                        else -> Icon(Icons.Default.PhotoCamera, contentDescription = "Take photo", tint = Color.White, modifier = Modifier.size(30.dp))
-                    }
-                }
-                Spacer(Modifier.width(gap))
-                // Live (opens the stream setup popup) — right of capture.
-                val liveEnabled = !recording && !captureBusy && !isLive && vrmBytes != null
-                VrmGlassBubble(
-                    size = 48.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
-                    enabled = liveEnabled,
-                    onClick = { tap(); liveDialogOpen = true }
-                ) {
-                    Text(
-                        "Live", color = Color.White.copy(alpha = if (liveEnabled) 1f else 0.35f),
-                        fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
-                    )
-                }
-                Spacer(Modifier.width(gap))
-                // Far right: Settings.
-                VrmGlassBubble(
-                    size = 48.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
-                    onClick = { tap(); settingsOpen = true }
-                ) {
-                    Icon(Icons.Default.Settings, contentDescription = "VRM Settings", tint = Color.White, modifier = Modifier.size(20.dp))
-                }
-            }
-        }
+            },
+            statusDot = (recording || liveState == com.mediaviewer.stream.LiveStreamer.State.LIVE) && captureError == null,
+            micMuted = micMuted, micEnabled = !recording && !captureBusy, onToggleMic = { tap(); micMuted = !micMuted },
+            videoMode = videoMode, swapEnabled = !recording && !captureBusy && !isLive, onToggleVideoMode = { tap(); videoMode = !videoMode },
+            connecting = liveState == com.mediaviewer.stream.LiveStreamer.State.CONNECTING,
+            isLive = isLive, captureBusy = captureBusy, recording = recording,
+            onCapture = { tap(); onCapturePressed() },
+            liveEnabled = !recording && !captureBusy && !isLive && vrmBytes != null,
+            onLive = { tap(); liveDialogOpen = true },
+            rightIcon = Icons.Default.Settings, rightDescription = "VRM Settings",
+            onRight = { tap(); settingsOpen = true },
+            modifier = Modifier.align(Alignment.BottomCenter)
+        )
 
         // Browser overlays float over everything in VRM mode except its
         // own popups. Never part of captures unless set to be (see
@@ -985,7 +920,10 @@ fun VrmModeScreen(
                 tint = tint,
                 registry = overlayRegistry,
                 onChange = { updated -> browserOverlays = browserOverlays.map { if (it.id == updated.id) updated else it } },
-                onRemove = { id -> browserOverlays = browserOverlays.filterNot { it.id == id } }
+                onRemove = { id -> browserOverlays = browserOverlays.filterNot { it.id == id } },
+                // Separate windows sit above everything: park them while one
+                // of this page's own popups is open.
+                hidden = settingsOpen || liveDialogOpen || endLiveConfirmOpen
             )
         }
 
@@ -1025,6 +963,7 @@ fun VrmModeScreen(
                     followHead = followHead, onToggleFollowHead = { followHead = it },
                     smoothing = smoothing, onSmoothing = { smoothing = it },
                     fastTracking = fastTracking, onToggleFastTracking = { fastTracking = it },
+                    performanceMode = performanceMode, onTogglePerformanceMode = { performanceMode = it },
                     manualEyes = manualEyes, onToggleManualEyes = { manualEyes = it },
                     eyeClosed = eyeClosed, onEyeClosed = { eyeClosed = it },
                     springBones = springBones, onToggleSpringBones = { springBones = it },
@@ -1783,6 +1722,7 @@ private class VrmSettingsUi(
     val followHead: Boolean, val onToggleFollowHead: (Boolean) -> Unit,
     val smoothing: Int, val onSmoothing: (Int) -> Unit,
     val fastTracking: Boolean, val onToggleFastTracking: (Boolean) -> Unit,
+    val performanceMode: Boolean, val onTogglePerformanceMode: (Boolean) -> Unit,
     val manualEyes: Boolean, val onToggleManualEyes: (Boolean) -> Unit,
     val eyeClosed: Float, val onEyeClosed: (Float) -> Unit,
     val springBones: Boolean, val onToggleSpringBones: (Boolean) -> Unit,
@@ -1863,6 +1803,8 @@ private fun VrmSettingsSheet(
                 hint = "When your face is hidden (hair, hands), the body tracker keeps your head placed and turned.") { ui.onToggleHeadFallback(it) }
             VrmSettingsToggleRow("Fast tracking (30 fps)", ui.fastTracking, tint,
                 hint = "Keeps up with quick movements. Uses more battery and warms the phone.") { ui.onToggleFastTracking(it) }
+            VrmSettingsToggleRow("Performance mode", ui.performanceMode, tint,
+                hint = "Plain tinted buttons instead of glass that blurs the avatar. Frees up the GPU for tracking — useful with another app open or while streaming.") { ui.onTogglePerformanceMode(it) }
             VrmSettingsSlider(
                 label = "Smoothing", valueText = if (ui.smoothing == 0) "off" else ui.smoothing.toString(),
                 value = ui.smoothing.toFloat(), range = 0f..10f, steps = 9, tint = tint,
@@ -2123,7 +2065,7 @@ private fun TrackingPreview(
 }
 
 /** Stream clock: m:ss, then h:mm:ss — it just keeps counting. */
-private fun formatLiveClock(totalSeconds: Long): String {
+internal fun formatLiveClock(totalSeconds: Long): String {
     val s = totalSeconds.coerceAtLeast(0)
     val h = s / 3600; val m = (s % 3600) / 60; val sec = s % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec)
@@ -2135,7 +2077,7 @@ private fun formatLiveClock(totalSeconds: Long): String {
  * the user's color and rimmed like every other glass button in the app.
  */
 @Composable
-private fun VrmGlassBubble(
+internal fun VrmGlassBubble(
     size: androidx.compose.ui.unit.Dp,
     liquidGlass: Boolean,
     tint: Color,
@@ -2240,7 +2182,7 @@ private fun VrmTextField(
  * and "Go Live". Compact and centered; it rides up above the keyboard.
  */
 @Composable
-private fun VrmLiveDialog(
+internal fun VrmLiveDialog(
     liquidGlass: Boolean,
     tint: Color,
     backdrop: GlassBackdrop?,
@@ -2375,7 +2317,7 @@ private fun VrmLiveDialog(
 }
 
 @Composable
-private fun VrmConfirmDialog(
+internal fun VrmConfirmDialog(
     liquidGlass: Boolean,
     tint: Color,
     backdrop: GlassBackdrop?,
@@ -2761,12 +2703,18 @@ private class VrmTrackingPipeline : VrmFrameHook {
         return true
     }
 
+    /** [version] the avatar was last posed with (main thread). */
+    private var posedVersion = -1
+    override fun hasNewData(): Boolean =
+        faceSeq.get() != seenFace || handSeq.get() != seenHand || poseSeq.get() != seenPose || version != posedVersion
+
     /** Filament frame loop (main thread), once per rendered frame. Poses
      *  every frame (the retargeter eases bones toward the latest tracking,
      *  so motion stays smooth between 15–30 Hz tracking updates);
      *  expressions only when the face changed. */
     override fun beforeFrame(): AvatarFraming? {
         update()
+        posedVersion = version
         val t = target
         val data = vrmData
         if (t != null && data != null) {
@@ -2856,3 +2804,156 @@ private fun VrmBackgroundColorRow(current: Int, tint: Color, onPick: (Int) -> Un
     }
 }
 
+
+/**
+ * The capture page's bottom controls, shared by VRM mode and the Camera page:
+ * [mic] [photo/video mode] [capture] [Live] [right button — Settings in VRM
+ * mode, Flip camera on the Camera page], with a status pill (timer, "Saving
+ * photo…", errors …) above. The capture button shows what it will do
+ * (camera or video icon; stop while recording; "Live" while streaming); the
+ * second bubble shows the OTHER photo/video mode and switches to it.
+ */
+@Composable
+internal fun CaptureControlsBar(
+    liquidGlass: Boolean,
+    tint: Color,
+    backdrop: GlassBackdrop?,
+    status: String?,
+    statusDot: Boolean,
+    micMuted: Boolean,
+    micEnabled: Boolean,
+    onToggleMic: () -> Unit,
+    videoMode: Boolean,
+    swapEnabled: Boolean,
+    onToggleVideoMode: () -> Unit,
+    connecting: Boolean,
+    isLive: Boolean,
+    captureBusy: Boolean,
+    recording: Boolean,
+    onCapture: () -> Unit,
+    liveEnabled: Boolean,
+    onLive: () -> Unit,
+    rightIcon: androidx.compose.ui.graphics.vector.ImageVector,
+    rightDescription: String,
+    onRight: () -> Unit,
+    rightEnabled: Boolean = true,
+    modifier: Modifier = Modifier
+) {
+    androidx.compose.foundation.layout.Column(
+        modifier.windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 28.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(Modifier.height(30.dp), contentAlignment = Alignment.Center) {
+            if (status != null) {
+                Row(
+                    Modifier.clip(RoundedCornerShape(14.dp)).background(Color.Black.copy(alpha = 0.45f))
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (statusDot) {
+                        Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFFFF3B30)))
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text(status, color = Color.White, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        val gap = 14.dp
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // Far left: mic mute. Locked mid-recording (a MediaRecorder
+            // can't add/drop its audio track once started); live, it
+            // mutes the stream instantly.
+            VrmGlassBubble(
+                size = 48.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                enabled = micEnabled,
+                onClick = onToggleMic
+            ) {
+                Icon(
+                    if (micMuted) Icons.Default.MicOff else Icons.Default.Mic,
+                    contentDescription = if (micMuted) "Unmute microphone" else "Mute microphone",
+                    tint = (if (micMuted) Color(0xFFFF6B61) else Color.White).copy(alpha = if (micEnabled) 1f else 0.35f),
+                    modifier = Modifier.size(21.dp)
+                )
+            }
+            Spacer(Modifier.width(gap))
+            // Switch photo ↔ video (disabled while recording/saving/live).
+            VrmGlassBubble(
+                size = 48.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                enabled = swapEnabled,
+                onClick = onToggleVideoMode
+            ) {
+                Icon(
+                    if (videoMode) Icons.Default.PhotoCamera else Icons.Default.Videocam,
+                    contentDescription = if (videoMode) "Switch to photo" else "Switch to video",
+                    tint = Color.White.copy(alpha = if (swapEnabled) 1f else 0.35f),
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+            Spacer(Modifier.width(gap))
+            // Centre: capture — or, while streaming, the Live button.
+            VrmGlassBubble(
+                size = 72.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                enabled = !captureBusy,
+                border = if (recording || isLive) Color(0xFFFF3B30) else null,
+                onClick = onCapture
+            ) {
+                when {
+                    connecting -> androidx.compose.material3.CircularProgressIndicator(
+                        color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(26.dp)
+                    )
+                    isLive -> Text("Live", color = Color(0xFFFF3B30), fontSize = 17.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                    captureBusy -> androidx.compose.material3.CircularProgressIndicator(
+                        color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(26.dp)
+                    )
+                    recording -> Icon(Icons.Default.Stop, contentDescription = "Stop recording", tint = Color(0xFFFF3B30), modifier = Modifier.size(34.dp))
+                    videoMode -> Icon(Icons.Default.Videocam, contentDescription = "Record video", tint = Color.White, modifier = Modifier.size(32.dp))
+                    else -> Icon(Icons.Default.PhotoCamera, contentDescription = "Take photo", tint = Color.White, modifier = Modifier.size(30.dp))
+                }
+            }
+            Spacer(Modifier.width(gap))
+            // Live (opens the stream setup popup) — right of capture.
+            VrmGlassBubble(
+                size = 48.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                enabled = liveEnabled,
+                onClick = onLive
+            ) {
+                Text(
+                    "Live", color = Color.White.copy(alpha = if (liveEnabled) 1f else 0.35f),
+                    fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                )
+            }
+            Spacer(Modifier.width(gap))
+            // Far right: Settings (VRM) / Flip camera (Camera page).
+            VrmGlassBubble(
+                size = 48.dp, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                enabled = rightEnabled,
+                onClick = onRight
+            ) {
+                Icon(rightIcon, contentDescription = rightDescription, tint = Color.White.copy(alpha = if (rightEnabled) 1f else 0.35f), modifier = Modifier.size(20.dp))
+            }
+        }
+    }
+}
+
+/** Asks for a [hz] display refresh rate while this is composed (restored
+ *  after) — VRM mode and the Camera page never draw faster than 60 fps, so
+ *  a 90/120 Hz panel just costs power and frame-loop wakeups. */
+@Composable
+internal fun DisplayRefreshCap(hz: Float) {
+    val view = androidx.compose.ui.platform.LocalView.current
+    DisposableEffect(view, hz) {
+        var ctx: android.content.Context? = view.context
+        while (ctx is android.content.ContextWrapper && ctx !is android.app.Activity) ctx = ctx.baseContext
+        val window = (ctx as? android.app.Activity)?.window
+        val previous = window?.attributes?.preferredRefreshRate ?: 0f
+        if (window != null) runCatching {
+            window.attributes = window.attributes.apply { preferredRefreshRate = hz }
+        }
+        onDispose {
+            if (window != null) runCatching {
+                window.attributes = window.attributes.apply { preferredRefreshRate = previous }
+            }
+        }
+    }
+}

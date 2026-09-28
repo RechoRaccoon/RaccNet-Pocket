@@ -28,6 +28,12 @@ class VrmSettingsStore(context: Context) {
         }.apply()
     }
 
+    /** Like [put], but written to disk before returning (for things that
+     *  must survive a crash right after). */
+    fun putNow(key: String, value: String) {
+        prefs.edit().putString(key, value).commit()
+    }
+
     companion object {
         const val UPPER_BODY = "upper_body"
         const val FULL_BODY = "full_body"
@@ -54,5 +60,6 @@ class VrmSettingsStore(context: Context) {
         const val BACKGROUND_COLOR = "background_color" // ARGB int, 0 = default (profile color)
         const val VOICE_PITCH = "voice_pitch"      // semitones, 0 = natural
         const val HEAD_FALLBACK = "head_fallback"  // body tracker places the head when the face is lost
+        const val PERFORMANCE_MODE = "performance_mode" // flat buttons, no live blur over the avatar
     }
 }

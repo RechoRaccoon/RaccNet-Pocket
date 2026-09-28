@@ -306,15 +306,10 @@ fun rememberDominantColor(url: String): Color {
 /** Big Update #8: the full-screen background behind a post — a dark vignette
  *  tinted with that post's own dominant color, instead of flat black — so the
  *  clear glass panels have real, post-specific color to show through to. */
-fun postBackgroundBrush(dominantColor: Color): Brush {
-    val deep = Color(
-        red = dominantColor.red * 0.22f,
-        green = dominantColor.green * 0.22f,
-        blue = dominantColor.blue * 0.22f,
-        alpha = 1f
-    )
-    return Brush.verticalGradient(listOf(deep, Color.Black, deep))
-}
+fun postBackgroundBrush(dominantColor: Color): Brush =
+    // A flat, dimmer version of the color (no black band through the
+    // middle any more) — the same fill SpaceSky puts its stars on.
+    SolidColor(dimSpaceColor(dominantColor))
 
 /** Item 11: a DM thread's own two-tone version of [postBackgroundBrush] —
  *  [bottomColor] (the logged-in user's own dominant color) deep-tints the
@@ -324,8 +319,7 @@ fun postBackgroundBrush(dominantColor: Color): Brush {
  *  page in the app. Mirrors how each side's chat bubbles are already tinted
  *  to that same person's own color (see DmThreadView's myTint/theirTint). */
 fun dmThreadBackgroundBrush(bottomColor: Color, topColor: Color): Brush {
-    fun deepen(c: Color) = Color(red = c.red * 0.22f, green = c.green * 0.22f, blue = c.blue * 0.22f, alpha = 1f)
-    return Brush.verticalGradient(listOf(deepen(topColor), Color.Black, deepen(bottomColor)))
+    return Brush.verticalGradient(listOf(dimSpaceColor(topColor), dimSpaceColor(bottomColor)))
 }
 
 /** Bug fix: blocks taps/drags from passing through a full-screen overlay to
