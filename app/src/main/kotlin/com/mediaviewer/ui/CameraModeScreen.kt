@@ -549,8 +549,8 @@ private class CameraCaptureSession(private val renderer: CameraGlRenderer) {
     suspend fun takePhoto(context: android.content.Context, view: TextureView, unmirror: Boolean = false): Uri? {
         if (!view.isAvailable || view.width <= 0) return null
         val shot = runCatching { view.bitmap }.getOrNull() ?: return null
-        // The selfie preview is shown mirrored; the saved photo is the true
-        // picture (like the phone's own camera app).
+        // The selfie preview is a mirror image; the saved photo is flipped
+        // back to the true picture (like the phone's own camera app).
         val bitmap = if (!unmirror) shot else runCatching {
             val m = android.graphics.Matrix().apply { preScale(-1f, 1f, shot.width / 2f, shot.height / 2f) }
             val flipped = android.graphics.Bitmap.createBitmap(shot, 0, 0, shot.width, shot.height, m, true)

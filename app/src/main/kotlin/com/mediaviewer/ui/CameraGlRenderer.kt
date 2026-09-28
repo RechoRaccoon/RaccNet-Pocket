@@ -77,9 +77,8 @@ internal class CameraGlRenderer {
         private set
     @Volatile var lastDrawnStream = 0
         private set
-    /** Mirror the on-screen preview horizontally (the selfie camera, like
-     *  every camera app). Only the preview: recordings and streams get the
-     *  true, unmirrored picture — text reads the right way round. */
+    /** Selfie camera: recordings/streams get flipped to the true picture;
+     *  the on-screen preview is left as a mirror image. */
     @Volatile var mirror = true
 
     private class Target(val id: Int, val eglSurface: EGLSurface, var width: Int, var height: Int, val encoder: Boolean)
@@ -212,7 +211,10 @@ internal class CameraGlRenderer {
         for (t in targets) {
             if (!makeCurrent(t.eglSurface)) { dead += t; continue }
             GLES20.glViewport(0, 0, t.width, t.height)
-            drawQuad(src, t.width, t.height, mirrorThis = mirror && !t.encoder)
+            // The selfie stream needs this flip for the true picture
+            // (recordings, streams); the on-screen preview skips it so it
+            // behaves like a mirror, the way every camera app's does.
+            drawQuad(src, t.width, t.height, mirrorThis = mirror && t.encoder)
             if (t.encoder) EGLExt.eglPresentationTimeANDROID(display, t.eglSurface, now)
             if (!EGL14.eglSwapBuffers(display, t.eglSurface)) {
                 val err = EGL14.eglGetError()
