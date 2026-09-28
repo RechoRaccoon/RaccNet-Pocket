@@ -402,8 +402,7 @@ private fun AppRoot(viewModel: MainViewModel) {
     LaunchedEffect(Unit) {
         com.mediaviewer.ui.ProfileColorStore.bannerResolver = { did -> viewModel.fetchBannerUrl(did) }
     }
-    val selfProfileTint = selfProfile?.author?.avatarUrl?.takeIf { it.isNotBlank() }
-        ?.let { com.mediaviewer.ui.rememberSelfProfileTint(it) } ?: NeutralGlassTint
+    val selfProfileTint = com.mediaviewer.ui.rememberSelfTint(selfProfile?.author?.avatarUrl, NeutralGlassTint)
     var currentDominantColor by remember { mutableStateOf(NeutralGlassTint) }
     // The starry page backgrounds stop ticking while VRM mode is open (it
     // needs every bit of CPU/GPU it can get).
@@ -913,7 +912,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             // bottom bar match the rest of the app instead of generic green.
             val vrmTint = run {
                 val selfAvatar = selfProfile?.author?.avatarUrl
-                if (!selfAvatar.isNullOrBlank()) com.mediaviewer.ui.rememberSelfProfileTint(selfAvatar) else currentDominantColor
+                com.mediaviewer.ui.rememberSelfTint(selfAvatar, currentDominantColor)
             }
             VrmModeScreen(
                 liquidGlass = liquidGlass,
@@ -935,7 +934,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             // when opened from it, below the notch bubble itself (11).
             val cameraTint = run {
                 val selfAvatar = selfProfile?.author?.avatarUrl
-                if (!selfAvatar.isNullOrBlank()) com.mediaviewer.ui.rememberSelfProfileTint(selfAvatar) else currentDominantColor
+                com.mediaviewer.ui.rememberSelfTint(selfAvatar, currentDominantColor)
             }
             Box(Modifier.fillMaxSize().zIndex(10.8f)) {
                 com.mediaviewer.ui.CameraModeScreen(
@@ -1189,7 +1188,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             val openProfile = profileOverlay
             val notchTint = if (vrmModeOpen || cameraModeOpen || composePostOpen) {
                 val selfAvatar = selfProfile?.author?.avatarUrl
-                if (!selfAvatar.isNullOrBlank()) com.mediaviewer.ui.rememberSelfProfileTint(selfAvatar) else currentDominantColor
+                com.mediaviewer.ui.rememberSelfTint(selfAvatar, currentDominantColor)
             } else if (profileVisible && openProfile != null) {
                 // On a profile page the notch wears that profile's own color —
                 // the same banner/avatar blend the page's glass uses.
@@ -1204,7 +1203,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             } else if (screenState == ScreenState.SETTINGS || screenState == ScreenState.GRID) {
                 // The Hub and Explore/grid mode both wear your own color.
                 val selfAvatar = selfProfile?.author?.avatarUrl
-                if (!selfAvatar.isNullOrBlank()) com.mediaviewer.ui.rememberSelfProfileTint(selfAvatar) else currentDominantColor
+                com.mediaviewer.ui.rememberSelfTint(selfAvatar, currentDominantColor)
             } else {
                 currentDominantColor
             }
@@ -1240,7 +1239,7 @@ private fun AppRoot(viewModel: MainViewModel) {
         // Settings → App Functionality → "Debug Overlay".
         if (com.mediaviewer.util.UiToggles.debugOverlay) {
             val selfAvatar = selfProfile?.author?.avatarUrl
-            val debugTint = if (!selfAvatar.isNullOrBlank()) com.mediaviewer.ui.rememberSelfProfileTint(selfAvatar) else Color.White
+            val debugTint = com.mediaviewer.ui.rememberSelfTint(selfAvatar, Color.White)
             com.mediaviewer.ui.DebugOverlay(
                 tint = debugTint,
                 taggingEnabled = tagPostWhenLiked,

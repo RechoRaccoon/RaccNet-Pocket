@@ -98,7 +98,7 @@ fun DmInboxOverlay(
     // page used everywhere before. DmThreadView's own `myTint` already did
     // this for "my" message bubbles specifically; this extends the same
     // color to the page background and every other glass surface here.
-    val profileTint = if (selfAvatarUrl != null) rememberSelfProfileTint(selfAvatarUrl) else NeutralGlassTint
+    val profileTint = rememberSelfTint(selfAvatarUrl, NeutralGlassTint)
 
     // Item 11: while a specific thread is open, the header (back button +
     // the other person's avatar/name) reflects *their* color instead of the
@@ -282,7 +282,7 @@ private fun DmThreadView(
     // subject's own palette. Falls back to the shared defaults below when
     // an avatar isn't available (e.g. no self avatar yet, or the other
     // person has none set).
-    val myTint = if (selfAvatarUrl != null) rememberSelfProfileTint(selfAvatarUrl) else VoteGreenTint
+    val myTint = rememberSelfTint(selfAvatarUrl, VoteGreenTint)
     val theirTint = if (thread.convo.member.avatarUrl != null) rememberDominantColor(thread.convo.member.avatarUrl!!) else NeutralGlassTint
     fun isMine(m: BskyMessageView) = m.sender?.did != thread.convo.member.did
     fun nameOf(m: BskyMessageView) = if (isMine(m)) "yourself" else thread.convo.member.displayName.ifBlank { "@" + thread.convo.member.handle }

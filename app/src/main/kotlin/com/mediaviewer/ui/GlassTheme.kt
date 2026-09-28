@@ -306,6 +306,24 @@ fun rememberProfileTint(bannerUrl: String?, avatarUrl: String?): Color {
 fun rememberAuthorProfileTint(did: String, avatarUrl: String?): Color =
     rememberProfileColors(did, avatarUrl).blended
 
+/** True when "your color" is already known without waiting for your
+ *  profile to load: Override App Colors is on, or your account's real
+ *  colors are remembered from an earlier run. */
+fun selfProfileColorKnown(): Boolean {
+    if (com.mediaviewer.util.UiToggles.overrideAppColors) return true
+    val did = SelfProfileColors.did?.takeIf { it.isNotBlank() } ?: SelfProfileColors.savedDid
+    return !did.isNullOrBlank() && ProfileColorStore.get(did) != null
+}
+
+/** "Your color" for any screen: the real one as soon as it's known —
+ *  straight away on launch when it's remembered, before your profile (and
+ *  avatar) have even loaded — else [fallback] (signed out, or a very first
+ *  launch before your profile has ever loaded). */
+@Composable
+fun rememberSelfTint(selfAvatarUrl: String?, fallback: Color): Color =
+    if (!selfAvatarUrl.isNullOrBlank() || selfProfileColorKnown()) rememberSelfProfileTint(selfAvatarUrl ?: "")
+    else fallback
+
 /** The signed-in user's own color, matching their profile page exactly. */
 @Composable
 fun rememberSelfProfileTint(selfAvatarUrl: String): Color {
@@ -319,7 +337,10 @@ fun rememberSelfProfileTint(selfAvatarUrl: String): Color {
     val color = if (!did.isNullOrBlank()) {
         rememberProfileColors(
             did, selfAvatarUrl, SelfProfileColors.bannerUrl,
-            bannerKnown = SelfProfileColors.loaded && SelfProfileColors.did == did, resolve = false
+            // Only "known" with the avatar in hand too — otherwise a
+            // blank avatar would be sampled as grey and remembered.
+            bannerKnown = SelfProfileColors.loaded && SelfProfileColors.did == did && selfAvatarUrl.isNotBlank(),
+            resolve = false
         ).blended
     } else rememberProfileTint(SelfProfileColors.bannerUrl, selfAvatarUrl)
     val liveDid = SelfProfileColors.did

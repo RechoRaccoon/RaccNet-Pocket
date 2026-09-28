@@ -115,7 +115,7 @@ fun SearchOverlay(
 
     // Item 8: same profile-color pattern as the Hub/DM inbox — falls back
     // to the shared neutral tint when there's no avatar yet.
-    val profileTint = if (selfAvatarUrl != null) rememberSelfProfileTint(selfAvatarUrl) else NeutralGlassTint
+    val profileTint = rememberSelfTint(selfAvatarUrl, NeutralGlassTint)
 
     // Bug fix/roadmap: the search bar, its buttons, and the filter row now
     // float directly over this page's own background gradient — sampling it

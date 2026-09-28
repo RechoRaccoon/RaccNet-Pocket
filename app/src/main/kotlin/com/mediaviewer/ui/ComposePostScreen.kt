@@ -274,7 +274,7 @@ fun ComposePostScreen(
     // the title being reviewed is far more the visual subject here than the
     // reviewer's own avatar is.
     val dominantColor = reviewTarget?.posterUrl?.let { rememberDominantColor(it) }
-        ?: selfProfile?.avatarUrl?.let { rememberSelfProfileTint(it) } ?: dominantColor
+        ?: rememberSelfTint(selfProfile?.avatarUrl, dominantColor)
 
     // ── Core state ───────────────────────────────────────────────────────
     var mode by remember {

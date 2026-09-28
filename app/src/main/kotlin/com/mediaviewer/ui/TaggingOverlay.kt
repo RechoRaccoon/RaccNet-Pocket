@@ -67,7 +67,7 @@ fun TaggingOverlay(
         androidx.activity.compose.BackHandler(onBack = onDismiss)
     }
 
-    val profileTint = if (selfAvatarUrl != null) rememberSelfProfileTint(selfAvatarUrl) else NeutralGlassTint
+    val profileTint = rememberSelfTint(selfAvatarUrl, NeutralGlassTint)
 
     val backdropLayer = rememberGraphicsLayer()
     var backdropOrigin by remember { mutableStateOf(Offset.Zero) }

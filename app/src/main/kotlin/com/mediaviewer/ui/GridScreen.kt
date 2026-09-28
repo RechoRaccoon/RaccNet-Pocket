@@ -139,7 +139,7 @@ fun GridScreen(
 ) {
     val tap = rememberHapticTap()
     var localTags  by remember(e621SearchTags) { mutableStateOf(e621SearchTags) }
-    val tint = if (!selfAvatarUrl.isNullOrBlank()) rememberSelfProfileTint(selfAvatarUrl) else NeutralGlassTint
+    val tint = rememberSelfTint(selfAvatarUrl, NeutralGlassTint)
     var kind by remember { mutableStateOf(PostKindFilter.ALL) }
     val gridScreen = "feed_grid"
     val gridMode = resultsGridMode(gridScreen, kind)
