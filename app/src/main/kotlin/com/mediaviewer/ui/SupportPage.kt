@@ -142,7 +142,7 @@ internal fun SupportPageContent(liquidGlass: Boolean, tint: Color) {
 
         Spacer(Modifier.height(22.dp))
         Text(
-            "Every bit helps. Thank you for flying with Stellar ✦",
+            "Thank you for using Stellar <3",
             color = DimGray, fontSize = 13.sp, textAlign = TextAlign.Center
         )
         Spacer(Modifier.height(12.dp))
