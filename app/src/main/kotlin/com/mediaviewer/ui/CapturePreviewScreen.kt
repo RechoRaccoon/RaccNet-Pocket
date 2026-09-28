@@ -61,6 +61,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.ui.graphics.rememberGraphicsLayer
@@ -214,7 +215,13 @@ fun CapturePreviewScreen(
                         .background(Color.Black)
                         .onGloballyPositioned { backdropOrigin = it.positionInRoot() }
                         .drawWithContent {
-                            if (backdrop != null) backdropLayer.record { this@drawWithContent.drawContent() }
+                            // Recorded clipped to the crop box: the media can
+                            // now be bigger than the box (zoomed/dragged), and
+                            // the unclipped overflow was showing up inside the
+                            // glass buttons around it.
+                            if (backdrop != null) backdropLayer.record {
+                                clipRect(0f, 0f, size.width, size.height) { this@drawWithContent.drawContent() }
+                            }
                             drawContent()
                         }
                         .then(if (cropping) Modifier.pointerInput(crop, dispWpx, dispHpx) {

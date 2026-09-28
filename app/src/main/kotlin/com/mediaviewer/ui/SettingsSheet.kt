@@ -332,6 +332,8 @@ fun SettingsSheet(
         hubPageForward = forward
         hubPage = target
     }
+    // Back from the Settings page returns to the Hub.
+    androidx.activity.compose.BackHandler(enabled = hubPage == HubPage.SETTINGS) { goToHubPage(HubPage.MAIN) }
     // Item 14: the Hub is one page now (Settings/AT Protocol/e621 chips are
     // gone — e621's own navigation folded into this page, its login moved
     // to Settings, see AtProtocolPageContent/SettingsPageContent), so

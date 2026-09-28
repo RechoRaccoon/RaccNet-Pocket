@@ -3184,6 +3184,8 @@ private fun BlogDetailOverlay(
     var layerOrigin by remember { mutableStateOf(Offset.Zero) }
     val backdrop = if (liquidGlass) remember(layer) { GlassBackdrop(layer) { layerOrigin } } else null
     val bubbleTint = remember(tint) { androidx.compose.ui.graphics.lerp(tint, Color.Black, 0.1f) }
+    val blogScroll = rememberScrollState()
+    val blogScope = rememberCoroutineScope()
 
     Box(
         Modifier.fillMaxSize().background(pageBrush)
@@ -3198,8 +3200,8 @@ private fun BlogDetailOverlay(
                 }
                 .background(pageBrush)
         ) {
-            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
-                Spacer(Modifier.height(headerHeight + 10.dp))
+            Column(Modifier.fillMaxSize().verticalScroll(blogScroll).padding(horizontal = 20.dp)) {
+                Spacer(Modifier.height(rememberTopCutoutClearance() + 18.dp))
                 // Title, byline and date are part of the page itself now
                 // (they used to float above it as glass bubbles) — set like
                 // the top of a printed article, so they scroll away with
@@ -3261,17 +3263,22 @@ private fun BlogDetailOverlay(
                     Text(blog.bodyText.ifBlank { "This blog has no readable text content." },
                         color = Color.White.copy(0.92f), fontSize = 15.sp, lineHeight = 23.sp)
                 }
-                Spacer(Modifier.height((if (isOwn) 120.dp else 48.dp) + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()))
+                Spacer(Modifier.height(120.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()))
             }
         }
 
-        // ── Floating close button: the only thing over the page now ──
-        Box(
-            Modifier.padding(top = rememberTopCutoutClearance())
-                .onSizeChanged { headerHeight = with(density) { it.height.toDp() } }
-                .padding(horizontal = 12.dp, vertical = 8.dp)
+        // Back to the top, once you've started reading down (same glass
+        // arrow as profiles and Explore mode, blurring the text behind it).
+        val showTop by remember { androidx.compose.runtime.derivedStateOf { blogScroll.value > with(density) { 320.dp.toPx() } } }
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showTop,
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = rememberTopCutoutClearance() + 8.dp),
+            enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.scaleIn(initialScale = 0.8f),
+            exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.scaleOut(targetScale = 0.8f)
         ) {
-            CloseGlassBubble(liquidGlass = liquidGlass, tint = bubbleTint, onClick = onClose, backdrop = backdrop)
+            ScrollToTopGlassBubble(liquidGlass = liquidGlass, tint = bubbleTint, backdrop = backdrop) {
+                blogScope.launch { blogScroll.animateScrollTo(0) }
+            }
         }
 
         // ── Interaction bar (like the profile's) ──
@@ -3287,17 +3294,21 @@ private fun BlogDetailOverlay(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                BarIcon(onClick = { onEdit(blog) }) {
+                // Close (replaces the old top-left X).
+                BarIcon(onClick = onClose) {
+                    Icon(Icons.Default.Close, contentDescription = "Close blog", tint = Color.White, modifier = Modifier.size(21.dp))
+                }
+                if (isOwn) BarIcon(onClick = { onEdit(blog) }) {
                     Icon(Icons.Default.Edit, contentDescription = "Edit blog", tint = Color.White, modifier = Modifier.size(20.dp))
                 }
-                BarIcon(onClick = { confirmDelete = true }) {
+                if (isOwn) BarIcon(onClick = { confirmDelete = true }) {
                     Icon(Icons.Default.Delete, contentDescription = "Delete blog", tint = Color(0xFFFF8A80), modifier = Modifier.size(21.dp))
                 }
             }
         }
-        // Someone else's blog has nothing to put in the bar (the Bluesky
-        // button is gone), so the bar only shows on your own: Edit/Delete.
-        if (isOwn) Box(
+        // The shared interaction bar: Close (and, on your own blog,
+        // Edit/Delete).
+        Box(
             Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navigationBars)
                 .height(if (liquidGlass) 60.dp else 52.dp).fillMaxWidth(),
             contentAlignment = Alignment.Center

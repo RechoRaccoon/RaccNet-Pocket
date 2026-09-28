@@ -416,6 +416,12 @@ private fun AppRoot(viewModel: MainViewModel) {
     LaunchedEffect(Unit) {
         com.mediaviewer.ui.ProfileColorStore.bannerResolver = { did -> viewModel.fetchBannerUrl(did) }
     }
+    // Back from Timeline/Explore returns to the Hub. Registered early, so
+    // anything opened on top (a profile, DMs, search, comments…) handles
+    // Back first.
+    androidx.activity.compose.BackHandler(
+        enabled = screenState == ScreenState.FEED || screenState == ScreenState.GRID
+    ) { viewModel.setScreen(ScreenState.SETTINGS) }
     val selfProfileTint = com.mediaviewer.ui.rememberSelfTint(selfProfile?.author?.avatarUrl, NeutralGlassTint)
     var currentDominantColor by remember { mutableStateOf(NeutralGlassTint) }
     // The starry page backgrounds stop ticking while VRM mode is open (it

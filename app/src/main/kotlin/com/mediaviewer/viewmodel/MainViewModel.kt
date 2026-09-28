@@ -612,6 +612,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // post flips it back to false instead of reconstructing the profile
         // from scratch.
         val hidden: Boolean = false,
+        /** Opened from a Hub title card/blog: only that title/blog is
+         *  shown, and closing it closes the whole thing (no profile). */
+        val standaloneDetail: Boolean = false,
         // Bug fix: scrolling a profile's grid, tapping a post, then pinching
         // back in was jumping to the bottom of the results instead of
         // staying put. The composable itself does stay alive at zero size
@@ -957,7 +960,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         appInForeground = foreground
         if (foreground && wasBackground && _bskyLoggedIn.value) {
             refreshInboxUnreadNow()
-            if (_dmInboxOpen.value) refreshDmConvosQuick()
+            refreshDmConvosQuick()
         }
     }
 
@@ -996,9 +999,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun startInboxPolling() {
         if (inboxPollingJob?.isActive == true || !_bskyLoggedIn.value) return
         inboxPollingJob = viewModelScope.launch(Dispatchers.IO) {
+            var tick = 0
             while (_bskyLoggedIn.value) {
-                if (appInForeground && !_inboxOpen.value) {
-                    bskyRepo.getNotificationUnreadCount(bskyToken, _bskyDid.value).onSuccess { _inboxUnreadCount.value = it }
+                if (appInForeground) {
+                    if (!_inboxOpen.value) {
+                        bskyRepo.getNotificationUnreadCount(bskyToken, _bskyDid.value).onSuccess { _inboxUnreadCount.value = it }
+                    }
+                    // The chat list's unread counts: right at app start, then
+                    // every 2 minutes (new messages in between are counted
+                    // live by the DM poll) — so the Hub's DMs badge is right
+                    // even if the DM list is never opened.
+                    if (tick % 2 == 0) refreshDmConvosQuick()
+                    tick++
                 }
                 delay(60_000)
             }
@@ -3461,6 +3473,9 @@ _bskyDid.value          = session.did
     // than always tearing down the whole profile in one shot.
     fun closeProfile() {
         val cur = _profileOverlay.value ?: return
+        if (cur.standaloneDetail && (cur.openBlog != null || cur.openTitle != null || cur.openReview != null)) {
+            closeStandaloneDetail(); return
+        }
         when {
             cur.openBlog != null -> { _profileOverlay.value = cur.copy(openBlog = null); return }
             cur.openReview != null -> { _profileOverlay.value = cur.copy(openReview = null); return }
@@ -3812,14 +3827,26 @@ _bskyDid.value          = session.did
      *  old standalone ReviewDetailOverlay popup. */
     fun openMutualReview(fr: FriendPopfeedReview) {
         openProfile(fr.author, initialTab = ProfileTab.REVIEWS, title = titleFromReview(fr.review), preselectedReview = fr)
+        _profileOverlay.value = _profileOverlay.value?.copy(standaloneDetail = true)
         fetchTitleOverviewFor(fr.review)
     }
 
     /** Hub Blogs section equivalent of [openMutualReview] above. */
     fun openMutualBlog(fb: FriendLeafletBlog) {
         openProfile(fb.author, initialTab = ProfileTab.BLOGS, blog = fb.blog)
+        _profileOverlay.value = _profileOverlay.value?.copy(standaloneDetail = true)
     }
-    fun closeProfileBlog() { _profileOverlay.value = _profileOverlay.value?.copy(openBlog = null) }
+    fun closeProfileBlog() {
+        val cur = _profileOverlay.value ?: return
+        if (cur.standaloneDetail) closeStandaloneDetail() else _profileOverlay.value = cur.copy(openBlog = null)
+    }
+
+    /** A Hub title/blog closes straight back to where it was opened from. */
+    private fun closeStandaloneDetail() {
+        val cur = _profileOverlay.value ?: return
+        _profileOverlay.value = cur.copy(openBlog = null, openReview = null, openTitle = null, openTitlePreselectedReview = null, standaloneDetail = false)
+        closeProfile()
+    }
 
     /** Profile Reviews tab equivalent of [openMutualReview] — the profile
      *  overlay is already open here (we're tapping a row on it), so this
@@ -3943,7 +3970,11 @@ _bskyDid.value          = session.did
             }
         }
     }
-    fun closeProfileTitle() { _profileOverlay.value = _profileOverlay.value?.copy(openTitle = null, openTitlePreselectedReview = null) }
+    fun closeProfileTitle() {
+        val cur = _profileOverlay.value ?: return
+        if (cur.standaloneDetail) closeStandaloneDetail()
+        else _profileOverlay.value = cur.copy(openTitle = null, openTitlePreselectedReview = null)
+    }
 
     fun toggleProfileFollow() {
         val cur = _profileOverlay.value ?: return

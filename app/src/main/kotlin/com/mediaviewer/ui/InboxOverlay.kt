@@ -222,7 +222,6 @@ private fun InboxCard(
 ) {
     val lead = item.authors.first()
     val tint = if (lead.did.isNotBlank()) rememberAuthorProfileTint(lead.did, lead.avatarUrl) else fallbackTint
-    val (icon, iconColor) = reasonIcon(item.reason)
     val shape = RoundedCornerShape(16.dp)
     val unread = !item.isRead
     Row(
@@ -238,13 +237,6 @@ private fun InboxCard(
             }
             .padding(12.dp)
     ) {
-        // What happened, as a colored badge.
-        Box(
-            Modifier.size(34.dp).clip(CircleShape).background(iconColor.copy(alpha = 0.18f))
-                .border(1.dp, iconColor.copy(alpha = 0.5f), CircleShape),
-            contentAlignment = Alignment.Center
-        ) { Icon(icon, contentDescription = null, tint = iconColor, modifier = Modifier.size(18.dp)) }
-        Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
             // Who: up to six overlapping avatars.
             Row(verticalAlignment = Alignment.CenterVertically) {

@@ -36,6 +36,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -98,6 +99,8 @@ fun DmInboxOverlay(
     onNewGroupWith: (com.mediaviewer.model.AuthorInfo) -> Unit = {}
 ) {
     val tap = rememberHapticTap()
+    // Back: an open chat returns to the DM list; the list returns to the Hub.
+    androidx.activity.compose.BackHandler { if (thread != null) onCloseThread() else onClose() }
     // Item 8: background/chrome now reflect the logged-in user's own
     // profile color, the same pattern the Hub uses (see SettingsSheet's
     // `dominantColor` shadow) — instead of the flat NeutralGlassTint this
@@ -222,8 +225,29 @@ fun DmInboxOverlay(
             HorizontalDivider(color = Color.White.copy(0.08f), thickness = 0.5.dp)
 
             if (thread == null) {
+                // The chat list is recorded (over the page background) so
+                // the + button can blur whatever chats scroll behind it.
+                val pickerLayer = rememberGraphicsLayer()
+                var pickerOrigin by remember { mutableStateOf(Offset.Zero) }
+                val pickerBackdrop = remember(liquidGlass, pickerLayer) {
+                    if (liquidGlass) GlassBackdrop(pickerLayer) { pickerOrigin } else null
+                }
                 Box(Modifier.fillMaxSize()) {
-                    DmConversationPicker(conversations = conversations, loading = loading, liquidGlass = liquidGlass, tint = profileTint, onSelectConvo = onSelectConvo)
+                    Box(
+                        Modifier.fillMaxSize()
+                            .onGloballyPositioned { pickerOrigin = it.positionInRoot() }
+                            .drawWithContent {
+                                if (liquidGlass) pickerLayer.record {
+                                    translate(backdropOrigin.x - pickerOrigin.x, backdropOrigin.y - pickerOrigin.y) {
+                                        drawLayer(backdropLayer)
+                                    }
+                                    this@drawWithContent.drawContent()
+                                }
+                                drawContent()
+                            }
+                    ) {
+                        DmConversationPicker(conversations = conversations, loading = loading, liquidGlass = liquidGlass, tint = profileTint, onSelectConvo = onSelectConvo)
+                    }
                     // New chat / new group.
                     val fabShape = CircleShape
                     val fabModifier = Modifier.align(Alignment.BottomEnd)
@@ -235,7 +259,7 @@ fun DmInboxOverlay(
                         }
                     }
                     if (liquidGlass) {
-                        LiquidGlassSurface(fabModifier, shape = fabShape, tint = androidx.compose.ui.graphics.lerp(profileTint, Color.White, 0.1f), backdrop = dmBackdrop) { fabContent() }
+                        LiquidGlassSurface(fabModifier, shape = fabShape, tint = androidx.compose.ui.graphics.lerp(profileTint, Color.White, 0.1f), backdrop = pickerBackdrop) { fabContent() }
                     } else {
                         Box(fabModifier.clip(fabShape).background(androidx.compose.ui.graphics.lerp(profileTint, Color.Black, 0.3f))) { fabContent() }
                     }
