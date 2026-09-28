@@ -77,7 +77,9 @@ internal class CameraGlRenderer {
         private set
     @Volatile var lastDrawnStream = 0
         private set
-    /** Mirror horizontally (the selfie camera, like every camera app). */
+    /** Mirror the on-screen preview horizontally (the selfie camera, like
+     *  every camera app). Only the preview: recordings and streams get the
+     *  true, unmirrored picture — text reads the right way round. */
     @Volatile var mirror = true
 
     private class Target(val id: Int, val eglSurface: EGLSurface, var width: Int, var height: Int, val encoder: Boolean)
@@ -210,7 +212,7 @@ internal class CameraGlRenderer {
         for (t in targets) {
             if (!makeCurrent(t.eglSurface)) { dead += t; continue }
             GLES20.glViewport(0, 0, t.width, t.height)
-            drawQuad(src, t.width, t.height)
+            drawQuad(src, t.width, t.height, mirrorThis = mirror && !t.encoder)
             if (t.encoder) EGLExt.eglPresentationTimeANDROID(display, t.eglSurface, now)
             if (!EGL14.eglSwapBuffers(display, t.eglSurface)) {
                 val err = EGL14.eglGetError()
@@ -226,7 +228,7 @@ internal class CameraGlRenderer {
     }
 
     /** Output (u,v) corners → upright crop → camera buffer coords. */
-    private fun drawQuad(src: Source, tw: Int, th: Int) {
+    private fun drawQuad(src: Source, tw: Int, th: Int, mirrorThis: Boolean) {
         // Same rules as CameraX's own PreviewView: with the camera's
         // transform in the stream, the texture (after the SurfaceTexture
         // matrix) is the picture upright for the phone's natural
@@ -251,7 +253,7 @@ internal class CameraGlRenderer {
         for (i in 0 until 4) {
             var ux = 0.5f + (corners[i * 2] - 0.5f) * sx
             val uy = 0.5f + (corners[i * 2 + 1] - 0.5f) * sy
-            if (mirror) ux = 1f - ux
+            if (mirrorThis) ux = 1f - ux
             // Undo the clockwise "make upright" rotation (v points up).
             val bx: Float; val by: Float
             when (rot) {

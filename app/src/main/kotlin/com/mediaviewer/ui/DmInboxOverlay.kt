@@ -8,6 +8,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.GroupAdd
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.focus.focusRequester
@@ -90,7 +91,11 @@ fun DmInboxOverlay(
     /** Long-press emoji reactions: (messageId, emoji) toggles yours. */
     onToggleReaction: (String, String) -> Unit = { _, _ -> },
     /** The signed-in account (whose reactions/messages are "mine"). */
-    selfDid: String = ""
+    selfDid: String = "",
+    /** The big + button: start a new chat or group. */
+    onNewChat: () -> Unit = {},
+    /** 1:1 chat header: start a group with this person. */
+    onNewGroupWith: (com.mediaviewer.model.AuthorInfo) -> Unit = {}
 ) {
     val tap = rememberHapticTap()
     // Item 8: background/chrome now reflect the logged-in user's own
@@ -176,7 +181,12 @@ fun DmInboxOverlay(
                     Column(Modifier.weight(1f)) {
                         Text(thread.convo.member.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        val count = maxOf(thread.convo.memberCount, thread.members.size + 1, thread.convo.groupMembers.size + 1)
+                        // Bluesky's own member count (you included); the
+                        // lists are only a fallback, and `members` already
+                        // includes you — counting it +1 again made a group
+                        // of 4 read "5".
+                        val count = thread.convo.memberCount.takeIf { it > 0 }
+                            ?: (thread.members.keys + thread.convo.groupMembers.map { it.did } + selfDid).filter { it.isNotBlank() }.toSet().size
                         Text("$count members", color = DimGray, fontSize = 11.sp, maxLines = 1)
                     }
                 } else if (thread != null) {
@@ -184,21 +194,52 @@ fun DmInboxOverlay(
                         AsyncImage(model = thread.convo.member.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
                             modifier = Modifier.size(28.dp).clip(CircleShape).clickable { tap(); onTapAuthor(thread.convo.member) })
                     }
-                    Column(Modifier.clickable { tap(); onTapAuthor(thread.convo.member) }) {
+                    Column(Modifier.weight(1f).clickable { tap(); onTapAuthor(thread.convo.member) }) {
                         Text(thread.convo.member.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text("@${thread.convo.member.handle}", color = DimGray, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
+                    // Start a group chat with this person.
+                    Box(
+                        Modifier.size(32.dp)
+                            .then(if (liquidGlass) Modifier.glassPanel(true, shape = CircleShape, tint = headerTint) else Modifier.clip(CircleShape).background(Color.White.copy(0.14f)))
+                            .clickable { tap(); onNewGroupWith(thread.convo.member) },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.GroupAdd, contentDescription = "New group with ${thread.convo.member.displayName}", tint = Color.White, modifier = Modifier.size(17.dp))
+                    }
                 } else {
                     // Item 12: there was a second, redundant Close button here on
                     // the right — the one at the far left already closes the inbox.
-                    Text("Direct Messages", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Light)
+                    Text(
+                        "Direct Messages", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Light,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center, modifier = Modifier.weight(1f)
+                    )
+                    // Balances the back button so the title sits dead centre.
+                    Spacer(Modifier.size(32.dp))
                 }
             }
             HorizontalDivider(color = Color.White.copy(0.08f), thickness = 0.5.dp)
 
             if (thread == null) {
-                DmConversationPicker(conversations = conversations, loading = loading, liquidGlass = liquidGlass, tint = profileTint, onSelectConvo = onSelectConvo)
+                Box(Modifier.fillMaxSize()) {
+                    DmConversationPicker(conversations = conversations, loading = loading, liquidGlass = liquidGlass, tint = profileTint, onSelectConvo = onSelectConvo)
+                    // New chat / new group.
+                    val fabShape = CircleShape
+                    val fabModifier = Modifier.align(Alignment.BottomEnd)
+                        .navigationBarsPadding().padding(end = 18.dp, bottom = 18.dp)
+                        .size(60.dp)
+                    val fabContent: @Composable () -> Unit = {
+                        Box(Modifier.fillMaxSize().clickable { tap(); onNewChat() }, contentAlignment = Alignment.Center) {
+                            Icon(Icons.Default.Add, contentDescription = "New chat", tint = Color.White, modifier = Modifier.size(30.dp))
+                        }
+                    }
+                    if (liquidGlass) {
+                        LiquidGlassSurface(fabModifier, shape = fabShape, tint = androidx.compose.ui.graphics.lerp(profileTint, Color.White, 0.1f), backdrop = dmBackdrop) { fabContent() }
+                    } else {
+                        Box(fabModifier.clip(fabShape).background(androidx.compose.ui.graphics.lerp(profileTint, Color.Black, 0.3f))) { fabContent() }
+                    }
+                }
             } else {
                 DmThreadView(
                     thread = thread, liquidGlass = liquidGlass, selfAvatarUrl = selfAvatarUrl,
@@ -240,28 +281,75 @@ private fun DmConversationPicker(
             else -> {
                 LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(withHistory, key = { it.convoId }) { convo ->
-                        val shape = RoundedCornerShape(14.dp)
-                        Row(
-                            Modifier.fillMaxWidth()
-                                .then(if (liquidGlass) Modifier.glassPanel(true, shape = shape, tint = tint) else Modifier.clip(shape).background(Color.White.copy(0.06f)))
-                                .clickable { tap(); onSelectConvo(convo) }
-                                .padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            DmConvoAvatar(convo, 40.dp)
-                            Column {
-                                // Group chats: the group's name, then its
-                                // newest message (instead of a handle).
-                                Text(convo.member.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(
-                                    if (convo.isGroup) convo.lastMessageText.ifBlank { "${maxOf(convo.memberCount, convo.groupMembers.size + 1)} members" }
-                                    else "@${convo.member.handle}",
-                                    color = DimGray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
+                        DmConvoRow(convo, liquidGlass, tint, onClick = { tap(); onSelectConvo(convo) })
                     }
+                    // Room for the + button.
+                    item(key = "fab_space") { Spacer(Modifier.height(80.dp)) }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One chat in the DM list, wearing the other person's own profile colors
+ * (group chats: yours). Top row: name, then their handle; bottom row: the
+ * newest message/activity, and "(x) unread" when there's anything new.
+ */
+@Composable
+private fun DmConvoRow(convo: DmConversation, liquidGlass: Boolean, selfTint: Color, onClick: () -> Unit) {
+    val rowTint = if (convo.isGroup || convo.member.did.isBlank()) selfTint
+        else rememberAuthorProfileTint(convo.member.did, convo.member.avatarUrl)
+    val unread = convo.unreadCount
+    val shape = RoundedCornerShape(16.dp)
+    Row(
+        Modifier.fillMaxWidth()
+            .then(
+                if (liquidGlass) Modifier.glassPanel(true, shape = shape, tint = rowTint)
+                else Modifier.clip(shape).background(androidx.compose.ui.graphics.lerp(Color(0xFF16161B), rowTint, 0.18f))
+            )
+            .then(if (unread > 0) Modifier.border(1.2.dp, rowTint.copy(alpha = 0.9f), shape) else Modifier)
+            .clickable(onClick = onClick)
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        DmConvoAvatar(convo, 44.dp)
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    convo.member.displayName, color = Color.White, fontSize = 14.sp,
+                    fontWeight = if (unread > 0) FontWeight.Bold else FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false)
+                )
+                if (!convo.isGroup && convo.member.handle.isNotBlank()) {
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "@${convo.member.handle}", color = DimGray, fontSize = 12.sp,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false)
+                    )
+                }
+            }
+            Spacer(Modifier.height(2.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                val preview = convo.lastMessageText.ifBlank {
+                    if (convo.isGroup) "${maxOf(convo.memberCount, convo.groupMembers.size + 1)} members" else ""
+                }
+                Text(
+                    preview, color = if (unread > 0) Color.White else Color.White.copy(alpha = 0.62f), fontSize = 12.sp,
+                    fontWeight = if (unread > 0) FontWeight.Medium else FontWeight.Normal,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
+                )
+                if (unread > 0) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "(${if (unread > 99) "99+" else unread}) unread",
+                        color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1,
+                        modifier = Modifier.clip(RoundedCornerShape(9.dp))
+                            .background(androidx.compose.ui.graphics.lerp(rowTint, Color.Black, 0.15f).copy(alpha = 0.85f))
+                            .border(1.dp, androidx.compose.ui.graphics.lerp(rowTint, Color.White, 0.45f).copy(alpha = 0.8f), RoundedCornerShape(9.dp))
+                            .padding(horizontal = 7.dp, vertical = 2.dp)
+                    )
                 }
             }
         }

@@ -243,6 +243,17 @@ class MainActivity : ComponentActivity() {
     // MainViewModel.loadFriendsReviewsIfNeeded — nothing persistent to
     // reconnect), so there's nothing left for onResume to do here.
 
+    override fun onStart() {
+        super.onStart()
+        viewModel.setAppForeground(true)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // DM/Inbox polling pauses while the app is off screen.
+        viewModel.setAppForeground(false)
+    }
+
     override fun onResume() {
         super.onResume()
         // Re-assert immersive mode: the system can bring the status/nav bars
@@ -326,6 +337,9 @@ private fun AppRoot(viewModel: MainViewModel) {
     val bskyDid                by viewModel.bskyDid.collectAsState()
     val dmInboxOpen            by viewModel.dmInboxOpen.collectAsState()
     val dmThread               by viewModel.dmThread.collectAsState()
+    val inboxUnreadCount       by viewModel.inboxUnreadCount.collectAsState()
+    val inboxOpen              by viewModel.inboxOpen.collectAsState()
+    val newChatState           by viewModel.newChatState.collectAsState()
     val composePostOpen        by viewModel.composePostOpen.collectAsState()
     val composePostSubmitting  by viewModel.composePostSubmitting.collectAsState()
     val reviewComposeTarget    by viewModel.reviewComposeTarget.collectAsState()
@@ -875,6 +889,9 @@ private fun AppRoot(viewModel: MainViewModel) {
             onShowSaves               = viewModel::showSaves,
             onShowHistory             = viewModel::showHistory,
             onOpenDmInbox             = viewModel::openDmInbox,
+            onOpenInbox               = viewModel::openInbox,
+            inboxUnreadCount          = inboxUnreadCount,
+            dmUnreadCount             = dmConversations.sumOf { it.unreadCount },
             onOpenComposePost         = viewModel::openComposePost,
             onOpenSearch              = viewModel::openSearch,
             translationEnabled        = translationEnabled,
@@ -1071,6 +1088,8 @@ private fun AppRoot(viewModel: MainViewModel) {
                     onToggleBlogSubscribe   = { viewModel.toggleBlogSubscription(currentProfileOverlay.author) },
                     onOpenAddTo       = viewModel::openListPickerForProfile,
                     onOpenDm          = viewModel::openDmWithProfile,
+                    onNewGroupWith    = { author -> viewModel.openNewChat(group = true, preselected = listOf(author)) },
+                    existingDmDids    = remember(dmConversations) { dmConversations.filter { it.convoId.isNotBlank() && !it.isGroup }.map { it.member.did }.toSet() },
                     onRefresh         = viewModel::refreshProfile,
                     onSelectPostKindFilter = viewModel::selectPostKindFilter,
                     onSelectReviewKindFilter = viewModel::selectReviewKindFilter,
@@ -1104,7 +1123,45 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onLoadMoreMessages   = viewModel::loadMoreDmMessages,
                 onOpenSharedPostsFeed = viewModel::openDmThreadSharedPostsFeed,
                 onToggleReaction     = viewModel::toggleDmReaction,
-                selfDid              = bskyDid
+                selfDid              = bskyDid,
+                onNewChat            = { viewModel.openNewChat() },
+                onNewGroupWith       = { author -> viewModel.openNewChat(group = true, preselected = listOf(author)) }
+            )
+        }
+
+        // The Hub's Inbox: Bluesky notifications (likes, follows, replies…).
+        if (inboxOpen) {
+            val inboxItems by viewModel.inboxItems.collectAsState()
+            val inboxLoading by viewModel.inboxLoading.collectAsState()
+            com.mediaviewer.ui.InboxOverlay(
+                items = inboxItems,
+                loading = inboxLoading,
+                liquidGlass = liquidGlass,
+                selfAvatarUrl = selfProfile?.author?.avatarUrl,
+                onLoadMore = viewModel::loadMoreInbox,
+                onOpenPost = viewModel::openInboxPost,
+                onOpenProfile = { author -> viewModel.closeInbox(); viewModel.openProfile(author) },
+                onClose = viewModel::closeInbox
+            )
+        }
+
+        // New chat / new group chat popup (DM list's + button, a 1:1 chat's
+        // group button, or a profile's DM button held down).
+        newChatState?.let { ncs ->
+            val candidates by viewModel.chatCandidates.collectAsState()
+            val searching by viewModel.chatSearching.collectAsState()
+            val creating by viewModel.creatingChat.collectAsState()
+            com.mediaviewer.ui.NewChatDialog(
+                state = ncs,
+                candidates = candidates,
+                searching = searching,
+                creating = creating,
+                tint = com.mediaviewer.ui.rememberSelfTint(selfProfile?.author?.avatarUrl, NeutralGlassTint),
+                onSearch = viewModel::searchChatCandidates,
+                onSetGroupMode = viewModel::setNewChatGroupMode,
+                onStartChat = viewModel::startChatWith,
+                onCreateGroup = viewModel::createGroupChat,
+                onClose = viewModel::closeNewChat
             )
         }
 
@@ -1112,7 +1169,7 @@ private fun AppRoot(viewModel: MainViewModel) {
         if (currentSendTarget != null) {
             SendDmDialog(
                 target          = currentSendTarget,
-                allConversations = dmConversations,
+                conversations   = dmConversations,
                 loading         = dmConversationsLoading,
                 selected        = sendPopupSelected,
                 sending         = sendPopupSending,
@@ -1183,7 +1240,7 @@ private fun AppRoot(viewModel: MainViewModel) {
             // The posting page always gets a working notch (it may have been
             // opened on top of Search/DMs, whose flags stay set underneath).
             val notchInteractive = !vrmModeOpen && !cameraModeOpen && (composePostOpen || (
-                !searchOpen && !dmInboxOpen && !taggingOverlayOpen && playingLive == null &&
+                !searchOpen && !dmInboxOpen && !inboxOpen && !taggingOverlayOpen && playingLive == null &&
                     (profileVisible || screenState == ScreenState.SETTINGS)))
             val openProfile = profileOverlay
             val notchTint = if (vrmModeOpen || cameraModeOpen || composePostOpen) {
@@ -1210,8 +1267,8 @@ private fun AppRoot(viewModel: MainViewModel) {
                     blue = (bannerColor.blue + avatarColor.blue) / 2f,
                     alpha = 1f
                 )
-            } else if (screenState == ScreenState.SETTINGS || screenState == ScreenState.GRID) {
-                // The Hub and Explore/grid mode both wear your own color.
+            } else if (inboxOpen || screenState == ScreenState.SETTINGS || screenState == ScreenState.GRID) {
+                // The Hub, the Inbox and Explore/grid mode wear your own color.
                 val selfAvatar = selfProfile?.author?.avatarUrl
                 com.mediaviewer.ui.rememberSelfTint(selfAvatar, currentDominantColor)
             } else {

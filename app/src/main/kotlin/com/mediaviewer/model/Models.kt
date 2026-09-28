@@ -266,8 +266,60 @@ data class BskyProfile(
 data class BskyActorViewer(
     val following: String? = null,
     val followedBy: String? = null,
-    val muted: Boolean? = null
+    val muted: Boolean? = null,
+    val blockedBy: Boolean? = null,
+    val blocking: String? = null
 )
+
+// ── Notifications (app.bsky.notification.*) — the Hub's Inbox ──────────────
+data class BskyNotificationAuthor(
+    val did: String,
+    val handle: String,
+    val displayName: String? = null,
+    val avatar: String? = null
+)
+data class BskyNotification(
+    val uri: String,
+    val cid: String,
+    val author: BskyNotificationAuthor,
+    /** like, repost, follow, mention, reply, quote, starterpack-joined,
+     *  verified, unverified, like-via-repost, repost-via-repost,
+     *  subscribed-post, contact-match. */
+    val reason: String,
+    /** The post the notification is about (likes/reposts of your post). */
+    val reasonSubject: String? = null,
+    val record: com.google.gson.JsonElement? = null,
+    val isRead: Boolean = false,
+    val indexedAt: String = ""
+)
+data class BskyListNotificationsResponse(
+    val notifications: List<BskyNotification> = emptyList(),
+    val cursor: String? = null,
+    val seenAt: String? = null
+)
+data class BskyUnreadCountResponse(val count: Int = 0)
+data class BskyUpdateSeenRequest(val seenAt: String)
+
+// ── Starting chats ──────────────────────────────────────────────────────────
+/** app.bsky.actor.defs#profileViewBasic — `associated.chat.allowIncoming`
+ *  ("all" | "following" | "none") says who may start a chat with them. */
+data class BskyActorBasic(
+    val did: String,
+    val handle: String,
+    val displayName: String? = null,
+    val avatar: String? = null,
+    val associated: com.google.gson.JsonElement? = null,
+    val viewer: BskyActorViewer? = null
+) {
+    val allowIncomingChat: String get() = runCatching {
+        associated?.asJsonObject?.getAsJsonObject("chat")?.get("allowIncoming")?.asString
+    }.getOrNull() ?: "following"
+}
+data class BskyActorsTypeaheadResponse(val actors: List<BskyActorBasic> = emptyList())
+data class BskyConvoAvailabilityResponse(val canChat: Boolean = false, val convo: BskyConvoView? = null)
+data class BskyCreateGroupRequest(val members: List<String>, val name: String)
+data class BskyConvoResponse(val convo: BskyConvoView? = null)
+data class BskyUpdateReadRequest(val convoId: String, val messageId: String? = null)
 
 data class BskyRecord(
     @SerializedName("\$type") val type: String = "",
@@ -619,6 +671,8 @@ data class BskyProfileDetailed(
     val followsCount: Int? = 0,
     val postsCount: Int? = 0,
     val viewer: BskyActorViewer? = null,
+    /** `associated.chat.allowIncoming` — who may start a chat with them. */
+    val associated: com.google.gson.JsonElement? = null,
     // Feature (this session): Bluesky's "Live Now" badge — confirmed via the
     // actual indigo (Go reference implementation) generated types:
     // ActorDefs_ProfileViewBasic/ProfileViewDetailed carry an optional
@@ -657,7 +711,12 @@ data class ProfileData(
     // only shows when the signed-in account and this profile are mutuals
     // (each follows the other) — author.isFollowing covers "I follow them",
     // this covers "they follow me back".
-    val followedByMe: Boolean = false
+    val followedByMe: Boolean = false,
+    /** Their Bluesky "who can message me" setting: "all", "following"
+     *  (only people they follow) or "none". */
+    val chatAllowIncoming: String = "following",
+    /** Either of you has blocked the other. */
+    val blockedEitherWay: Boolean = false
 )
 
 // Generic com.atproto.repo.listRecords envelope — used for any collection
@@ -942,6 +1001,8 @@ data class BskyConvoView(
     val members: List<BskyConvoMember> = emptyList(),
     val lastMessage: BskyMessageView? = null,
     val unreadCount: Int = 0,
+    /** The newest reaction in the chat (chat.bsky.convo.defs#messageAndReactionView). */
+    val lastReaction: JsonElement? = null,
     /** chat.bsky.convo.defs#directConvo or #groupConvo (group chats carry
      *  their name and member count here). */
     val kind: JsonElement? = null
@@ -1008,8 +1069,10 @@ data class DmConversation(
     val groupMembers: List<AuthorInfo> = emptyList(),
     /** Group chats: how many people are in it, you included. */
     val memberCount: Int = 0,
-    /** The newest message's text (shown under a group's name). */
-    val lastMessageText: String = ""
+    /** The newest message/activity, shown under the name in the DM list. */
+    val lastMessageText: String = "",
+    /** Messages in this chat you haven't read yet. */
+    val unreadCount: Int = 0
 )
 
 /** A shared post rendered inline inside a DM bubble — item 12. Parsed from a

@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -59,6 +60,9 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -144,10 +148,19 @@ fun CapturePreviewScreen(
     var backdropOrigin by remember { mutableStateOf(Offset.Zero) }
     val backdrop = remember(liquidGlass, backdropLayer) { if (liquidGlass) GlassBackdrop(backdropLayer) { backdropOrigin } else null }
 
+    // Positioning inside the crop: drag to move, pinch to zoom (1× = the
+    // media just filling the crop). Reset whenever the crop changes.
+    var cropZoom by remember(uri, crop) { mutableStateOf(1f) }
+    var cropPan by remember(uri, crop) { mutableStateOf(Offset.Zero) }
+    /** The part of the media the crop box shows, as fractions of the whole
+     *  frame (left, top, width, height) — what the export keeps. */
+    var cropWindow by remember(uri, crop) { mutableStateOf<FloatArray?>(null) }
+
     suspend fun cropped(): Uri? = withContext(Dispatchers.IO) {
         val ratio = crop.ratio ?: return@withContext uri
+        val window = cropWindow
         runCatching {
-            if (isVideo) cropVideo(context, uri, ratio, mediaSize) else cropImage(context, uri, ratio)
+            if (isVideo) cropVideo(context, uri, ratio, mediaSize, window) else cropImage(context, uri, ratio, window)
         }.onFailure { android.util.Log.e("CapturePreview", "Crop failed", it) }.getOrNull()
     }
 
@@ -170,6 +183,31 @@ fun CapturePreviewScreen(
                 val maxH = maxHeight
                 val w = if (maxW / maxH > animatedAspect) maxH * animatedAspect else maxW
                 val h = w / animatedAspect
+                // The media's own size inside the box: exactly the box with
+                // no crop; with a crop, just big enough to cover it (the
+                // overflow is what you can drag into view).
+                val cropping = crop.ratio != null
+                val boxAspect = w / h
+                val dispW = if (!cropping) w else if (mediaAspect > boxAspect) h * mediaAspect else w
+                val dispH = if (!cropping) h else if (mediaAspect > boxAspect) h else w / mediaAspect
+                val density = androidx.compose.ui.platform.LocalDensity.current
+                val boxWpx = with(density) { w.toPx() }; val boxHpx = with(density) { h.toPx() }
+                val dispWpx = with(density) { dispW.toPx() }; val dispHpx = with(density) { dispH.toPx() }
+                fun clampPan(p: Offset, z: Float): Offset {
+                    val mx = ((dispWpx * z - boxWpx) / 2f).coerceAtLeast(0f)
+                    val my = ((dispHpx * z - boxHpx) / 2f).coerceAtLeast(0f)
+                    return Offset(p.x.coerceIn(-mx, mx), p.y.coerceIn(-my, my))
+                }
+                // Keep the export window in step with what's on screen.
+                androidx.compose.runtime.SideEffect {
+                    cropWindow = if (!cropping || dispWpx <= 0f || dispHpx <= 0f) null else {
+                        val cw = dispWpx * cropZoom; val ch = dispHpx * cropZoom
+                        val left = ((cw - boxWpx) / 2f - cropPan.x) / cw
+                        val top = ((ch - boxHpx) / 2f - cropPan.y) / ch
+                        floatArrayOf(left.coerceIn(0f, 1f), top.coerceIn(0f, 1f), (boxWpx / cw).coerceIn(0f, 1f), (boxHpx / ch).coerceIn(0f, 1f))
+                    }
+                }
+                val hapticView = androidx.compose.ui.platform.LocalView.current
                 Box(
                     Modifier.size(w, h)
                         .clip(RoundedCornerShape(22.dp))
@@ -179,14 +217,33 @@ fun CapturePreviewScreen(
                             if (backdrop != null) backdropLayer.record { this@drawWithContent.drawContent() }
                             drawContent()
                         }
+                        .then(if (cropping) Modifier.pointerInput(crop, dispWpx, dispHpx) {
+                            detectTransformGestures { _, panChange, zoomChange, _ ->
+                                val before = cropZoom
+                                val z = (cropZoom * zoomChange).coerceIn(1f, 5f)
+                                if ((before > 1f && z == 1f) || (before < 5f && z == 5f)) {
+                                    hapticView.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+                                }
+                                cropZoom = z
+                                cropPan = clampPan(cropPan + panChange, z)
+                            }
+                        } else Modifier),
+                    contentAlignment = Alignment.Center
                 ) {
+                    Box(
+                        Modifier.requiredSize(dispW, dispH).graphicsLayer {
+                            scaleX = cropZoom; scaleY = cropZoom
+                            translationX = cropPan.x; translationY = cropPan.y
+                        }
+                    ) {
                     if (isVideo) {
                         CaptureVideo(
                             uri = uri,
-                            // No crop: show the whole frame (never zoomed).
-                            // A crop: fill the crop box, centre-cropped —
+                            // The player fills its own box exactly (same
+                            // shape as the video); the crop box around it
+                            // shows the part you've dragged/zoomed to —
                             // exactly what the export keeps.
-                            zoom = crop.ratio != null,
+                            zoom = false,
                             // The decoder's real frame size is the truth; the
                             // file metadata can disagree (rotation flags,
                             // encoder padding), which is what threw the box's
@@ -197,9 +254,24 @@ fun CapturePreviewScreen(
                         poster?.let {
                             androidx.compose.foundation.Image(
                                 it.asImageBitmap(), contentDescription = "Captured photo",
-                                contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()
+                                contentScale = ContentScale.FillBounds, modifier = Modifier.fillMaxSize()
                             )
                         }
+                    }
+                    }
+                    // A hint the first moments after picking a crop.
+                    if (cropping) {
+                        var hintVisible by remember(crop) { mutableStateOf(true) }
+                        LaunchedEffect(crop) { kotlinx.coroutines.delay(2600); hintVisible = false }
+                        val hintAlpha by animateFloatAsState(if (hintVisible) 1f else 0f, label = "cropHint")
+                        if (hintAlpha > 0f) Text(
+                            "Drag to position · pinch to zoom",
+                            color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium,
+                            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp)
+                                .graphicsLayer { alpha = hintAlpha }
+                                .clip(RoundedCornerShape(12.dp)).background(Color.Black.copy(alpha = 0.45f))
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
                     }
                 }
             }
@@ -418,16 +490,25 @@ private fun captureFile(context: Context, ext: String): File {
 private fun providerUri(context: Context, file: File): Uri =
     androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
 
-/** Centre crop of a photo to [ratio] (w/h), saved as a new JPEG. */
-private fun cropImage(context: Context, uri: Uri, ratio: Float): Uri {
+/** Crop of a photo to [ratio] (w/h), saved as a new JPEG: the [window]
+ *  (left, top, width, height as fractions of the frame) you positioned, or
+ *  the centre when there isn't one. */
+private fun cropImage(context: Context, uri: Uri, ratio: Float, window: FloatArray? = null): Uri {
     val src = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
         ?: error("Couldn't read the photo")
-    val (cw, ch) = if (src.width.toFloat() / src.height > ratio) {
-        (src.height * ratio).toInt() to src.height
+    val (x, y, cw, ch) = if (window != null) {
+        val cw = (window[2] * src.width).toInt().coerceIn(1, src.width)
+        val ch = (window[3] * src.height).toInt().coerceIn(1, src.height)
+        listOf((window[0] * src.width).toInt().coerceIn(0, src.width - cw), (window[1] * src.height).toInt().coerceIn(0, src.height - ch), cw, ch)
     } else {
-        src.width to (src.width / ratio).toInt()
+        val (cw, ch) = if (src.width.toFloat() / src.height > ratio) {
+            (src.height * ratio).toInt() to src.height
+        } else {
+            src.width to (src.width / ratio).toInt()
+        }
+        listOf((src.width - cw) / 2, (src.height - ch) / 2, cw.coerceAtLeast(1), ch.coerceAtLeast(1))
     }
-    val out = Bitmap.createBitmap(src, (src.width - cw) / 2, (src.height - ch) / 2, cw.coerceAtLeast(1), ch.coerceAtLeast(1))
+    val out = Bitmap.createBitmap(src, x, y, cw, ch)
     val file = captureFile(context, "jpg")
     file.outputStream().use { out.compress(Bitmap.CompressFormat.JPEG, 95, it) }
     if (out !== src) out.recycle()
@@ -436,15 +517,19 @@ private fun cropImage(context: Context, uri: Uri, ratio: Float): Uri {
 }
 
 /** Centre crop of a video to [ratio] (w/h) with media3 Transformer. */
-private suspend fun cropVideo(context: Context, uri: Uri, ratio: Float, size: Pair<Int, Int>?): Uri {
+private suspend fun cropVideo(context: Context, uri: Uri, ratio: Float, size: Pair<Int, Int>?, window: FloatArray? = null): Uri {
     val (w, h) = size ?: videoSize(context, uri) ?: error("Unknown video size")
     val videoAspect = w.toFloat() / h
-    // Crop takes normalised device coordinates (-1 … 1).
+    // Crop takes normalised device coordinates (-1 … 1, y pointing up).
     val (xExtent, yExtent) = if (ratio < videoAspect) (ratio / videoAspect) to 1f else 1f to (videoAspect / ratio)
+    val bounds = if (window != null) floatArrayOf(
+        -1f + 2f * window[0], -1f + 2f * (window[0] + window[2]),
+        1f - 2f * (window[1] + window[3]), 1f - 2f * window[1]
+    ) else floatArrayOf(-xExtent, xExtent, -yExtent, yExtent)
     val file = captureFile(context, "mp4")
     withContext(Dispatchers.Main) {
         suspendCancellableCoroutine<Unit> { cont ->
-            val crop = androidx.media3.effect.Crop(-xExtent, xExtent, -yExtent, yExtent)
+            val crop = androidx.media3.effect.Crop(bounds[0], bounds[1], bounds[2], bounds[3])
             val edited = androidx.media3.transformer.EditedMediaItem.Builder(MediaItem.fromUri(uri))
                 .setEffects(androidx.media3.transformer.Effects(emptyList(), listOf<androidx.media3.common.Effect>(crop)))
                 .build()

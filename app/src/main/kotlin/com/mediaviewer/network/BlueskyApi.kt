@@ -317,6 +317,54 @@ interface BlueskyApi {
         @Query("cursor") cursor: String? = null
     ): Response<BskyGetConvoLogResponse>
 
+    // ── Notifications (the Hub's Inbox). Normally called straight on the
+    // AppView with a service-auth token — see BlueskyRepository.viaService.
+    @GET("xrpc/app.bsky.notification.getUnreadCount")
+    suspend fun getNotificationUnreadCount(
+        @Header("Authorization") token: String
+    ): Response<BskyUnreadCountResponse>
+
+    @GET("xrpc/app.bsky.notification.listNotifications")
+    suspend fun listNotifications(
+        @Header("Authorization") token: String,
+        @Query("limit") limit: Int = 50,
+        @Query("cursor") cursor: String? = null
+    ): Response<BskyListNotificationsResponse>
+
+    @POST("xrpc/app.bsky.notification.updateSeen")
+    suspend fun updateNotificationsSeen(
+        @Header("Authorization") token: String,
+        @Body request: BskyUpdateSeenRequest
+    ): Response<com.google.gson.JsonElement>
+
+    @GET("xrpc/app.bsky.actor.searchActorsTypeahead")
+    suspend fun searchActorsTypeahead(
+        @Header("Authorization") token: String,
+        @Query("q") q: String,
+        @Query("limit") limit: Int = 25
+    ): Response<BskyActorsTypeaheadResponse>
+
+    @Headers("atproto-proxy: did:web:api.bsky.chat#bsky_chat")
+    @GET("xrpc/chat.bsky.convo.getConvoAvailability")
+    suspend fun getConvoAvailability(
+        @Header("Authorization") token: String,
+        @Query("members") members: List<String>
+    ): Response<BskyConvoAvailabilityResponse>
+
+    @Headers("atproto-proxy: did:web:api.bsky.chat#bsky_chat")
+    @POST("xrpc/chat.bsky.group.createGroup")
+    suspend fun createGroup(
+        @Header("Authorization") token: String,
+        @Body request: BskyCreateGroupRequest
+    ): Response<BskyConvoResponse>
+
+    @Headers("atproto-proxy: did:web:api.bsky.chat#bsky_chat")
+    @POST("xrpc/chat.bsky.convo.updateRead")
+    suspend fun updateConvoRead(
+        @Header("Authorization") token: String,
+        @Body request: BskyUpdateReadRequest
+    ): Response<BskyConvoResponse>
+
     // Group chats: the full member list (convoView only lists a few).
     @Headers("atproto-proxy: did:web:api.bsky.chat#bsky_chat")
     @GET("xrpc/chat.bsky.convo.getConvoMembers")

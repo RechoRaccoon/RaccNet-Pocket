@@ -90,6 +90,130 @@ class BlueskyRepository {
         }
     }
 
+    // ── Talking to Bluesky's services directly (not through the PDS) ─────────
+    // Every app.bsky.* / chat.bsky.* call normally goes to the user's PDS,
+    // which forwards it to the AppView or the chat service. Anything polled
+    // (new DMs every few seconds, the Inbox's unread count) therefore counted
+    // against the PDS's per-account rate limit, all day long — the classic
+    // way a notifications feature gets an account rate-limited.
+    //
+    // Bluesky's own answer is service auth: the PDS signs a token for one
+    // specific method (lxm) and one specific service (aud), valid for up to
+    // an hour, and the app then calls that service directly with it. So each
+    // polled method costs the PDS ONE call per hour instead of hundreds, and
+    // the polling itself lands on the AppView / chat service. If a token
+    // can't be minted (older PDS, restricted app password…), the call simply
+    // goes through the PDS as before.
+    private val appViewDirect by lazy { NetworkClient.buildDirectServiceApi("https://api.bsky.app/") }
+    private val chatDirect by lazy { NetworkClient.buildDirectServiceApi("https://api.bsky.chat/") }
+    private data class ServiceToken(val token: String, val expiresAtMs: Long)
+    private val serviceTokens = java.util.concurrent.ConcurrentHashMap<String, ServiceToken>()
+    /** aud|lxm → when minting may be retried after a failure. */
+    private val serviceTokenBackoff = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val serviceTokenMutex = Mutex()
+
+    private suspend fun serviceToken(pdsToken: String, myDid: String, aud: String, lxm: String): String? {
+        val key = "$aud|$lxm"
+        val now = System.currentTimeMillis()
+        serviceTokens[key]?.takeIf { it.expiresAtMs - now > 2 * 60_000 }?.let { return it.token }
+        if ((serviceTokenBackoff[key] ?: 0L) > now) return null
+        return serviceTokenMutex.withLock {
+            serviceTokens[key]?.takeIf { it.expiresAtMs - System.currentTimeMillis() > 2 * 60_000 }?.let { return@withLock it.token }
+            runCatching {
+                ensureChatApi(myDid)
+                val expSec = System.currentTimeMillis() / 1000 + 59 * 60
+                val resp = chatApi.getServiceAuth("Bearer $pdsToken", aud = aud, lxm = lxm, exp = expSec)
+                resp.body()?.token?.also { serviceTokens[key] = ServiceToken(it, expSec * 1000) }
+            }.getOrNull().also { t ->
+                // Couldn't mint one: use the PDS route for a while, then try again.
+                if (t == null) serviceTokenBackoff[key] = System.currentTimeMillis() + 15 * 60_000
+            }
+        }
+    }
+
+    /** Runs [call] straight against a Bluesky service with a service-auth
+     *  token when possible, else through the PDS ([fallback]). */
+    private suspend fun <T> viaService(
+        pdsToken: String, myDid: String, aud: String, lxm: String,
+        direct: BlueskyApi, fallback: BlueskyApi,
+        call: suspend (BlueskyApi, String) -> retrofit2.Response<T>
+    ): retrofit2.Response<T> {
+        val st = if (myDid.isNotBlank()) serviceToken(pdsToken, myDid, aud, lxm) else null
+        if (st != null) {
+            val r = runCatching { call(direct, "Bearer $st") }.getOrNull()
+            if (r != null && r.code() != 401 && r.code() != 403) return r
+            // Rejected (expired/revoked): drop it; the PDS route answers now.
+            serviceTokens.remove("$aud|$lxm")
+        }
+        return call(fallback, "Bearer $pdsToken")
+    }
+
+    private suspend fun <T> viaAppView(pdsToken: String, myDid: String, lxm: String, call: suspend (BlueskyApi, String) -> retrofit2.Response<T>) =
+        viaService(pdsToken, myDid, "did:web:api.bsky.app", lxm, appViewDirect, api, call)
+
+    private suspend fun <T> viaChat(pdsToken: String, myDid: String, lxm: String, call: suspend (BlueskyApi, String) -> retrofit2.Response<T>): retrofit2.Response<T> {
+        ensureChatApi(myDid)
+        return viaService(pdsToken, myDid, "did:web:api.bsky.chat", lxm, chatDirect, chatApi, call)
+    }
+
+    // ── Inbox (notifications) ────────────────────────────────────────────────
+
+    suspend fun getNotificationUnreadCount(token: String, myDid: String): Result<Int> = runCatching {
+        val resp = viaAppView(token, myDid, "app.bsky.notification.getUnreadCount") { a, auth -> a.getNotificationUnreadCount(auth) }
+        resp.body()?.count ?: error("Unread count ${resp.code()}: ${errorBodyText(resp)}")
+    }
+
+    suspend fun listNotifications(token: String, myDid: String, cursor: String? = null): Result<BskyListNotificationsResponse> = runCatching {
+        val resp = viaAppView(token, myDid, "app.bsky.notification.listNotifications") { a, auth -> a.listNotifications(auth, 50, cursor) }
+        resp.body() ?: error("Notifications ${resp.code()}: ${errorBodyText(resp)}")
+    }
+
+    suspend fun markNotificationsSeen(token: String, myDid: String): Result<Unit> = runCatching {
+        val seenAt = Instant.now().toString()
+        val resp = viaAppView(token, myDid, "app.bsky.notification.updateSeen") { a, auth -> a.updateNotificationsSeen(auth, BskyUpdateSeenRequest(seenAt)) }
+        if (!resp.isSuccessful) error("updateSeen ${resp.code()}")
+    }
+
+    /** Posts by URI, for the Inbox's "liked your post: …" previews. */
+    suspend fun getPostsByUri(token: String, myDid: String, uris: List<String>): Map<String, BskyPost> {
+        val out = HashMap<String, BskyPost>()
+        uris.distinct().chunked(25).forEach { batch ->
+            runCatching {
+                viaAppView(token, myDid, "app.bsky.feed.getPosts") { a, auth -> a.getPosts(auth, batch) }
+            }.getOrNull()?.body()?.posts?.forEach { out[it.uri] = it }
+        }
+        return out
+    }
+
+    // ── Starting chats ───────────────────────────────────────────────────────
+
+    suspend fun searchActorsTypeahead(token: String, myDid: String, q: String): Result<List<BskyActorBasic>> = runCatching {
+        val resp = viaAppView(token, myDid, "app.bsky.actor.searchActorsTypeahead") { a, auth -> a.searchActorsTypeahead(auth, q, 25) }
+        resp.body()?.actors ?: error("Search ${resp.code()}: ${errorBodyText(resp)}")
+    }
+
+    /** Whether a 1:1 chat with [did] can be started (their "who can message
+     *  me" setting, blocks, etc.), and the existing chat if there is one. */
+    suspend fun getConvoAvailability(token: String, myDid: String, did: String): Result<BskyConvoAvailabilityResponse> = runCatching {
+        val resp = viaChat(token, myDid, "chat.bsky.convo.getConvoAvailability") { a, auth -> a.getConvoAvailability(auth, listOf(did)) }
+        resp.body() ?: error("Availability ${resp.code()}: ${errorBodyText(resp)}")
+    }
+
+    suspend fun createGroup(token: String, myDid: String, memberDids: List<String>, name: String): Result<BskyConvoView> = runCatching {
+        ensureChatApi(myDid)
+        val resp = viaChat(token, myDid, "chat.bsky.group.createGroup") { a, auth -> a.createGroup(auth, BskyCreateGroupRequest(memberDids, name)) }
+        resp.body()?.convo ?: error("Couldn't create the group (${resp.code()}: ${errorBodyText(resp)})")
+    }
+
+    suspend fun markConvoRead(token: String, myDid: String, convoId: String): Result<Unit> = runCatching {
+        val resp = viaChat(token, myDid, "chat.bsky.convo.updateRead") { a, auth -> a.updateConvoRead(auth, BskyUpdateReadRequest(convoId)) }
+        if (!resp.isSuccessful) error("updateRead ${resp.code()}")
+    }
+
+    /** A group chat from createGroup/listConvos as a [DmConversation]. */
+    fun conversationFor(convo: BskyConvoView, myDid: String): DmConversation =
+        if (convo.isGroup) groupConversation(convo, myDid) else directConversation(convo, myDid)
+
     // ── Auth ──────────────────────────────────────────────────────────────────
 
     suspend fun login(identifier: String, password: String): Result<BskySession> = runCatching {
@@ -303,8 +427,18 @@ class BlueskyRepository {
             followersCount = body.followersCount ?: 0,
             followsCount = body.followsCount ?: 0,
             postsCount = body.postsCount ?: 0,
-            followedByMe = body.viewer?.followedBy != null
+            followedByMe = body.viewer?.followedBy != null,
+            chatAllowIncoming = runCatching {
+                body.associated?.asJsonObject?.getAsJsonObject("chat")?.get("allowIncoming")?.asString
+            }.getOrNull() ?: "following",
+            blockedEitherWay = body.viewer?.blockedBy == true || body.viewer?.blocking != null
         )
+    }
+
+    /** Posts by URI as feed items (the Inbox opening the post it's about). */
+    suspend fun getPostItems(token: String, myDid: String, uris: List<String>): List<MediaItem> {
+        val byUri = getPostsByUri(token, myDid, uris)
+        return uris.mapNotNull { byUri[it] }.flatMap { parseFeedItemSafe(BskyFeedItem(post = it)) }
     }
 
     /** Profile "Posts" tab: the account's own original posts only — reposts,
@@ -1873,37 +2007,79 @@ class BlueskyRepository {
      *  rather than genuine recency, and wasn't what "most recent
      *  interaction" should mean. */
     suspend fun listConvos(token: String, myDid: String): Result<List<DmConversation>> = runCatching {
-        ensureChatApi(myDid)
-        val resp = chatApi.listConvos("Bearer $token")
-        val body = resp.body() ?: error("ListConvos ${resp.code()}: ${errorBodyText(resp)}")
-        coroutineScope {
-            body.convos.map { convo ->
-                async {
-                    if (convo.isGroup) return@async groupConversation(convo, myDid)
-                    val other = convo.members.firstOrNull { it.did != myDid }
-                    val author = AuthorInfo(
-                        did = other?.did ?: convo.id,
-                        handle = other?.handle ?: "unknown",
-                        displayName = other?.displayName?.takeIf { it.isNotBlank() } ?: other?.handle ?: "Unknown",
-                        avatarUrl = other?.avatar
-                    )
-                    var lastSentByUs = if (convo.lastMessage?.sender?.did == myDid) convo.lastMessage.sentAt else ""
-                    if (lastSentByUs.isBlank()) {
-                        // Peek at recent history to find the last message we sent here
-                        runCatching { chatApi.getMessages("Bearer $token", convo.id, 30) }
-                            .getOrNull()?.takeIf { it.isSuccessful }?.body()
-                            ?.messages?.firstOrNull { it.sender?.did == myDid }
-                            ?.let { lastSentByUs = it.sentAt }
-                    }
-                    DmConversation(
-                        convoId = convo.id,
-                        member = author,
-                        lastSentByUsAt = lastSentByUs,
-                        lastActivityAt = convo.lastMessage?.sentAt ?: ""
-                    )
-                }
-            }.awaitAll()
-        }.sortedByDescending { it.lastActivityAt.ifBlank { it.lastSentByUsAt } }
+        // Speed fix: this used to also fetch 30 messages of history for
+        // every single conversation (to find "the last one WE sent") — one
+        // extra request per chat, every time the list loaded, which is what
+        // made the DM list so slow to refresh. The list is sorted by latest
+        // activity, which the convo list itself already carries. Up to 3
+        // pages (150 chats).
+        val all = mutableListOf<BskyConvoView>()
+        var cursor: String? = null
+        var pages = 0
+        do {
+            val resp = viaChat(token, myDid, "chat.bsky.convo.listConvos") { a, auth -> a.listConvos(auth, 50, cursor) }
+            val body = resp.body() ?: error("ListConvos ${resp.code()}: ${errorBodyText(resp)}")
+            all += body.convos
+            cursor = body.cursor
+            pages++
+        } while (!cursor.isNullOrBlank() && pages < 3)
+        all.map { conversationFor(it, myDid) }
+            .sortedByDescending { it.lastActivityAt.ifBlank { it.lastSentByUsAt } }
+    }
+
+    /** A 1:1 chat as a [DmConversation]. */
+    private fun directConversation(convo: BskyConvoView, myDid: String): DmConversation {
+        val other = convo.members.firstOrNull { it.did != myDid }
+        val author = AuthorInfo(
+            did = other?.did ?: convo.id,
+            handle = other?.handle ?: "unknown",
+            displayName = other?.displayName?.takeIf { it.isNotBlank() } ?: other?.handle ?: "Unknown",
+            avatarUrl = other?.avatar
+        )
+        val last = convo.lastMessage
+        val mine = last?.sender?.did == myDid
+        return DmConversation(
+            convoId = convo.id,
+            member = author,
+            lastSentByUsAt = if (mine) last?.sentAt.orEmpty() else "",
+            lastActivityAt = latestActivityAt(convo),
+            lastMessageText = lastActivityText(convo, myDid) { did -> if (did == author.did) author.displayName.substringBefore(' ') else null },
+            unreadCount = convo.unreadCount
+        )
+    }
+
+    /** The newest of the last message and the last reaction. */
+    private fun latestActivityAt(convo: BskyConvoView): String {
+        val msgAt = convo.lastMessage?.sentAt.orEmpty()
+        val reactAt = runCatching {
+            convo.lastReaction?.asJsonObject?.getAsJsonObject("reaction")?.get("createdAt")?.asString
+        }.getOrNull().orEmpty()
+        return if (reactAt > msgAt) reactAt else msgAt
+    }
+
+    /** "You: see you then", "Sam reacted ❤️ to a message", … */
+    private fun lastActivityText(convo: BskyConvoView, myDid: String, firstNameOf: (String) -> String?): String {
+        val last = convo.lastMessage
+        val reaction = runCatching { convo.lastReaction?.asJsonObject?.getAsJsonObject("reaction") }.getOrNull()
+        val reactAt = runCatching { reaction?.get("createdAt")?.asString }.getOrNull().orEmpty()
+        if (reaction != null && reactAt > last?.sentAt.orEmpty()) {
+            val emoji = runCatching { reaction.get("value").asString }.getOrNull().orEmpty()
+            val by = runCatching { reaction.getAsJsonObject("sender").get("did").asString }.getOrNull()
+            val who = if (by == myDid) "You" else by?.let(firstNameOf) ?: "Someone"
+            return "$who reacted $emoji to a message"
+        }
+        return when {
+            last == null -> ""
+            last.isSystem -> "Group updated"
+            last.type?.endsWith("#deletedMessageView") == true -> "Message deleted"
+            last.text.isNotBlank() -> {
+                val by = last.sender?.did
+                val who = if (by == myDid) "You" else if (convo.isGroup) by?.let(firstNameOf) else null
+                if (who != null) "$who: ${last.text}" else last.text
+            }
+            last.embed != null -> if (last.sender?.did == myDid) "You shared a post" else "Shared a post"
+            else -> ""
+        }
     }
 
     /** A Bluesky group chat as a [DmConversation]: its name stands in for a
@@ -1914,26 +2090,17 @@ class BlueskyRepository {
             others.take(3).joinToString(", ") { it.displayName }.ifBlank { "Group chat" }
         }
         val last = convo.lastMessage
-        val lastText = when {
-            last == null -> ""
-            last.isSystem -> "Group updated"
-            last.text.isNotBlank() -> {
-                val who = if (last.sender?.did == myDid) "You" else
-                    others.firstOrNull { it.did == last.sender?.did }?.displayName?.substringBefore(' ')
-                if (who != null) "$who: ${last.text}" else last.text
-            }
-            last.embed != null -> "Shared a post"
-            else -> ""
-        }
+        val lastText = lastActivityText(convo, myDid) { did -> others.firstOrNull { it.did == did }?.displayName?.substringBefore(' ') }
         return DmConversation(
             convoId = convo.id,
             member = AuthorInfo(did = convo.id, handle = "", displayName = name, avatarUrl = others.firstOrNull()?.avatarUrl),
             lastSentByUsAt = if (last?.sender?.did == myDid) last?.sentAt.orEmpty() else "",
-            lastActivityAt = last?.sentAt ?: "",
+            lastActivityAt = latestActivityAt(convo),
             isGroup = true,
             groupMembers = others,
             memberCount = convo.groupMemberCount,
-            lastMessageText = lastText
+            lastMessageText = lastText,
+            unreadCount = convo.unreadCount
         )
     }
 
@@ -1950,7 +2117,7 @@ class BlueskyRepository {
         var cursor: String? = null
         var pages = 0
         do {
-            val resp = chatApi.getConvoMembers("Bearer $token", convoId, 100, cursor)
+            val resp = viaChat(token, myDid, "chat.bsky.convo.getConvoMembers") { a, auth -> a.getConvoMembers(auth, convoId, 100, cursor) }
             val body = resp.body() ?: error("GetConvoMembers ${resp.code()}: ${errorBodyText(resp)}")
             out += body.members.map { it.toAuthorInfo() }
             cursor = body.cursor
@@ -1972,8 +2139,7 @@ class BlueskyRepository {
      *  fine for the poll loop's first call (it just seeds the cursor). */
     suspend fun getConvoLog(token: String, myDid: String, cursor: String? = null)
         : Result<Pair<List<BskyConvoLogEntry>, String?>> = runCatching {
-        ensureChatApi(myDid)
-        val resp = chatApi.getConvoLog("Bearer $token", cursor)
+        val resp = viaChat(token, myDid, "chat.bsky.convo.getLog") { a, auth -> a.getConvoLog(auth, cursor) }
         val body = resp.body() ?: error("GetConvoLog ${resp.code()}: ${errorBodyText(resp)}")
         Pair(body.logs, body.cursor)
     }
@@ -1990,7 +2156,7 @@ class BlueskyRepository {
     suspend fun getConvoMessages(token: String, myDid: String, convoId: String, cursor: String? = null)
         : Result<Pair<List<BskyMessageView>, String?>> = runCatching {
         ensureChatApi(myDid)
-        val resp = chatApi.getMessages("Bearer $token", convoId, 50, cursor)
+        val resp = viaChat(token, myDid, "chat.bsky.convo.getMessages") { a, auth -> a.getMessages(auth, convoId, 50, cursor) }
         val body = resp.body() ?: error("GetMessages ${resp.code()}: ${errorBodyText(resp)}")
         body.relatedProfiles?.forEach { p -> chatProfiles[p.did] = p.toAuthorInfo() }
         Pair(body.messages.reversed(), body.cursor)
@@ -2054,7 +2220,7 @@ class BlueskyRepository {
                     var cursor: String? = null
                     var pages = 0
                     do {
-                        val body = runCatching { chatApi.getMessages("Bearer $token", convo.convoId, 50, cursor) }
+                        val body = runCatching { viaChat(token, myDid, "chat.bsky.convo.getMessages") { a, auth -> a.getMessages(auth, convo.convoId, 50, cursor) } }
                             .getOrNull()?.takeIf { it.isSuccessful }?.body()
                         val related = body?.relatedProfiles?.associateBy { it.did }.orEmpty()
                         body?.messages?.forEach { msg ->

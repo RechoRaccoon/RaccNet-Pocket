@@ -6,6 +6,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -441,6 +442,10 @@ fun ProfileOverlay(
     // Feature request #6: profile page interaction bar.
     onOpenAddTo: (String) -> Unit = {},
     onOpenDm: (AuthorInfo) -> Unit = {},
+    /** Holding the DM button: start a group chat with them. */
+    onNewGroupWith: (AuthorInfo) -> Unit = {},
+    /** People you already have a 1:1 chat with (always reachable). */
+    existingDmDids: Set<String> = emptySet(),
     // Interaction bar's Refresh button (leftmost) — reloads this profile in
     // place; see MainViewModel.refreshProfile.
     onRefresh: () -> Unit = {},
@@ -934,11 +939,22 @@ fun ProfileOverlay(
                     gridCyclesListLayout = postKindFilter.isListKind(),
                     showGrid = state.selectedTab in setOf(MainViewModel.ProfileTab.POSTS, MainViewModel.ProfileTab.REPOSTS, MainViewModel.ProfileTab.LIKES) &&
                         (postKindFilter.isMasonryKind() || postKindFilter.isListKind()),
-                    showDm = selfDid.isNotBlank() && author.did != selfDid && author.isFollowing && profile?.followedByMe == true,
+                    // Anyone Bluesky lets you message: their "who can
+                    // message me" setting is "everyone", or "people I
+                    // follow" and they follow you — or you already have a
+                    // chat with them.
+                    showDm = selfDid.isNotBlank() && author.did != selfDid && profile != null && !profile.blockedEitherWay && (
+                        author.did in existingDmDids || when (profile.chatAllowIncoming) {
+                            "all" -> true
+                            "none" -> false
+                            else -> profile.followedByMe
+                        }
+                    ),
                     onGrid = { onGridButtonTap() },
                     onAddTo = { onOpenAddTo(author.did) },
                     onViewOnBluesky = { uriHandler.openUri("https://bsky.app/profile/${author.handle}") },
-                    onDm = { onOpenDm(author) }
+                    onDm = { onOpenDm(author) },
+                    onDmLongPress = { onNewGroupWith(author) }
                 )
             }
         }
@@ -1041,12 +1057,14 @@ fun ProfileOverlay(
  *  entirely on tabs/sub-tabs the Grid cycle has nothing to do to (Blogs,
  *  Reviews, Backlog, Vods, Vertical Videos — the last already renders as
  *  its own fixed 3-wide grid with no alternate layout to offer). */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun ProfileInteractionBar(
     liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
     refreshing: Boolean, animateRefresh: Boolean, onRefresh: () -> Unit,
     gridMode: Int, gridCyclesListLayout: Boolean, showGrid: Boolean, showDm: Boolean,
-    onGrid: () -> Unit, onAddTo: () -> Unit, onViewOnBluesky: () -> Unit, onDm: () -> Unit
+    onGrid: () -> Unit, onAddTo: () -> Unit, onViewOnBluesky: () -> Unit, onDm: () -> Unit,
+    onDmLongPress: () -> Unit = {}
 ) {
     val shape = RoundedCornerShape(26.dp)
     val iconSize = 20.dp
@@ -1131,8 +1149,20 @@ private fun ProfileInteractionBar(
                 BlueskyLogoIcon(Modifier.size(iconSize), tint = Color.White)
             }
             if (showDm) {
-                IconButton(onClick = { tap(); onDm() }) {
-                    Icon(Icons.Default.Chat, contentDescription = "DM", tint = Color.White, modifier = Modifier.size(iconSize))
+                // Tap: open (or start) your chat with them. Hold: start a
+                // group chat with them instead.
+                val dmView = androidx.compose.ui.platform.LocalView.current
+                Box(
+                    Modifier.size(48.dp).clip(CircleShape).combinedClickable(
+                        onClick = { tap(); onDm() },
+                        onLongClick = {
+                            dmView.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                            onDmLongPress()
+                        }
+                    ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.Chat, contentDescription = "DM (hold for a group chat)", tint = Color.White, modifier = Modifier.size(iconSize))
                 }
             }
         }

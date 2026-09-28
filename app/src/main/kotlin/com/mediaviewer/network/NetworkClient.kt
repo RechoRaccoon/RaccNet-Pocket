@@ -59,6 +59,22 @@ object NetworkClient {
             .create(BlueskyApi::class.java)
     }
 
+    /** A client for calling a Bluesky service (the AppView, the chat
+     *  service) DIRECTLY with a service-auth token, instead of through the
+     *  user's PDS. The PDS-routing "atproto-proxy" header some endpoints
+     *  carry is dropped — it only means something to a PDS. */
+    fun buildDirectServiceApi(baseUrl: String): BlueskyApi {
+        val client = buildOkHttp("Stellar/1.0 (ATProto client)").newBuilder()
+            .addInterceptor { chain -> chain.proceed(chain.request().newBuilder().removeHeader("atproto-proxy").build()) }
+            .build()
+        return Retrofit.Builder()
+            .baseUrl(baseUrl)
+            .client(client)
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+            .create(BlueskyApi::class.java)
+    }
+
     fun buildE621Api(): E621Api {
         // e621 requires a descriptive User-Agent per their policy
         return Retrofit.Builder()

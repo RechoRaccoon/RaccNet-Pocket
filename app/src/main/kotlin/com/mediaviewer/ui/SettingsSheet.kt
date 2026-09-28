@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.History
@@ -69,6 +70,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.SpanStyle
@@ -218,6 +221,9 @@ fun SettingsSheet(
     onShowSaves: () -> Unit,
     onShowHistory: () -> Unit,
     onOpenDmInbox: () -> Unit,
+    onOpenInbox: () -> Unit = {},
+    inboxUnreadCount: Int = 0,
+    dmUnreadCount: Int = 0,
     // Upload flow: the Hub's "+" -> "Post" bubble opens the Bluesky post
     // composer (see ComposePostScreen.kt). Default no-op keeps every other
     // existing call site of SettingsSheet compiling unchanged.
@@ -469,6 +475,7 @@ fun SettingsSheet(
                             onShowLikes = onShowLikes, onShowFriends = onShowFriends,
                             selfProfile = selfProfile, onOpenOwnProfile = onOpenOwnProfile,
                             onShowSaves = onShowSaves, onShowHistory = onShowHistory, onOpenDmInbox = onOpenDmInbox,
+                            onOpenInbox = onOpenInbox, inboxUnreadCount = inboxUnreadCount, dmUnreadCount = dmUnreadCount,
                             onSelectFeed = { uri -> pickedFeed = PickedFeed(uri) }, isLoading = isLoading,
                             highlightedFeedUri = pickedFeed.let { if (it != null) it.uri else selectedFeedUri },
                             authorChipSelected = pickedFeed == null && authorFeedState != null,
@@ -600,6 +607,9 @@ private fun AtProtocolPageContent(
     onShowSaves: () -> Unit,
     onShowHistory: () -> Unit,
     onOpenDmInbox: () -> Unit,
+    onOpenInbox: () -> Unit = {},
+    inboxUnreadCount: Int = 0,
+    dmUnreadCount: Int = 0,
     onSelectFeed: (String?) -> Unit,
     isLoading: Boolean,
     onLoginBluesky: (String, String) -> Unit,
@@ -837,14 +847,17 @@ private fun AtProtocolPageContent(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SettingsGridButton("Liked Posts", Icons.Default.Favorite, LikeRed, liquidGlass, Modifier.weight(1f), onShowLikes, panelTint = dominantColor, backdrop = backdrop)
+                // Inbox (Bluesky notifications) replaced Liked Posts; DMs and
+                // From Friends swapped places. The two badges count what
+                // you haven't seen yet.
+                SettingsGridButton("Inbox", Icons.Default.Email, Color.White, liquidGlass, Modifier.weight(1f), onOpenInbox, panelTint = dominantColor, backdrop = backdrop, badge = inboxUnreadCount)
                 ProfileGridButton(selfProfile, bskyHandle, liquidGlass, Modifier.weight(1f), onOpenOwnProfile, panelTint = dominantColor, backdrop = backdrop)
-                SettingsGridButton("From Friends", Icons.Default.Send, Color.White, liquidGlass, Modifier.weight(1f), onShowFriends, panelTint = dominantColor, backdrop = backdrop)
+                SettingsGridButton("DMs", Icons.Default.Chat, Color.White, liquidGlass, Modifier.weight(1f), onOpenDmInbox, panelTint = dominantColor, backdrop = backdrop, badge = dmUnreadCount)
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SettingsGridButton("Saves", Icons.Default.Star, BookmarkYellow, liquidGlass, Modifier.weight(1f), onShowSaves, panelTint = dominantColor, backdrop = backdrop)
                 SettingsGridButton("History", Icons.Default.History, Color.White, liquidGlass, Modifier.weight(1f), onShowHistory, panelTint = dominantColor, backdrop = backdrop)
-                SettingsGridButton("DMs", Icons.Default.Chat, Color.White, liquidGlass, Modifier.weight(1f), onOpenDmInbox, panelTint = dominantColor, backdrop = backdrop)
+                SettingsGridButton("From Friends", Icons.Default.Send, Color.White, liquidGlass, Modifier.weight(1f), onShowFriends, panelTint = dominantColor, backdrop = backdrop)
             }
         }
 
@@ -2064,10 +2077,59 @@ private fun SettingsGridButton(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
     panelTint: Color = NeutralGlassTint,
-    backdrop: GlassBackdrop? = null
+    backdrop: GlassBackdrop? = null,
+    /** Unseen count: a small bubble on the button's top-right corner. */
+    badge: Int = 0
 ) {
     val shape = RoundedCornerShape(12.dp)
+    Box(modifier) {
+        SettingsGridButtonBody(label, icon, iconTint, liquidGlass, Modifier.fillMaxWidth(), onClick, panelTint, backdrop, shape)
+        HubCountBadge(badge, panelTint, Modifier.align(Alignment.TopEnd).offset(x = 5.dp, y = (-6).dp))
+    }
+}
 
+/** A count bubble for the Hub's Inbox/DMs buttons: pops in with a little
+ *  spring when something new arrives, and is gone entirely at zero. */
+@Composable
+internal fun HubCountBadge(count: Int, tint: Color, modifier: Modifier = Modifier) {
+    val shown = count > 0
+    val scale by animateFloatAsState(
+        if (shown) 1f else 0f,
+        androidx.compose.animation.core.spring(dampingRatio = 0.45f, stiffness = 500f), label = "hubBadge"
+    )
+    var last by remember { mutableStateOf(count) }
+    if (count > 0) last = count
+    if (scale <= 0.01f && !shown) return
+    val accent = Color(0xFFFF3B6B)
+    Box(
+        modifier
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .heightIn(min = 18.dp).widthIn(min = 18.dp)
+            .clip(RoundedCornerShape(9.dp))
+            .background(Brush.verticalGradient(listOf(androidx.compose.ui.graphics.lerp(accent, Color.White, 0.18f), accent)))
+            .border(1.5.dp, androidx.compose.ui.graphics.lerp(Color(0xFF0B0B10), tint, 0.25f), RoundedCornerShape(9.dp))
+            .padding(horizontal = 5.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            if (last > 99) "99+" else last.toString(), color = Color.White,
+            fontSize = 10.sp, lineHeight = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1
+        )
+    }
+}
+
+@Composable
+private fun SettingsGridButtonBody(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    iconTint: Color,
+    liquidGlass: Boolean,
+    modifier: Modifier,
+    onClick: () -> Unit,
+    panelTint: Color,
+    backdrop: GlassBackdrop?,
+    shape: RoundedCornerShape
+) {
     @Composable
     fun ButtonContent() {
         // Item 1: half the previous height, icon and label share one row

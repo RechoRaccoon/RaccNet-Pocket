@@ -46,7 +46,7 @@ import com.mediaviewer.util.rememberHapticTap
 @Composable
 fun SendDmDialog(
     target: MediaItem?,
-    allConversations: List<DmConversation>,
+    conversations: List<DmConversation>,
     loading: Boolean,
     selected: Set<String>,
     sending: Boolean,
@@ -58,9 +58,6 @@ fun SendDmDialog(
     onDismiss: () -> Unit
 ) {
     if (target == null) return
-    // Bluesky doesn't allow sharing posts into group chats, so only 1:1
-    // conversations are offered here.
-    val conversations = remember(allConversations) { allConversations.filter { !it.isGroup } }
     var message by remember(target.id) { mutableStateOf("") }
     val tap = rememberHapticTap()
     val backdropUrl = target.thumbUrl.ifBlank { target.mediaUrl }
@@ -208,7 +205,10 @@ private fun RecipientCell(convo: DmConversation, isSelected: Boolean, onTap: () 
             modifier = Modifier.size(72.dp),
             contentAlignment = Alignment.Center
         ) {
-            Box(
+            if (convo.isGroup) {
+                // Group chats: their members' avatars, clustered.
+                DmConvoAvatar(convo, 64.dp)
+            } else Box(
                 modifier = Modifier.size(64.dp).clip(CircleShape)
             ) {
                 if (convo.member.avatarUrl != null) {

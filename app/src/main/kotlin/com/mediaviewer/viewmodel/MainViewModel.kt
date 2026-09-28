@@ -911,9 +911,297 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun openDmInbox() {
         _dmInboxOpen.value = true
         loadDmConversations(silent = false)
+        // Always refresh on open: one quick request for the chat list itself
+        // (newest activity, unread counts), shown the moment it lands —
+        // instead of only ever showing whatever was loaded at app start.
+        refreshDmConvosQuick()
     }
 
     fun closeDmInbox() { _dmInboxOpen.value = false; _dmThread.value = null }
+
+    private var dmQuickRefreshJob: Job? = null
+    /** Re-reads just the chat list (not mutuals/blocks/etc.) and merges it in. */
+    fun refreshDmConvosQuick() {
+        if (!_bskyLoggedIn.value || dmQuickRefreshJob?.isActive == true) return
+        dmQuickRefreshJob = viewModelScope.launch(Dispatchers.IO) {
+            bskyRepo.listConvos(bskyToken, _bskyDid.value).onSuccess { convos ->
+                val openId = _dmThread.value?.convo?.convoId
+                val fresh = convos.map { if (it.convoId == openId) it.copy(unreadCount = 0) else it }
+                val haveDids = fresh.map { it.member.did }.toSet()
+                // Mutuals you haven't chatted with yet stay listed after them.
+                val rest = _dmConversations.value.filter { it.convoId.isBlank() && it.member.did !in haveDids }
+                _dmConversations.value = fresh + rest
+                runCatching {
+                    val type = object : com.google.gson.reflect.TypeToken<List<DmConversation>>() {}.type
+                    prefs.setHubMutualsCache(com.google.gson.Gson().toJson(_dmConversations.value, type))
+                }
+            }
+        }
+    }
+
+    /** Opening a chat reads it: clears its unread count here and on Bluesky. */
+    private fun markConvoRead(convoId: String) {
+        if (convoId.isBlank()) return
+        if (_dmConversations.value.any { it.convoId == convoId && it.unreadCount > 0 }) {
+            _dmConversations.value = _dmConversations.value.map { if (it.convoId == convoId) it.copy(unreadCount = 0) else it }
+        }
+        viewModelScope.launch(Dispatchers.IO) { bskyRepo.markConvoRead(bskyToken, _bskyDid.value, convoId) }
+    }
+
+    // ── Foreground tracking ──────────────────────────────────────────────────
+    // Live polling (new DMs, the Inbox count) only runs while the app is on
+    // screen — nothing ticks away in the background.
+    @Volatile private var appInForeground = true
+    fun setAppForeground(foreground: Boolean) {
+        val wasBackground = !appInForeground
+        appInForeground = foreground
+        if (foreground && wasBackground && _bskyLoggedIn.value) {
+            refreshInboxUnreadNow()
+            if (_dmInboxOpen.value) refreshDmConvosQuick()
+        }
+    }
+
+    // ── Inbox (Bluesky notifications, minus DMs — those live in the DM list) ─
+    /** One row in the Inbox: a notification, or several of the same kind
+     *  about the same post grouped together ("Sam and 3 others liked…"). */
+    data class InboxItem(
+        val key: String,
+        val reason: String,
+        val authors: List<AuthorInfo>,
+        /** The post it's about: yours (likes/reposts) or theirs (replies…). */
+        val postUri: String?,
+        /** Text to preview under the headline. */
+        val snippet: String,
+        val thumbUrl: String?,
+        val indexedAt: String,
+        val isRead: Boolean
+    )
+    private val _inboxOpen = MutableStateFlow(false)
+    val inboxOpen: StateFlow<Boolean> = _inboxOpen
+    private val _inboxItems = MutableStateFlow<List<InboxItem>>(emptyList())
+    val inboxItems: StateFlow<List<InboxItem>> = _inboxItems
+    private val _inboxLoading = MutableStateFlow(false)
+    val inboxLoading: StateFlow<Boolean> = _inboxLoading
+    private val _inboxUnreadCount = MutableStateFlow(0)
+    val inboxUnreadCount: StateFlow<Int> = _inboxUnreadCount
+    private var inboxCursor: String? = null
+    private var inboxRaw: List<BskyNotification> = emptyList()
+    private var inboxPollingJob: Job? = null
+
+    /** The Hub's Inbox badge: Bluesky's own unread count, checked once a
+     *  minute while the app is open — one small request, answered by the
+     *  AppView directly (see BlueskyRepository.viaService), never a fetch of
+     *  the notifications themselves. The list is only loaded when you open
+     *  the Inbox. */
+    fun startInboxPolling() {
+        if (inboxPollingJob?.isActive == true || !_bskyLoggedIn.value) return
+        inboxPollingJob = viewModelScope.launch(Dispatchers.IO) {
+            while (_bskyLoggedIn.value) {
+                if (appInForeground && !_inboxOpen.value) {
+                    bskyRepo.getNotificationUnreadCount(bskyToken, _bskyDid.value).onSuccess { _inboxUnreadCount.value = it }
+                }
+                delay(60_000)
+            }
+        }
+    }
+
+    private fun refreshInboxUnreadNow() {
+        viewModelScope.launch(Dispatchers.IO) {
+            bskyRepo.getNotificationUnreadCount(bskyToken, _bskyDid.value).onSuccess { if (!_inboxOpen.value) _inboxUnreadCount.value = it }
+        }
+    }
+
+    fun openInbox() {
+        if (!_bskyLoggedIn.value) return
+        _inboxOpen.value = true
+        loadInbox(reset = true)
+    }
+
+    fun closeInbox() { _inboxOpen.value = false }
+
+    fun loadMoreInbox() { if (!_inboxLoading.value && inboxCursor != null) loadInbox(reset = false) }
+
+    private fun loadInbox(reset: Boolean) {
+        if (_inboxLoading.value) return
+        _inboxLoading.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val page = bskyRepo.listNotifications(bskyToken, _bskyDid.value, if (reset) null else inboxCursor).getOrElse {
+                    if (_inboxItems.value.isEmpty()) _errorMessage.value = "Couldn't load your inbox: ${it.message}"
+                    return@launch
+                }
+                inboxCursor = page.cursor
+                inboxRaw = if (reset) page.notifications else inboxRaw + page.notifications
+                _inboxItems.value = buildInboxItems(inboxRaw)
+                if (reset) {
+                    // Opening the Inbox is "seeing" it, same as Bluesky.
+                    _inboxUnreadCount.value = 0
+                    bskyRepo.markNotificationsSeen(bskyToken, _bskyDid.value)
+                }
+            } finally {
+                _inboxLoading.value = false
+            }
+        }
+    }
+
+    private suspend fun buildInboxItems(raw: List<BskyNotification>): List<InboxItem> {
+        fun author(a: BskyNotificationAuthor) = AuthorInfo(
+            did = a.did, handle = a.handle, displayName = a.displayName?.takeIf { it.isNotBlank() } ?: a.handle, avatarUrl = a.avatar
+        )
+        fun recordText(n: BskyNotification) = runCatching { n.record?.asJsonObject?.get("text")?.asString }.getOrNull().orEmpty()
+        val groupable = setOf("like", "repost", "follow", "like-via-repost", "repost-via-repost", "starterpack-joined")
+        // Consecutive notifications of the same kind about the same post
+        // become one row, like Bluesky's own list.
+        val groups = mutableListOf<MutableList<BskyNotification>>()
+        for (n in raw) {
+            val last = groups.lastOrNull()?.firstOrNull()
+            if (last != null && n.reason in groupable && last.reason == n.reason && last.reasonSubject == n.reasonSubject) {
+                groups.last().add(n)
+            } else groups.add(mutableListOf(n))
+        }
+        // The posts likes/reposts are about — one batched lookup.
+        val subjectUris = groups.mapNotNull { g -> g.first().takeIf { it.reason in groupable && it.reason != "follow" }?.reasonSubject }
+            .filter { it.contains("app.bsky.feed.post") }
+        val posts = if (subjectUris.isEmpty()) emptyMap() else bskyRepo.getPostsByUri(bskyToken, _bskyDid.value, subjectUris)
+        return groups.map { g ->
+            val first = g.first()
+            val subject = first.reasonSubject?.let { posts[it] }
+            val isPostAbout = first.reason in setOf("reply", "mention", "quote", "subscribed-post")
+            val thumb = subject?.embed?.let { e ->
+                e.images?.firstOrNull()?.thumb ?: e.items?.firstOrNull()?.thumb ?: e.thumbnail
+            }
+            InboxItem(
+                key = first.uri + "|" + first.reason,
+                reason = first.reason,
+                authors = g.map { author(it.author) }.distinctBy { it.did },
+                postUri = if (isPostAbout) first.uri else first.reasonSubject?.takeIf { it.contains("app.bsky.feed.post") },
+                snippet = if (isPostAbout) recordText(first) else subject?.record?.text.orEmpty(),
+                thumbUrl = thumb,
+                indexedAt = first.indexedAt,
+                isRead = g.all { it.isRead }
+            )
+        }
+    }
+
+    /** Opens the post an Inbox row is about. */
+    fun openInboxPost(uri: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val items = bskyRepo.getPostItems(bskyToken, _bskyDid.value, listOf(uri))
+            if (items.isEmpty()) { showToast("Post unavailable"); return@launch }
+            _currentIndex.value = 0
+            feedCursor = null
+            activeFeedMode = ActiveFeedMode.FRIENDS
+            activeFeedActorDid = null
+            _mediaItems.value = filterHidden(items)
+            _navDirection.value = 0
+            _inboxOpen.value = false
+            _screenState.value = ScreenState.FEED
+        }
+    }
+
+    // ── Starting chats / groups ──────────────────────────────────────────────
+    /** The "New chat" popup: null = closed. */
+    data class NewChatState(
+        val group: Boolean = false,
+        val preselected: List<AuthorInfo> = emptyList()
+    )
+    /** A person in the New chat popup, and whether they can be messaged
+     *  (their Bluesky "who can message me" setting, blocks). */
+    data class ChatCandidate(val author: AuthorInfo, val canMessage: Boolean)
+
+    private val _newChatState = MutableStateFlow<NewChatState?>(null)
+    val newChatState: StateFlow<NewChatState?> = _newChatState
+    private val _chatCandidates = MutableStateFlow<List<ChatCandidate>>(emptyList())
+    val chatCandidates: StateFlow<List<ChatCandidate>> = _chatCandidates
+    private val _chatSearching = MutableStateFlow(false)
+    val chatSearching: StateFlow<Boolean> = _chatSearching
+    private val _creatingChat = MutableStateFlow(false)
+    val creatingChat: StateFlow<Boolean> = _creatingChat
+
+    fun openNewChat(group: Boolean = false, preselected: List<AuthorInfo> = emptyList()) {
+        if (!_bskyLoggedIn.value) return
+        _newChatState.value = NewChatState(group, preselected)
+        searchChatCandidates("")
+    }
+    fun setNewChatGroupMode(group: Boolean) { _newChatState.value = _newChatState.value?.copy(group = group) }
+    fun closeNewChat() { if (!_creatingChat.value) _newChatState.value = null }
+
+    private var chatSearchJob: Job? = null
+    /** Blank query: suggestions (people you already chat with, then mutuals). */
+    fun searchChatCandidates(query: String) {
+        chatSearchJob?.cancel()
+        val q = query.trim()
+        if (q.isEmpty()) {
+            val me = _bskyDid.value
+            _chatCandidates.value = _dmConversations.value.filter { !it.isGroup && it.member.did != me && it.member.did.isNotBlank() }
+                .map { ChatCandidate(it.member, canMessage = true) }.distinctBy { it.author.did }.take(40)
+            _chatSearching.value = false
+            return
+        }
+        chatSearchJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(250) // typing debounce
+            _chatSearching.value = true
+            bskyRepo.searchActorsTypeahead(bskyToken, _bskyDid.value, q).onSuccess { actors ->
+                val me = _bskyDid.value
+                val existing = _dmConversations.value.filter { it.convoId.isNotBlank() && !it.isGroup }.map { it.member.did }.toSet()
+                val list = actors.filter { it.did != me }.map { a ->
+                    val blocked = a.viewer?.blockedBy == true || a.viewer?.blocking != null
+                    // Same rule Bluesky's own app uses: "everyone", or
+                    // "people I follow" when they follow you; an existing
+                    // chat can always be reopened.
+                    val can = !blocked && (a.did in existing || when (a.allowIncomingChat) {
+                        "all" -> true
+                        "none" -> false
+                        else -> a.viewer?.followedBy != null
+                    })
+                    ChatCandidate(
+                        AuthorInfo(did = a.did, handle = a.handle, displayName = a.displayName?.takeIf { it.isNotBlank() } ?: a.handle, avatarUrl = a.avatar),
+                        can
+                    )
+                }
+                // Available first, then the ones that can't be messaged.
+                _chatCandidates.value = list.filter { it.canMessage } + list.filterNot { it.canMessage }
+            }
+            _chatSearching.value = false
+        }
+    }
+
+    /** Opens (or starts) a 1:1 chat from the New chat popup. */
+    fun startChatWith(author: AuthorInfo) {
+        _newChatState.value = null
+        openDmWithProfile(author)
+    }
+
+    /** Creates a Bluesky group chat and opens it. */
+    fun createGroupChat(name: String, members: List<AuthorInfo>) {
+        if (_creatingChat.value || members.isEmpty()) return
+        _creatingChat.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            val groupName = name.trim().ifBlank { members.take(3).joinToString(", ") { it.displayName.substringBefore(' ') } }.take(50)
+            bskyRepo.createGroup(bskyToken, _bskyDid.value, members.map { it.did }, groupName)
+                .onSuccess { convo ->
+                    val dm = bskyRepo.conversationFor(convo, _bskyDid.value).let {
+                        // Everyone just added, for the avatars straight away.
+                        if (it.groupMembers.size < members.size) it.copy(groupMembers = members, memberCount = maxOf(it.memberCount, members.size + 1)) else it
+                    }
+                    _dmConversations.value = listOf(dm) + _dmConversations.value.filter { it.convoId != dm.convoId }
+                    _newChatState.value = null
+                    _dmInboxOpen.value = true
+                    openDmThread(dm)
+                }
+                .onFailure { e ->
+                    val msg = e.message.orEmpty()
+                    _errorMessage.value = when {
+                        "NotFollowedBySender" in msg -> "Some of them only accept group invites from people they follow."
+                        "UserForbidsGroups" in msg -> "Someone you picked doesn't allow group chats."
+                        "NewAccountCannotCreateGroup" in msg -> "Your account is too new to create group chats yet."
+                        "Blocked" in msg -> "You can't add someone you've blocked (or who blocked you)."
+                        else -> "Couldn't create the group: ${msg.take(120)}"
+                    }
+                }
+            _creatingChat.value = false
+        }
+    }
 
     // ── Compose Post (upload flow — Hub "+" -> "Post") ──────────────────────
     // See ComposePostScreen.kt for the full composer UI. Submitting is wired
@@ -1486,6 +1774,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openDmThread(convo: DmConversation) {
         if (convo.convoId.isBlank()) return // no history yet — nothing to show
+        markConvoRead(convo.convoId)
         _dmThread.value = DmThreadState(
             convo = convo, loading = true,
             members = if (convo.isGroup) convo.groupMembers.associateBy { it.did } else emptyMap()
@@ -1535,7 +1824,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // normally), so opening straight into that same state works here
         // too.
         _dmInboxOpen.value = true
-        val existing = _dmConversations.value.firstOrNull { it.member.did == author.did }
+        // (Only a real chat counts — a mutual you've never messaged is in
+        // the list too, with no chat yet, and used to make this do nothing.)
+        val existing = _dmConversations.value.firstOrNull { it.member.did == author.did && !it.isGroup && it.convoId.isNotBlank() }
         if (existing != null) { openDmThread(existing); return }
         _dmThread.value = DmThreadState(convo = DmConversation(convoId = "", member = author, lastSentByUsAt = "", lastActivityAt = ""), loading = true)
         viewModelScope.launch(Dispatchers.IO) {
@@ -1543,6 +1834,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .onSuccess { convoId ->
                     val convo = DmConversation(convoId = convoId, member = author, lastSentByUsAt = "", lastActivityAt = "")
                     _dmThread.value = DmThreadState(convo = convo, loading = true)
+                    // Newly started chats show up in the DM list right away.
+                    _dmConversations.value = listOf(convo) + _dmConversations.value.filter {
+                        it.convoId != convoId && !(it.convoId.isBlank() && it.member.did == author.did)
+                    }
                     bskyRepo.getConvoMessages(bskyToken, _bskyDid.value, convoId)
                         .onSuccess { (messages, cursor) ->
                             _dmThread.value = _dmThread.value?.copy(
@@ -2444,6 +2739,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     prefetchUserLists()   // preload so list picker opens instantly
                     startHubBackgroundWarmup() // item 6/this session: Mutuals/Reviews/Livestreams, see its own comment
                     startDmLivePolling()
+                    startInboxPolling()
                     preloadFriendsFeed()  // item 7: warm the From Friends feed in the background too
                     loadSelfProfile()     // Settings Update: warm the Profile button's avatar/banner preview
                 }
@@ -2479,6 +2775,7 @@ _bskyDid.value          = session.did
                     prefetchUserLists()   // preload so list picker opens instantly
                     startHubBackgroundWarmup()
                     startDmLivePolling()
+                    startInboxPolling()
                     loadSelfProfile()
                 }
                 .onFailure { _errorMessage.value = it.message ?: "Login failed" }
@@ -2522,6 +2819,10 @@ _bskyDid.value          = session.did
             dmLivePollingJob?.cancel()
             dmLivePollingJob = null
             dmLogCursor = null
+            inboxPollingJob?.cancel()
+            inboxPollingJob = null
+            _inboxUnreadCount.value = 0
+            _inboxItems.value = emptyList()
             _dmConversations.value = emptyList()
             if (_appMode.value == AppMode.BLUESKY) {
                 _mediaItems.value = emptyList()
@@ -4217,7 +4518,8 @@ _bskyDid.value          = session.did
                     groupMembers = o.get("groupMembers")?.takeIf { it.isJsonArray }?.asJsonArray
                         ?.map { ctx.deserialize<AuthorInfo>(it, AuthorInfo::class.java) } ?: emptyList(),
                     memberCount = o.get("memberCount")?.takeIf { !it.isJsonNull }?.asInt ?: 0,
-                    lastMessageText = str("lastMessageText") ?: ""
+                    lastMessageText = str("lastMessageText") ?: "",
+                    unreadCount = o.get("unreadCount")?.takeIf { !it.isJsonNull }?.asInt ?: 0
                 )
             })
             .create()
@@ -4326,6 +4628,9 @@ _bskyDid.value          = session.did
             bskyRepo.getConvoLog(bskyToken, _bskyDid.value, null).onSuccess { (_, cursor) -> dmLogCursor = cursor }
             while (_bskyLoggedIn.value) {
                 delay(4000)
+                // Paused while the app isn't on screen (it catches up from
+                // the same cursor when you come back).
+                if (!appInForeground) continue
                 val result = bskyRepo.getConvoLog(bskyToken, _bskyDid.value, dmLogCursor)
                 result.onSuccess { (logs, cursor) ->
                     cursor?.let { dmLogCursor = it }
@@ -4336,6 +4641,12 @@ _bskyDid.value          = session.did
     }
 
     private fun applyDmLogEntries(logs: List<BskyConvoLogEntry>) {
+        // Read somewhere else (the Bluesky app, another device): clear it here too.
+        val readConvos = logs.filter { (it.type?.endsWith("#logReadMessage") == true || it.type?.endsWith("#logReadConvo") == true) && it.convoId != null }
+            .map { it.convoId!! }.toSet()
+        if (readConvos.isNotEmpty()) {
+            _dmConversations.value = _dmConversations.value.map { if (it.convoId in readConvos) it.copy(unreadCount = 0) else it }
+        }
         val messageEntries = logs.filter { it.convoId != null && it.message != null }
         if (messageEntries.isEmpty()) return
 
@@ -4348,18 +4659,28 @@ _bskyDid.value          = session.did
         // — cheapest correct fix is a normal refresh, same call the DM inbox
         // itself already uses. Existing convos are just bumped in place.
         if (hasUnknownConvo) {
-            viewModelScope.launch(Dispatchers.IO) { loadDmConversationsBlocking(silent = true) }
+            refreshDmConvosQuick()
         } else {
             val byConvo = messageEntries.groupBy { it.convoId!! }
             _dmConversations.value = _dmConversations.value.map { convo ->
                 val latest = byConvo[convo.convoId]?.maxByOrNull { it.message!!.sentAt } ?: return@map convo
                 val msg = latest.message!!
                 val mine = msg.sender?.did == _bskyDid.value
+                val openHere = _dmThread.value?.convo?.convoId == convo.convoId
+                val newIncoming = byConvo[convo.convoId].orEmpty().count {
+                    it.type?.endsWith("#logCreateMessage") == true && it.message?.sender?.did != _bskyDid.value
+                }
+                if (openHere && newIncoming > 0) viewModelScope.launch(Dispatchers.IO) { bskyRepo.markConvoRead(bskyToken, _bskyDid.value, convo.convoId) }
                 convo.copy(
+                    unreadCount = if (openHere) 0 else if (mine) 0 else convo.unreadCount + newIncoming,
                     lastActivityAt = msg.sentAt,
                     lastSentByUsAt = if (mine) msg.sentAt else convo.lastSentByUsAt,
                     // Group chats show the newest message under their name.
-                    lastMessageText = if (!convo.isGroup) convo.lastMessageText else when {
+                    lastMessageText = if (!convo.isGroup) when {
+                        msg.text.isNotBlank() -> if (mine) "You: ${msg.text}" else msg.text
+                        msg.embed != null -> if (mine) "You shared a post" else "Shared a post"
+                        else -> convo.lastMessageText
+                    } else when {
                         msg.isSystem -> "Group updated"
                         msg.text.isNotBlank() -> {
                             val who = if (mine) "You" else (convo.groupMembers.firstOrNull { it.did == msg.sender?.did }
