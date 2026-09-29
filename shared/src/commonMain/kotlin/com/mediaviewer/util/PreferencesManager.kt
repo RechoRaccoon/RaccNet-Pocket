@@ -1,13 +1,14 @@
 package com.mediaviewer.util
 
-import android.content.Context
+import com.mediaviewer.platform.PlatformContext
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.*
-import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
-val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "media_viewer_prefs")
+/** The app's settings file ("media_viewer_prefs"). On Android this is the
+ *  same `preferencesDataStore` it has always been, so nothing moves. */
+expect val PlatformContext.dataStore: DataStore<Preferences>
 
 object PrefKeys {
     val BSKY_ACCESS_JWT      = stringPreferencesKey("bsky_access_jwt")
@@ -207,7 +208,7 @@ private data class AccountStateSnapshot(
 )
 
 
-class PreferencesManager(private val context: Context) {
+class PreferencesManager(private val context: PlatformContext) {
 
     val bskyAccessJwt: Flow<String?>  = context.dataStore.data.map { it[PrefKeys.BSKY_ACCESS_JWT] }
     val bskyRefreshJwt: Flow<String?> = context.dataStore.data.map { it[PrefKeys.BSKY_REFRESH_JWT] }
@@ -267,7 +268,7 @@ class PreferencesManager(private val context: Context) {
     // the user having to hunt for the setting first.
     val translateEnabled: Flow<Boolean>        = context.dataStore.data.map { it[PrefKeys.TRANSLATE_ENABLED] ?: false }
     val translateTargetLang: Flow<String>      = context.dataStore.data.map {
-        it[PrefKeys.TRANSLATE_TARGET_LANG] ?: java.util.Locale.getDefault().language.ifBlank { "en" }
+        it[PrefKeys.TRANSLATE_TARGET_LANG] ?: com.mediaviewer.platform.defaultLanguageCode().ifBlank { "en" }
     }
     // Phase 4: custom font pack — absolute path to the copied-in font file on
     // internal storage, plus its original display name for the Settings row.

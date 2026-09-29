@@ -52,6 +52,10 @@ kotlin {
             implementation("org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose:2.9.1")
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
             implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1")
+            implementation("org.jetbrains.androidx.lifecycle:lifecycle-viewmodel:2.9.1")
+            // Settings (PreferencesManager): same "media_viewer_prefs" file
+            // on Android as before, a file in the app sandbox on iOS.
+            implementation("androidx.datastore:datastore-preferences-core:1.1.7")
         }
         iosMain.dependencies {
             // HTTP on iOS (NSURLSession underneath) — see HttpEngine.ios.kt.
@@ -93,7 +97,7 @@ kotlin {
             implementation("androidx.media3:media3-effect:1.8.0")
             implementation("androidx.media3:media3-muxer:1.8.0")
 
-            implementation("androidx.datastore:datastore-preferences:1.0.0")
+            implementation("androidx.datastore:datastore-preferences:1.1.7")
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
             implementation("com.google.code.gson:gson:2.10.1")
             // Profile QR codes (ProfileQrScreen): ZXing's encoder only — the QR

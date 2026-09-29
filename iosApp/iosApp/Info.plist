@@ -25,6 +25,10 @@
 	<!-- Let ProMotion iPhones run Compose above 60 fps. -->
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Stellar saves images and videos you download to your photo library.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Stellar lets you pick photos and videos to post.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIRequiredDeviceCapabilities</key>

@@ -36,3 +36,5 @@ actual fun utcYearOf(epochMillis: Long): Int =
     java.time.Instant.ofEpochMilli(epochMillis).atZone(java.time.ZoneOffset.UTC).year
 
 actual fun <T> concurrentSetOf(): MutableSet<T> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+actual fun defaultLanguageCode(): String = java.util.Locale.getDefault().language

@@ -31,7 +31,7 @@ class TaggingRepository(
     context: Context,
     private val bskyRepo: BlueskyRepository,
     private val e621Repo: E621Repository
-) {
+) : TaggingService {
     // Tagging-speed fix: kept for fetchBitmapForTagging's Coil lookups
     // (Coil's own imageLoader() call takes a Context and internally uses
     // the application one regardless, but holding this explicitly avoids
@@ -45,24 +45,10 @@ class TaggingRepository(
     @Volatile private var tagger: ImageTagger? = null
     @Volatile private var cancelRequested = false
 
-    data class Progress(
-        val scanned: Int,
-        val tagged: Int,
-        val datasetBytes: Long,
-        val isRunning: Boolean,
-        val isComplete: Boolean,
-        val modelState: TaggerModelManager.State = TaggerModelManager.State.Ready,
-        // Tagging page redesign (item 3): whichever post is being fetched/
-        // inferred right now, so the overlay can show it full-screen in real
-        // time instead of a generic loading box. Null before the first item
-        // starts (still downloading the model, or between pages of the
-        // liked-posts pagination) and while nothing is running.
-        val currentItem: MediaItem? = null
-    )
 
-    fun currentCounts(): Pair<Int, Int> = db.scannedCount() to db.taggedCount()
-    fun datasetSizeBytes(): Long = db.datasetSizeBytes()
-    fun isModelReady(): Boolean = modelManager.isReady()
+    override fun currentCounts(): Pair<Int, Int> = db.scannedCount() to db.taggedCount()
+    override fun datasetSizeBytes(): Long = db.datasetSizeBytes()
+    override fun isModelReady(): Boolean = modelManager.isReady()
 
     @Volatile private var cachedVocabulary: List<String>? = null
 
@@ -72,7 +58,7 @@ class TaggingRepository(
      *  needing to spin up a full ONNX session (that only happens when
      *  actually tagging an image). Returns empty before the initial
      *  "Locally Tag All Liked Posts" pass has ever run. */
-    fun tagVocabulary(): List<String> {
+    override fun tagVocabulary(): List<String> {
         cachedVocabulary?.let { return it }
         if (!modelManager.tagsFile.exists()) return emptyList()
         val parsed = try {
@@ -95,9 +81,9 @@ class TaggingRepository(
     private val taggerLoadLock = kotlinx.coroutines.sync.Mutex()
 
     /** True once the model is loaded in memory (no "activating" wait). */
-    fun isTaggerLoaded(): Boolean = tagger != null
+    override fun isTaggerLoaded(): Boolean = tagger != null
 
-    private suspend fun ensureTagger(onModelProgress: (TaggerModelManager.State) -> Unit): ImageTagger {
+    private suspend fun ensureTagger(onModelProgress: (TaggerState) -> Unit): ImageTagger {
         tagger?.let { return it }
         return taggerLoadLock.withLock {
             tagger?.let { return@withLock it }
@@ -107,14 +93,14 @@ class TaggingRepository(
         }
     }
 
-    fun cancel() { cancelRequested = true }
+    override fun cancel() { cancelRequested = true }
 
     /** Settings' "Download On-Device Tagging Model" button: fetches the model
      *  and tag list without starting a tagging pass. Reports the same
-     *  [TaggerModelManager.State] updates [tagAllLiked] does while it fetches
+     *  [TaggerState] updates [tagAllLiked] does while it fetches
      *  them. Throws CancellationException if the calling coroutine is
      *  cancelled mid-download (partial files are cleaned up first). */
-    suspend fun downloadModel(onState: (TaggerModelManager.State) -> Unit) {
+    override suspend fun downloadModel(onState: (TaggerState) -> Unit) {
         modelManager.ensureReady(onState)
     }
 
@@ -126,29 +112,29 @@ class TaggingRepository(
      *  stopped first (the caller does this — see MainViewModel.
      *  deleteTaggedDatabase) so it doesn't keep writing rows back in while
      *  this runs. */
-    suspend fun deleteDatabase() = withContext(Dispatchers.IO) { db.clearAll() }
+    override suspend fun deleteDatabase() = withContext(Dispatchers.IO) { db.clearAll() }
 
     // ── Import/Export (item 4) ──────────────────────────────────────────
     // JSON (de)serialization itself lives in MainViewModel (via Gson,
     // already a project dependency — see NetworkClient.kt) since that's
     // where file I/O against a picked Uri already happens for the custom
     // font import feature; this repository only ever deals in plain Kotlin
-    // data (TagDatabase.ExportedPost/DatasetInfo), same as every other
+    // data (TagExportedPost/DatasetInfo), same as every other
     // method here.
 
     /** Everything currently tagged, across every dataset — the source data
      *  for Settings' "Export" button. */
-    suspend fun exportAllPosts(): List<TagDatabase.ExportedPost> = withContext(Dispatchers.IO) { db.allPostsForExport() }
+    override suspend fun exportAllPosts(): List<TagExportedPost> = withContext(Dispatchers.IO) { db.allPostsForExport() }
 
     /** Settings' "Import" button, once a file's been picked and parsed. */
-    suspend fun importDataset(name: String, posts: List<TagDatabase.ExportedPost>): TagDatabase.DatasetInfo =
+    override suspend fun importDataset(name: String, posts: List<TagExportedPost>): TagDatasetInfo =
         withContext(Dispatchers.IO) { db.importDataset(name, posts) }
 
     /** Settings' imported-datasets list, under Import/Export. */
-    suspend fun listImportedDatasets(): List<TagDatabase.DatasetInfo> = withContext(Dispatchers.IO) { db.listImportedDatasets() }
+    override suspend fun listImportedDatasets(): List<TagDatasetInfo> = withContext(Dispatchers.IO) { db.listImportedDatasets() }
 
     /** The list's per-row delete ("X"). */
-    suspend fun deleteDataset(id: String) = withContext(Dispatchers.IO) { db.deleteDataset(id) }
+    override suspend fun deleteDataset(id: String) = withContext(Dispatchers.IO) { db.deleteDataset(id) }
 
     /** Full backlog pass: pages through every liked post (Bluesky or e621,
      *  whichever app mode is active), skips anything already in the
@@ -167,23 +153,23 @@ class TaggingRepository(
      *  below (kept as AtomicIntegers) and the SQLite writes in
      *  TagDatabase.storeTags (Android's SQLiteDatabase already serializes
      *  concurrent writers internally, so no extra locking is needed here). */
-    suspend fun tagAllLiked(
+    override suspend fun tagAllLiked(
         isBlueskyMode: Boolean,
         bskyToken: String,
         bskyDid: String,
         e621Username: String,
         e621ApiKey: String,
-        concurrency: Int = 1,
-        onProgress: (Progress) -> Unit
+        concurrency: Int,
+        onProgress: (TaggingProgress) -> Unit
     ) {
         cancelRequested = false
         val parallelism = concurrency.coerceIn(1, 10)
         withContext(Dispatchers.IO) {
-            onProgress(Progress(db.scannedCount(), db.taggedCount(), db.datasetSizeBytes(), isRunning = true, isComplete = false, modelState = TaggerModelManager.State.Downloading(0, 0)))
+            onProgress(TaggingProgress(db.scannedCount(), db.taggedCount(), db.datasetSizeBytes(), isRunning = true, isComplete = false, modelState = TaggerState.Downloading(0, 0)))
             val loadedTagger = try {
-                ensureTagger { state -> onProgress(Progress(db.scannedCount(), db.taggedCount(), db.datasetSizeBytes(), isRunning = true, isComplete = false, modelState = state)) }
+                ensureTagger { state -> onProgress(TaggingProgress(db.scannedCount(), db.taggedCount(), db.datasetSizeBytes(), isRunning = true, isComplete = false, modelState = state)) }
             } catch (e: Exception) {
-                onProgress(Progress(db.scannedCount(), db.taggedCount(), db.datasetSizeBytes(), isRunning = false, isComplete = false, modelState = TaggerModelManager.State.Failed(e.message ?: "Model load failed")))
+                onProgress(TaggingProgress(db.scannedCount(), db.taggedCount(), db.datasetSizeBytes(), isRunning = false, isComplete = false, modelState = TaggerState.Failed(e.message ?: "Model load failed")))
                 return@withContext
             }
 
@@ -199,7 +185,7 @@ class TaggingRepository(
             // items) can run on different Dispatchers.IO threads.
             val currentItemRef = java.util.concurrent.atomic.AtomicReference<MediaItem?>(null)
             fun reportProgress() {
-                onProgress(Progress(scanned.get(), tagged.get(), db.datasetSizeBytes(), isRunning = true, isComplete = false, currentItem = currentItemRef.get()))
+                onProgress(TaggingProgress(scanned.get(), tagged.get(), db.datasetSizeBytes(), isRunning = true, isComplete = false, currentItem = currentItemRef.get()))
             }
 
             /** Tags a batch of not-yet-indexed items.
@@ -315,7 +301,7 @@ class TaggingRepository(
                     page++
                 }
             }
-            onProgress(Progress(scanned.get(), tagged.get(), db.datasetSizeBytes(), isRunning = false, isComplete = !cancelRequested))
+            onProgress(TaggingProgress(scanned.get(), tagged.get(), db.datasetSizeBytes(), isRunning = false, isComplete = !cancelRequested))
         }
     }
 
@@ -325,7 +311,7 @@ class TaggingRepository(
      *  downloaded yet — realtime tagging only makes sense once the person
      *  has already run the initial "Locally Tag All Liked Posts" pass, at
      *  which point the model is guaranteed to already be on disk. */
-    suspend fun tagOnLike(item: MediaItem) {
+    override suspend fun tagOnLike(item: MediaItem) {
         if (!modelManager.isReady()) return
         withContext(Dispatchers.IO) {
             // A post that's already part of an imported dataset counts as
@@ -519,7 +505,7 @@ class TaggingRepository(
      *  MainViewModel.performLikedTagSearch) — a query with no *searchable*
      *  characters in it should behave the same way rather than looking
      *  "broken" with a permanent empty result. */
-    fun search(query: String): List<String> {
+    override fun search(query: String): List<String> {
         val groups = TagAliases.toTagGroups(query)
         if (groups.isEmpty()) return browseAllTagged()
         return db.searchPostUris(groups)
@@ -527,11 +513,11 @@ class TaggingRepository(
 
     /** Default view for the Liked tab (item 2): every tagged post, most
      *  recently-tagged first — shown before the person types anything. */
-    fun browseAllTagged(limit: Int = 200): List<String> = db.allTaggedPostUris(limit)
+    override fun browseAllTagged(limit: Int): List<String> = db.allTaggedPostUris(limit)
 
     /** Full tag list for one post — item 3's "Tags mode needs to display
      *  ALL the tags on the post", sorted highest confidence first. */
-    fun tagsForPost(postUri: String): List<String> = db.tagsForPost(postUri)
+    override fun tagsForPost(postUri: String): List<String> = db.tagsForPost(postUri)
 
     companion object {
         @Volatile private var instance: TaggingRepository? = null

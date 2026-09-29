@@ -199,7 +199,7 @@ fun SettingsSheet(
     onLocallyTagAllLiked: () -> Unit,
     onDeleteTaggedDatabase: () -> Unit = {},
     // Import/Export (item 4)
-    importedDatasets: List<com.mediaviewer.tagging.TagDatabase.DatasetInfo> = emptyList(),
+    importedDatasets: List<com.mediaviewer.tagging.TagDatasetInfo> = emptyList(),
     onExportDataset: (String, android.net.Uri) -> Unit = { _, _ -> },
     onImportDataset: (android.net.Uri) -> Unit = {},
     onDeleteImportedDataset: (String) -> Unit = {},

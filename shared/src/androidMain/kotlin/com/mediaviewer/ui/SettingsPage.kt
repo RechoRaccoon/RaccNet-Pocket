@@ -386,7 +386,7 @@ internal fun SettingsPageContent(
     taggingTagged: Int,
     onLocallyTagAllLiked: () -> Unit,
     onDeleteTaggedDatabase: () -> Unit,
-    importedDatasets: List<com.mediaviewer.tagging.TagDatabase.DatasetInfo>,
+    importedDatasets: List<com.mediaviewer.tagging.TagDatasetInfo>,
     onExportDataset: (String, android.net.Uri) -> Unit,
     onImportDataset: (android.net.Uri) -> Unit,
     onDeleteImportedDataset: (String) -> Unit,

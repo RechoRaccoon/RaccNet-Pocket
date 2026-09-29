@@ -1,3 +1,4 @@
+// check:jvm
 package com.mediaviewer.tagging
 
 import android.content.Context
@@ -35,12 +36,7 @@ import java.io.RandomAccessFile
  *  happens or working through a liked-posts backlog in the background. */
 class TaggerModelManager(private val context: Context) {
 
-    sealed class State {
-        data object NotDownloaded : State()
-        data class Downloading(val bytesDownloaded: Long, val totalBytes: Long) : State()
-        data object Ready : State()
-        data class Failed(val message: String) : State()
-    }
+    // State is the shared TaggerState (TaggingService.kt).
 
     private val modelDir: File by lazy { File(context.filesDir, "tagger").apply { mkdirs() } }
     val modelFile: File by lazy { File(modelDir, "z3d_e621_convnext.onnx") }
@@ -56,19 +52,19 @@ class TaggerModelManager(private val context: Context) {
      *  file is small enough relative to the images it'll process later that
      *  a clean restart is simpler), but [isReady] already short-circuits a
      *  repeat call once both files are present. */
-    suspend fun ensureReady(onProgress: (State) -> Unit) {
-        if (isReady()) { onProgress(State.Ready); return }
+    suspend fun ensureReady(onProgress: (TaggerState) -> Unit) {
+        if (isReady()) { onProgress(TaggerState.Ready); return }
         withContext(Dispatchers.IO) {
             try {
-                onProgress(State.Downloading(0, 0))
+                onProgress(TaggerState.Downloading(0, 0))
                 // ensureActive() on every chunk is what makes cancelling the
                 // download (closing the progress page) actually stop the
                 // transfer — the read loop below is plain blocking I/O and
                 // would otherwise run to completion regardless.
-                downloadTo(TAGS_URL, tagsFile) { done, total -> ensureActive(); onProgress(State.Downloading(done, total)) }
-                downloadTo(MODEL_URL, modelFile) { done, total -> ensureActive(); onProgress(State.Downloading(done, total)) }
-                if (isReady()) onProgress(State.Ready)
-                else onProgress(State.Failed("Download finished but files look incomplete"))
+                downloadTo(TAGS_URL, tagsFile) { done, total -> ensureActive(); onProgress(TaggerState.Downloading(done, total)) }
+                downloadTo(MODEL_URL, modelFile) { done, total -> ensureActive(); onProgress(TaggerState.Downloading(done, total)) }
+                if (isReady()) onProgress(TaggerState.Ready)
+                else onProgress(TaggerState.Failed("Download finished but files look incomplete"))
             } catch (e: CancellationException) {
                 modelFile.delete(); tagsFile.delete()
                 File(modelFile.parentFile, modelFile.name + ".part").delete()
@@ -76,7 +72,7 @@ class TaggerModelManager(private val context: Context) {
                 throw e
             } catch (e: Exception) {
                 modelFile.delete(); tagsFile.delete()
-                onProgress(State.Failed(e.message ?: "Download failed"))
+                onProgress(TaggerState.Failed(e.message ?: "Download failed"))
             }
         }
     }

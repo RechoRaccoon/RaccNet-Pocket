@@ -1,7 +1,8 @@
 package com.mediaviewer.util
 
-import android.content.Context
-import android.content.SharedPreferences
+import com.mediaviewer.platform.PlatformContext
+import com.mediaviewer.platform.SharedPreferences
+import com.mediaviewer.platform.sharedPreferences
 
 /**
  * Add To's ordering: when an account was last added to each list / starter
@@ -11,8 +12,8 @@ import android.content.SharedPreferences
 object ListRecency {
     private var prefs: SharedPreferences? = null
 
-    fun init(context: Context) {
-        if (prefs == null) prefs = context.applicationContext.getSharedPreferences("list_recency", Context.MODE_PRIVATE)
+    fun init(context: PlatformContext) {
+        if (prefs == null) prefs = context.sharedPreferences("list_recency")
     }
 
     /** Milliseconds of the last add to [listUri], or 0 if never. */
@@ -24,7 +25,7 @@ object ListRecency {
         get() = prefs?.getString("__last_tab", null)
         set(value) { prefs?.edit()?.putString("__last_tab", value)?.apply() }
 
-    fun noteAdded(listUri: String, at: Long = System.currentTimeMillis()) {
+    fun noteAdded(listUri: String, at: Long = com.mediaviewer.platform.currentTimeMillis()) {
         if (listUri.isBlank()) return
         prefs?.edit()?.putLong(listUri, at)?.apply()
     }

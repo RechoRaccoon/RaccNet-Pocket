@@ -1,13 +1,8 @@
 package com.mediaviewer.viewmodel
 
-import android.app.Application
-import android.content.Context
-import android.util.Log
-import android.widget.Toast
-import androidx.lifecycle.AndroidViewModel
+import com.mediaviewer.platform.Log
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import coil.imageLoader
-import coil.request.ImageRequest
 import com.mediaviewer.model.*
 import com.mediaviewer.repository.BlueskyRepository
 import com.mediaviewer.repository.E621Repository
@@ -19,16 +14,18 @@ import com.mediaviewer.ui.ReviewKindFilter
 import com.mediaviewer.ui.matches
 import com.mediaviewer.ui.matchesReview
 import com.mediaviewer.ui.matchesBacklog
-import com.mediaviewer.tagging.TagDatabase
-import com.mediaviewer.tagging.TaggerModelManager
-import com.mediaviewer.tagging.TaggingRepository
 import com.mediaviewer.tagging.TagSuggestionProvider
+import com.mediaviewer.tagging.TaggerState
+import com.mediaviewer.tagging.TagDatasetInfo
+import com.mediaviewer.tagging.TagExportedPost
+import com.mediaviewer.platform.AppPlatform
+import com.mediaviewer.platform.FontImport
+import com.mediaviewer.platform.PlatformUri
 import com.mediaviewer.util.PreferencesManager
 import com.mediaviewer.util.StoredBskyAccount
-import com.mediaviewer.worker.DownloadWorker
-import com.mediaviewer.worker.GifDownloadWorker
 import com.mediaviewer.worker.urlToDownloadInfo
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -43,46 +40,33 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
-class MainViewModel(application: Application) : AndroidViewModel(application) {
+/**
+ * The app's state and actions — shared by Android and iOS. Everything the
+ * operating system has to do (haptics, toasts, downloads, file pickers, AI
+ * tagging, widgets…) goes through [platform]; on Android that's
+ * AndroidAppPlatform, i.e. the same code this class used to run through its
+ * Application context.
+ */
+class MainViewModel(
+    platformFactory: (BlueskyRepository, E621Repository) -> AppPlatform
+) : ViewModel() {
 
-    private val prefs     = PreferencesManager(application)
     private val bskyRepo  = BlueskyRepository()
     private val e621Repo  = E621Repository()
+    private val platform: AppPlatform = platformFactory(bskyRepo, e621Repo)
+    private val prefs     = PreferencesManager(platform.context)
     private val streamplaceRepo = StreamplaceRepository()
-    private val taggingRepo = TaggingRepository.get(application, bskyRepo, e621Repo)
+    private val taggingRepo = platform.tagging
     // Item 16: Rocksky music-scrobbling integration.
     private val rockskyRepo = RockskyRepository()
 
+    /** False on platforms without on-device AI tagging (iOS for now) —
+     *  the UI hides the feature there. */
+    val taggingSupported: Boolean get() = taggingRepo.isSupported
+
     // Item 8: shared haptic tap, callable from anywhere in the ViewModel
-    // (opening a profile, sending a message/comment/post, running a search)
-    // without needing a Compose/View context at each call site. Uses the
-    // Vibrator system service directly via the Application context this
-    // AndroidViewModel already holds.
-    private fun tapHaptic() {
-        try {
-            val context = getApplication<Application>()
-            val vibrator: android.os.Vibrator? =
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-                    val vm = context.getSystemService(android.os.VibratorManager::class.java)
-                    vm?.defaultVibrator
-                } else {
-                    @Suppress("DEPRECATION")
-                    context.getSystemService(android.content.Context.VIBRATOR_SERVICE) as? android.os.Vibrator
-                }
-            if (vibrator != null && vibrator.hasVibrator()) {
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                    vibrator.vibrate(android.os.VibrationEffect.createPredefined(android.os.VibrationEffect.EFFECT_TICK))
-                } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                    vibrator.vibrate(android.os.VibrationEffect.createOneShot(15, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
-                } else {
-                    @Suppress("DEPRECATION")
-                    vibrator.vibrate(15)
-                }
-            }
-        } catch (_: Exception) {
-            // Haptics are a nicety, never worth crashing over.
-        }
-    }
+    // (opening a profile, sending a message/comment/post, running a search).
+    private fun tapHaptic() = platform.haptic()
 
     // ── Session ───────────────────────────────────────────────────────────────
     private val _bskyLoggedIn = MutableStateFlow(false)
@@ -214,7 +198,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _translationEnabled = MutableStateFlow(false)
     val translationEnabled: StateFlow<Boolean> = _translationEnabled
 
-    private val _translationTargetLang = MutableStateFlow(java.util.Locale.getDefault().language.ifBlank { "en" })
+    private val _translationTargetLang = MutableStateFlow(com.mediaviewer.platform.defaultLanguageCode().ifBlank { "en" })
     val translationTargetLang: StateFlow<String> = _translationTargetLang
 
     fun setTranslationEnabled(enabled: Boolean) {
@@ -241,37 +225,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      *  anything else fails loudly via the normal error snackbar rather than
      *  silently producing a FontFamily that crashes the first time Compose
      *  actually tries to lay out text with it. */
-    fun setCustomFontFromUri(uri: android.net.Uri) {
+    fun setCustomFontFromUri(uri: com.mediaviewer.platform.PlatformUri) {
         viewModelScope.launch(Dispatchers.IO) {
-            val context = getApplication<Application>()
             try {
-                val displayName = queryDisplayName(context, uri) ?: uri.lastPathSegment ?: "Custom Font"
-                val ext = displayName.substringAfterLast('.', "").lowercase()
-                if (ext !in setOf("ttf", "otf", "ttc")) {
-                    _errorMessage.value = "Please choose a .ttf or .otf font file"
-                    return@launch
-                }
-                val fontsDir = java.io.File(context.filesDir, "fonts").apply { mkdirs() }
-                // Item 22: previously always wrote to the same "custom_font.$ext"
-                // path. Re-picking a font with the same extension left that path
-                // unchanged, and MainActivity's FontFamily is `remember`'d keyed
-                // only on the path — so the new file's bytes were saved but the
-                // already-cached FontFamily never got rebuilt. A unique name per
-                // pick guarantees the path changes every time.
                 val oldPath = _customFontPath.value
-                val destFile = java.io.File(fontsDir, "custom_font_${System.currentTimeMillis()}.$ext")
-                context.contentResolver.openInputStream(uri)?.use { input ->
-                    destFile.outputStream().use { output -> input.copyTo(output) }
-                } ?: run {
-                    _errorMessage.value = "Couldn't read that font file"
-                    return@launch
+                when (val result = platform.importCustomFont(uri)) {
+                    is FontImport.Error -> {
+                        _errorMessage.value = result.message
+                        return@launch
+                    }
+                    is FontImport.Success -> {
+                        prefs.setCustomFontPath(result.path)
+                        prefs.setCustomFontName(result.displayName)
+                        _customFontPath.value = result.path
+                        _customFontName.value = result.displayName
+                        // Clean up the previous font file now that the new one is active.
+                        oldPath?.let { platform.deleteFile(it) }
+                    }
                 }
-                prefs.setCustomFontPath(destFile.absolutePath)
-                prefs.setCustomFontName(displayName)
-                _customFontPath.value = destFile.absolutePath
-                _customFontName.value = displayName
-                // Clean up the previous font file now that the new one is active.
-                oldPath?.let { runCatching { java.io.File(it).delete() } }
             } catch (e: Exception) {
                 _errorMessage.value = "Couldn't load that font file: ${e.message}"
             }
@@ -280,23 +251,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun resetCustomFont() {
         viewModelScope.launch {
-            _customFontPath.value?.let { path -> runCatching { java.io.File(path).delete() } }
+            _customFontPath.value?.let { path -> platform.deleteFile(path) }
             prefs.setCustomFontPath(null)
             prefs.setCustomFontName(null)
             _customFontPath.value = null
             _customFontName.value = null
         }
-    }
-
-    private fun queryDisplayName(context: Application, uri: android.net.Uri): String? {
-        return try {
-            context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                    if (idx >= 0) cursor.getString(idx) else null
-                } else null
-            }
-        } catch (_: Exception) { null }
     }
 
     private val _downloadOnLike = MutableStateFlow(false)
@@ -305,7 +265,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _downloadProgress = MutableStateFlow<DownloadProgress?>(null)
     val downloadProgress: StateFlow<DownloadProgress?> = _downloadProgress
 
-    @Volatile private var cancelDownloadFlag = false
+    @kotlin.concurrent.Volatile private var cancelDownloadFlag = false
 
     // ── App Mode / Screen ─────────────────────────────────────────────────────
     private val _appMode     = MutableStateFlow(AppMode.BLUESKY)
@@ -370,7 +330,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var feedCursor: String?  = null
     private var isLoadingMore        = false
     /** Bumped by every feed reset/switch — see loadFeed. */
-    @Volatile private var feedLoadGeneration = 0
+    @kotlin.concurrent.Volatile private var feedLoadGeneration = 0
 
     // Tracks what kind of feed is active so loadMore() uses the right endpoint
     private enum class ActiveFeedMode { NORMAL, AUTHOR, LIKES, FRIENDS, SAVES, HISTORY }
@@ -543,7 +503,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 .map { it.name }.toSet())
                         }
                     },
-                    savedAt = System.currentTimeMillis()
+                    savedAt = com.mediaviewer.platform.currentTimeMillis()
                 )
                 profileTabCache[state.author.did] = entry
                 // Evict oldest entries once over the cap.
@@ -715,13 +675,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      *  success (popup closes, page reloads) or a message to show. */
     fun updateOwnProfile(
         displayName: String, description: String, handle: String,
-        avatarUri: android.net.Uri?, bannerUri: android.net.Uri?,
+        avatarUri: com.mediaviewer.platform.PlatformUri?, bannerUri: com.mediaviewer.platform.PlatformUri?,
         onDone: (String?) -> Unit
     ) {
         if (!_bskyLoggedIn.value) { onDone("Not signed in"); return }
         val newHandle = handle.trim().removePrefix("@").takeIf { it.isNotBlank() && !it.equals(bskyHandle, ignoreCase = true) }
         viewModelScope.launch(Dispatchers.IO) {
-            val context = getApplication<Application>()
+            val context = platform.context
             var result = bskyRepo.updateOwnProfile(bskyToken, context, _bskyDid.value, displayName, description, avatarUri, bannerUri, newHandle)
             if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
                 if (refreshBskyTokenIfPossible()) {
@@ -786,7 +746,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             uri = item.postUri, cid = item.postCid, mediaUrl = item.mediaUrl, thumbUrl = item.thumbUrl,
             isVideo = item.isVideo, text = item.text, authorDid = item.author.did,
             authorHandle = item.author.handle, authorDisplayName = item.author.displayName,
-            authorAvatarUrl = item.author.avatarUrl, viewedAt = System.currentTimeMillis()
+            authorAvatarUrl = item.author.avatarUrl, viewedAt = com.mediaviewer.platform.currentTimeMillis()
         )
         val updated = (listOf(entry) + _history.value.filterNot { it.uri.ifBlank { it.cid } == key }).take(HISTORY_LIMIT)
         _history.value = updated
@@ -983,7 +943,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ── Foreground tracking ──────────────────────────────────────────────────
     // Live polling (new DMs, the Inbox count) only runs while the app is on
     // screen — nothing ticks away in the background.
-    @Volatile private var appInForeground = true
+    @kotlin.concurrent.Volatile private var appInForeground = true
     fun setAppForeground(foreground: Boolean) {
         val wasBackground = !appInForeground
         appInForeground = foreground
@@ -1078,7 +1038,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Subject posts ("liked your post: …") already looked up, by URI, so
      *  paging or refreshing never fetches the same post twice. */
-    private val inboxPostCache = java.util.concurrent.ConcurrentHashMap<String, BskyPost>()
+    private val inboxPostCache = com.mediaviewer.platform.ConcurrentHashMap<String, BskyPost>()
 
     fun closeInbox() { _inboxOpen.value = false }
 
@@ -1417,11 +1377,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // system camera app hands back the file it just captured — opens the
     // composer with that file already attached, same idea as
     // openReviewCompose seeding reviewComposeTarget above.
-    private val _initialComposeImageUri = MutableStateFlow<android.net.Uri?>(null)
-    val initialComposeImageUri: StateFlow<android.net.Uri?> = _initialComposeImageUri
-    private val _initialComposeVideoUri = MutableStateFlow<android.net.Uri?>(null)
-    val initialComposeVideoUri: StateFlow<android.net.Uri?> = _initialComposeVideoUri
-    fun openComposePostWithCapturedMedia(imageUri: android.net.Uri?, videoUri: android.net.Uri?) {
+    private val _initialComposeImageUri = MutableStateFlow<com.mediaviewer.platform.PlatformUri?>(null)
+    val initialComposeImageUri: StateFlow<com.mediaviewer.platform.PlatformUri?> = _initialComposeImageUri
+    private val _initialComposeVideoUri = MutableStateFlow<com.mediaviewer.platform.PlatformUri?>(null)
+    val initialComposeVideoUri: StateFlow<com.mediaviewer.platform.PlatformUri?> = _initialComposeVideoUri
+    fun openComposePostWithCapturedMedia(imageUri: com.mediaviewer.platform.PlatformUri?, videoUri: com.mediaviewer.platform.PlatformUri?) {
         _initialComposeImageUri.value = imageUri
         _initialComposeVideoUri.value = videoUri
         _composePostOpen.value = true
@@ -1480,7 +1440,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun closeCameraMode() { _cameraModeOpen.value = false }
     /** A photo/video taken on the Camera page. */
-    fun onCameraCapture(uri: android.net.Uri, isVideo: Boolean) {
+    fun onCameraCapture(uri: com.mediaviewer.platform.PlatformUri, isVideo: Boolean) {
         if (cameraOpenedFromComposer && _composePostOpen.value) {
             _cameraModeOpen.value = false
             openComposePostWithCapturedMedia(if (isVideo) null else uri, if (isVideo) uri else null)
@@ -1492,12 +1452,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** A photo/video just taken in VRM mode, shown on its own review page
      *  (CapturePreviewScreen) with VRM mode closed — see [openCapturePreview]. */
-    data class CapturePreview(val uri: android.net.Uri, val isVideo: Boolean, val fromCamera: Boolean = false)
+    data class CapturePreview(val uri: com.mediaviewer.platform.PlatformUri, val isVideo: Boolean, val fromCamera: Boolean = false)
     private val _capturePreview = MutableStateFlow<CapturePreview?>(null)
     val capturePreview: StateFlow<CapturePreview?> = _capturePreview
     /** Closes VRM mode (camera, trackers and renderer all shut down) and
      *  opens the review page for the capture. */
-    fun openCapturePreview(uri: android.net.Uri, isVideo: Boolean) {
+    fun openCapturePreview(uri: com.mediaviewer.platform.PlatformUri, isVideo: Boolean) {
         _vrmModeOpen.value = false
         _capturePreview.value = CapturePreview(uri, isVideo)
     }
@@ -1508,7 +1468,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (fromCamera) { cameraOpenedFromComposer = false; _cameraModeOpen.value = true } else _vrmModeOpen.value = true
     }
     /** Review page's "Create Post": into the composer with the (cropped) capture. */
-    fun createPostFromPreview(uri: android.net.Uri, isVideo: Boolean) {
+    fun createPostFromPreview(uri: com.mediaviewer.platform.PlatformUri, isVideo: Boolean) {
         _capturePreview.value = null
         openComposePostWithCapturedMedia(if (isVideo) null else uri, if (isVideo) uri else null)
     }
@@ -1679,7 +1639,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun runCatchingComposePost(draft: com.mediaviewer.ui.ComposePostDraft): Result<Any> {
-        val context = getApplication<Application>()
+        val context = platform.context
         val did = _bskyDid.value
         return when (draft.mode) {
             com.mediaviewer.ui.ComposeMode.SINGLE -> {
@@ -1695,14 +1655,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 bskyRepo.createThread(bskyToken, did, context, posts, draft.selfLabels).getOrElse { throw it }
             }
             com.mediaviewer.ui.ComposeMode.TEXTSHOT -> runCatching {
-                val emoji = com.mediaviewer.util.EmojiStore.get(context)
-                emoji.load()
-                val hasEmoji = emoji.containsEmoji(draft.textshotText)
-                val bitmap = com.mediaviewer.util.TextshotRenderer.render(draft.textshotText, emojiBitmap = emoji::bitmapForChar)
-                // Alt text never carries a custom emoji's name — just drop the
-                // token entirely rather than exposing it as a `:name:` shortcode.
-                val altText = emoji.stripEmoji(draft.textshotText)
-                bskyRepo.createTextshotPost(bskyToken, did, bitmap, altText, draft.selfLabels, hasEmoji, postText = draft.textshotPostText).getOrElse { throw it }
+                // Custom emoji are drawn into the image; the alt text never
+                // carries an emoji's name (see AppPlatform.renderTextshot).
+                val shot = platform.renderTextshot(draft.textshotText)
+                bskyRepo.createTextshotPost(bskyToken, did, shot.bitmap, shot.altText, draft.selfLabels, shot.hasEmoji, postText = draft.textshotPostText).getOrElse { throw it }
             }
             com.mediaviewer.ui.ComposeMode.VIDEO -> {
                 val uri = draft.videoUri
@@ -2047,7 +2003,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Each chat as last shown, so reopening it is instant. */
-    private val dmThreadCache = java.util.concurrent.ConcurrentHashMap<String, DmThreadState>()
+    private val dmThreadCache = com.mediaviewer.platform.ConcurrentHashMap<String, DmThreadState>()
 
     /** Group chats: the people who sent [messages], as far as known. */
     private fun groupSenders(messages: List<BskyMessageView>): Map<String, AuthorInfo> =
@@ -2267,9 +2223,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val myDid = _bskyDid.value
         if (myDid.isBlank()) return
         followerScanJob = viewModelScope.launch(Dispatchers.IO) {
-            val scanned = java.util.concurrent.atomic.AtomicInteger(0)
-            val reviewsFound = java.util.concurrent.atomic.AtomicInteger(0)
-            val blogsFound = java.util.concurrent.atomic.AtomicInteger(0)
+            val scanned = com.mediaviewer.platform.AtomicInteger(0)
+            val reviewsFound = com.mediaviewer.platform.AtomicInteger(0)
+            val blogsFound = com.mediaviewer.platform.AtomicInteger(0)
             _followerScanState.value = FollowerScanState.Scanning(0, 0, 0)
 
             suspend fun probe(did: String) {
@@ -2311,7 +2267,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             prefs.setFollowerScanCompleted(true)
             prefs.setFollowerScanCursor(null)
-            prefs.setFollowerScanLastRunMs(System.currentTimeMillis())
+            prefs.setFollowerScanLastRunMs(com.mediaviewer.platform.currentTimeMillis())
             _followerScanCompletedOnce.value = true
             _followerScanState.value = FollowerScanState.Completed(scanned.get(), reviewsFound.get(), blogsFound.get())
 
@@ -2473,7 +2429,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // until the other side catches up too.
                 reviewsBlogsLoaded = reviewsOk && blogsOk
                 runCatching {
-                    prefs.setHubCache(com.mediaviewer.json.StellarJson.default.encodeToString<List<FriendPopfeedReview>>(_friendsReviews.value), com.mediaviewer.json.StellarJson.default.encodeToString<List<FriendLeafletBlog>>(_friendsBlogs.value), System.currentTimeMillis())
+                    prefs.setHubCache(com.mediaviewer.json.StellarJson.default.encodeToString<List<FriendPopfeedReview>>(_friendsReviews.value), com.mediaviewer.json.StellarJson.default.encodeToString<List<FriendLeafletBlog>>(_friendsBlogs.value), com.mediaviewer.platform.currentTimeMillis())
                 }
             } finally {
                 _friendsReviewsLoading.value = false
@@ -2484,7 +2440,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
-    @Volatile private var friendsReloadPending = false
+    @kotlin.concurrent.Volatile private var friendsReloadPending = false
 
     /** Hub refresh bubble — re-checks Mutuals, Reviews, and Blogs against
      *  the network, bypassing every "already loaded" guard. Live sections
@@ -2557,7 +2513,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val hubListLock = Any()
 
     private fun setHubList(uri: String, transform: (HubListState) -> HubListState) {
-        synchronized(hubListLock) {
+        com.mediaviewer.platform.synchronizedCompat(hubListLock) {
             val map = _hubLists.value
             _hubLists.value = map + (uri to transform(map[uri] ?: HubListState()))
         }
@@ -2567,13 +2523,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      *  Kept for 5 minutes unless [force]d. */
     fun loadHubListIfNeeded(uri: String, force: Boolean = false) {
         if (!_bskyLoggedIn.value || uri.isBlank()) return
-        synchronized(hubListLock) {
+        com.mediaviewer.platform.synchronizedCompat(hubListLock) {
             val cur = _hubLists.value[uri]
             if (cur?.loading == true) return
             // Loaded content is kept for 5 minutes; a failure only briefly,
             // so the row can recover by itself.
             val keepFor = if (cur?.failed == true) 15_000L else 5 * 60_000L
-            if (!force && cur != null && System.currentTimeMillis() - cur.loadedAt < keepFor) return
+            if (!force && cur != null && com.mediaviewer.platform.currentTimeMillis() - cur.loadedAt < keepFor) return
             _hubLists.value = _hubLists.value + (uri to (cur ?: HubListState()).copy(loading = true))
         }
         viewModelScope.launch(Dispatchers.IO) {
@@ -2583,11 +2539,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             result.onSuccess { content ->
                 val posts = filterHidden(content.posts)
-                synchronized(hubListLock) { hubMemberFeeds.remove(uri) }
+                com.mediaviewer.platform.synchronizedCompat(hubListLock) { hubMemberFeeds.remove(uri) }
                 setHubList(uri) {
                     HubListState(
                         loading = false, members = content.members, posts = posts,
-                        loadedAt = System.currentTimeMillis(), postsCursor = content.postsCursor,
+                        loadedAt = com.mediaviewer.platform.currentTimeMillis(), postsCursor = content.postsCursor,
                         membersExhausted = content.members.isEmpty()
                     )
                 }
@@ -2601,7 +2557,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val showsPosts = com.mediaviewer.util.HubLayout.rows.any { it.listUri == uri && it.showPosts }
                 if (showsPosts && posts.size < HUB_LIST_BATCH) loadMoreHubList(uri)
             }.onFailure {
-                setHubList(uri) { it.copy(loading = false, failed = true, loadedAt = System.currentTimeMillis()) }
+                setHubList(uri) { it.copy(loading = false, failed = true, loadedAt = com.mediaviewer.platform.currentTimeMillis()) }
             }
         }
     }
@@ -2612,7 +2568,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      *  on further back through the members' own feeds instead. */
     fun loadMoreHubList(uri: String) {
         if (!_bskyLoggedIn.value) return
-        val start: Pair<String?, List<String>> = synchronized(hubListLock) {
+        val start: Pair<String?, List<String>> = com.mediaviewer.platform.synchronizedCompat(hubListLock) {
             val cur = _hubLists.value[uri] ?: return
             if (cur.loading || cur.loadingMore || !cur.hasMore) return
             _hubLists.value = _hubLists.value + (uri to cur.copy(loadingMore = true))
@@ -2662,7 +2618,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      *  members are read (members come sorted that way). */
     private suspend fun loadHubListFromMembers(uri: String, memberDids: List<String>, want: Int) {
         if (memberDids.isEmpty()) { setHubList(uri) { it.copy(membersExhausted = true) }; return }
-        val feeds: Map<String, HubMemberFeed> = synchronized(hubListLock) {
+        val feeds: Map<String, HubMemberFeed> = com.mediaviewer.platform.synchronizedCompat(hubListLock) {
             val m = hubMemberFeeds.getOrPut(uri) { LinkedHashMap() }
             memberDids.take(HUB_LIST_MEMBER_CAP).forEach { d -> m.getOrPut(d) { HubMemberFeed() } }
             LinkedHashMap(m)
@@ -2695,7 +2651,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (res == null) return@forEach
                     anyOk = true
                     val (items, nextCursor) = res
-                    synchronized(hubListLock) {
+                    com.mediaviewer.platform.synchronizedCompat(hubListLock) {
                         // No cursor, or a page that moved nowhere: that's the end.
                         val stalled = items.isEmpty() && nextCursor == feed.cursor
                         feed.started = true
@@ -2713,7 +2669,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val frontier = if (stillReading.isEmpty()) Long.MIN_VALUE
                 else stillReading.maxOf { if (it.started) it.oldest else Long.MAX_VALUE }
             val ready = ArrayList<Pair<Long, MediaItem>>()
-            synchronized(hubListLock) {
+            com.mediaviewer.platform.synchronizedCompat(hubListLock) {
                 feeds.values.forEach { f ->
                     val (take, keep) = f.buffer.partition { it.first >= frontier }
                     ready += take
@@ -2730,7 +2686,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
-        val allDone = synchronized(hubListLock) { feeds.values.all { it.done && it.buffer.isEmpty() } }
+        val allDone = com.mediaviewer.platform.synchronizedCompat(hubListLock) { feeds.values.all { it.done && it.buffer.isEmpty() } }
         if (allDone) setHubList(uri) { it.copy(membersExhausted = true) }
     }
 
@@ -2928,7 +2884,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val mine = msg.reactions.orEmpty().any { it.value == emoji && it.sender?.did == me }
         val optimistic = msg.copy(
             reactions = if (mine) msg.reactions.orEmpty().filterNot { it.value == emoji && it.sender?.did == me }
-            else msg.reactions.orEmpty() + BskyReactionView(emoji, BskyMessageSender(me), java.time.Instant.now().toString())
+            else msg.reactions.orEmpty() + BskyReactionView(emoji, BskyMessageSender(me), com.mediaviewer.platform.nowIsoString())
         )
         fun replace(m: BskyMessageView) {
             val cur = _dmThread.value ?: return
@@ -3420,7 +3376,7 @@ _bskyDid.value          = session.did
             applyAccountSettings(freshTarget.did)
             // Everything is persisted (DataStore's edit{} returns only once
             // the write is on disk) — now cold-start into the new account.
-            com.mediaviewer.RestartActivity.restartApp(getApplication<Application>())
+            platform.restartApp()
             // Only reached if the relaunch couldn't be started.
             _accountSwitching.value = false
         }
@@ -3939,7 +3895,7 @@ _bskyDid.value          = session.did
                 // No Music History at all: nothing to keep watching.
                 if (!inferred.hasHistory || ++checks > 240) return@launch
                 val endsAt = inferred.track?.endsAtMs ?: 0L
-                val wait = if (endsAt > 0L) (endsAt - System.currentTimeMillis()).coerceIn(1_000L, 30_000L) else 30_000L
+                val wait = if (endsAt > 0L) (endsAt - com.mediaviewer.platform.currentTimeMillis()).coerceIn(1_000L, 30_000L) else 30_000L
                 delay(wait)
                 if (_profileOverlay.value?.author?.did != author.did) return@launch
             }
@@ -4065,8 +4021,8 @@ _bskyDid.value          = session.did
      *  same time Rocksky itself caches a Wrapped for), so reopening a
      *  profile shows its Top tabs instantly. */
     private data class MusicYearsCache(val years: List<Int>, val wrapped: Map<Int, com.mediaviewer.model.RockskyWrapped>, val at: Long)
-    private val musicYearsCache = java.util.concurrent.ConcurrentHashMap<String, MusicYearsCache>()
-    private val musicYearsLoading = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+    private val musicYearsCache = com.mediaviewer.platform.ConcurrentHashMap<String, MusicYearsCache>()
+    private val musicYearsLoading = com.mediaviewer.platform.concurrentSetOf<String>()
 
     private fun applyMusicYears(did: String, transform: (ProfileOverlayState) -> ProfileOverlayState) {
         val cur = _profileOverlay.value?.takeIf { it.author.did == did } ?: return
@@ -4078,7 +4034,7 @@ _bskyDid.value          = session.did
      *  a few at a time, newest first; a year with no plays gets no tab.
      *  The Wrapped data is kept, so opening a Top tab afterwards is instant. */
     private fun loadMusicYears(did: String) {
-        val cached = musicYearsCache[did]?.takeIf { System.currentTimeMillis() - it.at < 30 * 60_000L }
+        val cached = musicYearsCache[did]?.takeIf { com.mediaviewer.platform.currentTimeMillis() - it.at < 30 * 60_000L }
         if (cached != null) {
             applyMusicYears(did) { it.copy(musicYears = cached.years, musicWrapped = cached.wrapped + it.musicWrapped) }
             return
@@ -4088,7 +4044,7 @@ _bskyDid.value          = session.did
             try {
                 val candidates = rockskyRepo.getCandidateYears(did)
                 val gate = Semaphore(3)
-                val found = java.util.concurrent.ConcurrentHashMap<Int, com.mediaviewer.model.RockskyWrapped>()
+                val found = com.mediaviewer.platform.ConcurrentHashMap<Int, com.mediaviewer.model.RockskyWrapped>()
                 coroutineScope {
                     candidates.map { year ->
                         async {
@@ -4107,7 +4063,7 @@ _bskyDid.value          = session.did
                     }.awaitAll()
                 }
                 if (found.isNotEmpty()) {
-                    musicYearsCache[did] = MusicYearsCache(found.keys.sortedDescending(), HashMap(found), System.currentTimeMillis())
+                    musicYearsCache[did] = MusicYearsCache(found.keys.sortedDescending(), HashMap(found), com.mediaviewer.platform.currentTimeMillis())
                 }
             } finally {
                 musicYearsLoading.remove(did)
@@ -5958,11 +5914,7 @@ _bskyDid.value          = session.did
      *  icon of their own in this app (they show the generic icon), so only list
      *  avatars need prefetching. */
     private fun prefetchListAvatars(lists: List<BskyList>) {
-        val context = getApplication<Application>()
-        val loader = context.imageLoader
-        lists.mapNotNull { it.avatar }.distinct().forEach { url ->
-            loader.enqueue(ImageRequest.Builder(context).data(url).build())
-        }
+        platform.preloadImages(lists.mapNotNull { it.avatar }.distinct())
     }
 
     /** Prefetch user's lists and starter packs in the background.
@@ -5994,8 +5946,8 @@ _bskyDid.value          = session.did
     private var listMembershipJob: Job? = null
 
     /** Memberships looked up recently, by account (did -> time, list URI -> item URI). */
-    private val listMembershipCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Map<String, String>>>()
-    private val listMembershipFetches = java.util.concurrent.ConcurrentHashMap<String, Job>()
+    private val listMembershipCache = com.mediaviewer.platform.ConcurrentHashMap<String, Pair<Long, Map<String, String>>>()
+    private val listMembershipFetches = com.mediaviewer.platform.ConcurrentHashMap<String, Job>()
 
     /** Starts looking up which of your lists [did] is on before Add To is
      *  even opened (the More menu or a profile page opening), so the
@@ -6003,7 +5955,7 @@ _bskyDid.value          = session.did
     fun prefetchListMemberships(did: String) {
         if (!_bskyLoggedIn.value || did.isBlank()) return
         val cached = listMembershipCache[did]
-        if (cached != null && System.currentTimeMillis() - cached.first < 5 * 60_000L) return
+        if (cached != null && com.mediaviewer.platform.currentTimeMillis() - cached.first < 5 * 60_000L) return
         fetchListMemberships(did)
     }
 
@@ -6011,7 +5963,7 @@ _bskyDid.value          = session.did
         listMembershipFetches[did]?.takeIf { it.isActive }?.let { return it }
         val job = viewModelScope.launch(Dispatchers.IO) {
             bskyRepo.getListMemberships(bskyToken, _bskyDid.value, did).onSuccess { map ->
-                listMembershipCache[did] = System.currentTimeMillis() to map
+                listMembershipCache[did] = com.mediaviewer.platform.currentTimeMillis() to map
                 if (_listPickerTargetDid.value == did) _listMemberships.value = map
             }
             if (_listPickerTargetDid.value == did) _listMembershipsLoading.value = false
@@ -6061,7 +6013,7 @@ _bskyDid.value          = session.did
                 }
             }
             failed?.let { _errorMessage.value = it }
-            listMembershipCache[targetDid] = System.currentTimeMillis() to _listMemberships.value
+            listMembershipCache[targetDid] = com.mediaviewer.platform.currentTimeMillis() to _listMemberships.value
             // Keep the member counts under each list honest.
             if (failed == null) {
                 val delta = if (removing) -1 else 1
@@ -6116,12 +6068,12 @@ _bskyDid.value          = session.did
      *  or "BOTH" (a list and a starter pack under the same name, which Add
      *  To's Both tab then treats as one). The new entry appears at the top
      *  of its tab, ready for its + button. */
-    fun createPickerList(kind: String, name: String, description: String, coverUri: android.net.Uri?, onDone: (String?) -> Unit) {
+    fun createPickerList(kind: String, name: String, description: String, coverUri: com.mediaviewer.platform.PlatformUri?, onDone: (String?) -> Unit) {
         val clean = name.trim()
         if (clean.isBlank() || _creatingPickerList.value) return
         _creatingPickerList.value = true
         viewModelScope.launch(Dispatchers.IO) {
-            val context = getApplication<Application>()
+            val context = platform.context
             val me = _bskyDid.value
             val result = runCatching {
                 if (kind == "LISTS" || kind == "MODLISTS" || kind == "BOTH") {
@@ -6211,13 +6163,13 @@ _bskyDid.value          = session.did
         if (item.isTextOnly) return
         if (item.mediaGroup.size > 1) {
             item.mediaGroup.forEachIndexed { i, img ->
-                GifDownloadWorker.enqueue(getApplication(), img.mediaUrl, false, "gif_${item.id}_$i")
+                platform.enqueueGifDownload(img.mediaUrl, false, "gif_${item.id}_$i")
             }
         } else {
             val sourceUrl = if (item.isVideo) (item.videoPlaylistUrl.takeUnless { it.isNullOrBlank() } ?: item.mediaUrl) else item.mediaUrl
             val did = item.author.did.takeIf { item.isVideo && it.isNotBlank() }
             val cid = item.videoBlobCid.takeIf { item.isVideo }
-            GifDownloadWorker.enqueue(getApplication(), sourceUrl, item.isVideo, "gif_${item.id}", blobDid = did, blobCid = cid)
+            platform.enqueueGifDownload(sourceUrl, item.isVideo, "gif_${item.id}", blobDid = did, blobCid = cid)
         }
         updateCurrentItem { it.copy(isGifDownloaded = true) }
     }
@@ -6228,20 +6180,14 @@ _bskyDid.value          = session.did
     // sheet opens), so swiping up shows them straight away with no spinner.
     // A small per-post cache keeps swiping back and forth free.
     private class CachedComments(val atMs: Long, val list: List<CommentItem>)
-    // Access-ordered LRU with manual eviction (subclassing LinkedHashMap
-    // crashes the Kotlin compiler in a multiplatform module).
-    private val commentsCache = LinkedHashMap<String, CachedComments>(32, 0.75f, true)
-    @Volatile private var commentsShownFor: String? = null
+    // Least-recently-used, at most 30 posts.
+    private val commentsCache = com.mediaviewer.util.LruMap<String, CachedComments>(30)
+    @kotlin.concurrent.Volatile private var commentsShownFor: String? = null
     private fun commentKey(item: MediaItem) = "${_appMode.value}:${item.id}"
-    private fun cachedComments(key: String): CachedComments? = synchronized(commentsCache) { commentsCache[key] }
+    private fun cachedComments(key: String): CachedComments? = com.mediaviewer.platform.synchronizedCompat(commentsCache) { commentsCache[key] }
     private fun putCachedComments(key: String, list: List<CommentItem>) {
-        synchronized(commentsCache) {
-            commentsCache[key] = CachedComments(System.currentTimeMillis(), list)
-            if (commentsCache.size > 30) {
-                val eldest = commentsCache.entries.iterator()
-                eldest.next()
-                eldest.remove()
-            }
+        com.mediaviewer.platform.synchronizedCompat(commentsCache) {
+            commentsCache[key] = CachedComments(com.mediaviewer.platform.currentTimeMillis(), list)
         }
     }
 
@@ -6302,7 +6248,7 @@ _bskyDid.value          = session.did
         val item = currentItem.value ?: return
         showCommentsFor(item)
         val cached = cachedComments(commentKey(item))
-        if (force || cached == null || System.currentTimeMillis() - cached.atMs > 120_000) fetchComments(item)
+        if (force || cached == null || com.mediaviewer.platform.currentTimeMillis() - cached.atMs > 120_000) fetchComments(item)
     }
 
     // Item 20: replying to a specific comment now actually threads the reply
@@ -6444,7 +6390,7 @@ _bskyDid.value          = session.did
 
     private fun enqueueDownload(url: String, uniqueId: String, isVideo: Boolean = false) {
         val (finalUrl, filename, mimeType) = urlToDownloadInfo(url, uniqueId, isVideo)
-        DownloadWorker.enqueue(getApplication(), finalUrl, filename, mimeType, uniqueId)
+        platform.enqueueDownload(finalUrl, filename, mimeType, uniqueId)
     }
 
     // Bug fix (item 5): for Bluesky videos, item.mediaUrl only ever holds the
@@ -6464,7 +6410,7 @@ _bskyDid.value          = session.did
             if (did.isNotBlank() && !cid.isNullOrBlank()) {
                 // Real fix: fetch the original video blob directly, instead of
                 // saving the HLS playlist manifest as a fake .mp4.
-                DownloadWorker.enqueueVideoBlob(getApplication(), did, cid, item.id)
+                platform.enqueueVideoBlobDownload(did, cid, item.id)
             } else {
                 // Fallback for sources that don't have a resolvable blob (e.g.
                 // e621, whose "playlist" URL already points at a real mp4 file).
@@ -6488,7 +6434,7 @@ _bskyDid.value          = session.did
         val datasetBytes: Long = 0L,
         val isRunning: Boolean = false,
         val isComplete: Boolean = false,
-        val modelState: TaggerModelManager.State = TaggerModelManager.State.NotDownloaded,
+        val modelState: TaggerState = TaggerState.NotDownloaded,
         val errorMessage: String? = null,
         // Tagging page redesign (item 3): the post currently being fetched/
         // tagged, straight from TaggingRepository.Progress — drives the
@@ -6539,8 +6485,8 @@ _bskyDid.value          = session.did
     // Item 4 (Import/Export): every dataset imported on this device, for
     // Settings' list under the Import/Export buttons — refreshed after
     // every import/delete (see refreshImportedDatasets below).
-    private val _importedDatasets = MutableStateFlow<List<TagDatabase.DatasetInfo>>(emptyList())
-    val importedDatasets: StateFlow<List<TagDatabase.DatasetInfo>> = _importedDatasets
+    private val _importedDatasets = MutableStateFlow<List<TagDatasetInfo>>(emptyList())
+    val importedDatasets: StateFlow<List<TagDatasetInfo>> = _importedDatasets
 
     // Item 4 (Import/Export): human-readable status for the last
     // export/import attempt — surfaced as a small toast-style message
@@ -6578,21 +6524,21 @@ _bskyDid.value          = session.did
         _taggingUiState.value = TaggingUiState(
             scanned = _taggingUiState.value.scanned, tagged = _taggingUiState.value.tagged,
             datasetBytes = _taggingUiState.value.datasetBytes,
-            isRunning = true, modelState = TaggerModelManager.State.Downloading(0, 0)
+            isRunning = true, modelState = TaggerState.Downloading(0, 0)
         )
         modelDownloadJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 taggingRepo.downloadModel { state ->
                     _taggingUiState.value = _taggingUiState.value.copy(
                         modelState = state,
-                        isRunning = state is TaggerModelManager.State.Downloading,
-                        errorMessage = (state as? TaggerModelManager.State.Failed)?.message
+                        isRunning = state is TaggerState.Downloading,
+                        errorMessage = (state as? TaggerState.Failed)?.message
                     )
-                    if (state is TaggerModelManager.State.Ready) {
+                    if (state is TaggerState.Ready) {
                         _taggerModelReady.value = true
                         _taggingOverlayOpen.value = false
                         _taggingUiState.value = _taggingUiState.value.copy(
-                            isRunning = false, modelState = TaggerModelManager.State.Ready, errorMessage = null
+                            isRunning = false, modelState = TaggerState.Ready, errorMessage = null
                         )
                     }
                 }
@@ -6636,7 +6582,7 @@ _bskyDid.value          = session.did
     private val _likeTagPending = MutableStateFlow(0)
     val likeTagPending: StateFlow<Int> = _likeTagPending
     private val likeTagQueue = kotlinx.coroutines.channels.Channel<MediaItem>(kotlinx.coroutines.channels.Channel.UNLIMITED)
-    private val likeTagQueued = java.util.Collections.synchronizedSet(HashSet<String>())
+    private val likeTagQueued = com.mediaviewer.platform.concurrentSetOf<String>()
     private val likeTagWorker = viewModelScope.launch(Dispatchers.IO) {
         for (item in likeTagQueue) {
             // Never overlap the full "Tag all liked posts" pass either.
@@ -6685,11 +6631,11 @@ _bskyDid.value          = session.did
                     isRunning = progress.isRunning,
                     isComplete = progress.isComplete,
                     modelState = progress.modelState,
-                    errorMessage = (progress.modelState as? TaggerModelManager.State.Failed)?.message,
+                    errorMessage = (progress.modelState as? TaggerState.Failed)?.message,
                     currentItem = progress.currentItem
                 )
                 if (progress.tagged > 0) _hasTaggedDataset.value = true
-                if (progress.modelState is TaggerModelManager.State.Ready) _taggerModelReady.value = true
+                if (progress.modelState is TaggerState.Ready) _taggerModelReady.value = true
             }
         }
     }
@@ -6761,7 +6707,7 @@ _bskyDid.value          = session.did
     val datasetExportState: StateFlow<DatasetExportState> = _datasetExportState
     private var datasetExportResetJob: Job? = null
 
-    fun exportDataset(name: String, uri: android.net.Uri) {
+    fun exportDataset(name: String, uri: com.mediaviewer.platform.PlatformUri) {
         if (_datasetExportState.value is DatasetExportState.Working) return
         datasetExportResetJob?.cancel()
         _datasetExportState.value = DatasetExportState.Working("Gathering tagged posts…")
@@ -6771,15 +6717,13 @@ _bskyDid.value          = session.did
                 _datasetExportState.value = DatasetExportState.Working("Writing ${posts.size} posts…", posts.size)
                 val file = DatasetFile(
                     name = name.ifBlank { "Untitled Dataset" },
-                    exportedAt = System.currentTimeMillis(),
+                    exportedAt = com.mediaviewer.platform.currentTimeMillis(),
                     posts = posts.map { p ->
                         DatasetFilePost(p.postUri, p.cid, p.mediaUrl, p.tags.map { (tag, conf) -> DatasetFileTag(tag, conf) })
                     }
                 )
                 val json = com.mediaviewer.json.StellarJson.default.encodeToString(DatasetFile.serializer(), file)
-                getApplication<Application>().contentResolver.openOutputStream(uri)?.use { out ->
-                    out.write(json.toByteArray(Charsets.UTF_8))
-                } ?: throw java.io.IOException("Couldn't open the chosen file for writing")
+                platform.writeTextToUri(uri, json)
                 _datasetExportState.value = DatasetExportState.Done(posts.size)
                 showToast("Dataset exported (${posts.size} posts)")
             } catch (e: Exception) {
@@ -6800,18 +6744,18 @@ _bskyDid.value          = session.did
      *  TaggingRepository.importDataset, which is what actually keeps it
      *  separate from every other dataset already on the device (see that
      *  method's own doc comment). */
-    fun importDatasetFromUri(uri: android.net.Uri) {
+    fun importDatasetFromUri(uri: com.mediaviewer.platform.PlatformUri) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val json = getApplication<Application>().contentResolver.openInputStream(uri)?.use { it.reader(Charsets.UTF_8).readText() }
-                    ?: throw java.io.IOException("Couldn't open the chosen file for reading")
+                val json = platform.readTextFromUri(uri)
+                    ?: throw com.mediaviewer.platform.IOException("Couldn't open the chosen file for reading")
                 val file = runCatching { com.mediaviewer.json.StellarJson.default.decodeFromString(DatasetFile.serializer(), json) }.getOrNull()
-                    ?: throw java.io.IOException("That file isn't a dataset export")
-                if (file.posts.isEmpty()) throw java.io.IOException("That dataset export is empty")
+                    ?: throw com.mediaviewer.platform.IOException("That file isn't a dataset export")
+                if (file.posts.isEmpty()) throw com.mediaviewer.platform.IOException("That dataset export is empty")
                 taggingRepo.importDataset(
                     name = file.name.ifBlank { "Untitled Dataset" },
                     posts = file.posts.map { p ->
-                        TagDatabase.ExportedPost(p.postUri, p.cid, p.mediaUrl, p.tags.map { it.name to it.confidence })
+                        TagExportedPost(p.postUri, p.cid, p.mediaUrl, p.tags.map { it.name to it.confidence })
                     }
                 )
                 refreshImportedDatasets()
@@ -6843,7 +6787,7 @@ _bskyDid.value          = session.did
     fun dismissTaggingOverlay() {
         if (_taggerModelDownloading.value) {
             modelDownloadJob?.cancel()
-            _taggingUiState.value = _taggingUiState.value.copy(isRunning = false, modelState = TaggerModelManager.State.NotDownloaded, errorMessage = null)
+            _taggingUiState.value = _taggingUiState.value.copy(isRunning = false, modelState = TaggerState.NotDownloaded, errorMessage = null)
         }
         if (_taggingUiState.value.isRunning) taggingRepo.cancel()
         _taggingOverlayOpen.value = false
@@ -6916,7 +6860,7 @@ _bskyDid.value          = session.did
     /** Item 2: blank query browses everything tagged so far, most recent
      *  first, instead of an empty "type to search" state — a search query
      *  narrows that same list by tag. */
-    private val likedSearchGeneration = java.util.concurrent.atomic.AtomicInteger(0)
+    private val likedSearchGeneration = com.mediaviewer.platform.AtomicInteger(0)
 
     private suspend fun performLikedTagSearch(query: String) {
         // Only the most recently started search may publish results — an
@@ -7035,14 +6979,14 @@ _bskyDid.value          = session.did
             val state = liveLinkState.value
             val url = if (platform == com.mediaviewer.model.LiveNowPlatform.TWITCH) state.twitchUrl else state.youtubeUrl
             if (url.isNullOrBlank()) return@launch
-            com.mediaviewer.util.LiveLinkManager.goLive(getApplication(), platform, url)
+            this@MainViewModel.platform.goLive(platform, url)
                 .onFailure { showToast("Couldn't start Live Link: ${it.message}") }
         }
     }
 
     fun endLiveLink() {
         viewModelScope.launch {
-            com.mediaviewer.util.LiveLinkManager.endLive(getApplication())
+            platform.endLive()
                 .onFailure { showToast("Couldn't end Live Link: ${it.message}") }
         }
     }
@@ -7055,12 +6999,7 @@ _bskyDid.value          = session.did
      *  UI for "drag it from the widget picker yourself" since that picker
      *  entry point is intentionally what this feature avoids relying on. */
     fun createLiveLinkWidget() {
-        val context: Context = getApplication()
-        val appWidgetManager = android.appwidget.AppWidgetManager.getInstance(context)
-        val provider = android.content.ComponentName(context, com.mediaviewer.widget.LiveLinkWidgetProvider::class.java)
-        if (appWidgetManager.isRequestPinAppWidgetSupported) {
-            appWidgetManager.requestPinAppWidget(provider, null, null)
-        } else {
+        if (!platform.requestPinLiveLinkWidget()) {
             showToast("Your launcher doesn't support pinning widgets from apps")
         }
     }
@@ -7069,7 +7008,7 @@ _bskyDid.value          = session.did
 
     private fun showToast(msg: String) {
         viewModelScope.launch(Dispatchers.Main) {
-            Toast.makeText(getApplication(), msg, Toast.LENGTH_SHORT).show()
+            platform.toast(msg)
         }
     }
 }

@@ -260,7 +260,7 @@ fun MainFeedScreen(
     onLocallyTagAllLiked: () -> Unit = {},
     onDeleteTaggedDatabase: () -> Unit = {},
     settingsExtras: SettingsExtras = SettingsExtras(),
-    importedDatasets: List<com.mediaviewer.tagging.TagDatabase.DatasetInfo> = emptyList(),
+    importedDatasets: List<com.mediaviewer.tagging.TagDatasetInfo> = emptyList(),
     onExportDataset: (String, android.net.Uri) -> Unit = { _, _ -> },
     onImportDataset: (android.net.Uri) -> Unit = {},
     onDeleteImportedDataset: (String) -> Unit = {},

@@ -115,7 +115,7 @@ fun TaggingOverlay(
                     }
                 }
             }
-            modelState is TaggerModelManager.State.Downloading -> {
+            modelState is TaggerState.Downloading -> {
                 CenteredCard(liquidGlass, profileTint, backdrop) {
                     CircularProgressIndicator(Modifier.size(28.dp), color = Color.White, strokeWidth = 2.dp)
                     Spacer(Modifier.height(14.dp))

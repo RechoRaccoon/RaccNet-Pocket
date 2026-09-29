@@ -148,8 +148,6 @@ import kotlinx.coroutines.withContext
 private const val POST_CHAR_LIMIT = 300
 private const val MAX_IMAGES = 10
 
-enum class ComposeMode { SINGLE, THREAD, TEXTSHOT, VIDEO, REVIEW, BLOG }
-
 /** The three mutually-exclusive "Adult Content" self-labels from Bluesky's
  *  own content-warning menu, in Bluesky's order. [value] is the exact
  *  self-label string Bluesky's moderation system expects; [description] is
@@ -164,13 +162,6 @@ enum class AdultContentLabel(val value: String, val title: String, val descripti
 private const val GRAPHIC_MEDIA_LABEL = "graphic-media"
 private const val GRAPHIC_MEDIA_DESCRIPTION = "Media that may be disturbing or inappropriate for some audiences."
 
-/** One post's worth of content inside a [ComposeMode.THREAD] thread. */
-data class ThreadPostDraft(
-    val text: String,
-    val images: List<Uri> = emptyList(),
-    val video: Uri? = null
-)
-
 /** Item 2: one thread post's *live editing* state — its text field value
  *  plus whatever media has been attached to that post specifically. Each
  *  post in a thread carries its own up-to-[MAX_IMAGES]-images-or-one-video
@@ -181,41 +172,6 @@ private data class ThreadPostState(
     val text: TextFieldValue,
     val images: List<Uri> = emptyList(),
     val video: Uri? = null
-)
-
-/** Everything the composer collected, handed to the caller on "Post". */
-data class ComposePostDraft(
-    val mode: ComposeMode,
-    /** SINGLE: exactly one entry. THREAD: two or more, in posting order.
-     *  REVIEW: exactly one entry, carrying just the typed review text (no
-     *  images — see reviewTarget's own doc comment below for why). */
-    val posts: List<ThreadPostDraft> = emptyList(),
-    val videoUri: Uri? = null,
-    val videoThumbnailUri: Uri? = null,
-    val videoTitle: String = "",
-    val videoDescription: String = "",
-    val textshotText: String = "",
-    /** Textshot mode: the post's own (regular Bluesky) text, separate from
-     *  the text rendered into the image — for hashtags, a caption… */
-    val textshotPostText: String = "",
-    // Item 10: the title being reviewed, and the picked star rating on
-    // Popfeed's own native 0–10 half-star scale (so 0 = unrated, 10 = full
-    // 5 stars) — both only populated for ComposeMode.REVIEW. Image
-    // attach/Textshot/Blog/thread are greyed out for the whole lifetime of
-    // a review draft (see ComposePostScreen's reviewTarget param), so the
-    // review itself is always exactly one plain-text post.
-    val reviewTarget: TitleSearchResult? = null,
-    val reviewRating: Int = 0,
-    // Item 12: mirrors social.popfeed.feed.review's own "containsSpoilers"
-    // boolean (see review.json) — set from the composer's "Mark as Spoiler"
-    // toggle, only meaningful for ComposeMode.REVIEW.
-    val reviewContainsSpoilers: Boolean = false,
-    // Bluesky self-label values picked via the composer's "Labels" popup
-    // (e.g. "sexual", "nudity", "porn", "graphic-media"). Empty = no labels.
-    // Applied to every post the draft produces (all posts of a thread).
-    val selfLabels: List<String> = emptyList(),
-    // Item 12: ComposeMode.BLOG — the whole blog (title, description, rows).
-    val blog: com.mediaviewer.model.BlogDraft? = null
 )
 
 /** Item 12: one live row of the blog editor. [id] is stable for the row's

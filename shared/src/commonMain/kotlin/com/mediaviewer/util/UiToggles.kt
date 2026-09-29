@@ -1,7 +1,8 @@
 package com.mediaviewer.util
 
-import android.content.Context
-import android.content.SharedPreferences
+import com.mediaviewer.platform.PlatformContext
+import com.mediaviewer.platform.SharedPreferences
+import com.mediaviewer.platform.sharedPreferences
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -136,9 +137,9 @@ object UiToggles {
     /** Whether any loading transition/screen plays at all. */
     val loadingScreens: Boolean get() = loadingAnimation != LoadingAnimation.NONE
 
-    fun init(context: Context) {
+    fun init(context: PlatformContext) {
         if (prefs != null) return
-        val p = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val p = context.sharedPreferences(PREFS)
         prefs = p
         debugOverlay = p.getBoolean(KEY_DEBUG_OVERLAY, false)
         showTaggingStatus = p.getBoolean(KEY_SHOW_TAGGING_STATUS, true)

@@ -68,3 +68,6 @@ expect fun utcYearOf(epochMillis: Long): Int
 
 /** ConcurrentHashMap.newKeySet() on Android. */
 expect fun <T> concurrentSetOf(): MutableSet<T>
+
+/** java.util.Locale.getDefault().language on Android ("en", "de", …). */
+expect fun defaultLanguageCode(): String

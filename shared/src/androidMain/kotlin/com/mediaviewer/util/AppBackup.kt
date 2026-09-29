@@ -169,7 +169,7 @@ object AppBackup {
             val posts = arr.mapNotNull { el ->
                 runCatching {
                     val o = el.asJsonObject
-                    TagDatabase.ExportedPost(
+                    TagExportedPost(
                         postUri = o.get("u").asString,
                         cid = o.get("c")?.asString ?: "",
                         mediaUrl = o.get("m")?.asString ?: "",

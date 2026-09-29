@@ -1,13 +1,14 @@
 package com.mediaviewer.util
 
-import android.content.Context
-import android.content.SharedPreferences
+import com.mediaviewer.platform.PlatformContext
+import com.mediaviewer.platform.SharedPreferences
+import com.mediaviewer.platform.sharedPreferences
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import com.google.gson.JsonArray
-import com.google.gson.JsonObject
-import com.google.gson.JsonParser
+import com.mediaviewer.json.JsonArray
+import com.mediaviewer.json.JsonObject
+import com.mediaviewer.json.JsonParser
 
 /**
  * Settings → Customize Hub: which rows the Hub shows, in what order, plus any
@@ -72,9 +73,9 @@ object HubLayout {
     /** Whose layout [rows] currently is. */
     private var accountDid: String = ""
 
-    fun init(context: Context) {
+    fun init(context: PlatformContext) {
         if (prefs != null) return
-        val p = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val p = context.sharedPreferences(PREFS)
         prefs = p
         accountDid = p.getString(KEY_ACTIVE_DID, null) ?: ""
         rows = normalize(parse(readFor(p, accountDid)))

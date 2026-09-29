@@ -159,7 +159,6 @@ private fun MediaKindFilter.matches(item: MediaItem) = when (this) {
 // Profile "Posts" tab redesign: replaces the old MEDIA/TEXT_POSTS pair of
 // top-level tabs with a single POSTS tab and this five-way sub-filter row.
 // Each option gets its own distinct layout — see PostsLayoutRows below.
-enum class PostKindFilter { ALL, IMAGES, TEXT_POSTS, HORIZONTAL_VIDEOS, VERTICAL_VIDEOS }
 private fun PostKindFilter.label() = when (this) {
     PostKindFilter.ALL               -> "All"
     PostKindFilter.IMAGES             -> "Images"
@@ -167,50 +166,9 @@ private fun PostKindFilter.label() = when (this) {
     PostKindFilter.HORIZONTAL_VIDEOS  -> "Horizontal Videos"
     PostKindFilter.VERTICAL_VIDEOS    -> "Vertical Videos"
 }
-fun PostKindFilter.matches(item: MediaItem) = when (this) {
-    PostKindFilter.ALL              -> true
-    PostKindFilter.IMAGES            -> !item.isVideo && !item.isTextOnly
-    PostKindFilter.TEXT_POSTS        -> item.isTextOnly
-    PostKindFilter.HORIZONTAL_VIDEOS -> item.isHorizontalVideo
-    PostKindFilter.VERTICAL_VIDEOS   -> item.isVerticalVideo
-}
-
 // Not private: Search's Titles tab (SearchOverlay.kt) reuses this exact
 // enum/label/bucketing for its own sub-filter row, per spec ("subtabs...
 // just like in the profile tabs").
-enum class ReviewKindFilter { ALL, MOVIES, TV, GAMES, MUSIC, BOOKS }
-fun ReviewKindFilter.label() = when (this) {
-    ReviewKindFilter.ALL -> "All"; ReviewKindFilter.MOVIES -> "Movies"; ReviewKindFilter.TV -> "TV"
-    ReviewKindFilter.GAMES -> "Games"; ReviewKindFilter.MUSIC -> "Music"; ReviewKindFilter.BOOKS -> "Books"
-}
-
-/** Buckets a raw creativeWorkType string (e.g. "movie", "tv_show",
- *  "video_game", "album") into one of the four sub-filter categories.
- *  Keyword-contains matching, same defensive style as the rest of this
- *  record's parsing (see BlueskyRepository.getPopfeedBacklog) — Popfeed's
- *  exact set of type strings isn't fully documented, so this is deliberately
- *  loose rather than an exact-match enum. Null/unrecognized categories only
- *  show up under "All", never hidden entirely. */
-fun categoryBucket(raw: String?): ReviewKindFilter? {
-    val v = raw?.lowercase() ?: return null
-    return when {
-        v.contains("movie") || v.contains("film") -> ReviewKindFilter.MOVIES
-        v.contains("tv") || v.contains("show") || v.contains("series") || v.contains("episode") -> ReviewKindFilter.TV
-        v.contains("game") -> ReviewKindFilter.GAMES
-        v.contains("album") || v.contains("music") || v.contains("song") || v.contains("track") -> ReviewKindFilter.MUSIC
-        // Titles feature: books, added alongside the Titles tab per spec
-        // ("which btw need the 'Books' options at the end") — keyed off the
-        // same loose keyword-contains matching as every other bucket here.
-        v.contains("book") || v.contains("novel") || v.contains("comic") || v.contains("literature") -> ReviewKindFilter.BOOKS
-        else -> null
-    }
-}
-fun ReviewKindFilter.matchesReview(review: PopfeedReview) = this == ReviewKindFilter.ALL || categoryBucket(review.mediaCategory) == this
-fun ReviewKindFilter.matchesBacklog(item: PopfeedBacklogItem) = this == ReviewKindFilter.ALL || categoryBucket(item.mediaCategory) == this
-// Titles feature: same bucketing, applied to a search result instead of a
-// Popfeed backlog/review record.
-fun ReviewKindFilter.matchesTitle(result: com.mediaviewer.model.TitleSearchResult) =
-    this == ReviewKindFilter.ALL || categoryBucket(result.mediaCategory) == this
 
 // ─── Profile grid-mode cycling (adjustment #2/#5) ───────────────────────────
 // The interaction bar's Grid button now cycles through three layouts instead

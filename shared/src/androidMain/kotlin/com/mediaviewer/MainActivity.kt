@@ -154,7 +154,15 @@ class MainActivity : ComponentActivity() {
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean =
         com.mediaviewer.util.HardwareKeys.dispatch(event) || super.dispatchKeyEvent(event)
 
-    private val viewModel: MainViewModel by viewModels()
+    // MainViewModel is shared with iOS; on Android it runs through
+    // AndroidAppPlatform (haptics, toasts, downloads, tagging, widgets…).
+    private val viewModel: MainViewModel by viewModels {
+        androidx.lifecycle.viewmodel.viewModelFactory {
+            androidx.lifecycle.viewmodel.initializer {
+                MainViewModel { bsky, e621 -> com.mediaviewer.app.AndroidAppPlatform(application, bsky, e621) }
+            }
+        }
+    }
 
     /** A bsky.app/profile/<actor> link Stellar was opened with, waiting to
      *  be opened once the app (and your login) is ready. */

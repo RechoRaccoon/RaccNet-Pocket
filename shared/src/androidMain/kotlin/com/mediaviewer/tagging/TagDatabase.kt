@@ -1,3 +1,4 @@
+// check:jvm
 package com.mediaviewer.tagging
 
 import android.content.Context
@@ -268,27 +269,16 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
         return results
     }
 
-    /** One row of the "imported datasets" list Settings shows under the
-     *  Import/Export buttons — [postCount] is computed live off liked_media
-     *  rather than stored, so it can never drift out of sync with reality
-     *  (e.g. if a future feature ever lets someone delete individual posts). */
-    data class DatasetInfo(val id: String, val name: String, val importedAt: Long, val postCount: Int)
 
-    /** One post as read back out for [TaggingRepository.exportAllPosts] to
-     *  serialize to JSON — a plain snapshot, not tied to any one dataset
-     *  (export always bundles *everything* currently on the device, local +
-     *  every imported dataset together, per the request that Export produces
-     *  one shareable backup of "their dataset" as a whole). */
-    data class ExportedPost(val postUri: String, val cid: String, val mediaUrl: String, val tags: List<Pair<String, Float>>)
 
     /** Every post currently in the database, across every dataset — the
      *  source data for an Export. */
-    fun allPostsForExport(): List<ExportedPost> {
-        val posts = LinkedHashMap<String, ExportedPost>()
+    fun allPostsForExport(): List<TagExportedPost> {
+        val posts = LinkedHashMap<String, TagExportedPost>()
         readableDatabase.rawQuery("SELECT post_uri, cid, media_url FROM liked_media", null).use { cursor ->
             while (cursor.moveToNext()) {
                 val uri = cursor.getString(0)
-                posts[uri] = ExportedPost(uri, cursor.getString(1), cursor.getString(2), emptyList())
+                posts[uri] = TagExportedPost(uri, cursor.getString(1), cursor.getString(2), emptyList())
             }
         }
         val tagsByPost = HashMap<String, MutableList<Pair<String, Float>>>()
@@ -316,7 +306,7 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
      *  between two people's datasets is expected and shouldn't block the
      *  rest of the import or silently reassign an existing post to a
      *  different dataset_id. */
-    fun importDataset(name: String, posts: List<ExportedPost>): DatasetInfo {
+    fun importDataset(name: String, posts: List<TagExportedPost>): TagDatasetInfo {
         val id = java.util.UUID.randomUUID().toString()
         val importedAt = System.currentTimeMillis()
         val db = writableDatabase
@@ -356,21 +346,21 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
                 insertStmt.close()
             }
             db.setTransactionSuccessful()
-            return DatasetInfo(id, name, importedAt, inserted)
+            return TagDatasetInfo(id, name, importedAt, inserted)
         } finally {
             db.endTransaction()
         }
     }
 
     /** Settings → Data → Export: only the on-device (main/default) dataset. */
-    fun localPostsForExport(): List<ExportedPost> {
-        val posts = LinkedHashMap<String, ExportedPost>()
+    fun localPostsForExport(): List<TagExportedPost> {
+        val posts = LinkedHashMap<String, TagExportedPost>()
         readableDatabase.rawQuery(
             "SELECT post_uri, cid, media_url FROM liked_media WHERE dataset_id = ?", arrayOf(LOCAL_DATASET_ID)
         ).use { cursor ->
             while (cursor.moveToNext()) {
                 val uri = cursor.getString(0)
-                posts[uri] = ExportedPost(uri, cursor.getString(1), cursor.getString(2), emptyList())
+                posts[uri] = TagExportedPost(uri, cursor.getString(1), cursor.getString(2), emptyList())
             }
         }
         val tagsByPost = HashMap<String, MutableList<Pair<String, Float>>>()
@@ -388,7 +378,7 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
     /** Settings → Data → Import: [posts] BECOME the on-device (main) dataset
      *  — the old local rows are replaced, not merged, and nothing is added
      *  as a separate imported dataset. Imported datasets are left alone. */
-    fun replaceLocalDataset(posts: List<ExportedPost>) {
+    fun replaceLocalDataset(posts: List<TagExportedPost>) {
         val db = writableDatabase
         val now = System.currentTimeMillis()
         db.beginTransaction()
@@ -426,8 +416,8 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
     /** Settings' imported-datasets list. Only ever contains entries created
      *  by [importDataset] — the local on-device dataset isn't listed here
      *  (see the `datasets` table's own doc comment in [onCreate]). */
-    fun listImportedDatasets(): List<DatasetInfo> {
-        val results = mutableListOf<DatasetInfo>()
+    fun listImportedDatasets(): List<TagDatasetInfo> {
+        val results = mutableListOf<TagDatasetInfo>()
         readableDatabase.rawQuery(
             """
             SELECT d.id, d.name, d.imported_at,
@@ -437,7 +427,7 @@ class TagDatabase(context: Context) : SQLiteOpenHelper(context.applicationContex
             null
         ).use { cursor ->
             while (cursor.moveToNext()) {
-                results.add(DatasetInfo(cursor.getString(0), cursor.getString(1), cursor.getLong(2), cursor.getInt(3)))
+                results.add(TagDatasetInfo(cursor.getString(0), cursor.getString(1), cursor.getLong(2), cursor.getInt(3)))
             }
         }
         return results
