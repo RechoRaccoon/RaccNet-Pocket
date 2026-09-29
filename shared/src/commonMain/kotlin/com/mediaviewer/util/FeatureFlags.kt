@@ -12,6 +12,9 @@ package com.mediaviewer.util
  * LiveLinkCheckWorker, LiveLinkWidgetProvider, PreferencesManager entries)
  * stays intact and untouched — this only hides the surfaces a user could
  * reach it from while it's unfinished.
+ *
+ * Shared by Android and iOS: Live Link (and its widget) is a retired
+ * feature and stays off on both.
  */
 object FeatureFlags {
     const val LIVE_LINK_ENABLED: Boolean = false

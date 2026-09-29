@@ -1,5 +1,7 @@
 package com.mediaviewer.util
 
+import com.mediaviewer.tagging.TagExportedPost
+
 import android.content.Context
 import android.net.Uri
 import android.util.Base64

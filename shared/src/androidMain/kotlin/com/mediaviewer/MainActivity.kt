@@ -11,6 +11,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.core.content.FileProvider
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -157,8 +159,8 @@ class MainActivity : ComponentActivity() {
     // MainViewModel is shared with iOS; on Android it runs through
     // AndroidAppPlatform (haptics, toasts, downloads, tagging, widgets…).
     private val viewModel: MainViewModel by viewModels {
-        androidx.lifecycle.viewmodel.viewModelFactory {
-            androidx.lifecycle.viewmodel.initializer {
+        viewModelFactory {
+            initializer {
                 MainViewModel { bsky, e621 -> com.mediaviewer.app.AndroidAppPlatform(application, bsky, e621) }
             }
         }

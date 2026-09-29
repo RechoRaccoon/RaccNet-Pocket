@@ -52,7 +52,6 @@ kotlin {
             implementation("org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose:2.9.1")
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
             implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1")
-            implementation("org.jetbrains.androidx.lifecycle:lifecycle-viewmodel:2.9.1")
             // Settings (PreferencesManager): same "media_viewer_prefs" file
             // on Android as before, a file in the app sandbox on iOS.
             implementation("androidx.datastore:datastore-preferences-core:1.1.7")

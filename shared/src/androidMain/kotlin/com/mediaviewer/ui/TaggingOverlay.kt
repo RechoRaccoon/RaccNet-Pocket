@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import com.mediaviewer.tagging.TaggerState
+
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
