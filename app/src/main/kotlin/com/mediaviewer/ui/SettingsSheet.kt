@@ -1214,18 +1214,16 @@ private fun AtProtocolPageContent(
                 subscribedReviewDids.isEmpty() && subscribedBlogDids.isEmpty()
         )
 
-        // Livestreams aren't a customizable row: when someone you follow is
-        // live they show just above the first Blogs/Reviews row, otherwise
-        // (nothing to show) they'd sit at the end.
-        var liveShown = false
+        // Livestreams is its own row in Customize Hub now (it only shows
+        // while someone you follow is live).
         var scanShown = false
         com.mediaviewer.util.HubLayout.rows.filter { it.enabled }.forEach { row ->
             when (row.id) {
                 com.mediaviewer.util.HubLayout.FEEDS -> FeedsSection()
                 com.mediaviewer.util.HubLayout.BUTTONS -> ButtonsSection()
                 com.mediaviewer.util.HubLayout.MUTUALS -> MutualsSection()
+                com.mediaviewer.util.HubLayout.LIVESTREAMS -> LiveSectionContent()
                 com.mediaviewer.util.HubLayout.BLOGS, com.mediaviewer.util.HubLayout.REVIEWS -> {
-                    if (!liveShown && hasCurrentLive) { LiveSectionContent(); liveShown = true }
                     if (showScanIntro) {
                         if (!scanShown) {
                             scanShown = true
@@ -1251,7 +1249,6 @@ private fun AtProtocolPageContent(
                 }
             }
         }
-        if (!liveShown) LiveSectionContent()
 
         // ── Live Link widget feature: mirrored row at the very bottom of
         // the Hub — per the feature request, only shown once at least one

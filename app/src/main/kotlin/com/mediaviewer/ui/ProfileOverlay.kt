@@ -1708,7 +1708,6 @@ private fun ProfileTabsRow(
             val shape = RoundedCornerShape(20.dp)
             Box(
                 Modifier
-                    .then(if (shadowed) Modifier.popupTextShadow(shape) else Modifier)
                     .then(
                         if (liquidGlass) Modifier.glassPanel(true, tint = if (isSelected) tint else tint.copy(alpha = 0.4f), shape = shape)
                         else Modifier.clip(shape).background(if (isSelected) Color.White.copy(0.15f) else Color.White.copy(0.06f))

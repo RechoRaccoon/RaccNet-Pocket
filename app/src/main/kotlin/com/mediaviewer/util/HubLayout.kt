@@ -19,6 +19,7 @@ object HubLayout {
     const val FEEDS = "feeds"
     const val BUTTONS = "buttons"
     const val MUTUALS = "mutuals"
+    const val LIVESTREAMS = "live"
     const val BLOGS = "blogs"
     const val REVIEWS = "reviews"
     const val SWITCH_ACCOUNTS = "switch"
@@ -45,6 +46,7 @@ object HubLayout {
         FEEDS to "Feeds",
         BUTTONS to "6 Button",
         MUTUALS to "Mutuals",
+        LIVESTREAMS to "Livestreams",
         BLOGS to "Blogs",
         REVIEWS to "Reviews",
         SWITCH_ACCOUNTS to "Switch Accounts"
@@ -118,7 +120,17 @@ object HubLayout {
             if (!r.isList && !BUILT_IN_LABELS.containsKey(r.id)) continue
             out += r
         }
-        for (id in BUILT_IN_LABELS.keys) if (id !in seen) out += Row(id)
+        // A built-in row that's new since the layout was saved goes right
+        // after the one before it in the default order (e.g. Livestreams
+        // after Mutuals), not at the very bottom.
+        val defaults = BUILT_IN_LABELS.keys.toList()
+        for ((i, id) in defaults.withIndex()) {
+            if (id in seen) continue
+            val prev = defaults.subList(0, i).lastOrNull { p -> out.any { it.id == p } }
+            val at = if (prev == null) 0 else out.indexOfFirst { it.id == prev } + 1
+            out.add(at, Row(id))
+            seen += id
+        }
         return out
     }
 

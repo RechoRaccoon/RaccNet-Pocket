@@ -78,7 +78,7 @@ fun ProfileQrScreen(
                 Spacer(Modifier.height(rememberTopCutoutClearance() + 44.dp))
                 Image(
                     painterResource(R.drawable.stellar_logo_vector), contentDescription = "Stellar",
-                    modifier = Modifier.width((maxWidth * 0.42f).coerceAtMost(220.dp))
+                    modifier = Modifier.width((qrSize * 0.42f).coerceAtMost(220.dp))
                 )
                 Spacer(Modifier.weight(1f))
                 Box(Modifier.size(qrSize), contentAlignment = Alignment.Center) {
