@@ -350,11 +350,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val userListsLoading: StateFlow<Boolean> = _userListsLoading
 
     /** "LISTS" or "STARTER_PACKS" — persisted so the picker reopens on the last used tab */
-    private val _lastPickerTab = MutableStateFlow("LISTS")
+    private val _lastPickerTab = MutableStateFlow(com.mediaviewer.util.ListRecency.lastTab ?: "LISTS")
     val lastPickerTab: StateFlow<String> = _lastPickerTab
 
     fun setPickerTab(tab: String) {
         _lastPickerTab.value = tab
+        com.mediaviewer.util.ListRecency.lastTab = tab
         viewModelScope.launch { prefs.setLastPickerTab(tab) }
     }
 
@@ -803,6 +804,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (items.isEmpty()) { showToast("No history yet"); return }
         _currentIndex.value = 0
         enterSpecialFeed("History")
+        feedLoadGeneration++
+        _isLoading.value = false
         feedCursor = null
         activeFeedMode = ActiveFeedMode.HISTORY
         activeFeedActorDid = null
@@ -830,14 +833,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ── Saves / Bookmarks (Settings Update) ─────────────────────────────────────
     fun showSaves() {
         if (!_bskyLoggedIn.value) return
+        // Like switching feeds: the grid opens straight away showing
+        // placeholder tiles (not the previous feed's posts) until the saves
+        // arrive.
+        _currentIndex.value = 0
+        enterSpecialFeed("Saved Posts")
+        feedLoadGeneration++
+        val generation = feedLoadGeneration
+        feedCursor = null
+        activeFeedMode = ActiveFeedMode.SAVES
+        activeFeedActorDid = null
+        _mediaItems.value = emptyList()
+        _isLoading.value = true
+        _screenState.value = ScreenState.GRID
         viewModelScope.launch(Dispatchers.IO) {
-            _isLoading.value = true
-            _currentIndex.value = 0
-            enterSpecialFeed("Saved Posts")
             var result = bskyRepo.getBookmarkedPosts(bskyToken)
             if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
                 if (refreshBskyTokenIfPossible()) result = bskyRepo.getBookmarkedPosts(bskyToken)
             }
+            // They may have moved on to another feed while this loaded.
+            if (generation != feedLoadGeneration || activeFeedMode != ActiveFeedMode.SAVES) return@launch
             result.onSuccess { (items, cursor) ->
                 feedCursor = cursor
                 activeFeedMode = ActiveFeedMode.SAVES
@@ -1415,7 +1430,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Boolean flow in this ViewModel.
     private val _vrmModeOpen = MutableStateFlow(false)
     val vrmModeOpen: StateFlow<Boolean> = _vrmModeOpen
+    /** Entering VRM or Camera mode closes every other page first (profiles,
+     *  Search, DMs, the Inbox, popups…) and leaves the Hub underneath, so
+     *  closing it comes back to a clean Hub. [keepComposer]: the Camera
+     *  opened from the posting page returns to that draft. */
+    private fun closeAllPagesForCapture(keepComposer: Boolean) {
+        _profileOverlay.value = null
+        _searchOpen.value = false
+        _searchHiddenBehindPost.value = false
+        _dmThread.value = null
+        _dmInboxOpen.value = false
+        _inboxOpen.value = false
+        _playingLive.value = null
+        _taggingOverlayOpen.value = false
+        _blockedAccountsOpen.value = false
+        _listPickerTargetDid.value = null
+        _sendPopupTarget.value = null
+        _quoteRepostTarget.value = null
+        _replyToConvo.value = null
+        _newChatState.value = null
+        _capturePreview.value = null
+        if (!keepComposer && _composePostOpen.value) resetComposeState()
+        _screenState.value = ScreenState.SETTINGS
+    }
+
     fun openVrmMode() {
+        closeAllPagesForCapture(keepComposer = false)
         // Opened from the posting page's notch bubble: VRM mode replaces the
         // posting page rather than stacking on top of it (a capture taken in
         // VRM mode comes back through its own review page into a fresh
@@ -1433,6 +1473,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var cameraOpenedFromComposer = false
     fun openCameraMode() {
         cameraOpenedFromComposer = _composePostOpen.value
+        closeAllPagesForCapture(keepComposer = cameraOpenedFromComposer)
         _cameraModeOpen.value = true
     }
     fun closeCameraMode() { _cameraModeOpen.value = false }
@@ -2500,7 +2541,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val members: List<AuthorInfo> = emptyList(),
         val posts: List<MediaItem> = emptyList(),
         val loadedAt: Long = 0L,
-        val failed: Boolean = false
+        val failed: Boolean = false,
+        /** Where the next page of posts starts (null = no more). */
+        val postsCursor: String? = null,
+        val loadingMore: Boolean = false
     )
     private val _hubLists = MutableStateFlow<Map<String, HubListState>>(emptyMap())
     val hubLists: StateFlow<Map<String, HubListState>> = _hubLists
@@ -2530,11 +2574,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             result.onSuccess { content ->
                 setHubList(uri) {
-                    HubListState(loading = false, members = content.members, posts = filterHidden(content.posts), loadedAt = System.currentTimeMillis())
+                    HubListState(
+                        loading = false, members = content.members, posts = filterHidden(content.posts),
+                        loadedAt = System.currentTimeMillis(), postsCursor = content.postsCursor
+                    )
                 }
             }.onFailure {
                 setHubList(uri) { it.copy(loading = false, failed = true, loadedAt = System.currentTimeMillis()) }
             }
+        }
+    }
+
+    /** A Hub list row in Posts mode scrolled to its end: the next page. */
+    fun loadMoreHubList(uri: String) {
+        if (!_bskyLoggedIn.value) return
+        val cursor: String = synchronized(hubListLock) {
+            val cur = _hubLists.value[uri] ?: return
+            if (cur.loading || cur.loadingMore) return
+            val next = cur.postsCursor ?: return
+            _hubLists.value = _hubLists.value + (uri to cur.copy(loadingMore = true))
+            next
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = bskyRepo.getHubListPostsPage(bskyToken, _bskyDid.value, uri, cursor)
+            result.onSuccess { (posts, next) ->
+                setHubList(uri) { st ->
+                    val known = st.posts.mapTo(HashSet()) { it.postUri }
+                    st.copy(posts = st.posts + filterHidden(posts).filter { it.postUri !in known }, postsCursor = next, loadingMore = false)
+                }
+            }.onFailure { setHubList(uri) { it.copy(loadingMore = false) } }
         }
     }
 
@@ -2962,7 +3030,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             if (!lastE621Tags.isNullOrBlank()) _e621SearchTags.value = lastE621Tags
             _selectedFeedUri.value   = lastFeedUri
-            _lastPickerTab.value     = prefs.lastPickerTab.first()
+            // Add To's last tab: the synchronously-saved copy wins (see
+            // ListRecency.lastTab); the DataStore one only fills in when
+            // there isn't one yet.
+            if (com.mediaviewer.util.ListRecency.lastTab == null) _lastPickerTab.value = prefs.lastPickerTab.first()
             _combineListsAndPacks.value = prefs.combineListsAndPacks.first()
             _autoAddToOnFollow.value = prefs.autoAddToOnFollow.first()
 
@@ -3711,7 +3782,18 @@ _bskyDid.value          = session.did
             while (true) {
                 val inferred = rockskyRepo.inferNowPlaying(author.did)
                 val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
-                if (cur.nowPlaying != inferred.track) _profileOverlay.value = cur.copy(nowPlaying = inferred.track)
+                if (cur.nowPlaying != inferred.track) {
+                    // A new song: show it at the top of the Music History tab
+                    // too, from the scrobble we just read — no extra request.
+                    val t = inferred.track
+                    val history = cur.tabStates[ProfileTab.MUSIC_HISTORY]
+                    val newTabStates = if (t != null && history != null && history.loaded &&
+                        history.musicHistory.none { it.uri.isNotBlank() && it.uri == t.uri }
+                    ) {
+                        cur.tabStates + (ProfileTab.MUSIC_HISTORY to history.copy(musicHistory = listOf(t.copy(endsAtMs = 0L)) + history.musicHistory))
+                    } else cur.tabStates
+                    _profileOverlay.value = cur.copy(nowPlaying = t, tabStates = newTabStates)
+                }
                 // No Music History at all: nothing to keep watching.
                 if (!inferred.hasHistory || ++checks > 240) return@launch
                 val endsAt = inferred.track?.endsAtMs ?: 0L
@@ -4089,6 +4171,21 @@ _bskyDid.value          = session.did
      *  see PopfeedReview's own doc comment), so this is exactly the same
      *  synchronous, no-network-round-trip mapping openProfileTitle already
      *  does for Backlog items. */
+    /** Patches a Wikipedia lookup into an open title page: the synopsis
+     *  (with its article link for attribution) and, when the Popfeed record
+     *  has no cover of its own, Wikipedia's lead image as the fallback. */
+    private fun TitleSearchResult.withWikipedia(info: WikipediaRepository.WikiTitleInfo): TitleSearchResult {
+        val hasOwnCover = com.mediaviewer.util.BlockedHosts.isAllowedCoverUrl(posterUrl) ||
+            com.mediaviewer.util.BlockedHosts.isAllowedCoverUrl(backdropUrl)
+        val cover = if (hasOwnCover) null else info.imageUrl
+        return copy(
+            overview = info.extract ?: overview,
+            wikipediaArticleUrl = if (info.extract != null || cover != null) info.pageUrl else wikipediaArticleUrl,
+            wikipediaCoverUrl = cover,
+            wikipediaCoverWide = info.imageIsWide
+        )
+    }
+
     private fun titleFromReview(review: PopfeedReview): TitleSearchResult = TitleSearchResult(
         id = review.imdbId?.let { "imdb:$it" } ?: review.uri,
         title = review.mediaTitle, posterUrl = review.mediaImageUrl, backdropUrl = review.mediaBackdropUrl,
@@ -4108,10 +4205,16 @@ _bskyDid.value          = session.did
      *  the extract (see WikipediaRepository's class doc comment). */
     private fun fetchTitleOverviewFor(review: PopfeedReview) {
         viewModelScope.launch(Dispatchers.IO) {
-            val result = runCatching { WikipediaRepository.fetchDescription(review.mediaTitle, review.imdbId) }.getOrNull() ?: return@launch
+            val result = runCatching {
+                WikipediaRepository.lookup(
+                    review.mediaTitle, review.mediaCategory, review.identifiersJson, review.releaseDate,
+                    creator = review.mainCredit, imdbId = review.imdbId
+                )
+            }.getOrNull() ?: return@launch
             val cur = _profileOverlay.value ?: return@launch
-            if (cur.openTitle?.title == review.mediaTitle) {
-                _profileOverlay.value = cur.copy(openTitle = cur.openTitle.copy(overview = result.extract, wikipediaArticleUrl = result.pageUrl))
+            val open = cur.openTitle ?: return@launch
+            if (open.title == review.mediaTitle) {
+                _profileOverlay.value = cur.copy(openTitle = open.withWikipedia(result))
             }
         }
     }
@@ -4261,11 +4364,16 @@ _bskyDid.value          = session.did
             )
         )
         viewModelScope.launch(Dispatchers.IO) {
-            val result = runCatching { WikipediaRepository.fetchDescription(item.title, item.imdbId) }.getOrNull()
-            if (result == null || result.extract.isBlank()) return@launch
+            val result = runCatching {
+                WikipediaRepository.lookup(
+                    item.title, item.mediaCategory, item.identifiersJson, item.releaseDate,
+                    creator = item.mainCredit, imdbId = item.imdbId
+                )
+            }.getOrNull() ?: return@launch
             val cur = _profileOverlay.value ?: return@launch
-            if (cur.openTitle?.id == item.uri) {
-                _profileOverlay.value = cur.copy(openTitle = cur.openTitle.copy(overview = result.extract, wikipediaArticleUrl = result.pageUrl))
+            val open = cur.openTitle ?: return@launch
+            if (open.id == item.uri) {
+                _profileOverlay.value = cur.copy(openTitle = open.withWikipedia(result))
             }
         }
     }
@@ -4596,6 +4704,9 @@ _bskyDid.value          = session.did
             // a little bubble with who sent it and what they said.
             _screenState.value = ScreenState.GRID
         }
+        // A Saved Posts load that was still running is superseded.
+        feedLoadGeneration++
+        _isLoading.value = false
     }
 
     /** Opens the (still empty) From Friends grid straight away while its
@@ -4809,7 +4920,7 @@ _bskyDid.value          = session.did
     /** A bsky.app/profile/<handle or DID> link opened with Stellar (see
      *  MainActivity's intent filter): looks the account up and opens its
      *  profile page. */
-    fun openProfileFromLink(actor: String) {
+    fun openProfileFromLink(actor: String, postRkey: String? = null) {
         if (!_bskyLoggedIn.value || actor.isBlank()) return
         viewModelScope.launch(Dispatchers.IO) {
             var result = bskyRepo.getFullProfile(bskyToken, actor)
@@ -4824,8 +4935,45 @@ _bskyDid.value          = session.did
                     _inboxOpen.value = false
                     openProfile(p.author)
                 }
+                if (postRkey.isNullOrBlank()) return@onSuccess
+                // A post link: once the poster's profile has loaded, open the
+                // post on top of it — closing the post goes back to the
+                // profile (see backFromFeed).
+                val did = p.author.did
+                withTimeoutOrNull(12_000) {
+                    _profileOverlay.first { o -> o == null || o.author.did != did || !o.loadingProfile }
+                }
+                if (_profileOverlay.value?.author?.did != did) return@onSuccess
+                val items = runCatching {
+                    bskyRepo.getPostItems(bskyToken, _bskyDid.value, listOf("at://$did/app.bsky.feed.post/$postRkey"))
+                }.getOrDefault(emptyList())
+                if (items.isEmpty()) { showToast("Couldn't open that post"); return@onSuccess }
+                // Let the profile's loading animation finish revealing it.
+                delay(400)
+                withContext(Dispatchers.Main) {
+                    if (_profileOverlay.value?.author?.did == did) {
+                        openPostFromProfileTab(items, 0)
+                        linkPostReturnsToProfile = true
+                    }
+                }
             }.onFailure { showToast("Couldn't open @$actor") }
         }
+    }
+
+    /** A post opened from a bsky.app post link: Back returns to its poster's profile. */
+    private var linkPostReturnsToProfile = false
+
+    /** Back from the Timeline/Explore: normally the Hub; after opening a
+     *  post from a link, back to that poster's profile instead. */
+    fun backFromFeed() {
+        val overlay = _profileOverlay.value
+        if (linkPostReturnsToProfile && overlay != null && overlay.hidden) {
+            linkPostReturnsToProfile = false
+            pinchInFromPost()
+            return
+        }
+        linkPostReturnsToProfile = false
+        setScreen(ScreenState.SETTINGS)
     }
 
     /** Profile interaction bar → Block: the same block/unblock the
@@ -5740,6 +5888,30 @@ _bskyDid.value          = session.did
                 }
             }
             _listMembershipBusy.value = _listMembershipBusy.value - listUri
+        }
+    }
+
+    /** Add To → double-tap a name → rename. [recordUris]: every record to
+     *  rename (a list; a starter pack and its own list; or, from the Both
+     *  tab, the list plus the starter pack and its list). [onDone] gets null
+     *  on success or an error. */
+    fun renamePickerEntry(recordUris: List<String>, newName: String, onDone: (String?) -> Unit) {
+        val clean = newName.trim()
+        if (clean.isBlank() || recordUris.isEmpty()) { onDone(null); return }
+        viewModelScope.launch(Dispatchers.IO) {
+            var error: String? = null
+            for (uri in recordUris.distinct()) {
+                bskyRepo.renameNamedRecord(bskyToken, _bskyDid.value, uri, clean).onFailure { error = it.message ?: "Couldn't rename it" }
+            }
+            val renamed = if (error == null) recordUris.toSet() else emptySet()
+            _userLists.value = _userLists.value.map { if (it.uri in renamed) it.copy(name = clean) else it }
+            _userStarterPacks.value = _userStarterPacks.value.map { p ->
+                if (p.uri in renamed) p.copy(record = p.record?.copy(name = clean)) else p
+            }
+            withContext(Dispatchers.Main) {
+                error?.let { _errorMessage.value = it }
+                onDone(error)
+            }
         }
     }
 

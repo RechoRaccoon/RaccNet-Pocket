@@ -37,6 +37,7 @@ object NetworkClient {
         }
         return OkHttpClient.Builder()
             .dispatcher(buildDispatcher())
+            .addInterceptor(com.mediaviewer.util.BlockedHosts.interceptor)
             .addInterceptor(logging)
             .addInterceptor { chain ->
                 val req = chain.request().newBuilder()
@@ -44,6 +45,8 @@ object NetworkClient {
                     .build()
                 chain.proceed(req)
             }
+            // After the generic one: Wikimedia requests identify as Stellar.
+            .addInterceptor(com.mediaviewer.util.BlockedHosts.wikimediaUserAgent)
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
             .writeTimeout(60, TimeUnit.SECONDS)
@@ -113,6 +116,7 @@ object NetworkClient {
     fun buildBlueskyVideoApi(): BlueskyVideoApi {
         val client = OkHttpClient.Builder()
             .dispatcher(buildDispatcher())
+            .addInterceptor(com.mediaviewer.util.BlockedHosts.interceptor)
             .addInterceptor(HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BASIC })
             .addInterceptor { chain ->
                 val req = chain.request().newBuilder().header("User-Agent", "MediaViewer/1.0 (ATProto client)").build()

@@ -145,7 +145,9 @@ fun GridScreen(
     val gridScreen = "feed_grid"
     val gridMode = resultsGridMode(gridScreen, kind)
     val spec = resultsLayoutSpec(kind, gridMode, roundedGridTiles)
-    val memoryScope = "$appMode|${authorFeedState?.author?.did ?: selectedFeedUri}"
+    // Saved Posts / From Friends / History all use your own DID, so the
+    // name is part of the key too — switching between them starts fresh.
+    val memoryScope = "$appMode|${authorFeedState?.author?.let { it.did + "|" + it.handle + "|" + it.displayName } ?: selectedFeedUri}"
     val freshGridState = rememberLazyStaggeredGridState()
     val keptState = remember(memoryScope) {
         GridScrollMemory.state?.takeIf { GridScrollMemory.stateScope == memoryScope } != null

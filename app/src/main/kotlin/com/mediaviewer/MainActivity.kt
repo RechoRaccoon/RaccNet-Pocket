@@ -167,7 +167,10 @@ class MainActivity : ComponentActivity() {
         if (host != "bsky.app" && host != "www.bsky.app") return
         val segments = data.pathSegments ?: return
         if (segments.size >= 2 && segments[0] == "profile" && segments[1].isNotBlank()) {
-            pendingProfileLink.value = segments[1]
+            // bsky.app/profile/<actor>/post/<rkey> → "<actor>|<rkey>" (the
+            // profile opens, then the post on top of it).
+            val rkey = if (segments.size >= 4 && segments[2] == "post") segments[3] else null
+            pendingProfileLink.value = if (rkey.isNullOrBlank()) segments[1] else segments[1] + "|" + rkey
         }
     }
 
@@ -208,6 +211,8 @@ class MainActivity : ComponentActivity() {
         com.mediaviewer.util.FontStore.init(applicationContext)
         com.mediaviewer.util.ListRecency.init(applicationContext)
         com.mediaviewer.util.HubLayout.init(applicationContext)
+        com.mediaviewer.util.TitleCovers.init(applicationContext)
+        com.mediaviewer.repository.WikipediaRepository.init(applicationContext)
         com.mediaviewer.ui.ProfileColorStore.init(applicationContext)
         com.mediaviewer.ui.SelfProfileColors.init(applicationContext)
         // Audio visualizer: start noting music apps' audio sessions right
@@ -474,7 +479,7 @@ private fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null
     // Back first.
     androidx.activity.compose.BackHandler(
         enabled = screenState == ScreenState.FEED || screenState == ScreenState.GRID
-    ) { viewModel.setScreen(ScreenState.SETTINGS) }
+    ) { viewModel.backFromFeed() }
     val selfProfileTint = com.mediaviewer.ui.rememberSelfTint(selfProfile?.author?.avatarUrl, NeutralGlassTint)
     var currentDominantColor by remember { mutableStateOf(NeutralGlassTint) }
     // The starry page backgrounds stop ticking while VRM mode is open (it
@@ -485,7 +490,7 @@ private fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null
     LaunchedEffect(pendingProfileLink, appInitialized, bskyLoggedIn) {
         val actor = pendingProfileLink ?: return@LaunchedEffect
         if (!appInitialized) return@LaunchedEffect
-        if (bskyLoggedIn) viewModel.openProfileFromLink(actor)
+        if (bskyLoggedIn) viewModel.openProfileFromLink(actor.substringBefore('|'), actor.substringAfter('|', "").ifBlank { null })
         onProfileLinkHandled()
     }
     // Reduced Animations → every Compose animation (see util/AppMotion.kt).
@@ -892,6 +897,7 @@ private fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null
                 onAddHubListFromUrl = viewModel::addHubListFromUrl,
                 hubLists = hubLists,
                 onLoadHubList = { uri -> viewModel.loadHubListIfNeeded(uri) },
+                onLoadMoreHubList = viewModel::loadMoreHubList,
                 onOpenHubListPost = viewModel::openHubListPost,
                 onForceRefreshHub = viewModel::forceRefreshHub
             ),
@@ -1354,6 +1360,7 @@ private fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null
                 onTabChange   = { tab -> viewModel.setPickerTab(tab) },
                 onToggle      = { listUri, additionalUri -> viewModel.toggleListMembership(listUri, additionalUri) },
                 onCreate      = { kind, name, description, cover, done -> viewModel.createPickerList(kind, name, description, cover, done) },
+                onRename      = { uris, name, done -> viewModel.renamePickerEntry(uris, name, done) },
                 onDismiss     = { viewModel.dismissListPicker() }
             )
         }

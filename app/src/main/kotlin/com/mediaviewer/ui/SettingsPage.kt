@@ -91,6 +91,8 @@ data class SettingsExtras(
     /** Each Hub list row's loaded content, by list URI. */
     val hubLists: Map<String, com.mediaviewer.viewmodel.MainViewModel.HubListState> = emptyMap(),
     val onLoadHubList: (String) -> Unit = {},
+    /** A Hub list row's posts scrolled to the end: load the next page. */
+    val onLoadMoreHubList: (String) -> Unit = {},
     /** (list URI, list name, index) — a post tapped in a Hub list row. */
     val onOpenHubListPost: (String, String, Int) -> Unit = { _, _, _ -> },
     // ── Dev Tools ──
@@ -690,31 +692,19 @@ internal fun SettingsPageContent(
             ToggleBubble("Show \"Add To\" After Following", autoAddToOnFollow, onToggleAutoAddToOnFollow, liquidGlass, tint, backdrop)
         }
 
-        // Bluesky profile links (a scanned QR code, a link in the browser)
-        // can open in Stellar: Android keeps that choice in its own
-        // "Open by default" settings, so this jumps straight there.
-        val linkContext = androidx.compose.ui.platform.LocalContext.current
+        // Bluesky profile/post links (a scanned QR code, a link in the
+        // browser) can open in Stellar — "Set Up" explains how, with
+        // shortcuts to both apps' Android settings.
+        var linkSetupOpen by remember { mutableStateOf(false) }
         ActionBubble(
             label = "Open Bluesky Links in Stellar",
-            sub = "Opens Android's settings for Stellar — tap \"Add link\" and turn on bsky.app, then profile links from your camera or browser open here.",
             buttonLabel = "Set Up",
-            onClick = {
-                val pkg = android.net.Uri.parse("package:" + linkContext.packageName)
-                val intent = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-                    android.content.Intent(android.provider.Settings.ACTION_APP_OPEN_BY_DEFAULT_SETTINGS, pkg)
-                } else {
-                    android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkg)
-                }
-                runCatching { linkContext.startActivity(intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)) }
-                    .recoverCatching {
-                        linkContext.startActivity(
-                            android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkg)
-                                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
-                    }
-            },
+            onClick = { linkSetupOpen = true },
             liquidGlass = liquidGlass, tint = tint, backdrop = backdrop
         )
+        if (linkSetupOpen) {
+            OpenLinksSetupDialog(liquidGlass = liquidGlass, tint = tint, onDismiss = { linkSetupOpen = false })
+        }
 
         // ── Integrations ────────────────────────────────────────────────
         SectionHeader("Integrations", tint)
@@ -1107,6 +1097,21 @@ internal fun SettingsPageContent(
                     PillButton("Refresh", extras.onForceRefreshHub, enabled = bskyLoggedIn)
                 }
                 BubbleDivider()
+                val coverContext = androidx.compose.ui.platform.LocalContext.current
+                val coverScope = rememberCoroutineScope()
+                BubbleRow {
+                    RowLabel("Clear Cached Title Covers", Modifier.weight(1f), sub = "Removes saved review/backlog covers (incl. Wikipedia lookups) from this phone.")
+                    PillButton("Clear", {
+                        coverScope.launch {
+                            val n = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                com.mediaviewer.repository.WikipediaRepository.clearCoverCache()
+                                com.mediaviewer.util.TitleCovers.clearCached(coverContext)
+                            }
+                            android.widget.Toast.makeText(coverContext, "Cleared $n cached title cover${if (n == 1) "" else "s"}", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }, color = DangerRed)
+                }
+                BubbleDivider()
                 BubbleRow {
                     RowLabel("Hide Dev Tools", Modifier.weight(1f))
                     PillButton("Hide", { com.mediaviewer.util.UiToggles.updateDevToolsUnlocked(false) }, color = DangerRed)
@@ -1306,78 +1311,121 @@ private fun E621AccountBubble(
     }
 }
 
-// ── Credits page ────────────────────────────────────────────────────────────
+// ── About page ──────────────────────────────────────────────────────────────
 
-/** The Settings/Credits switch's second page: plain centered headers over
- *  left-aligned body text. */
+/** Business contact shown on the About page. */
+internal const val STELLAR_CONTACT_EMAIL = "RechoRaccoonBusiness@proton.me"
+
+/**
+ * Settings → About: every credit on one compact screen (no scrolling), with
+ * the business contact at the bottom. On a short screen the whole block
+ * scales down to fit rather than scrolling.
+ */
 @Composable
-internal fun CreditsPageContent() {
+internal fun AboutPageContent() {
     val recho = Color(0xFF00FF07)
     val rose = Color(0xFFE0245E)
+    val dim = Color.White.copy(alpha = 0.6f)
+    val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+    val tap = rememberHapticTap()
 
     @Composable
     fun Header(text: String) {
         Text(
-            text, color = Color.White, fontSize = 22.sp, lineHeight = 26.sp, fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+            text.uppercase(), color = Color.White.copy(alpha = 0.45f), fontSize = 10.sp,
+            fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp,
+            modifier = Modifier.padding(top = 10.dp, bottom = 2.dp)
+        )
+    }
+    /** "Name — what it's for" on one line. */
+    @Composable
+    fun Line(name: String, role: String, nameColor: Color = Color.White) {
+        Text(
+            buildAnnotatedString {
+                withStyle(SpanStyle(color = nameColor, fontWeight = FontWeight.SemiBold)) { append(name) }
+                if (role.isNotEmpty()) withStyle(SpanStyle(color = dim)) { append(" · $role") }
+            },
+            fontSize = 12.sp, lineHeight = 16.sp
         )
     }
     @Composable
-    fun Body(text: androidx.compose.ui.text.AnnotatedString) {
-        Text(
-            text, color = Color.White, fontSize = 16.sp, lineHeight = 23.sp,
-            textAlign = TextAlign.Start, modifier = Modifier.fillMaxWidth()
-        )
+    fun Small(text: String) {
+        Text(text, color = dim, fontSize = 11.sp, lineHeight = 15.sp)
     }
 
-    Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 28.dp, vertical = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(28.dp)
-    ) {
-        Column {
-            Header("Front End Development")
-            Body(buildAnnotatedString {
-                append("Created by ")
-                withStyle(SpanStyle(color = recho)) { append("Recho Raccoon") }
-                append(", coded with Claude Sonnet, Claude Opus 5.5 and Muse by Meta")
-            })
+    FitToHeight(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 14.dp)) {
+        Column(Modifier.fillMaxWidth()) {
+            Header("Created by")
+            Text(
+                buildAnnotatedString {
+                    withStyle(SpanStyle(color = recho, fontWeight = FontWeight.SemiBold)) { append("Recho Raccoon") }
+                    withStyle(SpanStyle(color = dim)) { append(" · coded with Claude Sonnet, Claude Opus 5.5 and Muse by Meta") }
+                },
+                fontSize = 12.sp, lineHeight = 16.sp
+            )
+            Line("Rose (SomeDudeGT)", "publishing builds on GitHub", rose)
+
+            Header("AT Protocol")
+            Line("Bluesky", "accounts, posts and feeds")
+            Line("Leaflet / Standard.site", "long-form blogs")
+            Line("Popfeed", "title reviews, backlog and covers")
+            Line("Rocksky", "music listening history")
+            Line("Streamplace", "livestreams")
+
+            Header("Other services")
+            Line("Wikipedia & Wikidata", "synopses (CC BY-SA 4.0) and fallback covers")
+            Line("e621", "content browsing")
+            Line("DecAPI", "Twitch live status")
+            Line("Hugging Face", "hosts the tagging model")
+
+            Header("On-device AI")
+            Line("Z3D-E621-Convnext", "tagging, by Zack3D, via ONNX Runtime")
+            Line("MediaPipe", "VRM face, hand and pose tracking (Google)")
+            Line("ML Kit", "translation and language ID (Google)")
+
+            Header("Open source")
+            Small("Jetpack Compose, Media3/ExoPlayer, CameraX, Filament, Coil, OkHttp, Retrofit, Gson, ZXing, and the Audiowide font by Astigmatic (SIL OFL).")
+
+            Spacer(Modifier.height(12.dp))
+            Small("All trademarks, logos and cover art belong to their respective owners. Stellar is independent and not affiliated with or endorsed by the services above.")
+            Spacer(Modifier.height(10.dp))
+            Small("For app inquiries or copyright and trademark concerns, please contact:")
+            Text(
+                STELLAR_CONTACT_EMAIL, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(top = 2.dp).clip(RoundedCornerShape(6.dp))
+                    .clickable { tap(); runCatching { uriHandler.openUri("mailto:$STELLAR_CONTACT_EMAIL") } }
+                    .padding(vertical = 2.dp)
+            )
         }
-        Column {
-            Header("Special Thanks")
-            Body(buildAnnotatedString {
-                withStyle(SpanStyle(color = rose)) { append("Rose (SomeDudeGT)") }
-                append(" - Helped push new builds to the GitHub Repo.")
-            })
+    }
+}
+
+/** Lays [content] out at its natural height and, if that's taller than the
+ *  space available, scales it down (from the top) so it always fits on one
+ *  screen instead of scrolling. */
+@Composable
+private fun FitToHeight(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    androidx.compose.ui.layout.Layout(content = content, modifier = modifier) { measurables, constraints ->
+        val placeable = measurables.first().measure(
+            constraints.copy(minWidth = 0, minHeight = 0, maxHeight = androidx.compose.ui.unit.Constraints.Infinity)
+        )
+        val maxH = if (constraints.hasBoundedHeight) constraints.maxHeight else placeable.height
+        val scale = if (placeable.height > maxH && placeable.height > 0) maxH.toFloat() / placeable.height else 1f
+        val width = if (constraints.hasBoundedWidth) constraints.maxWidth else placeable.width
+        layout(width, maxH.coerceAtLeast(0)) {
+            placeable.placeWithLayer(0, 0) {
+                scaleX = scale
+                scaleY = scale
+                transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 0f)
+            }
         }
-        Column {
-            Header("AT Protocol Integrations")
-            Body(buildAnnotatedString {
-                append("Bluesky - Accounts, Posts, etc.\n")
-                append("Standard.site/Leaflet - Long-Form Blogs.\n")
-                append("Popfeed - Title Reviews and Backlog.\n")
-                append("Rocksky - Music Listening History.")
-            })
-        }
-        Column {
-            Header("Other Integrations")
-            Body(buildAnnotatedString { append("e621 - Content Browsing.") })
-        }
-        Column {
-            Header("On-Device AI Models")
-            Body(buildAnnotatedString {
-                append("AI Tagging - Z3D-E621-Convnext (Zack3D), via ONNX Runtime.\n")
-                append("VRM Tracking - MediaPipe Face, Hand & Pose Landmarkers (Google).\n")
-                append("Translation - ML Kit Translate & Language ID (Google).")
-            })
-        }
-        Spacer(Modifier.height(8.dp))
     }
 }
 
 // ── Customize Hub ───────────────────────────────────────────────────────────
 
 /**
- * Settings → Customize Hub: one bubble per Hub row (Feeds, 6 Button,
+ * Settings → Customize Hub: one bubble per Hub row (Feeds, Launchpad,
  * Mutuals, Blogs, Reviews, Switch Accounts, then any added lists), each with
  * a grab handle on the left to drag it into a new place and an on/off switch
  * on the right. List rows also get an "Accounts"/"Posts" mode button and an
@@ -1596,6 +1644,88 @@ private fun HubListUrlDialog(
                     interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                     indication = null
                 ) {}
+            if (liquidGlass) {
+                LiquidGlassSurface(m, shape = shape, tint = tint) { Content() }
+            } else {
+                Box(m.clip(shape).background(OffBlack).border(1.dp, tint.copy(alpha = 0.5f), shape)) { Content() }
+            }
+        }
+    }
+}
+
+
+/** Opens Android's "Open by default" page for [packageName] (the app's info
+ *  page on older Android, or if that one isn't available). */
+private fun openAppLinkSettings(context: android.content.Context, packageName: String) {
+    val pkg = android.net.Uri.parse("package:$packageName")
+    val flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+    val byDefault = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+        android.content.Intent(android.provider.Settings.ACTION_APP_OPEN_BY_DEFAULT_SETTINGS, pkg).addFlags(flags)
+    } else null
+    val details = android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkg).addFlags(flags)
+    val opened = byDefault != null && runCatching { context.startActivity(byDefault) }.isSuccess
+    if (!opened) {
+        runCatching { context.startActivity(details) }.onFailure {
+            android.widget.Toast.makeText(context, "Couldn't open that app's settings", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+}
+
+/** Settings → Open Bluesky Links in Stellar → Set Up: a small centered
+ *  popup with the two steps and a button for each app's settings. */
+@Composable
+private fun OpenLinksSetupDialog(liquidGlass: Boolean, tint: Color, onDismiss: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val tap = rememberHapticTap()
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            Modifier.fillMaxSize().clickable(
+                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                indication = null, onClick = onDismiss
+            ),
+            contentAlignment = Alignment.Center
+        ) {
+            val shape = RoundedCornerShape(22.dp)
+            @Composable
+            fun Step(number: String, text: String) {
+                Row(verticalAlignment = Alignment.Top) {
+                    Box(
+                        Modifier.size(20.dp).clip(CircleShape).background(headerColorFor(tint).copy(alpha = 0.85f)),
+                        contentAlignment = Alignment.Center
+                    ) { Text(number, color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                    Spacer(Modifier.width(10.dp))
+                    Text(text, color = Color.White.copy(alpha = 0.9f), fontSize = 13.sp, lineHeight = 17.sp, modifier = Modifier.weight(1f))
+                }
+            }
+            @Composable
+            fun Content() {
+                Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        "Open Bluesky Links in Stellar", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+                        textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
+                    )
+                    Step("1", "In Bluesky's settings, open \"Open by default\" and set supported links to open in your browser (turn off \"In the app\").")
+                    Step("2", "In Stellar's settings, open \"Open by default\", tap \"Add link\" and turn on bsky.app.")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("Bluesky Settings" to "xyz.blueskyweb.app", "Stellar Settings" to context.packageName).forEach { (label, pkg) ->
+                            Box(
+                                Modifier.weight(1f).height(40.dp).clip(RoundedCornerShape(20.dp))
+                                    .background(Color.White.copy(alpha = 0.12f))
+                                    .border(1.dp, headerColorFor(tint).copy(alpha = 0.5f), RoundedCornerShape(20.dp))
+                                    .clickable { tap(); openAppLinkSettings(context, pkg) },
+                                contentAlignment = Alignment.Center
+                            ) { Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1) }
+                        }
+                    }
+                }
+            }
+            val m = Modifier.fillMaxWidth(0.9f).widthIn(max = 420.dp).clickable(
+                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                indication = null
+            ) {}
             if (liquidGlass) {
                 LiquidGlassSurface(m, shape = shape, tint = tint) { Content() }
             } else {

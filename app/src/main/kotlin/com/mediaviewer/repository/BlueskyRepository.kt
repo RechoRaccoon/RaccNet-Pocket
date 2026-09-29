@@ -835,13 +835,13 @@ class BlueskyRepository {
         val subject = obj.getAsJsonObject("subject") ?: obj.getAsJsonObject("item") ?: obj
         val title = firstStringField(subject, "title", "name") ?: firstStringField(obj, "title", "name")
             ?: return null
-        val image = firstImageField(subject, did, "poster", "posterUrl", "coverUrl", "artworkUrl", "image", "coverImage", "thumb")
-            ?: firstImageField(obj, did, "poster", "posterUrl", "coverUrl", "artworkUrl", "image", "coverImage", "thumb")
+        val image = firstImageField(subject, did, "poster", "posterUrl", "coverUrl", "artworkUrl", "image", "coverImage", "thumb", titleCover = true)
+            ?: firstImageField(obj, did, "poster", "posterUrl", "coverUrl", "artworkUrl", "image", "coverImage", "thumb", titleCover = true)
         // Distinct landscape/backdrop art (as opposed to the portrait
         // poster above) — used for the wide banner in the review
         // detail popup so it isn't a cropped portrait image.
-        val backdrop = firstImageField(subject, did, "backdrop", "backdropUrl", "banner", "bannerUrl", "landscape", "landscapeUrl", "fanart", "heroImage", "wideImage")
-            ?: firstImageField(obj, did, "backdrop", "backdropUrl", "banner", "bannerUrl", "landscape", "landscapeUrl", "fanart", "heroImage", "wideImage")
+        val backdrop = firstImageField(subject, did, "backdrop", "backdropUrl", "banner", "bannerUrl", "landscape", "landscapeUrl", "fanart", "heroImage", "wideImage", titleCover = true)
+            ?: firstImageField(obj, did, "backdrop", "backdropUrl", "banner", "bannerUrl", "landscape", "landscapeUrl", "fanart", "heroImage", "wideImage", titleCover = true)
         val text = firstStringField(obj, "text", "review", "body", "content") ?: ""
         // Popfeed's rating field is on a fixed 0–10 scale (half-star
         // granularity — one point per half star), not a 0–5 scale.
@@ -865,6 +865,8 @@ class BlueskyRepository {
         // The record's whole identifiers object (tmdb/igdb/isbn/… too), so a
         // title opened from this review can be added to the backlog with
         // the same identifiers Popfeed itself uses.
+        com.mediaviewer.util.TitleCovers.note(image)
+        com.mediaviewer.util.TitleCovers.note(backdrop)
         val identifiersJson = runCatching { subject.getAsJsonObject("identifiers") ?: obj.getAsJsonObject("identifiers") }
             .getOrNull()?.toString()
         return PopfeedReview(
@@ -1264,7 +1266,7 @@ class BlueskyRepository {
      *  a direct URL string, or a blob to resolve via the account's own PDS
      *  (com.atproto.sync.getBlob), the same way this app already resolves
      *  video blobs (see BlueskyBlobResolver). */
-    private suspend fun firstImageField(obj: com.google.gson.JsonObject?, ownerDid: String, vararg keys: String, wideOverride: Boolean? = null): String? {
+    private suspend fun firstImageField(obj: com.google.gson.JsonObject?, ownerDid: String, vararg keys: String, wideOverride: Boolean? = null, titleCover: Boolean = false): String? {
         if (obj == null) return null
         // Backdrop/banner-style fields get the larger rendition; posters,
         // covers and inline images the lighter one (see ImageLoading).
@@ -1272,6 +1274,14 @@ class BlueskyRepository {
         for (k in keys) {
             val v = obj.get(k) ?: continue
             if (v.isJsonPrimitive && v.asJsonPrimitive.isString && v.asString.isNotBlank()) {
+                // TMDB links (Popfeed's legacy posterUrl/backdropUrl) are
+                // never used — only images stored in the record itself.
+                // Only covers stored on AT Protocol itself (or Wikipedia's)
+                // — links to IGDB, Google Books, Spotify etc. are skipped
+                // too (see BlockedHosts.isAllowedCoverUrl); the Wikipedia
+                // fallback fills in for those titles instead.
+                if (com.mediaviewer.util.BlockedHosts.isBlockedUrl(v.asString)) continue
+                if (titleCover && !com.mediaviewer.util.BlockedHosts.isAllowedCoverUrl(v.asString)) continue
                 return com.mediaviewer.util.ImageLoading.optimizeUrl(v.asString, wide)
             }
             if (v.isJsonObject) {
@@ -1351,10 +1361,12 @@ class BlueskyRepository {
             // poster/backdrop blobs; preferring the blob when both a record
             // and this app's parsing happen to see both is the safer,
             // self-hosted-first default).
-            val image = firstImageField(obj, did, "poster", "posterUrl", "coverUrl", "artworkUrl", "image", "coverImage", "thumb")
+            val image = firstImageField(obj, did, "poster", "posterUrl", "coverUrl", "artworkUrl", "image", "coverImage", "thumb", titleCover = true)
             // Same landscape/backdrop keyword set getPopfeedReviews uses —
             // see PopfeedBacklogItem.mediaBackdropUrl's own doc comment.
-            val backdrop = firstImageField(obj, did, "backdrop", "backdropUrl", "banner", "bannerUrl", "landscape", "landscapeUrl", "fanart", "heroImage", "wideImage")
+            val backdrop = firstImageField(obj, did, "backdrop", "backdropUrl", "banner", "bannerUrl", "landscape", "landscapeUrl", "fanart", "heroImage", "wideImage", titleCover = true)
+            com.mediaviewer.util.TitleCovers.note(image)
+            com.mediaviewer.util.TitleCovers.note(backdrop)
             val createdAt = firstStringField(obj, "createdAt", "updatedAt") ?: ""
             // Confirmed real lexicon fields — see PopfeedBacklogItem's own
             // doc comment for how TitleDetailOverlay uses these.
@@ -1427,8 +1439,8 @@ class BlueskyRepository {
             "isRevisit" to false
         )
         if (text.isNotBlank()) record["text"] = text
-        target.posterUrl?.let { record["posterUrl"] = it }
-        target.backdropUrl?.let { record["backdropUrl"] = it }
+        target.posterUrl?.takeIf { com.mediaviewer.util.BlockedHosts.isAllowedCoverUrl(it) && !com.mediaviewer.util.BlockedHosts.isWikimediaUrl(it) }?.let { record["posterUrl"] = it }
+        target.backdropUrl?.takeIf { com.mediaviewer.util.BlockedHosts.isAllowedCoverUrl(it) && !com.mediaviewer.util.BlockedHosts.isWikimediaUrl(it) }?.let { record["backdropUrl"] = it }
         if (target.releaseDate.isNotBlank()) record["releaseDate"] = target.releaseDate
         if (target.genres.isNotEmpty()) record["genres"] = target.genres
         target.creator?.let { record["mainCredit"] = it }
@@ -1577,8 +1589,8 @@ class BlueskyRepository {
             "title" to target.title
         )
         listType?.takeIf { it.isNotBlank() }?.let { record["listType"] = it }
-        target.posterUrl?.takeIf { it.startsWith("http") }?.let { record["posterUrl"] = it }
-        target.backdropUrl?.takeIf { it.startsWith("http") }?.let { record["backdropUrl"] = it }
+        target.posterUrl?.takeIf { com.mediaviewer.util.BlockedHosts.isAllowedCoverUrl(it) && !com.mediaviewer.util.BlockedHosts.isWikimediaUrl(it) }?.let { record["posterUrl"] = it }
+        target.backdropUrl?.takeIf { com.mediaviewer.util.BlockedHosts.isAllowedCoverUrl(it) && !com.mediaviewer.util.BlockedHosts.isWikimediaUrl(it) }?.let { record["backdropUrl"] = it }
         if (target.releaseDate.isNotBlank()) record["releaseDate"] = target.releaseDate
         if (target.genres.isNotEmpty()) record["genres"] = target.genres
         target.creator?.let { record["mainCredit"] = it }
@@ -2502,13 +2514,25 @@ class BlueskyRepository {
     /** A Hub list row's content: its [name], its members (most recently
      *  active first) and their latest original posts (no reposts, no
      *  replies). Two AppView calls for the posts + one per 100 members. */
-    data class HubListContent(val name: String?, val members: List<AuthorInfo>, val posts: List<MediaItem>)
+    data class HubListContent(val name: String?, val members: List<AuthorInfo>, val posts: List<MediaItem>, val postsCursor: String? = null)
+
+    private fun hubListOriginalPosts(feed: List<BskyFeedItem>): List<MediaItem> = feed
+        .filter { it.reason == null && it.reply == null && it.post.record.reply == null }
+        .flatMap { parseFeedItemSafe(it) }
+        .distinctBy { it.postUri }
+
+    /** The next page of a Hub list row's posts (AppView), for scrolling on. */
+    suspend fun getHubListPostsPage(token: String, myDid: String, listUri: String, cursor: String): Result<Pair<List<MediaItem>, String?>> = runCatching {
+        val resp = viaAppView(token, myDid, "app.bsky.feed.getListFeed") { a, auth -> a.getListFeed(auth, listUri, 100, cursor) }
+        val body = resp.body() ?: error("List feed ${resp.code()}")
+        hubListOriginalPosts(body.feed) to body.cursor?.takeIf { it.isNotBlank() && body.feed.isNotEmpty() }
+    }
 
     suspend fun getHubListContent(token: String, myDid: String, listUri: String, maxMembers: Int = 300): Result<HubListContent> = runCatching {
         coroutineScope {
             val feedJob = async {
                 val resp = viaAppView(token, myDid, "app.bsky.feed.getListFeed") { a, auth -> a.getListFeed(auth, listUri, 100, null) }
-                resp.body()?.feed ?: emptyList()
+                resp.body()
             }
             val membersJob = async {
                 val members = ArrayList<AuthorInfo>()
@@ -2535,7 +2559,8 @@ class BlueskyRepository {
                 } while (cursor != null && members.size < maxMembers)
                 name to members
             }
-            val feed = feedJob.await()
+            val feedBody = feedJob.await()
+            val feed = feedBody?.feed ?: emptyList()
             val (name, rawMembers) = membersJob.await()
             val members = rawMembers.distinctBy { it.did }.filterNot { com.mediaviewer.util.BlockedAccounts.isHidden(it.did) }
             // Most recent poster first: order of each member's first
@@ -2547,11 +2572,8 @@ class BlueskyRepository {
             val sortedMembers = members.withIndex()
                 .sortedWith(compareBy({ recency[it.value.did] ?: Int.MAX_VALUE }, { it.index }))
                 .map { it.value }
-            val posts = feed
-                .filter { it.reason == null && it.reply == null && it.post.record.reply == null }
-                .flatMap { parseFeedItemSafe(it) }
-                .distinctBy { it.postUri }
-            HubListContent(name, sortedMembers, posts)
+            val posts = hubListOriginalPosts(feed)
+            HubListContent(name, sortedMembers, posts, feedBody?.cursor?.takeIf { it.isNotBlank() && feed.isNotEmpty() })
         }
     }
 
@@ -2577,6 +2599,20 @@ class BlueskyRepository {
         val name = runCatching { body.getAsJsonObject("list")?.get("name")?.asString }.getOrNull() ?: "List"
         val canonical = runCatching { body.getAsJsonObject("list")?.get("uri")?.asString }.getOrNull() ?: atUri
         canonical to name
+    }
+
+    /** Add To → rename: changes the `name` of one of your own list /
+     *  starter pack records (everything else in the record is kept). */
+    suspend fun renameNamedRecord(token: String, did: String, recordUri: String, newName: String): Result<Unit> = runCatching {
+        val collection = recordUri.collection()
+        val rkey = recordUri.rkey()
+        val existing = api.getRecord("Bearer $token", did, collection, rkey)
+        val obj = existing.body()?.value?.takeIf { it.isJsonObject }?.asJsonObject ?: error("Couldn't read it (${existing.code()})")
+        val record = LinkedHashMap<String, Any>()
+        obj.entrySet().forEach { (k, v) -> record[k] = v }
+        record["name"] = newName
+        val resp = api.putRecord("Bearer $token", BskyPutRecordRequest(did, collection, rkey, record))
+        if (!resp.isSuccessful) error("Renaming failed (${resp.code()})")
     }
 
     suspend fun getUserLists(token: String, did: String): Result<List<BskyList>> = runCatching {

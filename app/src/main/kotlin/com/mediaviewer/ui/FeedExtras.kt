@@ -35,7 +35,14 @@ import kotlinx.coroutines.withContext
  * while nothing is playing.
  */
 @Composable
-fun AudioVisualizerBars(color: Color, modifier: Modifier = Modifier) {
+fun AudioVisualizerBars(
+    color: Color,
+    modifier: Modifier = Modifier,
+    /** Narrower bars (a profile's interaction bar): draw fewer bars so each
+     *  one is exactly as wide as the Timeline's, instead of squeezing all of
+     *  them into less room. */
+    matchTimelineBarWidth: Boolean = false
+) {
     val context = LocalContext.current
     DisposableEffect(Unit) {
         AudioVisualizerEngine.acquire(context)
@@ -43,6 +50,8 @@ fun AudioVisualizerBars(color: Color, modifier: Modifier = Modifier) {
     }
     // Lighter than the post color so the bars read over dark media too.
     val barColor = remember(color) { lerp(color, Color.White, 0.35f) }
+    // The Timeline's bars span the screen minus 20dp on each side.
+    val timelineWidthDp = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp - 40
     Canvas(modifier) {
         // Read here, in the draw phase: each new spectrum (~20 a second)
         // only redraws this canvas instead of recomposing the whole post.
@@ -50,10 +59,23 @@ fun AudioVisualizerBars(color: Color, modifier: Modifier = Modifier) {
         val n = levels.size
         if (n == 0) return@Canvas
         val gap = 3.dp.toPx()
-        val barW = ((size.width - gap * (n - 1)) / n).coerceAtLeast(1f)
+        var count = n
+        if (matchTimelineBarWidth) {
+            val refW = timelineWidthDp.dp.toPx()
+            val refBar = ((refW - gap * (n - 1)) / n).coerceAtLeast(1f)
+            count = ((size.width + gap) / (refBar + gap)).toInt().coerceIn(1, n)
+        }
+        val barW = ((size.width - gap * (count - 1)) / count).coerceAtLeast(1f)
         val radius = CornerRadius(barW / 2f, barW / 2f)
-        for (i in 0 until n) {
-            val v = levels[i]
+        for (i in 0 until count) {
+            // Fewer bars than bands: each bar averages its share of them.
+            val v = if (count == n) levels[i] else {
+                val from = i * n / count
+                val to = ((i + 1) * n / count).coerceAtLeast(from + 1).coerceAtMost(n)
+                var sum = 0f
+                for (k in from until to) sum += levels[k]
+                sum / (to - from)
+            }
             if (v <= 0.01f) continue
             val h = (size.height * v).coerceAtLeast(barW)
             drawRoundRect(

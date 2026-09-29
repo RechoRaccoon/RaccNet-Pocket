@@ -1241,6 +1241,7 @@ private fun ProfileInteractionBar(
             if (com.mediaviewer.util.UiToggles.audioVisualizer) {
                 AudioVisualizerBars(
                     color = tint,
+                    matchTimelineBarWidth = true,
                     modifier = Modifier
                         .matchParentSize()
                         .graphicsLayer { translationY = -size.height - 2.dp.toPx() }
@@ -1361,12 +1362,29 @@ private fun ProfileHeaderSection(
         // have no Rocksky connection or nothing currently playing, and
         // shouldn't reserve any space for this at all in that case.
         if (nowPlaying != null) {
-            Text(
-                "Listening to ${nowPlaying.title} by ${nowPlaying.artist}",
-                color = linkColor, fontSize = 12.sp, fontWeight = FontWeight.Medium,
-                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(top = 10.dp)
-            )
+            // ♪ + "Listening to"/"by" in the profile's color; the song and
+            // artist in that track's own cover color (the same color its
+            // Music History row uses), lifted a little so it stays readable.
+            val coverTint = rememberDominantColor(nowPlaying.albumArtUrl ?: "")
+            val songColor = if (nowPlaying.albumArtUrl.isNullOrBlank()) Color.White
+                else androidx.compose.ui.graphics.lerp(coverTint, Color.White, 0.35f)
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(top = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Filled.MusicNote, contentDescription = null, tint = linkColor, modifier = Modifier.size(14.dp))
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    buildAnnotatedString {
+                        withStyle(SpanStyle(color = linkColor)) { append("Listening to ") }
+                        withStyle(SpanStyle(color = songColor)) { append(nowPlaying.title) }
+                        withStyle(SpanStyle(color = linkColor)) { append(" by ") }
+                        withStyle(SpanStyle(color = songColor)) { append(nowPlaying.artist) }
+                    },
+                    fontSize = 12.sp, fontWeight = FontWeight.Medium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                )
+            }
         }
 
         // ── Bio ──
@@ -2661,18 +2679,17 @@ fun HubPostTile(item: MediaItem, tint: Color, liquidGlass: Boolean, height: Dp, 
 /** How wide [HubPostTile] draws [item] at [height]. */
 fun hubPostTileWidth(item: MediaItem, height: Dp): Dp = height * item.tileAspectRatio().coerceIn(0.5f, 1.9f)
 
-/** The video marker on a post's cover: bottom-right, on the same dark
- *  rounded backing as [MultiImageCountBadge]. */
+/** The video marker on a post's cover: the word "Video", bottom-right, on
+ *  exactly the same backing (and text size) as [MultiImageCountBadge]. */
 @Composable
-private fun VideoCoverBadge(modifier: Modifier = Modifier, iconSize: Dp = 14.dp) {
+private fun VideoCoverBadge(modifier: Modifier = Modifier, @Suppress("UNUSED_PARAMETER") iconSize: Dp = 14.dp) {
     Box(
         modifier
             .clip(RoundedCornerShape(6.dp))
             .background(Color.Black.copy(alpha = 0.55f))
-            .padding(horizontal = 3.dp, vertical = 1.dp),
-        contentAlignment = Alignment.Center
+            .padding(horizontal = 5.dp, vertical = 2.dp)
     ) {
-        Icon(Icons.Filled.PlayArrow, contentDescription = "Video", tint = Color.White, modifier = Modifier.size(iconSize))
+        Text("Video", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -2776,8 +2793,12 @@ private fun LazyListScope.profileBacklogGridRows(items: List<PopfeedBacklogItem>
  *  own doc comment for why it was pulled out. */
 @Composable
 private fun BacklogCard(item: PopfeedBacklogItem, liquidGlass: Boolean, onOpenTitle: (PopfeedBacklogItem) -> Unit = {}, modifier: Modifier = Modifier) {
+    val cover = rememberTitleCover(
+        item.imageUrl ?: item.mediaBackdropUrl, item.title, item.mediaCategory, item.identifiersJson,
+        item.releaseDate, item.mainCredit, item.imdbId
+    )
     TitlePosterCard(
-        title = item.title, imageUrl = item.imageUrl, liquidGlass = liquidGlass,
+        title = item.title, imageUrl = cover, liquidGlass = liquidGlass,
         onClick = { onOpenTitle(item) }, modifier = modifier
     )
 }
@@ -3448,14 +3469,15 @@ private fun BlogDetailOverlay(
 
         // Back: a round button level with the camera-notch bubble, on the
         // far left, lined up with the text's left edge.
+        // Same size as the camera-notch bubble, level with it.
         val notchY = rememberNotchCenterY()
-        val backSize = 40.dp
+        val backSize = rememberNotchBubbleSize()
         RoundBackButton(
             liquidGlass = liquidGlass, tint = bubbleTint, backdrop = backdrop, onClick = onClose,
             size = backSize,
             modifier = Modifier.align(Alignment.TopStart)
                 .padding(start = 20.dp)
-                .offset(y = (notchY - backSize / 2).coerceAtLeast(4.dp))
+                .offset(y = (notchY - backSize / 2).coerceAtLeast(0.dp))
         )
 
         // ── Interaction bar (like the profile's) — your own blogs only,
@@ -3690,7 +3712,11 @@ private fun ReviewRow(review: PopfeedReview, liquidGlass: Boolean, onOpenReview:
     // Rims/backgrounds reflect the thumbnail's own colors, not a fixed neutral
     // tint — same idea as everywhere else these bubbles pull from a source
     // image, just per-review instead of per-profile.
-    val tint = rememberDominantColor(review.mediaImageUrl ?: "")
+    val cover = rememberTitleCover(
+        review.mediaImageUrl ?: review.mediaBackdropUrl, review.mediaTitle, review.mediaCategory, review.identifiersJson,
+        review.releaseDate, review.mainCredit, review.imdbId
+    )
+    val tint = rememberDominantColor(cover ?: "")
     Row(
         modifier
             .fillMaxWidth()
@@ -3706,8 +3732,8 @@ private fun ReviewRow(review: PopfeedReview, liquidGlass: Boolean, onOpenReview:
             Modifier.fillMaxHeight().width(70.dp)
                 .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = imgShape) else Modifier.clip(imgShape))
         ) {
-            if (review.mediaImageUrl != null) {
-                AsyncImage(model = review.mediaImageUrl, contentDescription = null, contentScale = ContentScale.Crop,
+            if (cover != null) {
+                AsyncImage(model = cover, contentDescription = null, contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize().clip(imgShape))
             }
         }
@@ -4001,7 +4027,19 @@ fun TitleDetailOverlay(
     onCheckBacklog: (TitleSearchResult) -> Unit = {},
     onToggleBacklog: (TitleSearchResult) -> Unit = {}
 ) {
-    val tint = rememberDominantColor(title.posterUrl ?: title.backdropUrl ?: "")
+    // Covers: the Popfeed record's own images (stored on AT Protocol) first;
+    // Wikipedia's lead image only when the record has none. A landscape
+    // Wikipedia image (e.g. a TV title card) goes in the banner only.
+    val ownPoster = title.posterUrl?.takeIf { com.mediaviewer.util.BlockedHosts.isAllowedCoverUrl(it) }
+    val ownBackdrop = title.backdropUrl?.takeIf { com.mediaviewer.util.BlockedHosts.isAllowedCoverUrl(it) }
+    val wikiCover = title.wikipediaCoverUrl?.takeIf { ownPoster == null && ownBackdrop == null }
+    val posterImage = ownPoster ?: wikiCover?.takeIf { !title.wikipediaCoverWide }
+    val coverSource = when {
+        ownPoster != null || ownBackdrop != null -> CoverSource.POPFEED
+        wikiCover != null -> CoverSource.WIKIPEDIA
+        else -> CoverSource.NONE
+    }
+    val tint = rememberDominantColor(posterImage ?: ownBackdrop ?: wikiCover ?: "")
     LaunchedEffect(title.id, title.title) { onCheckBacklog(title) }
     // "Backlog" to add it, "Remove" once it's in your backlog; "…" while
     // that's being checked or changed. Null = not signed in (no button).
@@ -4045,7 +4083,7 @@ fun TitleDetailOverlay(
     val posterWidth = 108.dp
     val posterHeight = posterWidth * 3f / 2f
     val overlap = 44.dp
-    val bannerImage = title.backdropUrl ?: title.posterUrl
+    val bannerImage = ownBackdrop ?: ownPoster ?: wikiCover
 
     // Item 12: index 0 = Summary, 1..n = reviews. Starts on whichever
     // review this page was opened from (see ProfileOverlay's
@@ -4121,8 +4159,8 @@ fun TitleDetailOverlay(
                     val posterShape = RoundedCornerShape(14.dp)
                     @Composable
                     fun PosterImage() {
-                        if (title.posterUrl != null) {
-                            AsyncImage(model = title.posterUrl, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                        if (posterImage != null) {
+                            AsyncImage(model = posterImage, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                         } else {
                             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Text("Placeholder", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, textAlign = TextAlign.Center)
@@ -4231,7 +4269,15 @@ fun TitleDetailOverlay(
                     }
                 ) {
                     if (selectedIndex == 0) {
-                        SummaryPanel(title = title, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, onOpenLink = { uriHandler.openUri(it) })
+                        Column {
+                            SummaryPanel(title = title, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, onOpenLink = { uriHandler.openUri(it) })
+                            Spacer(Modifier.height(8.dp))
+                            CoverSourceBubble(
+                                source = coverSource, articleUrl = title.wikipediaArticleUrl,
+                                liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                                onOpenLink = { runCatching { uriHandler.openUri(it) } }
+                            )
+                        }
                     } else {
                         val fr = reviews.getOrNull(selectedIndex - 1)
                         if (fr != null) {
@@ -4446,6 +4492,46 @@ private fun SummaryPanel(title: TitleSearchResult, liquidGlass: Boolean, tint: C
                 )
             }
         }
+    }
+    if (liquidGlass) {
+        LiquidGlassSurface(Modifier.fillMaxWidth().padding(horizontal = 12.dp), shape = shape, tint = tint, backdrop = backdrop) { Content() }
+    } else {
+        Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp).clip(shape).background(Color.White.copy(0.06f))) { Content() }
+    }
+}
+
+internal enum class CoverSource { POPFEED, WIKIPEDIA, NONE }
+
+/** A short edge-to-edge bubble under the Summary saying where the title's
+ *  cover art comes from. */
+@Composable
+private fun CoverSourceBubble(
+    source: CoverSource, articleUrl: String?, liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
+    onOpenLink: (String) -> Unit
+) {
+    val shape = RoundedCornerShape(12.dp)
+    val tap = rememberHapticTap()
+    val text = buildAnnotatedString {
+        withStyle(SpanStyle(color = Color.White.copy(0.5f), fontWeight = FontWeight.SemiBold)) { append("Cover: ") }
+        when (source) {
+            CoverSource.POPFEED -> append("from this title's Popfeed entry")
+            CoverSource.WIKIPEDIA -> {
+                append("via ")
+                withStyle(SpanStyle(color = Color.White, fontWeight = FontWeight.SemiBold, textDecoration = TextDecoration.Underline)) { append("Wikipedia") }
+                append(", shown for identification")
+            }
+            CoverSource.NONE -> append("none available for this title")
+        }
+    }
+    val link = articleUrl?.takeIf { source == CoverSource.WIKIPEDIA }
+    @Composable
+    fun Content() {
+        Text(
+            text, color = Color.White.copy(0.7f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth()
+                .then(if (link != null) Modifier.clickable { tap(); onOpenLink(link) } else Modifier)
+                .padding(horizontal = 14.dp, vertical = 8.dp)
+        )
     }
     if (liquidGlass) {
         LiquidGlassSurface(Modifier.fillMaxWidth().padding(horizontal = 12.dp), shape = shape, tint = tint, backdrop = backdrop) { Content() }

@@ -75,12 +75,15 @@ fun ProfileQrScreen(
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val qrSize = maxWidth
             Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
-                Spacer(Modifier.height(rememberTopCutoutClearance() + 44.dp))
+                Spacer(Modifier.height(rememberTopCutoutClearance() + 40.dp))
+                Spacer(Modifier.weight(1f))
+                // The logo sits right on top of the QR code, balancing the
+                // name/handle underneath it.
                 Image(
                     painterResource(R.drawable.stellar_logo_vector), contentDescription = "Stellar",
-                    modifier = Modifier.width((qrSize * 0.42f).coerceAtMost(220.dp))
+                    modifier = Modifier.width((qrSize * 0.6f).coerceAtMost(300.dp))
                 )
-                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.height(10.dp))
                 Box(Modifier.size(qrSize), contentAlignment = Alignment.Center) {
                     if (matrix != null) {
                         Canvas(Modifier.matchParentSize()) {
@@ -155,7 +158,7 @@ fun ProfileQrScreen(
                     "@${author.handle}", color = lerp(end, Color.White, 0.3f), fontSize = 13.sp, maxLines = 1,
                     overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, modifier = Modifier.padding(horizontal = 24.dp)
                 )
-                Spacer(Modifier.weight(1.3f))
+                Spacer(Modifier.weight(1f))
             }
         }
         RoundBackButton(

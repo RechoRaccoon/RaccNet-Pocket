@@ -444,7 +444,7 @@ fun SettingsSheet(
                             label = "settingsTab"
                         ) { tab ->
                             when (tab) {
-                                SettingsTab.CREDITS -> CreditsPageContent()
+                                SettingsTab.CREDITS -> AboutPageContent()
                                 SettingsTab.SUPPORT -> SupportPageContent(liquidGlass = liquidGlass, tint = dominantColor)
                                 SettingsTab.SETTINGS -> SettingsPageContent(
                                     reducedAnimations = reducedAnimations, onToggleReducedAnimations = onToggleReducedAnimations,
@@ -536,6 +536,7 @@ fun SettingsSheet(
                             onOpenE621Following = { onSwitchMode(AppMode.E621); onShowE621Following(); onSwipeToFeed() },
                             hubLists = settingsExtras.hubLists,
                             onLoadHubList = settingsExtras.onLoadHubList,
+                            onLoadMoreHubList = settingsExtras.onLoadMoreHubList,
                             onOpenHubListPost = settingsExtras.onOpenHubListPost
                         )
                     }
@@ -713,6 +714,7 @@ private fun AtProtocolPageContent(
     // Customize Hub: list rows' content + actions (see HubListSection).
     hubLists: Map<String, MainViewModel.HubListState> = emptyMap(),
     onLoadHubList: (String) -> Unit = {},
+    onLoadMoreHubList: (String) -> Unit = {},
     onOpenHubListPost: (String, String, Int) -> Unit = { _, _, _ -> }
 ) {
     // Item 8: both of the new sections' fetches are lazy — kick them off once
@@ -1242,6 +1244,7 @@ private fun AtProtocolPageContent(
                         HubListSection(
                             row = row, state = hubLists[uri], liquidGlass = liquidGlass, tint = dominantColor,
                             onLoad = { onLoadHubList(uri) },
+                            onLoadMore = { onLoadMoreHubList(uri) },
                             onOpenProfile = onOpenProfile,
                             onOpenPost = { index -> onOpenHubListPost(uri, row.label, index) }
                         )
@@ -1487,7 +1490,8 @@ private fun HubListSection(
     tint: Color,
     onLoad: () -> Unit,
     onOpenProfile: (com.mediaviewer.model.AuthorInfo) -> Unit,
-    onOpenPost: (Int) -> Unit
+    onOpenPost: (Int) -> Unit,
+    onLoadMore: () -> Unit = {}
 ) {
     LaunchedEffect(row.listUri) { onLoad() }
     val loading = state == null || (state.loading && state.members.isEmpty() && state.posts.isEmpty())
@@ -1562,8 +1566,19 @@ private fun HubListSection(
                 color = DimGray, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), textAlign = TextAlign.Center
             )
         } else {
+            // Scrolling near the end of the row loads the next page.
+            val rowState = androidx.compose.foundation.lazy.rememberLazyListState()
+            val latestLoadMore by rememberUpdatedState(onLoadMore)
+            LaunchedEffect(rowState, posts.size) {
+                snapshotFlow {
+                    val info = rowState.layoutInfo
+                    val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+                    info.totalItemsCount > 0 && last >= info.totalItemsCount - 4
+                }.collect { nearEnd -> if (nearEnd) latestLoadMore() }
+            }
             androidx.compose.foundation.lazy.LazyRow(
                 Modifier.fillMaxWidth(),
+                state = rowState,
                 contentPadding = PaddingValues(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.Top
@@ -1580,6 +1595,13 @@ private fun HubListSection(
                         )
                         Spacer(Modifier.height(6.dp))
                         HubPostTile(post, authorTint, liquidGlass, HUB_BLOG_CARD_HEIGHT) { onOpenPost(i) }
+                    }
+                }
+                if (state?.loadingMore == true) {
+                    item(key = "hub_list_more") {
+                        Box(Modifier.width(48.dp).height(HUB_BLOG_CARD_HEIGHT + 26.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 1.5.dp)
+                        }
                     }
                 }
             }
@@ -1995,8 +2017,8 @@ private fun SettingsCreditsSwitch(
         Row(Modifier.padding(3.dp), verticalAlignment = Alignment.CenterVertically) {
             listOf(
                 SettingsTab.SETTINGS to "Settings",
-                SettingsTab.CREDITS to "Credits",
-                SettingsTab.SUPPORT to "Support Stellar"
+                SettingsTab.SUPPORT to "Support Stellar",
+                SettingsTab.CREDITS to "About"
             ).forEach { (tab, label) ->
                 val isSelected = tab == selected
                 Box(
@@ -2132,7 +2154,7 @@ private fun ReturnToFeedBar(
                     // buttons too, not just Timeline/Explore.
                     .padding(horizontal = 2.dp)
                     .layout { measurable, constraints ->
-                        val h = 26.dp.roundToPx()
+                        val h = 34.dp.roundToPx() // same height as the Timeline's
                         val placeable = measurable.measure(constraints.copy(minHeight = h, maxHeight = h))
                         layout(placeable.width, 0) { placeable.place(0, -placeable.height - 2.dp.roundToPx()) }
                     }
@@ -2234,7 +2256,11 @@ private fun MutualReviewCard(
     onOpenProfile: (com.mediaviewer.model.AuthorInfo) -> Unit = {}
 ) {
     val shape = RoundedCornerShape(14.dp)
-    val tint = rememberDominantColor(fr.review.mediaImageUrl ?: fr.author.avatarUrl ?: "")
+    val cover = rememberTitleCover(
+        fr.review.mediaImageUrl ?: fr.review.mediaBackdropUrl, fr.review.mediaTitle, fr.review.mediaCategory,
+        fr.review.identifiersJson, fr.review.releaseDate, fr.review.mainCredit, fr.review.imdbId
+    )
+    val tint = rememberDominantColor(cover ?: fr.author.avatarUrl ?: "")
     // Bug fix (per feedback): the author icon+name used to float INSIDE the
     // card as a TopStart overlay, competing for the same corner as the star
     // rating pill — the two routinely overlapped on this card's narrow
@@ -2250,8 +2276,8 @@ private fun MutualReviewCard(
                 .then(if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape) else Modifier.clip(shape).background(Color.White.copy(0.06f)))
                 .clickable { onOpenReview(fr) }
         ) {
-            if (fr.review.mediaImageUrl != null) {
-                AsyncImage(model = fr.review.mediaImageUrl, contentDescription = null, contentScale = ContentScale.Crop,
+            if (cover != null) {
+                AsyncImage(model = cover, contentDescription = null, contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize().clip(shape))
             } else {
                 Box(Modifier.fillMaxSize().clip(shape).background(Color.White.copy(0.10f)))

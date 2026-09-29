@@ -162,6 +162,13 @@ fun CameraNotchButton(
         animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessHigh),
         label = "notchBubbleWidth"
     )
+    // Publish the collapsed bubble's real size/position so other buttons
+    // can sit level with it at the same size (the blog's back button).
+    val fallbackTopPx = with(density) { 12.dp.toPx() }
+    androidx.compose.runtime.SideEffect {
+        NotchGeometry.ringSizePx = ringPx
+        NotchGeometry.centerYPx = cutoutCenterPx?.y ?: (fallbackTopPx + ringPx / 2f)
+    }
     val collapsedShape = CircleShape
     val expandedShape = RoundedCornerShape(50)
     val shape = if (expanded) expandedShape else collapsedShape

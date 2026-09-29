@@ -44,7 +44,7 @@ object HubLayout {
 
     val BUILT_IN_LABELS = linkedMapOf(
         FEEDS to "Feeds",
-        BUTTONS to "6 Button",
+        BUTTONS to "Launchpad",
         MUTUALS to "Mutuals",
         LIVESTREAMS to "Livestreams",
         BLOGS to "Blogs",

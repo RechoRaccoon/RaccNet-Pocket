@@ -47,6 +47,11 @@ object ImageLoading {
             }
             val client = OkHttpClient.Builder()
                 .dispatcher(dispatcher)
+                // Never TMDB (see BlockedHosts).
+                .addInterceptor(BlockedHosts.interceptor)
+                // Wikimedia asks every client to identify itself (fallback
+                // title covers load from upload.wikimedia.org).
+                .addInterceptor(BlockedHosts.wikimediaUserAgent)
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
                 .build()
@@ -74,14 +79,14 @@ object ImageLoading {
     // ── Age limit ────────────────────────────────────────────────────────
     // Because cache headers are ignored above, nothing else would ever
     // expire a stored image; it would only leave when the size cap pushed
-    // it out. TMDB's API terms (§1.C) forbid caching their content for more
-    // than 6 months, and TMDB posters/backdrops show up here via Popfeed
-    // reviews, so the whole image cache (disk + memory) is wiped every
-    // 30 days — well inside that limit. It's checked every time the app
+    // it out, so the whole image cache (disk + memory) is still wiped every
+    // 30 days to keep it fresh. (Stellar no longer loads anything from
+    // TMDB at all — see BlockedHosts.) It's checked every time the app
     // starts AND by a once-a-day background job (ImageCacheExpiryWorker),
     // so it still happens for someone who doesn't open the app for months.
     private const val META_PREFS = "image_cache_meta"
     private const val KEY_LAST_WIPE = "last_wipe_ms"
+    private const val KEY_TMDB_PURGED = "tmdb_purged_v1"
     const val MAX_AGE_MS = 30L * 24 * 60 * 60 * 1000
 
     /** Wipes the image cache if it's been [MAX_AGE_MS] since the last wipe.
@@ -92,6 +97,13 @@ object ImageLoading {
         val prefs = app.getSharedPreferences(META_PREFS, Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
         val last = prefs.getLong(KEY_LAST_WIPE, 0L)
+        // One time, on the first run of the build that cut TMDB off: drop
+        // every cached image so no TMDB poster stays on the phone.
+        if (!prefs.getBoolean(KEY_TMDB_PURGED, false)) {
+            wipe(app)
+            prefs.edit().putLong(KEY_LAST_WIPE, now).putBoolean(KEY_TMDB_PURGED, true).apply()
+            return
+        }
         if (last == 0L) {
             // First run with the age limit: anything already cached came
             // from older builds with no start date — clear it once.
@@ -111,17 +123,10 @@ object ImageLoading {
         runCatching { loader.diskCache?.clear() }
     }
 
-    /**
-     * Rewrites known image URLs to a size that fits a phone screen:
-     * TMDB `original` (often 3000–4000 px, several MB) → w780 posters /
-     * w1280 backdrops. Anything else is returned unchanged.
-     */
-    fun optimizeUrl(url: String, wide: Boolean): String {
-        if (url.contains("image.tmdb.org/t/p/original/")) {
-            return url.replace("/t/p/original/", if (wide) "/t/p/w1280/" else "/t/p/w780/")
-        }
-        return url
-    }
+    /** Image URLs are used as-is. (This used to shrink TMDB links; TMDB is
+     *  no longer used at all.) */
+    @Suppress("UNUSED_PARAMETER")
+    fun optimizeUrl(url: String, wide: Boolean): String = url
 
     /** Bluesky's image CDN for a blob: resized, cached at the edge, and far
      *  faster than pulling the original from the owner's PDS. */

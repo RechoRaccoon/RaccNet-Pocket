@@ -1324,7 +1324,13 @@ data class TitleSearchResult(
     val wikipediaArticleUrl: String? = null,
     /** The source record's raw Popfeed `identifiers` object as JSON, when
      *  known — used when adding this title to the backlog. */
-    val identifiersJson: String? = null
+    val identifiersJson: String? = null,
+    /** Fallback cover from the title's Wikipedia article, used only when
+     *  the Popfeed record has no image of its own. [wikipediaCoverWide] =
+     *  landscape (e.g. a TV title card) — shown as the banner, not the
+     *  poster. */
+    val wikipediaCoverUrl: String? = null,
+    val wikipediaCoverWide: Boolean = false
 )
 
 /** One parsed social.popfeed.feed.comment record, resolved to the author who

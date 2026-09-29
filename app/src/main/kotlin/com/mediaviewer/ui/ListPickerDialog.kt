@@ -29,6 +29,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.lerp
@@ -62,7 +65,9 @@ private data class PickerEntry(
     /** The list the account is added to / removed from. */
     val listUri: String,
     /** "Both": the same-named starter pack's list, kept in step. */
-    val additionalUri: String? = null
+    val additionalUri: String? = null,
+    /** Every record renamed together when the name is edited. */
+    val renameUris: List<String> = emptyList()
 )
 
 /**
@@ -92,6 +97,8 @@ fun ListPickerDialog(
     onToggle: (listUri: String, additionalUri: String?) -> Unit,
     /** (tab key, name, description, cover image, onDone(error or null)) */
     onCreate: (String, String, String, android.net.Uri?, (String?) -> Unit) -> Unit = { _, _, _, _, _ -> },
+    /** Double-tap a name to rename: (records to rename, new name, onDone(error or null)). */
+    onRename: (List<String>, String, (String?) -> Unit) -> Unit = { _, _, done -> done(null) },
     onDismiss: () -> Unit
 ) {
     var activeTab by remember(initialTab) {
@@ -114,22 +121,26 @@ fun ListPickerDialog(
         val curate = lists.filter { !it.purpose.contains("modlist") && !it.purpose.contains("referencelist") }
         val raw = when (activeTab) {
             PickerTab.LISTS -> curate.map {
-                PickerEntry(it.uri, it.name, null, it.avatar, PickerTab.LISTS, it.uri)
+                PickerEntry(it.uri, it.name, null, it.avatar, PickerTab.LISTS, it.uri, renameUris = listOf(it.uri))
             }
             PickerTab.MODLISTS -> lists.filter { it.purpose.contains("modlist") }.map {
-                PickerEntry(it.uri, it.name, null, it.avatar, PickerTab.MODLISTS, it.uri)
+                PickerEntry(it.uri, it.name, null, it.avatar, PickerTab.MODLISTS, it.uri, renameUris = listOf(it.uri))
             }
             PickerTab.STARTER_PACKS -> starterPacks.mapNotNull { pack ->
                 val rec = pack.record ?: return@mapNotNull null
                 if (rec.list.isBlank()) return@mapNotNull null
-                PickerEntry(pack.uri, rec.name, null, null, PickerTab.STARTER_PACKS, rec.list)
+                PickerEntry(pack.uri, rec.name, null, null, PickerTab.STARTER_PACKS, rec.list, renameUris = listOf(pack.uri, rec.list))
             }
             PickerTab.BOTH -> {
-                val packByName = starterPacks.mapNotNull { p -> p.record?.let { r -> r.name to r.list } }
-                    .filter { it.second.isNotBlank() }.toMap()
+                // name -> (the pack's own list, the pack)
+                val packByName = starterPacks.mapNotNull { p -> p.record?.let { r -> r.name to (r.list to p.uri) } }
+                    .filter { it.second.first.isNotBlank() }.toMap()
                 curate.mapNotNull { list ->
-                    packByName[list.name]?.let { packList ->
-                        PickerEntry(list.uri, list.name, null, list.avatar, PickerTab.BOTH, list.uri, packList)
+                    packByName[list.name]?.let { (packList, packUri) ->
+                        PickerEntry(
+                            list.uri, list.name, null, list.avatar, PickerTab.BOTH, list.uri, packList,
+                            renameUris = listOf(list.uri, packUri, packList)
+                        )
                     }
                 }
             }
@@ -226,7 +237,8 @@ fun ListPickerDialog(
                                             entry = entry, tint = tint,
                                             isMember = memberships.containsKey(entry.listUri),
                                             busy = entry.listUri in busy,
-                                            onToggle = { onToggle(entry.listUri, entry.additionalUri) }
+                                            onToggle = { onToggle(entry.listUri, entry.additionalUri) },
+                                            onRename = { name, done -> onRename(entry.renameUris, name, done) }
                                         )
                                     }
                                     item(key = "create_${activeTab.key}") {
@@ -248,7 +260,29 @@ private val RowHeight = 40.dp
 private val RowShape = RoundedCornerShape(12.dp)
 
 @Composable
-private fun EntryRow(entry: PickerEntry, tint: Color, isMember: Boolean, busy: Boolean, onToggle: () -> Unit) {
+private fun EntryRow(
+    entry: PickerEntry, tint: Color, isMember: Boolean, busy: Boolean, onToggle: () -> Unit,
+    onRename: (String, (String?) -> Unit) -> Unit = { _, done -> done(null) }
+) {
+    // Double-tap the name to edit it; the keyboard's Enter saves.
+    var editing by remember(entry.key) { mutableStateOf(false) }
+    var draft by remember(entry.key) { mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(entry.name)) }
+    var saving by remember(entry.key) { mutableStateOf(false) }
+    val focus = remember { androidx.compose.ui.focus.FocusRequester() }
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    LaunchedEffect(editing) {
+        if (editing) {
+            kotlinx.coroutines.delay(60)
+            runCatching { focus.requestFocus() }
+            keyboard?.show()
+        }
+    }
+    fun save() {
+        val name = draft.text.trim()
+        if (name.isBlank() || name == entry.name) { editing = false; return }
+        saving = true
+        onRename(name) { err -> saving = false; if (err == null) editing = false }
+    }
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -274,12 +308,36 @@ private fun EntryRow(entry: PickerEntry, tint: Color, isMember: Boolean, busy: B
             }
         }
         Column(
-            modifier = Modifier.weight(1f).height(RowHeight).popupTextShadow(RowShape).padding(horizontal = 12.dp),
+            modifier = Modifier.weight(1f).height(RowHeight).popupTextShadow(RowShape)
+                .then(
+                    if (editing) Modifier.border(1.dp, lerp(tint, Color.White, 0.4f).copy(alpha = 0.8f), RowShape)
+                    else Modifier.pointerInput(entry.key) {
+                        detectTapGestures(onDoubleTap = {
+                            draft = androidx.compose.ui.text.input.TextFieldValue(entry.name, androidx.compose.ui.text.TextRange(entry.name.length))
+                            editing = true
+                        })
+                    }
+                )
+                .padding(horizontal = 12.dp),
             verticalArrangement = Arrangement.Center
         ) {
-            Text(entry.name, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1,
-                overflow = TextOverflow.Ellipsis)
-            if (entry.subtitle != null) Text(entry.subtitle, color = Color.White.copy(alpha = 0.75f), fontSize = 11.sp, maxLines = 1)
+            if (editing) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    BasicTextField(
+                        value = draft, onValueChange = { draft = it }, singleLine = true, enabled = !saving,
+                        textStyle = TextStyle(color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium),
+                        cursorBrush = SolidColor(Color.White),
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = androidx.compose.ui.text.input.ImeAction.Done),
+                        keyboardActions = androidx.compose.foundation.text.KeyboardActions(onDone = { save() }),
+                        modifier = Modifier.weight(1f).focusRequester(focus)
+                    )
+                    if (saving) CircularProgressIndicator(Modifier.size(12.dp), color = Color.White, strokeWidth = 1.5.dp)
+                }
+            } else {
+                Text(entry.name, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis)
+                if (entry.subtitle != null) Text(entry.subtitle, color = Color.White.copy(alpha = 0.75f), fontSize = 11.sp, maxLines = 1)
+            }
         }
         // One button: + adds them, − takes them back off. It doesn't light
         // up or ripple when tapped — only the icon changes.

@@ -274,7 +274,7 @@ fun ComposePostScreen(
     // own poster color takes priority over the profile avatar shadow, since
     // the title being reviewed is far more the visual subject here than the
     // reviewer's own avatar is.
-    val dominantColor = reviewTarget?.posterUrl?.let { rememberDominantColor(it) }
+    val dominantColor = (reviewTarget?.posterUrl?.takeIf { com.mediaviewer.util.BlockedHosts.isAllowedCoverUrl(it) } ?: reviewTarget?.wikipediaCoverUrl)?.let { rememberDominantColor(it) }
         ?: rememberSelfTint(selfProfile?.avatarUrl, dominantColor)
 
     // ── Core state ───────────────────────────────────────────────────────
@@ -1670,8 +1670,9 @@ private fun ReviewTargetRow(
         ) {
             val coverShape = RoundedCornerShape(6.dp)
             Box(Modifier.fillMaxHeight().aspectRatio(2f / 3f).clip(coverShape).background(Color.White.copy(0.10f))) {
-                if (target.posterUrl != null) {
-                    AsyncImage(model = target.posterUrl, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                val coverUrl = target.posterUrl?.takeIf { com.mediaviewer.util.BlockedHosts.isAllowedCoverUrl(it) } ?: target.wikipediaCoverUrl
+                if (coverUrl != null) {
+                    AsyncImage(model = coverUrl, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                 }
             }
             Spacer(Modifier.width(10.dp))
