@@ -6228,14 +6228,21 @@ _bskyDid.value          = session.did
     // sheet opens), so swiping up shows them straight away with no spinner.
     // A small per-post cache keeps swiping back and forth free.
     private class CachedComments(val atMs: Long, val list: List<CommentItem>)
-    private val commentsCache = object : LinkedHashMap<String, CachedComments>(32, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedComments>?) = size > 30
-    }
+    // Access-ordered LRU with manual eviction (subclassing LinkedHashMap
+    // crashes the Kotlin compiler in a multiplatform module).
+    private val commentsCache = LinkedHashMap<String, CachedComments>(32, 0.75f, true)
     @Volatile private var commentsShownFor: String? = null
     private fun commentKey(item: MediaItem) = "${_appMode.value}:${item.id}"
     private fun cachedComments(key: String): CachedComments? = synchronized(commentsCache) { commentsCache[key] }
     private fun putCachedComments(key: String, list: List<CommentItem>) {
-        synchronized(commentsCache) { commentsCache[key] = CachedComments(System.currentTimeMillis(), list) }
+        synchronized(commentsCache) {
+            commentsCache[key] = CachedComments(System.currentTimeMillis(), list)
+            if (commentsCache.size > 30) {
+                val eldest = commentsCache.entries.iterator()
+                eldest.next()
+                eldest.remove()
+            }
+        }
     }
 
     init {

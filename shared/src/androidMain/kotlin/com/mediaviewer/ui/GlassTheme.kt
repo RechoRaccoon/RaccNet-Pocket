@@ -98,7 +98,7 @@ suspend fun fetchDominantColor(context: android.content.Context, url: String): C
             }
             if (n > 0) {
                 val c = Color(r.toFloat() / n / 255f, g.toFloat() / n / 255f, b.toFloat() / n / 255f, 1f)
-                synchronized(dominantColorCache) { dominantColorCache[url] = c }
+                putDominantColor(url, c)
                 return c
             }
         }
@@ -112,8 +112,18 @@ suspend fun fetchDominantColor(context: android.content.Context, url: String): C
  *  each appearance started from a grey placeholder and re-ran the image
  *  fetch, then recomposed its whole subtree again once the real color
  *  arrived — a visible flash and extra work on every menu switch. */
-private val dominantColorCache = object : LinkedHashMap<String, Color>(64, 0.75f, true) {
-    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Color>?): Boolean = size > 300
+// A plain access-ordered LinkedHashMap with manual eviction: subclassing it
+// (to override removeEldestEntry) crashes the Kotlin compiler's IR backend in
+// a multiplatform module ("No override for FUN ... name:get").
+private val dominantColorCache = LinkedHashMap<String, Color>(64, 0.75f, true)
+
+private fun putDominantColor(url: String, color: Color) = synchronized(dominantColorCache) {
+    dominantColorCache[url] = color
+    if (dominantColorCache.size > 300) {
+        val eldest = dominantColorCache.entries.iterator()
+        eldest.next()
+        eldest.remove()
+    }
 }
 
 private fun cachedDominantColor(url: String): Color? = synchronized(dominantColorCache) { dominantColorCache[url] }
