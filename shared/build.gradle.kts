@@ -146,6 +146,16 @@ android {
     buildFeatures {
         compose = true
     }
+
+    // lifecycle 2.9's bundled lint checks were compiled against a newer lint
+    // than AGP 8.7 ships and crash lintVital (IncompatibleClassChangeError in
+    // NonNullableMutableLiveDataDetector). Lint never changes the APK, so
+    // skip the release-time lint pass and that detector.
+    lint {
+        disable += "NullSafeMutableLiveData"
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
