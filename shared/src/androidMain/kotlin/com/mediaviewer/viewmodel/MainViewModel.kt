@@ -427,6 +427,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // "add/remove from availableTabs" logic in openProfile() already
     // reconciles that once the fresh probe finishes — see the isEmpty()
     // checks added to each probe below.
+    @kotlinx.serialization.Serializable
     private data class CachedProfileTabs(
         val availableTabs: Set<String> = emptySet(),
         val posts: List<MediaItem> = emptyList(),
@@ -464,10 +465,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val profileTabCacheMutex = Mutex()
     /** Guards loading the DM conversation list (see ensureDmConversationsLoadedSuspend). */
     private val dmConversationsMutex = Mutex()
-    private val profileTabCacheGson by lazy { com.google.gson.Gson() }
-    private val profileTabCacheType by lazy {
-        object : com.google.gson.reflect.TypeToken<Map<String, CachedProfileTabs>>() {}.type
-    }
 
     private suspend fun ensureProfileTabCacheHydrated() {
         if (profileTabCacheHydrated) return
@@ -475,7 +472,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (profileTabCacheHydrated) return
             runCatching {
                 val json = prefs.profileTabCacheJson.first()
-                val parsed: Map<String, CachedProfileTabs>? = profileTabCacheGson.fromJson(json, profileTabCacheType)
+                val parsed: Map<String, CachedProfileTabs>? = json?.takeIf { it.isNotBlank() }?.let { com.mediaviewer.json.StellarJson.default.decodeFromString<Map<String, CachedProfileTabs>>(it) }
                 if (parsed != null) profileTabCache = parsed.toMutableMap()
             }
             profileTabCacheHydrated = true
@@ -555,7 +552,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         .take(profileTabCache.size - PROFILE_TAB_CACHE_MAX_ENTRIES).map { it.key }
                     toDrop.forEach { profileTabCache.remove(it) }
                 }
-                runCatching { prefs.setProfileTabCacheJson(profileTabCacheGson.toJson(profileTabCache, profileTabCacheType)) }
+                runCatching { prefs.setProfileTabCacheJson(com.mediaviewer.json.StellarJson.default.encodeToString<Map<String, CachedProfileTabs>>(profileTabCache)) }
             }
         }
     }
@@ -756,15 +753,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Remembers every post the user scrolls onto, purely on-device, so the
     // History button can show them again later. Capped to avoid unbounded growth.
     private val _history = MutableStateFlow<List<HistoryEntry>>(emptyList())
-    private val historyGson = com.google.gson.Gson()
     private val HISTORY_LIMIT = 500
 
     private fun loadHistoryFromPrefs() {
         viewModelScope.launch {
             val json = prefs.historyJson.first()
             val parsed = runCatching {
-                val type = object : com.google.gson.reflect.TypeToken<List<HistoryEntry>>() {}.type
-                historyGson.fromJson<List<HistoryEntry>>(json, type) ?: emptyList()
+                json?.takeIf { it.isNotBlank() }?.let { com.mediaviewer.json.StellarJson.default.decodeFromString<List<HistoryEntry>>(it) } ?: emptyList()
             }.getOrDefault(emptyList())
             _history.value = parsed
         }
@@ -795,7 +790,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         val updated = (listOf(entry) + _history.value.filterNot { it.uri.ifBlank { it.cid } == key }).take(HISTORY_LIMIT)
         _history.value = updated
-        viewModelScope.launch { prefs.setHistoryJson(historyGson.toJson(updated)) }
+        viewModelScope.launch { prefs.setHistoryJson(com.mediaviewer.json.StellarJson.default.encodeToString<List<HistoryEntry>>(updated)) }
     }
 
     private fun HistoryEntry.toMediaItem(): MediaItem = MediaItem(
@@ -970,8 +965,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val rest = _dmConversations.value.filter { it.convoId.isBlank() && it.member.did !in haveDids }
                 _dmConversations.value = fresh + rest
                 runCatching {
-                    val type = object : com.google.gson.reflect.TypeToken<List<DmConversation>>() {}.type
-                    prefs.setHubMutualsCache(com.google.gson.Gson().toJson(_dmConversations.value, type))
+                    prefs.setHubMutualsCache(com.mediaviewer.json.StellarJson.default.encodeToString<List<DmConversation>>(_dmConversations.value))
                 }
             }
         }
@@ -2416,24 +2410,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         // problem by never asking Gson to populate `blocks`
                         // from cached JSON at all; the live fetch below
                         // supplies real block data moments later anyway.
-                        val gson = com.google.gson.GsonBuilder()
-                            .registerTypeAdapter(LeafletBlog::class.java, com.google.gson.JsonDeserializer { json, _, _ ->
-                                val o = json.asJsonObject
-                                LeafletBlog(
-                                    uri = o.get("uri")?.takeIf { !it.isJsonNull }?.asString ?: "",
-                                    title = o.get("title")?.takeIf { !it.isJsonNull }?.asString ?: "",
-                                    bodyText = o.get("bodyText")?.takeIf { !it.isJsonNull }?.asString ?: "",
-                                    createdAt = o.get("createdAt")?.takeIf { !it.isJsonNull }?.asString ?: "",
-                                    description = o.get("description")?.takeIf { !it.isJsonNull }?.asString,
-                                    thumbnailUrl = o.get("thumbnailUrl")?.takeIf { !it.isJsonNull }?.asString
-                                    // blocks intentionally omitted — always emptyList() from cache.
-                                )
-                            })
-                            .create()
-                        val reviewType = object : com.google.gson.reflect.TypeToken<List<FriendPopfeedReview>>() {}.type
-                        val blogType = object : com.google.gson.reflect.TypeToken<List<FriendLeafletBlog>>() {}.type
-                        val cachedReviews: List<FriendPopfeedReview> = gson.fromJson(prefs.hubReviewsCacheJson.first(), reviewType) ?: emptyList()
-                        val cachedBlogs: List<FriendLeafletBlog> = gson.fromJson(prefs.hubBlogsCacheJson.first(), blogType) ?: emptyList()
+                        // LeafletBlog.blocks is @Transient: never cached,
+                        // always emptyList() from cache (see its doc comment).
+                        val cachedReviews: List<FriendPopfeedReview> = prefs.hubReviewsCacheJson.first()?.takeIf { it.isNotBlank() }
+                            ?.let { runCatching { com.mediaviewer.json.StellarJson.default.decodeFromString<List<FriendPopfeedReview>>(it) }.getOrNull() } ?: emptyList()
+                        val cachedBlogs: List<FriendLeafletBlog> = prefs.hubBlogsCacheJson.first()?.takeIf { it.isNotBlank() }
+                            ?.let { runCatching { com.mediaviewer.json.StellarJson.default.decodeFromString<List<FriendLeafletBlog>>(it) }.getOrNull() } ?: emptyList()
                         if (cachedReviews.isNotEmpty()) _friendsReviews.value = cachedReviews
                         if (cachedBlogs.isNotEmpty()) _friendsBlogs.value = cachedBlogs
                     }
@@ -2491,10 +2473,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // until the other side catches up too.
                 reviewsBlogsLoaded = reviewsOk && blogsOk
                 runCatching {
-                    val gson = com.google.gson.Gson()
-                    val reviewType = object : com.google.gson.reflect.TypeToken<List<FriendPopfeedReview>>() {}.type
-                    val blogType = object : com.google.gson.reflect.TypeToken<List<FriendLeafletBlog>>() {}.type
-                    prefs.setHubCache(gson.toJson(_friendsReviews.value, reviewType), gson.toJson(_friendsBlogs.value, blogType), System.currentTimeMillis())
+                    prefs.setHubCache(com.mediaviewer.json.StellarJson.default.encodeToString<List<FriendPopfeedReview>>(_friendsReviews.value), com.mediaviewer.json.StellarJson.default.encodeToString<List<FriendLeafletBlog>>(_friendsBlogs.value), System.currentTimeMillis())
                 }
             } finally {
                 _friendsReviewsLoading.value = false
@@ -3135,8 +3114,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             withContext(Dispatchers.IO) {
                 if (_dmConversations.value.isEmpty()) {
                     runCatching {
-                        val type = object : com.google.gson.reflect.TypeToken<List<DmConversation>>() {}.type
-                        val cached: List<DmConversation> = dmCacheGson.fromJson(prefs.hubMutualsCacheJson.first(), type) ?: emptyList()
+                        val cached: List<DmConversation> = decodeDmCache(prefs.hubMutualsCacheJson.first())
                         if (cached.isNotEmpty()) _dmConversations.value = cached
                     }
                 }
@@ -5398,39 +5376,11 @@ _bskyDid.value          = session.did
     // of leaving that to Gson's normal reflective (and much stricter about
     // matching the JSON exactly) deserialization, the same fix already
     // applied to LeafletBlog's own cache reader above.
-    private val dmCacheGson: com.google.gson.Gson by lazy {
-        com.google.gson.GsonBuilder()
-            .registerTypeAdapter(AuthorInfo::class.java, com.google.gson.JsonDeserializer { json, _, _ ->
-                val o = json.asJsonObject
-                fun str(key: String) = o.get(key)?.takeIf { !it.isJsonNull }?.asString
-                AuthorInfo(
-                    did = str("did") ?: "",
-                    handle = str("handle") ?: "",
-                    displayName = str("displayName") ?: "",
-                    avatarUrl = str("avatarUrl"),
-                    followingUri = str("followingUri"),
-                    isFollowing = o.get("isFollowing")?.takeIf { !it.isJsonNull }?.asBoolean ?: false
-                )
-            })
-            .registerTypeAdapter(DmConversation::class.java, com.google.gson.JsonDeserializer { json, _, ctx ->
-                val o = json.asJsonObject
-                fun str(key: String) = o.get(key)?.takeIf { !it.isJsonNull }?.asString
-                DmConversation(
-                    convoId = str("convoId") ?: "",
-                    member = o.get("member")?.let { ctx.deserialize<AuthorInfo>(it, AuthorInfo::class.java) }
-                        ?: AuthorInfo(did = "", handle = "", displayName = "", avatarUrl = null),
-                    lastSentByUsAt = str("lastSentByUsAt") ?: "",
-                    lastActivityAt = str("lastActivityAt") ?: "",
-                    isGroup = o.get("isGroup")?.takeIf { !it.isJsonNull }?.asBoolean ?: false,
-                    groupMembers = o.get("groupMembers")?.takeIf { it.isJsonArray }?.asJsonArray
-                        ?.map { ctx.deserialize<AuthorInfo>(it, AuthorInfo::class.java) } ?: emptyList(),
-                    memberCount = o.get("memberCount")?.takeIf { !it.isJsonNull }?.asInt ?: 0,
-                    lastMessageText = str("lastMessageText") ?: "",
-                    unreadCount = o.get("unreadCount")?.takeIf { !it.isJsonNull }?.asInt ?: 0
-                )
-            })
-            .create()
-    }
+    // Missing keys fall back to each field's default (AuthorInfo /
+    // DmConversation declare defaults for every field), so older caches
+    // still read — what the custom Gson deserializers used to do.
+    private fun decodeDmCache(json: String?): List<DmConversation> =
+        json?.takeIf { it.isNotBlank() }?.let { com.mediaviewer.json.StellarJson.default.decodeFromString<List<DmConversation>>(it) } ?: emptyList()
 
     private suspend fun ensureDmConversationsLoadedSuspend(silent: Boolean) {
         if (_dmConversations.value.isNotEmpty()) return
@@ -5646,8 +5596,7 @@ _bskyDid.value          = session.did
         _dmConversationsLoading.value = true
         if (_dmConversations.value.isEmpty()) {
             runCatching {
-                val type = object : com.google.gson.reflect.TypeToken<List<DmConversation>>() {}.type
-                val cached: List<DmConversation> = dmCacheGson.fromJson(prefs.hubMutualsCacheJson.first(), type) ?: emptyList()
+                val cached: List<DmConversation> = decodeDmCache(prefs.hubMutualsCacheJson.first())
                 if (cached.isNotEmpty()) _dmConversations.value = cached
             }
         }
@@ -5655,8 +5604,7 @@ _bskyDid.value          = session.did
             .onSuccess {
                 _dmConversations.value = it
                 runCatching {
-                    val type = object : com.google.gson.reflect.TypeToken<List<DmConversation>>() {}.type
-                    prefs.setHubMutualsCache(com.google.gson.Gson().toJson(it, type))
+                    prefs.setHubMutualsCache(com.mediaviewer.json.StellarJson.default.encodeToString<List<DmConversation>>(it))
                 }
             }
             .onFailure {
@@ -6769,21 +6717,23 @@ _bskyDid.value          = session.did
      *  back up, email, or inspect. [name] is what the person typed into the
      *  "Export" naming dialog; it's what shows up in the *other* person's
      *  imported-datasets list after they import it. */
+    @kotlinx.serialization.Serializable
     private data class DatasetFile(
         val formatVersion: Int = 1,
         val name: String,
         val exportedAt: Long,
         val posts: List<DatasetFilePost>
     )
+    @kotlinx.serialization.Serializable
     private data class DatasetFilePost(
         val postUri: String,
         val cid: String,
         val mediaUrl: String,
         val tags: List<DatasetFileTag>
     )
+    @kotlinx.serialization.Serializable
     private data class DatasetFileTag(val name: String, val confidence: Float)
 
-    private val datasetGson = com.google.gson.Gson()
 
     /** Settings' "Export" button, once the person has named the dataset and
      *  picked a save location via the system file picker (ActivityResult
@@ -6819,7 +6769,7 @@ _bskyDid.value          = session.did
                         DatasetFilePost(p.postUri, p.cid, p.mediaUrl, p.tags.map { (tag, conf) -> DatasetFileTag(tag, conf) })
                     }
                 )
-                val json = datasetGson.toJson(file)
+                val json = com.mediaviewer.json.StellarJson.default.encodeToString(DatasetFile.serializer(), file)
                 getApplication<Application>().contentResolver.openOutputStream(uri)?.use { out ->
                     out.write(json.toByteArray(Charsets.UTF_8))
                 } ?: throw java.io.IOException("Couldn't open the chosen file for writing")
@@ -6848,7 +6798,7 @@ _bskyDid.value          = session.did
             try {
                 val json = getApplication<Application>().contentResolver.openInputStream(uri)?.use { it.reader(Charsets.UTF_8).readText() }
                     ?: throw java.io.IOException("Couldn't open the chosen file for reading")
-                val file = datasetGson.fromJson(json, DatasetFile::class.java)
+                val file = runCatching { com.mediaviewer.json.StellarJson.default.decodeFromString(DatasetFile.serializer(), json) }.getOrNull()
                     ?: throw java.io.IOException("That file isn't a dataset export")
                 if (file.posts.isEmpty()) throw java.io.IOException("That dataset export is empty")
                 taggingRepo.importDataset(

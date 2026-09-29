@@ -1,0 +1,197 @@
+package com.mediaviewer.network
+
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+
+
+/** Item 16: Rocksky (rocksky.app) integration — an AT Protocol music-
+ *  scrobbling service. This talks to their public XRPC surface at
+ *  https://api.rocksky.app, per their docs (https://docs.rocksky.app) and
+ *  lexicon namespace (app.rocksky.*, github.com/tsirysndr/rocksky). Two
+ *  endpoints are used:
+ *   - app.rocksky.actor.getActorScrobbles — a DID's *own* scrobble history
+ *     (queried with a `did` param — `actor` is rejected with InvalidRequest),
+ *     used for the profile's "Music History" tab. Important: the sibling
+ *     app.rocksky.scrobble.getScrobbles returns the GLOBAL recent-scrobble
+ *     feed whenever the DID has no Rocksky data — it never goes empty —
+ *     so it must never back a per-profile tab. The actor endpoint returns
+ *     {"scrobbles":[]} for unknown DIDs instead, which is what lets the tab
+ *     hide itself on non-Rocksky accounts.
+ *   - app.rocksky.player.getCurrentlyPlaying — a DID's live now-playing
+ *     state, used for the "Listening to ..." bio line. Rocksky also exposes
+ *     a Spotify-specific app.rocksky.spotify.getCurrentlyPlaying; this app
+ *     tries the general player endpoint first and falls back to the Spotify
+ *     one (see RockskyRepository.getNowPlaying) since not every scrobbler
+ *     integration necessarily answers the general one.
+ *  The actor-endpoint scrobble field names (title, artist, album, albumArt,
+ *  uri, ...) were verified against a live API response (2026-09-18); the
+ *  now-playing fields are reconstructed from public docs/lexicon, so
+ *  RockskyRepository parses them defensively (every field
+ *  optional/defaulted) and a mismatch degrades to "no data" instead of
+ *  crashing. */
+class RockskyApi(baseUrl: String = "https://api.rocksky.app/", profile: HttpProfile = HttpProfile.ROCKSKY) : ApiClient(baseUrl, profile) {
+    suspend fun getScrobbles(
+        did: String,
+        limit: Int = 30,
+        offset: Int = 0
+    ): Response<RockskyScrobblesResponse> = call(
+        "GET",
+        "xrpc/app.rocksky.actor.getActorScrobbles",
+        query = listOf("did" to did, "limit" to limit, "offset" to offset)
+    )
+    /** A listener's year in review (Rocksky "Wrapped") — totals, top
+     *  tracks/artists/albums/genres and a few stats for one calendar year
+     *  (UTC). Answers an empty view (totalScrobbles 0) for a year with no
+     *  plays. Verified against a live response (2026-09-29). */
+    suspend fun getWrapped(
+        did: String,
+        year: Int
+    ): Response<RockskyWrappedDto> = call(
+        "GET",
+        "xrpc/app.rocksky.stats.getWrapped",
+        query = listOf("did" to did, "year" to year)
+    )
+    /** All-time totals for a listener — used for the scrobble count, which
+     *  (as an offset into getActorScrobbles, newest first) finds their very
+     *  first scrobble and so the first year they have any history in. */
+    suspend fun getStats(
+        did: String
+    ): Response<RockskyStatsDto> = call(
+        "GET",
+        "xrpc/app.rocksky.stats.getStats",
+        query = listOf("did" to did)
+    )
+    suspend fun getCurrentlyPlaying(
+        actor: String
+    ): Response<RockskyNowPlayingDto> = call(
+        "GET",
+        "xrpc/app.rocksky.player.getCurrentlyPlaying",
+        query = listOf("actor" to actor)
+    )
+    suspend fun getSpotifyCurrentlyPlaying(
+        actor: String
+    ): Response<RockskyNowPlayingDto> = call(
+        "GET",
+        "xrpc/app.rocksky.spotify.getCurrentlyPlaying",
+        query = listOf("actor" to actor)
+    )}
+
+@Serializable
+data class RockskyScrobblesResponse(
+    val scrobbles: List<RockskyScrobbleDto>? = null,
+    val cursor: String? = null
+)
+
+@Serializable
+data class RockskyScrobbleDto(
+    val uri: String? = null,
+    val title: String? = null,
+    val artist: String? = null,
+    val album: String? = null,
+    // The actor endpoint's real cover-art field (verified live); the
+    // global-feed variant used `cover` instead — kept as a fallback.
+    val albumArt: String? = null,
+    val cover: String? = null,
+    val did: String? = null,
+    val handle: String? = null,
+    // Some responses may nest cover art under a `track` object instead of
+    // flat fields — checked as a fallback when parsing (see
+    // RockskyRepository.toModel()).
+    val track: RockskyTrackDto? = null,
+    val date: String? = null,
+    val createdAt: String? = null,
+    // Track length — used to guess whether the latest scrobble is still
+    // playing (see RockskyRepository.inferNowPlaying). Rocksky reports ms.
+    val duration: Long? = null
+)
+
+@Serializable
+data class RockskyTrackDto(
+    val title: String? = null,
+    val artist: String? = null,
+    val album: String? = null,
+    val albumArt: String? = null,
+    val duration: Long? = null
+)
+
+@Serializable
+data class RockskyNowPlayingDto(
+    val title: String? = null,
+    val artist: String? = null,
+    val album: String? = null,
+    val albumArt: String? = null,
+    val track: RockskyTrackDto? = null,
+    val isPlaying: Boolean? = null,
+    val playing: Boolean? = null
+)
+
+@Serializable
+data class RockskyStatsDto(
+    val scrobbles: Long? = null,
+    val artists: Long? = null,
+    val albums: Long? = null,
+    val tracks: Long? = null,
+    val lovedTracks: Long? = null
+)
+
+/** app.rocksky.stats.defs#wrappedView. Every field optional — see the
+ *  lexicon (github.com/tsirysndr/rocksky, crates/lexicon/.../stats/defs.rs). */
+@Serializable
+data class RockskyWrappedDto(
+    val year: Int? = null,
+    val totalScrobbles: Long? = null,
+    val totalListeningTimeMinutes: Long? = null,
+    val topTracks: List<RockskyWrappedTrackDto>? = null,
+    val topArtists: List<RockskyWrappedArtistDto>? = null,
+    val topAlbums: List<RockskyWrappedAlbumDto>? = null,
+    val topGenres: List<RockskyWrappedGenreDto>? = null,
+    val mostActiveDay: RockskyWrappedDayDto? = null,
+    val mostActiveHour: Int? = null,
+    val newArtistsCount: Long? = null,
+    val longestStreak: Long? = null,
+    val scrobblesPerMonth: List<RockskyWrappedMonthDto>? = null,
+    val firstScrobble: RockskyWrappedMilestoneDto? = null,
+    val lastScrobble: RockskyWrappedMilestoneDto? = null
+)
+
+@Serializable
+data class RockskyWrappedTrackDto(
+    val id: String? = null,
+    val title: String? = null,
+    val artist: String? = null,
+    val albumArt: String? = null,
+    val uri: String? = null,
+    val playCount: Long? = null
+)
+
+@Serializable
+data class RockskyWrappedArtistDto(
+    val id: String? = null,
+    val name: String? = null,
+    val picture: String? = null,
+    val uri: String? = null,
+    val playCount: Long? = null
+)
+
+@Serializable
+data class RockskyWrappedAlbumDto(
+    val id: String? = null,
+    val title: String? = null,
+    val artist: String? = null,
+    val albumArt: String? = null,
+    val uri: String? = null,
+    val playCount: Long? = null
+)
+
+@Serializable
+data class RockskyWrappedGenreDto(val genre: String? = null, val count: Long? = null)
+@Serializable
+data class RockskyWrappedDayDto(val date: String? = null, val count: Long? = null)
+@Serializable
+data class RockskyWrappedMonthDto(val month: Int? = null, val count: Long? = null)
+@Serializable
+data class RockskyWrappedMilestoneDto(
+    val trackTitle: String? = null,
+    val artistName: String? = null,
+    val timestamp: String? = null
+)

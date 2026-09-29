@@ -91,7 +91,7 @@ class DownloadWorker(private val context: Context, params: WorkerParameters) : C
     }
 
     private fun downloadFile(url: String, filename: String, mimeType: String) {
-        val response = NetworkClient.downloadClient.newCall(Request.Builder().url(url).build()).execute()
+        val response = com.mediaviewer.network.AndroidHttpClients.downloadClient.newCall(Request.Builder().url(url).build()).execute()
         if (!response.isSuccessful) error("HTTP ${response.code}")
         val body = response.body ?: error("Empty body")
 

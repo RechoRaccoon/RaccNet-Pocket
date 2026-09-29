@@ -184,6 +184,7 @@ object PrefKeys {
 /** One signed-in AT Protocol account. [displayName]/[avatarUrl] are cached
  *  purely so the Settings rows and the Hub's "Switch Accounts" row can show
  *  the account without a network round trip. */
+@kotlinx.serialization.Serializable
 data class StoredBskyAccount(
     val did: String = "",
     val handle: String = "",
@@ -197,6 +198,7 @@ data class StoredBskyAccount(
  *  to another. Everything here is either derived from the account's own
  *  data (Hub caches, follower scan progress) or is that account's own
  *  personal record (history, subscriptions). */
+@kotlinx.serialization.Serializable
 private data class AccountStateSnapshot(
     val strings: Map<String, String> = emptyMap(),
     val stringSets: Map<String, Set<String>> = emptyMap(),
@@ -591,13 +593,14 @@ class PreferencesManager(private val context: Context) {
 
     // ── Multiple AT Protocol accounts ────────────────────────────────────
 
-    private val accountGson = com.google.gson.Gson()
+    // kotlinx.serialization (was Gson; same JSON shape, so saved accounts
+    // written by earlier versions still read back).
+    private val accountJson = com.mediaviewer.json.StellarJson.default
 
     private fun parseAccounts(json: String?): List<StoredBskyAccount> {
         if (json.isNullOrBlank()) return emptyList()
         return try {
-            val type = object : com.google.gson.reflect.TypeToken<List<StoredBskyAccount>>() {}.type
-            (accountGson.fromJson<List<StoredBskyAccount>>(json, type) ?: emptyList())
+            accountJson.decodeFromString<List<StoredBskyAccount>>(json)
                 .filter { it.did.isNotBlank() }
         } catch (_: Exception) { emptyList() }
     }
@@ -613,7 +616,7 @@ class PreferencesManager(private val context: Context) {
             val current = parseAccounts(prefs[PrefKeys.BSKY_OTHER_ACCOUNTS_JSON])
             val index = current.indexOfFirst { it.did == account.did }
             val updated = if (index >= 0) current.toMutableList().also { it[index] = account } else current + account
-            prefs[PrefKeys.BSKY_OTHER_ACCOUNTS_JSON] = accountGson.toJson(updated)
+            prefs[PrefKeys.BSKY_OTHER_ACCOUNTS_JSON] = accountJson.encodeToString<List<StoredBskyAccount>>(updated)
         }
     }
 
@@ -622,7 +625,7 @@ class PreferencesManager(private val context: Context) {
     suspend fun removeOtherBskyAccount(did: String) {
         context.dataStore.edit { prefs ->
             val current = parseAccounts(prefs[PrefKeys.BSKY_OTHER_ACCOUNTS_JSON])
-            prefs[PrefKeys.BSKY_OTHER_ACCOUNTS_JSON] = accountGson.toJson(current.filter { it.did != did })
+            prefs[PrefKeys.BSKY_OTHER_ACCOUNTS_JSON] = accountJson.encodeToString<List<StoredBskyAccount>>(current.filter { it.did != did })
             prefs.remove(stateKeyFor(did))
         }
     }
@@ -646,14 +649,14 @@ class PreferencesManager(private val context: Context) {
         context.dataStore.edit { prefs ->
             // 1 + 2: park the outgoing account's state, restore the target's.
             if (outgoing != null && keepOutgoing) {
-                prefs[stateKeyFor(outgoing.did)] = accountGson.toJson(snapshotAccountState(prefs))
+                prefs[stateKeyFor(outgoing.did)] = accountJson.encodeToString(AccountStateSnapshot.serializer(), snapshotAccountState(prefs))
             }
             if (outgoing != null && !keepOutgoing) prefs.remove(stateKeyFor(outgoing.did))
             clearAccountState(prefs)
             val parked = prefs[stateKeyFor(target.did)]
             if (!parked.isNullOrBlank()) {
                 try {
-                    restoreAccountState(prefs, accountGson.fromJson(parked, AccountStateSnapshot::class.java))
+                    restoreAccountState(prefs, accountJson.decodeFromString(AccountStateSnapshot.serializer(), parked))
                 } catch (_: Exception) { /* corrupt snapshot — start the account fresh */ }
             }
             prefs.remove(stateKeyFor(target.did))
@@ -673,7 +676,7 @@ class PreferencesManager(private val context: Context) {
             } else if (outgoing != null && keepOutgoing) {
                 updated.add(0, outgoing)
             }
-            prefs[PrefKeys.BSKY_OTHER_ACCOUNTS_JSON] = accountGson.toJson(updated)
+            prefs[PrefKeys.BSKY_OTHER_ACCOUNTS_JSON] = accountJson.encodeToString<List<StoredBskyAccount>>(updated)
         }
     }
 

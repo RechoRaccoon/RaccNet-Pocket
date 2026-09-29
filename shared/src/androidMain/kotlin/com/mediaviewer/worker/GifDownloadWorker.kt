@@ -88,11 +88,11 @@ class GifDownloadWorker(private val context: Context, params: WorkerParameters) 
      *  re-compressed JPEG; the blob is exactly what was posted. */
     private fun originalBlobUrl(url: String): String? {
         val m = Regex("/plain/(did:[^/]+)/([^/@?]+)").find(url) ?: return null
-        return runCatching { BlueskyBlobResolver.resolveBlobUrl(m.groupValues[1], m.groupValues[2]) }.getOrNull()
+        return runCatching { kotlinx.coroutines.runBlocking { BlueskyBlobResolver.resolveBlobUrl(m.groupValues[1], m.groupValues[2]) } }.getOrNull()
     }
 
     private fun fetchBytes(url: String): ByteArray? = runCatching {
-        NetworkClient.downloadClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
+        com.mediaviewer.network.AndroidHttpClients.downloadClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
             if (!response.isSuccessful) null else response.body?.bytes()
         }
     }.getOrNull()
@@ -133,7 +133,7 @@ class GifDownloadWorker(private val context: Context, params: WorkerParameters) 
         // remote/HLS stream.
         val tmp = File.createTempFile("racc_gif_src", ".mp4", context.cacheDir)
         try {
-            NetworkClient.downloadClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
+            com.mediaviewer.network.AndroidHttpClients.downloadClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
                 if (!response.isSuccessful) error("HTTP ${response.code}")
                 val body = response.body ?: error("Empty body")
                 tmp.outputStream().use { out -> body.byteStream().copyTo(out) }

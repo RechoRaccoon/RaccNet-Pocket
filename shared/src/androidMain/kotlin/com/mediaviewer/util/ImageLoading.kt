@@ -48,10 +48,10 @@ object ImageLoading {
             val client = OkHttpClient.Builder()
                 .dispatcher(dispatcher)
                 // Never TMDB (see BlockedHosts).
-                .addInterceptor(BlockedHosts.interceptor)
+                .addInterceptor(BlockedHostsInterceptors.interceptor)
                 // Wikimedia asks every client to identify itself (fallback
                 // title covers load from upload.wikimedia.org).
-                .addInterceptor(BlockedHosts.wikimediaUserAgent)
+                .addInterceptor(BlockedHostsInterceptors.wikimediaUserAgent)
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
                 .build()
@@ -123,15 +123,10 @@ object ImageLoading {
         runCatching { loader.diskCache?.clear() }
     }
 
-    /** Image URLs are used as-is. (This used to shrink TMDB links; TMDB is
-     *  no longer used at all.) */
-    @Suppress("UNUSED_PARAMETER")
-    fun optimizeUrl(url: String, wide: Boolean): String = url
+    /** See [ImageUrls.optimizeUrl]. */
+    fun optimizeUrl(url: String, wide: Boolean): String = ImageUrls.optimizeUrl(url, wide)
 
-    /** Bluesky's image CDN for a blob: resized, cached at the edge, and far
-     *  faster than pulling the original from the owner's PDS. */
+    /** See [ImageUrls.bskyCdnUrl]. */
     fun bskyCdnUrl(did: String, cid: String, wide: Boolean, keepAlpha: Boolean = false): String =
-        // @jpeg flattens transparency onto white — PNG/WebP blobs (which may
-        // be transparent) are asked for as @png instead.
-        "https://cdn.bsky.app/img/${if (wide) "feed_fullsize" else "feed_thumbnail"}/plain/$did/$cid@${if (keepAlpha) "png" else "jpeg"}"
+        ImageUrls.bskyCdnUrl(did, cid, wide, keepAlpha)
 }

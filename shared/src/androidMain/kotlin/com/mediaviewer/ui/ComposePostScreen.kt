@@ -226,7 +226,7 @@ private data class BlogEditorRow(
     val text: TextFieldValue = TextFieldValue(""),
     val align: com.mediaviewer.model.LeafletAlign = com.mediaviewer.model.LeafletAlign.START,
     val imageUri: Uri? = null,
-    val existingBlob: com.google.gson.JsonObject? = null,
+    val existingBlob: com.mediaviewer.json.JsonObject? = null,
     val existingUrl: String? = null,
     val imageWidth: Int = 0,
     val imageHeight: Int = 0,

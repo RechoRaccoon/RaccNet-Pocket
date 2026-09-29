@@ -12,6 +12,7 @@ plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.compose")
+    id("org.jetbrains.kotlin.plugin.serialization")
 }
 
 kotlin {
@@ -33,6 +34,9 @@ kotlin {
     sourceSets {
         all {
             languageSettings.optIn("androidx.compose.material3.ExperimentalMaterial3Api")
+            languageSettings.optIn("kotlinx.serialization.ExperimentalSerializationApi")
+            languageSettings.optIn("kotlin.io.encoding.ExperimentalEncodingApi")
+            languageSettings.optIn("kotlinx.cinterop.ExperimentalForeignApi")
         }
         commonMain.dependencies {
             // Compose Multiplatform 1.8.2 = androidx Compose 1.8.x /
@@ -47,6 +51,14 @@ kotlin {
             implementation("org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose:2.9.1")
             implementation("org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose:2.9.1")
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+            implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1")
+        }
+        iosMain.dependencies {
+            // HTTP on iOS (NSURLSession underneath) — see HttpEngine.ios.kt.
+            implementation("io.ktor:ktor-client-core:3.1.3")
+            implementation("io.ktor:ktor-client-darwin:3.1.3")
+            // Locks for the iOS ConcurrentHashMap / SharedPreferences stand-ins.
+            implementation("org.jetbrains.kotlinx:atomicfu:0.27.0")
         }
         androidMain.dependencies {
             implementation(compose.preview)
@@ -60,8 +72,6 @@ kotlin {
 
             implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.1")
 
-            implementation("com.squareup.retrofit2:retrofit:2.9.0")
-            implementation("com.squareup.retrofit2:converter-gson:2.9.0")
             implementation("com.squareup.okhttp3:okhttp:4.12.0")
             implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
 
