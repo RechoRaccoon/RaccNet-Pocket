@@ -1,16 +1,17 @@
 // Shared code module (Kotlin Multiplatform).
 //
-// Stage 1 of the iOS port: only the Android target exists and every source
-// file is in src/androidMain, unchanged — a pure move out of the old :app
-// module. The dependency list below is exactly what :app used. Later stages
-// add iosArm64/iosSimulatorArm64 targets and move portable code into
-// src/commonMain.
+// Targets: Android (the real app, all code in src/androidMain for now) and
+// iOS (iosArm64 = iPhone, iosSimulatorArm64 = Simulator on Apple-silicon
+// Macs). Portable code moves from src/androidMain into src/commonMain
+// package by package; Android-only pieces stay in androidMain behind
+// expect/actual declarations with iOS versions in src/iosMain.
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("org.jetbrains.kotlin.multiplatform")
     id("com.android.library")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("org.jetbrains.compose")
 }
 
 kotlin {
@@ -20,18 +21,35 @@ kotlin {
         }
     }
 
+    // Kotlin/Native iOS targets only build on macOS (the iOS workflow); on
+    // the Linux Android runner they are skipped automatically.
+    listOf(iosArm64(), iosSimulatorArm64()).forEach { target ->
+        target.binaries.framework {
+            baseName = "Shared"
+            isStatic = true
+        }
+    }
+
     sourceSets {
         all {
             languageSettings.optIn("androidx.compose.material3.ExperimentalMaterial3Api")
         }
+        commonMain.dependencies {
+            // Compose Multiplatform 1.8.2 = androidx Compose 1.8.x /
+            // Material3 1.3.x on Android.
+            implementation(compose.runtime)
+            implementation(compose.foundation)
+            implementation(compose.animation)
+            implementation(compose.material3)
+            implementation(compose.materialIconsExtended)
+            implementation(compose.ui)
+
+            implementation("org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose:2.9.1")
+            implementation("org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose:2.9.1")
+            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+        }
         androidMain.dependencies {
-            val composeBom = project.dependencies.platform("androidx.compose:compose-bom:2024.12.01")
-            implementation(composeBom)
-            implementation("androidx.compose.ui:ui")
-            implementation("androidx.compose.ui:ui-graphics")
-            implementation("androidx.compose.material3:material3")
-            implementation("androidx.compose.material:material-icons-extended")
-            implementation("androidx.compose.ui:ui-tooling-preview")
+            implementation(compose.preview)
             implementation("androidx.activity:activity-compose:1.8.2")
             implementation("androidx.core:core-ktx:1.12.0")
             // Performance: installs the baseline profiles Compose/Material/Media3
@@ -40,9 +58,7 @@ kotlin {
             // several launches (the main cause of first-open jank on menus).
             implementation("androidx.profileinstaller:profileinstaller:1.3.1")
 
-            implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
-            implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
-            implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
+            implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.1")
 
             implementation("com.squareup.retrofit2:retrofit:2.9.0")
             implementation("com.squareup.retrofit2:converter-gson:2.9.0")
@@ -68,7 +84,7 @@ kotlin {
             implementation("androidx.media3:media3-muxer:1.8.0")
 
             implementation("androidx.datastore:datastore-preferences:1.0.0")
-            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
             implementation("com.google.code.gson:gson:2.10.1")
             // Profile QR codes (ProfileQrScreen): ZXing's encoder only — the QR
             // matrix it produces is drawn by Compose in Stellar's own style.

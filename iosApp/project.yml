@@ -1,0 +1,33 @@
+# XcodeGen spec — CI runs `xcodegen generate` here to produce
+# iosApp.xcodeproj, so no hand-maintained .pbxproj is committed.
+name: iosApp
+options:
+  bundleIdPrefix: rechoraccoon
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  iosApp:
+    type: application
+    platform: iOS
+    sources:
+      - iosApp
+    scheme: {}
+    settings:
+      base:
+        PRODUCT_NAME: Stellar
+        PRODUCT_BUNDLE_IDENTIFIER: rechoraccoon.stellar
+        INFOPLIST_FILE: iosApp/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.0"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        ENABLE_BITCODE: NO
+        # The Kotlin framework (static) is built by Gradle before xcodebuild
+        # runs — see .github/workflows/ios.yml.
+        "FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]": "$(inherited) $(SRCROOT)/../shared/build/bin/iosArm64/releaseFramework"
+        "FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]": "$(inherited) $(SRCROOT)/../shared/build/bin/iosSimulatorArm64/releaseFramework"
+        OTHER_LDFLAGS: "$(inherited) -framework Shared"
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
