@@ -1387,3 +1387,32 @@ data class RockskyTrack(
      *  not inferred. */
     val endsAtMs: Long = 0L
 )
+
+/** A listener's Rocksky year in review — the profile Music History tab's
+ *  "Top <year>" sub-tabs. See RockskyApi.getWrapped. */
+data class RockskyWrapped(
+    val year: Int,
+    val totalScrobbles: Long,
+    val listeningMinutes: Long,
+    val newArtists: Long,
+    val longestStreakDays: Long,
+    /** 0-23 in UTC, as Rocksky reports it; null if unknown. */
+    val peakHourUtc: Int?,
+    val bestDayDate: String?,
+    val bestDayPlays: Long,
+    val topTracks: List<RockskyWrappedEntry>,
+    val topArtists: List<RockskyWrappedEntry>,
+    val topAlbums: List<RockskyWrappedEntry>,
+    val topGenres: List<Pair<String, Long>>
+)
+
+/** One ranked track/artist/album. [subtitle] is the artist for a track or
+ *  album, blank for an artist; [imageUrl] is cover art or artist picture. */
+data class RockskyWrappedEntry(
+    val key: String,
+    val title: String,
+    val subtitle: String,
+    val imageUrl: String?,
+    val plays: Long
+)
+

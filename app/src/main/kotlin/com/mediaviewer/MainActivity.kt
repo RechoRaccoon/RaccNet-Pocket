@@ -1201,6 +1201,7 @@ private fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null
                     onRefresh         = viewModel::refreshProfile,
                     onSelectPostKindFilter = viewModel::selectPostKindFilter,
                     onSelectReviewKindFilter = viewModel::selectReviewKindFilter,
+                    onSelectMusicYear = viewModel::selectMusicYear,
                     pinterestThreeColumns = pinterestThreeColumns,
                     hateFunBlurNsfw   = hateFunBlurNsfw,
                     onSaveOwnProfile  = viewModel::updateOwnProfile,

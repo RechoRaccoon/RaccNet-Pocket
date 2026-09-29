@@ -1494,6 +1494,14 @@ private fun HubListSection(
     onLoadMore: () -> Unit = {}
 ) {
     LaunchedEffect(row.listUri) { onLoad() }
+    // A failed load (e.g. the list was just renamed and Bluesky was still
+    // re-indexing it) retries by itself instead of staying broken.
+    LaunchedEffect(row.listUri, state?.failed, state?.loadedAt) {
+        if (state?.failed == true) {
+            kotlinx.coroutines.delay(20_000)
+            onLoad()
+        }
+    }
     val loading = state == null || (state.loading && state.members.isEmpty() && state.posts.isEmpty())
     Spacer(Modifier.height(14.dp))
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1518,8 +1526,10 @@ private fun HubListSection(
             }
         } else if (members.isEmpty()) {
             Text(
-                if (state?.failed == true) "Couldn't load this list" else "Nobody on this list yet",
-                color = DimGray, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), textAlign = TextAlign.Center
+                if (state?.failed == true) "Couldn't load this list · Tap to retry" else "Nobody on this list yet",
+                color = DimGray, fontSize = 12.sp, textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                    .then(if (state?.failed == true) Modifier.clickable { tap(); onLoad() } else Modifier)
             )
         } else {
             androidx.compose.foundation.lazy.LazyRow(
@@ -1556,7 +1566,12 @@ private fun HubListSection(
         }
     } else {
         val posts = state?.posts ?: emptyList()
-        if (loading) {
+        // Nothing to show yet but more to read (e.g. the row was just
+        // switched to Posts): start reading without waiting for a scroll.
+        LaunchedEffect(row.listUri, posts.isEmpty(), state?.loading, state?.loadingMore, state?.hasMore) {
+            if (state != null && !state.loading && !state.loadingMore && posts.isEmpty() && state.hasMore) onLoadMore()
+        }
+        if (loading || (posts.isEmpty() && state?.loadingMore == true)) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 repeat(4) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1568,8 +1583,10 @@ private fun HubListSection(
             }
         } else if (posts.isEmpty()) {
             Text(
-                if (state?.failed == true) "Couldn't load this list" else "No recent posts",
-                color = DimGray, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), textAlign = TextAlign.Center
+                if (state?.failed == true) "Couldn't load this list · Tap to retry" else "No recent posts",
+                color = DimGray, fontSize = 12.sp, textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                    .then(if (state?.failed == true) Modifier.clickable { tap(); onLoad() } else Modifier)
             )
         } else {
             // Scrolling near the end of the row loads the next page.
@@ -1577,12 +1594,13 @@ private fun HubListSection(
             val latestLoadMore by rememberUpdatedState(onLoadMore)
             // Re-armed whenever a page finishes (even one that added nothing
             // new), so sitting at the end keeps pulling until the list ends.
-            LaunchedEffect(rowState, posts.size, state?.loadingMore, state?.postsCursor) {
+            LaunchedEffect(rowState, posts.size, state?.loadingMore, state?.postsCursor, state?.membersExhausted) {
                 snapshotFlow {
                     val info = rowState.layoutInfo
                     val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-                    info.totalItemsCount > 0 && last >= info.totalItemsCount - 4
-                }.collect { nearEnd -> if (nearEnd) latestLoadMore() }
+                    // Near the end, or everything already fits on screen.
+                    (info.totalItemsCount > 0 && last >= info.totalItemsCount - 4) || !rowState.canScrollForward
+                }.collect { nearEnd -> if (nearEnd && state?.hasMore != false) latestLoadMore() }
             }
             androidx.compose.foundation.lazy.LazyRow(
                 Modifier.fillMaxWidth(),

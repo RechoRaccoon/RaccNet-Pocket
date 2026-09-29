@@ -31,6 +31,7 @@ import com.mediaviewer.worker.urlToDownloadInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
@@ -643,6 +644,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // restore, which leaves them alone).
         val postKindFilter: PostKindFilter = PostKindFilter.ALL,
         val reviewKindFilter: ReviewKindFilter = ReviewKindFilter.ALL,
+        // Music History's sub-tabs: 0 = "Recent" (the scrobble list), else
+        // a year = "Top <year>" (Rocksky Wrapped for that year).
+        val musicYear: Int = 0,
+        // Years this person has Music History in, newest first — one
+        // "Top <year>" sub-tab each. Filled in once the tab is opened.
+        val musicYears: List<Int> = emptyList(),
+        val musicWrapped: Map<Int, com.mediaviewer.model.RockskyWrapped> = emptyMap(),
         // Item 17: if a profile is opened while another profile overlay is
         // already up (visible or hidden behind a post pager) — e.g. tapping
         // a different author's avatar from inside a post reached via a
@@ -2542,10 +2550,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val posts: List<MediaItem> = emptyList(),
         val loadedAt: Long = 0L,
         val failed: Boolean = false,
-        /** Where the next page of posts starts (null = no more). */
+        /** Where the next page of posts starts (null = the list feed has
+         *  run out; older posts then come from the members' own feeds). */
         val postsCursor: String? = null,
-        val loadingMore: Boolean = false
-    )
+        val loadingMore: Boolean = false,
+        /** Every member's own feed has been read to the end too. */
+        val membersExhausted: Boolean = false
+    ) {
+        val hasMore: Boolean get() = postsCursor != null || !membersExhausted
+    }
+
+    /** One list member's own feed, read in pages once the list feed runs
+     *  out (see loadHubListFromMembers). [oldest] is the createdAt of the
+     *  oldest post fetched so far; [buffer] holds fetched posts that can't
+     *  be shown yet because another member might still have newer ones. */
+    private class HubMemberFeed {
+        var cursor: String? = null
+        var started = false
+        var done = false
+        var oldest = Long.MAX_VALUE
+        val buffer = ArrayList<Pair<Long, MediaItem>>()
+    }
+    /** list URI -> member DID -> that member's feed state. Guarded by hubListLock. */
+    private val hubMemberFeeds = HashMap<String, LinkedHashMap<String, HubMemberFeed>>()
     private val _hubLists = MutableStateFlow<Map<String, HubListState>>(emptyMap())
     val hubLists: StateFlow<Map<String, HubListState>> = _hubLists
     private val hubListLock = Any()
@@ -2564,7 +2591,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         synchronized(hubListLock) {
             val cur = _hubLists.value[uri]
             if (cur?.loading == true) return
-            if (!force && cur != null && System.currentTimeMillis() - cur.loadedAt < 5 * 60_000L) return
+            // Loaded content is kept for 5 minutes; a failure only briefly,
+            // so the row can recover by itself.
+            val keepFor = if (cur?.failed == true) 15_000L else 5 * 60_000L
+            if (!force && cur != null && System.currentTimeMillis() - cur.loadedAt < keepFor) return
             _hubLists.value = _hubLists.value + (uri to (cur ?: HubListState()).copy(loading = true))
         }
         viewModelScope.launch(Dispatchers.IO) {
@@ -2574,42 +2604,56 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             result.onSuccess { content ->
                 val posts = filterHidden(content.posts)
+                synchronized(hubListLock) { hubMemberFeeds.remove(uri) }
                 setHubList(uri) {
                     HubListState(
                         loading = false, members = content.members, posts = posts,
-                        loadedAt = System.currentTimeMillis(), postsCursor = content.postsCursor
+                        loadedAt = System.currentTimeMillis(), postsCursor = content.postsCursor,
+                        membersExhausted = content.members.isEmpty()
                     )
                 }
-                // Only a few posts on the first page: fill the row right away.
-                if (posts.size < HUB_LIST_BATCH && content.postsCursor != null) loadMoreHubList(uri)
+                // Keep the row's name in step with the list's real name
+                // (renamed here or in another app).
+                content.name?.takeIf { it.isNotBlank() }?.let { name ->
+                    withContext(Dispatchers.Main) { com.mediaviewer.util.HubLayout.renameList(uri, name) }
+                }
+                // Only a few posts on the first page: fill the row right away
+                // (rows in Posts mode only — Accounts mode never shows them).
+                val showsPosts = com.mediaviewer.util.HubLayout.rows.any { it.listUri == uri && it.showPosts }
+                if (showsPosts && posts.size < HUB_LIST_BATCH) loadMoreHubList(uri)
             }.onFailure {
                 setHubList(uri) { it.copy(loading = false, failed = true, loadedAt = System.currentTimeMillis()) }
             }
         }
     }
 
-    /** A Hub list row in Posts mode scrolled to its end: the next page. */
+    /** A Hub list row in Posts mode scrolled to its end: the next page.
+     *  Reads Bluesky's list feed first; once that stops giving a cursor
+     *  (which it does early for some lists, e.g. a newly made one), carries
+     *  on further back through the members' own feeds instead. */
     fun loadMoreHubList(uri: String) {
         if (!_bskyLoggedIn.value) return
-        val cursor: String = synchronized(hubListLock) {
+        val start: Pair<String?, List<String>> = synchronized(hubListLock) {
             val cur = _hubLists.value[uri] ?: return
-            if (cur.loading || cur.loadingMore) return
-            val next = cur.postsCursor ?: return
+            if (cur.loading || cur.loadingMore || !cur.hasMore) return
             _hubLists.value = _hubLists.value + (uri to cur.copy(loadingMore = true))
-            next
+            cur.postsCursor to cur.members.map { it.did }
         }
         viewModelScope.launch(Dispatchers.IO) {
             // A list feed page is 100 items, but after dropping reposts,
             // replies (and text-only posts, if that's on) a page can leave
             // only a handful — so keep reading pages until there's a useful
-            // batch of new posts, or the list runs out (max 6 pages a go).
-            var next: String? = cursor
+            // batch of new posts, or the list feed runs out (max 6 pages a go).
+            var next: String? = start.first
             var added = 0
             var pages = 0
             var failed = false
             while (next != null && added < HUB_LIST_BATCH && pages < 6) {
                 val page = next ?: break
-                val result = bskyRepo.getHubListPostsPage(bskyToken, _bskyDid.value, uri, page)
+                var result = bskyRepo.getHubListPostsPage(bskyToken, _bskyDid.value, uri, page)
+                if (result.isFailure && isAuthError(result.exceptionOrNull()?.message) && refreshBskyTokenIfPossible()) {
+                    result = bskyRepo.getHubListPostsPage(bskyToken, _bskyDid.value, uri, page)
+                }
                 val ok = result.getOrNull()
                 if (ok == null) { failed = true; break }
                 pages++
@@ -2622,8 +2666,93 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     st.copy(posts = st.posts + fresh, postsCursor = newCursor)
                 }
             }
-            setHubList(uri) { it.copy(loadingMore = false, postsCursor = if (failed) it.postsCursor else next) }
+            if (!failed) setHubList(uri) { it.copy(postsCursor = next) }
+            // The list feed has nothing further back: the members' own feeds.
+            if (!failed && next == null && added < HUB_LIST_BATCH) {
+                runCatching { loadHubListFromMembers(uri, start.second, HUB_LIST_BATCH - added) }
+            }
+            setHubList(uri) { it.copy(loadingMore = false) }
         }
+    }
+
+    /** Pages further back through a Hub list's members' own feeds and adds
+     *  up to about [want] posts to the row, newest first. It's a proper
+     *  merge: a post is only shown once every member still being read has
+     *  been read back past it, so nothing newer can turn up later and land
+     *  out of order. Only the [HUB_LIST_MEMBER_CAP] most recently active
+     *  members are read (members come sorted that way). */
+    private suspend fun loadHubListFromMembers(uri: String, memberDids: List<String>, want: Int) {
+        if (memberDids.isEmpty()) { setHubList(uri) { it.copy(membersExhausted = true) }; return }
+        val feeds: Map<String, HubMemberFeed> = synchronized(hubListLock) {
+            val m = hubMemberFeeds.getOrPut(uri) { LinkedHashMap() }
+            memberDids.take(HUB_LIST_MEMBER_CAP).forEach { d -> m.getOrPut(d) { HubMemberFeed() } }
+            LinkedHashMap(m)
+        }
+        var emitted = 0
+        var rounds = 0
+        while (emitted < want && rounds < 5) {
+            rounds++
+            val active = feeds.entries.filter { !it.value.done }
+            if (active.isEmpty() && feeds.values.all { it.buffer.isEmpty() }) {
+                setHubList(uri) { it.copy(membersExhausted = true) }
+                return
+            }
+            // Fetch whoever is holding the merge back: everyone not read yet,
+            // else the few members whose oldest fetched post is the newest.
+            val unstarted = active.filter { !it.value.started }
+            val toFetch = if (unstarted.isNotEmpty()) unstarted
+                else active.sortedByDescending { it.value.oldest }.take(6)
+            var anyOk = false
+            toFetch.chunked(8).forEach { chunk ->
+                coroutineScope {
+                    chunk.map { (did, feed) ->
+                        async {
+                            val res = bskyRepo.getHubListMemberPostsPage(bskyToken, _bskyDid.value, did, feed.cursor).getOrNull()
+                            did to res
+                        }
+                    }.awaitAll()
+                }.forEach { (did, res) ->
+                    val feed = feeds[did] ?: return@forEach
+                    if (res == null) return@forEach
+                    anyOk = true
+                    val (items, nextCursor) = res
+                    synchronized(hubListLock) {
+                        // No cursor, or a page that moved nowhere: that's the end.
+                        val stalled = items.isEmpty() && nextCursor == feed.cursor
+                        feed.started = true
+                        feed.buffer += items
+                        items.minOfOrNull { it.first }?.let { feed.oldest = minOf(feed.oldest, it) }
+                        feed.cursor = nextCursor
+                        if (nextCursor == null || stalled) feed.done = true
+                    }
+                }
+            }
+            if (!anyOk && toFetch.isNotEmpty()) return // offline or failing: try again on the next scroll
+            // Everything at least as new as the newest "oldest fetched" of the
+            // members still being read is safe to show now.
+            val stillReading = feeds.values.filter { !it.done }
+            val frontier = if (stillReading.isEmpty()) Long.MIN_VALUE
+                else stillReading.maxOf { if (it.started) it.oldest else Long.MAX_VALUE }
+            val ready = ArrayList<Pair<Long, MediaItem>>()
+            synchronized(hubListLock) {
+                feeds.values.forEach { f ->
+                    val (take, keep) = f.buffer.partition { it.first >= frontier }
+                    ready += take
+                    f.buffer.clear(); f.buffer += keep
+                }
+            }
+            if (ready.isNotEmpty()) {
+                val sorted = filterHidden(ready.sortedByDescending { it.first }.map { it.second })
+                setHubList(uri) { st ->
+                    val known = st.posts.mapTo(HashSet()) { it.postUri }
+                    val fresh = sorted.filter { it.postUri !in known }.distinctBy { it.postUri }
+                    emitted += fresh.size
+                    st.copy(posts = st.posts + fresh)
+                }
+            }
+        }
+        val allDone = synchronized(hubListLock) { feeds.values.all { it.done && it.buffer.isEmpty() } }
+        if (allDone) setHubList(uri) { it.copy(membersExhausted = true) }
     }
 
     /** Customize Hub → Add → one of your lists. */
@@ -3063,6 +3192,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (!accessJwt.isNullOrBlank() && did != null && handle != null) {
                 bskyToken = accessJwt; bskyRefreshToken = refreshJwt ?: ""
                 _bskyDid.value = did; bskyHandle = handle; _bskyLoggedIn.value = true
+                applyAccountSettings(did)
             }
 
             // Item 5: always default to the Hub in AT Protocol/Bluesky mode
@@ -3120,6 +3250,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     bskyToken        = session.accessJwt
                     bskyRefreshToken = session.refreshJwt
 _bskyDid.value          = session.did
+                    applyAccountSettings(session.did)
                     bskyHandle       = session.handle
                     prefs.saveBskySession(session.accessJwt, session.refreshJwt, session.did, session.handle)
                     _bskyLoggedIn.value = true
@@ -3151,6 +3282,7 @@ _bskyDid.value          = session.did
         viewModelScope.launch {
             prefs.clearBskySession()
             bskyToken = ""; bskyRefreshToken = ""; _bskyDid.value = ""; bskyHandle = ""
+            applyAccountSettings("")
             _bskyLoggedIn.value = false
             _selfProfile.value = null
             // Bug fix (this session): none of this used to be reset on
@@ -3259,6 +3391,15 @@ _bskyDid.value          = session.did
     }
 
     /** Makes [did] the active account and restarts the app. */
+    /** Customize Hub's rows/order/list rows and Override App Colors are
+     *  saved per account: points both at [did]'s own settings. */
+    private fun applyAccountSettings(did: String) {
+        viewModelScope.launch(Dispatchers.Main.immediate) {
+            com.mediaviewer.util.HubLayout.setAccount(did)
+            com.mediaviewer.util.UiToggles.setAccount(did)
+        }
+    }
+
     fun switchBskyAccount(did: String) {
         val target = _otherBskyAccounts.value.firstOrNull { it.did == did } ?: return
         switchBskyAccountInternal(target, keepOutgoing = true)
@@ -3296,6 +3437,9 @@ _bskyDid.value          = session.did
             } else null
             prefs.switchActiveBskyAccount(outgoing, freshTarget, keepOutgoing)
             prefs.setLastMode("BLUESKY")
+            // So the restarted app opens straight onto this account's own
+            // Hub layout and colors.
+            applyAccountSettings(freshTarget.did)
             // Everything is persisted (DataStore's edit{} returns only once
             // the write is on disk) — now cold-start into the new account.
             com.mediaviewer.RestartActivity.restartApp(getApplication<Application>())
@@ -3926,9 +4070,82 @@ _bskyDid.value          = session.did
         // to a profile that's already mid-browse) that's supposed to leave
         // postKindFilter/reviewKindFilter alone; see ProfileOverlayState's
         // own doc comment on these two fields.
-        _profileOverlay.value = cur.copy(selectedTab = tab, postKindFilter = PostKindFilter.ALL, reviewKindFilter = ReviewKindFilter.ALL)
+        _profileOverlay.value = cur.copy(selectedTab = tab, postKindFilter = PostKindFilter.ALL, reviewKindFilter = ReviewKindFilter.ALL, musicYear = 0)
         val state = cur.tabStates[tab]
         if (state == null || (!state.loaded && !state.loading)) loadProfileTab(tab, reset = true)
+        if (tab == ProfileTab.MUSIC_HISTORY) loadMusicYears(cur.author.did)
+    }
+
+    /** Music History → a sub-tab: 0 = Recent, else "Top <year>". */
+    fun selectMusicYear(year: Int) {
+        val cur = _profileOverlay.value ?: return
+        _profileOverlay.value = cur.copy(musicYear = year)
+        if (year != 0 && year !in cur.musicWrapped) loadMusicYear(cur.author.did, year)
+    }
+
+    /** Recently fetched Top-year data per DID, kept for half an hour (the
+     *  same time Rocksky itself caches a Wrapped for), so reopening a
+     *  profile shows its Top tabs instantly. */
+    private data class MusicYearsCache(val years: List<Int>, val wrapped: Map<Int, com.mediaviewer.model.RockskyWrapped>, val at: Long)
+    private val musicYearsCache = java.util.concurrent.ConcurrentHashMap<String, MusicYearsCache>()
+    private val musicYearsLoading = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+
+    private fun applyMusicYears(did: String, transform: (ProfileOverlayState) -> ProfileOverlayState) {
+        val cur = _profileOverlay.value?.takeIf { it.author.did == did } ?: return
+        _profileOverlay.value = transform(cur)
+    }
+
+    /** Finds which years [did] has Music History in (one "Top <year>"
+     *  sub-tab each) by loading each candidate year's Wrapped from Rocksky,
+     *  a few at a time, newest first; a year with no plays gets no tab.
+     *  The Wrapped data is kept, so opening a Top tab afterwards is instant. */
+    private fun loadMusicYears(did: String) {
+        val cached = musicYearsCache[did]?.takeIf { System.currentTimeMillis() - it.at < 30 * 60_000L }
+        if (cached != null) {
+            applyMusicYears(did) { it.copy(musicYears = cached.years, musicWrapped = cached.wrapped + it.musicWrapped) }
+            return
+        }
+        if (!musicYearsLoading.add(did)) return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val candidates = rockskyRepo.getCandidateYears(did)
+                val gate = Semaphore(3)
+                val found = java.util.concurrent.ConcurrentHashMap<Int, com.mediaviewer.model.RockskyWrapped>()
+                coroutineScope {
+                    candidates.map { year ->
+                        async {
+                            val w = gate.withPermit { rockskyRepo.getWrapped(did, year).getOrNull() } ?: return@async
+                            if (w.totalScrobbles <= 0L) return@async
+                            found[year] = w
+                            withContext(Dispatchers.Main) {
+                                applyMusicYears(did) { st ->
+                                    st.copy(
+                                        musicYears = (st.musicYears + year).distinct().sortedDescending(),
+                                        musicWrapped = st.musicWrapped + (year to w)
+                                    )
+                                }
+                            }
+                        }
+                    }.awaitAll()
+                }
+                if (found.isNotEmpty()) {
+                    musicYearsCache[did] = MusicYearsCache(found.keys.sortedDescending(), HashMap(found), System.currentTimeMillis())
+                }
+            } finally {
+                musicYearsLoading.remove(did)
+            }
+        }
+    }
+
+    /** One Top-year tab's data, if it isn't loaded yet (e.g. it failed the
+     *  first time round). */
+    private fun loadMusicYear(did: String, year: Int) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val w = rockskyRepo.getWrapped(did, year).getOrNull() ?: return@launch
+            withContext(Dispatchers.Main) {
+                applyMusicYears(did) { it.copy(musicWrapped = it.musicWrapped + (year to w)) }
+            }
+        }
     }
 
     // Adjustment #7: see ProfileOverlayState.postKindFilter/reviewKindFilter's
@@ -5930,7 +6147,16 @@ _bskyDid.value          = session.did
             }
             withContext(Dispatchers.Main) {
                 error?.let { _errorMessage.value = it }
+                // A renamed list that's also a Hub row: the row takes the new
+                // name, and reloads once Bluesky has re-indexed the list
+                // (straight after a rename it can briefly fail to load).
+                renamed.forEach { com.mediaviewer.util.HubLayout.renameList(it, clean) }
                 onDone(error)
+            }
+            val hubRows = renamed.filter { u -> com.mediaviewer.util.HubLayout.rows.any { it.listUri == u } }
+            if (hubRows.isNotEmpty()) {
+                delay(4_000)
+                hubRows.forEach { loadHubListIfNeeded(it, force = true) }
             }
         }
     }
@@ -6893,3 +7119,6 @@ _bskyDid.value          = session.did
 
 /** How many new posts a Hub list row pulls in per batch. */
 private const val HUB_LIST_BATCH = 12
+/** How many of a list's (most recently active) members the Hub row reads
+ *  one by one once Bluesky's list feed runs out. */
+private const val HUB_LIST_MEMBER_CAP = 40

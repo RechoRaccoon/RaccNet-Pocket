@@ -1371,7 +1371,7 @@ internal fun AboutPageContent() {
             Line("Bluesky", "accounts, posts and feeds")
             Line("Leaflet / Standard.site", "long-form blogs")
             Line("Popfeed", "title reviews, backlog and covers")
-            Line("Rocksky", "music listening history")
+            Line("Rocksky", "music listening history and yearly top stats")
             Line("Streamplace", "livestreams")
 
             Header("Other services")

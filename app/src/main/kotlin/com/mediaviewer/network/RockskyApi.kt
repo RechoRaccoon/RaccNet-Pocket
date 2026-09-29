@@ -38,6 +38,22 @@ interface RockskyApi {
         @Query("offset") offset: Int = 0
     ): Response<RockskyScrobblesResponse>
 
+    /** A listener's year in review (Rocksky "Wrapped") — totals, top
+     *  tracks/artists/albums/genres and a few stats for one calendar year
+     *  (UTC). Answers an empty view (totalScrobbles 0) for a year with no
+     *  plays. Verified against a live response (2026-09-29). */
+    @GET("xrpc/app.rocksky.stats.getWrapped")
+    suspend fun getWrapped(
+        @Query("did") did: String,
+        @Query("year") year: Int
+    ): Response<RockskyWrappedDto>
+
+    /** All-time totals for a listener — used for the scrobble count, which
+     *  (as an offset into getActorScrobbles, newest first) finds their very
+     *  first scrobble and so the first year they have any history in. */
+    @GET("xrpc/app.rocksky.stats.getStats")
+    suspend fun getStats(@Query("did") did: String): Response<RockskyStatsDto>
+
     @GET("xrpc/app.rocksky.player.getCurrentlyPlaying")
     suspend fun getCurrentlyPlaying(@Query("actor") actor: String): Response<RockskyNowPlayingDto>
 
@@ -88,4 +104,66 @@ data class RockskyNowPlayingDto(
     val track: RockskyTrackDto? = null,
     val isPlaying: Boolean? = null,
     val playing: Boolean? = null
+)
+
+data class RockskyStatsDto(
+    val scrobbles: Long? = null,
+    val artists: Long? = null,
+    val albums: Long? = null,
+    val tracks: Long? = null,
+    val lovedTracks: Long? = null
+)
+
+/** app.rocksky.stats.defs#wrappedView. Every field optional — see the
+ *  lexicon (github.com/tsirysndr/rocksky, crates/lexicon/.../stats/defs.rs). */
+data class RockskyWrappedDto(
+    val year: Int? = null,
+    val totalScrobbles: Long? = null,
+    val totalListeningTimeMinutes: Long? = null,
+    val topTracks: List<RockskyWrappedTrackDto>? = null,
+    val topArtists: List<RockskyWrappedArtistDto>? = null,
+    val topAlbums: List<RockskyWrappedAlbumDto>? = null,
+    val topGenres: List<RockskyWrappedGenreDto>? = null,
+    val mostActiveDay: RockskyWrappedDayDto? = null,
+    val mostActiveHour: Int? = null,
+    val newArtistsCount: Long? = null,
+    val longestStreak: Long? = null,
+    val scrobblesPerMonth: List<RockskyWrappedMonthDto>? = null,
+    val firstScrobble: RockskyWrappedMilestoneDto? = null,
+    val lastScrobble: RockskyWrappedMilestoneDto? = null
+)
+
+data class RockskyWrappedTrackDto(
+    val id: String? = null,
+    val title: String? = null,
+    val artist: String? = null,
+    val albumArt: String? = null,
+    val uri: String? = null,
+    val playCount: Long? = null
+)
+
+data class RockskyWrappedArtistDto(
+    val id: String? = null,
+    val name: String? = null,
+    val picture: String? = null,
+    val uri: String? = null,
+    val playCount: Long? = null
+)
+
+data class RockskyWrappedAlbumDto(
+    val id: String? = null,
+    val title: String? = null,
+    val artist: String? = null,
+    val albumArt: String? = null,
+    val uri: String? = null,
+    val playCount: Long? = null
+)
+
+data class RockskyWrappedGenreDto(val genre: String? = null, val count: Long? = null)
+data class RockskyWrappedDayDto(val date: String? = null, val count: Long? = null)
+data class RockskyWrappedMonthDto(val month: Int? = null, val count: Long? = null)
+data class RockskyWrappedMilestoneDto(
+    val trackTitle: String? = null,
+    val artistName: String? = null,
+    val timestamp: String? = null
 )

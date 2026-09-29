@@ -1,6 +1,8 @@
 package com.mediaviewer.repository
 
 import com.mediaviewer.model.RockskyTrack
+import com.mediaviewer.model.RockskyWrapped
+import com.mediaviewer.model.RockskyWrappedEntry
 import com.mediaviewer.network.NetworkClient
 import com.mediaviewer.network.RockskyNowPlayingDto
 import com.mediaviewer.network.RockskyScrobbleDto
@@ -118,5 +120,59 @@ class RockskyRepository {
                 val resp = api.getSpotifyCurrentlyPlaying(did)
                 if (resp.isSuccessful) resp.body()?.toModel() else null
             }.getOrNull()
+    }
+
+    /** [did]'s Rocksky year in review for [year] (Rocksky "Wrapped"), or a
+     *  failure. A year with no plays comes back with totalScrobbles 0. */
+    suspend fun getWrapped(did: String, year: Int): Result<RockskyWrapped> = withContext(Dispatchers.IO) {
+        runCatching {
+            val resp = api.getWrapped(did, year)
+            val w = resp.body() ?: error("getWrapped ${resp.code()}")
+            RockskyWrapped(
+                year = w.year ?: year,
+                totalScrobbles = w.totalScrobbles ?: 0L,
+                listeningMinutes = w.totalListeningTimeMinutes ?: 0L,
+                newArtists = w.newArtistsCount ?: 0L,
+                longestStreakDays = w.longestStreak ?: 0L,
+                peakHourUtc = w.mostActiveHour?.takeIf { it in 0..23 },
+                bestDayDate = w.mostActiveDay?.date,
+                bestDayPlays = w.mostActiveDay?.count ?: 0L,
+                topTracks = w.topTracks.orEmpty().mapIndexedNotNull { i, t ->
+                    val title = t.title?.takeIf { it.isNotBlank() } ?: return@mapIndexedNotNull null
+                    RockskyWrappedEntry(t.id ?: t.uri ?: "t$i", title, t.artist.orEmpty(), t.albumArt?.takeIf { it.isNotBlank() }, t.playCount ?: 0L)
+                },
+                topArtists = w.topArtists.orEmpty().mapIndexedNotNull { i, a ->
+                    val name = a.name?.takeIf { it.isNotBlank() } ?: return@mapIndexedNotNull null
+                    RockskyWrappedEntry(a.id ?: a.uri ?: "a$i", name, "", a.picture?.takeIf { it.isNotBlank() }, a.playCount ?: 0L)
+                },
+                topAlbums = w.topAlbums.orEmpty().mapIndexedNotNull { i, a ->
+                    val title = a.title?.takeIf { it.isNotBlank() } ?: return@mapIndexedNotNull null
+                    RockskyWrappedEntry(a.id ?: a.uri ?: "l$i", title, a.artist.orEmpty(), a.albumArt?.takeIf { it.isNotBlank() }, a.playCount ?: 0L)
+                },
+                topGenres = w.topGenres.orEmpty().mapNotNull { g ->
+                    val name = g.genre?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    name to (g.count ?: 0L)
+                }
+            )
+        }
+    }
+
+    /** Every year [did] could have Music History in, newest first: from the
+     *  year of their very first scrobble up to this year. The first scrobble
+     *  is found cheaply — the all-time scrobble count from getStats, used as
+     *  an offset into the (newest-first) scrobble list. If that doesn't work
+     *  out, falls back to the last five years, as Rocksky's own Wrapped page
+     *  does. Years are calendar years in UTC, matching getWrapped. */
+    suspend fun getCandidateYears(did: String): List<Int> = withContext(Dispatchers.IO) {
+        val thisYear = java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC).year
+        val firstYear = runCatching {
+            val total = api.getStats(did).body()?.scrobbles ?: return@runCatching null
+            if (total <= 0L) return@runCatching thisYear
+            val oldest = api.getScrobbles(did, 1, (total - 1).coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+                .body()?.scrobbles?.firstOrNull() ?: return@runCatching null
+            val ms = parseTimeMs(oldest.date ?: oldest.createdAt) ?: return@runCatching null
+            java.time.Instant.ofEpochMilli(ms).atZone(java.time.ZoneOffset.UTC).year
+        }.getOrNull()?.coerceIn(2000, thisYear) ?: (thisYear - 4)
+        (thisYear downTo firstYear).toList()
     }
 }

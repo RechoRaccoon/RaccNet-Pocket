@@ -2525,7 +2525,40 @@ class BlueskyRepository {
     suspend fun getHubListPostsPage(token: String, myDid: String, listUri: String, cursor: String): Result<Pair<List<MediaItem>, String?>> = runCatching {
         val resp = viaAppView(token, myDid, "app.bsky.feed.getListFeed") { a, auth -> a.getListFeed(auth, listUri, 100, cursor) }
         val body = resp.body() ?: error("List feed ${resp.code()}")
-        hubListOriginalPosts(body.feed) to body.cursor?.takeIf { it.isNotBlank() && body.feed.isNotEmpty() }
+        // A page the AppView filtered down to nothing can still carry a
+        // cursor; only a missing or unchanged cursor means the end.
+        hubListOriginalPosts(body.feed) to body.cursor?.takeIf { it.isNotBlank() && it != cursor }
+    }
+
+    /** One page of a single list member's own original posts (AppView
+     *  author feed, no replies, no reposts, no pinned post), each with its
+     *  createdAt time in ms so pages from several members can be merged
+     *  newest-first. The second value is that member's next cursor (null =
+     *  no more). Used by the Hub list rows once Bluesky's list feed itself
+     *  stops handing back a cursor, which it does early for some lists
+     *  (a new list, or one whose members are quiet), so the row can keep
+     *  going further back. */
+    suspend fun getHubListMemberPostsPage(
+        token: String, myDid: String, memberDid: String, cursor: String?, limit: Int = 15
+    ): Result<Pair<List<Pair<Long, MediaItem>>, String?>> = runCatching {
+        val resp = viaAppView(token, myDid, "app.bsky.feed.getAuthorFeed") { a, auth ->
+            a.getAuthorFeed(auth, memberDid, limit, cursor, "posts_no_replies")
+        }
+        val body = resp.body() ?: error("Author feed ${resp.code()}")
+        val out = ArrayList<Pair<Long, MediaItem>>()
+        val seen = HashSet<String>()
+        for (item in body.feed) {
+            if (item.reason != null || item.reply != null || item.post.record.reply != null) continue
+            if (item.post.author.did != memberDid) continue
+            val media = parseFeedItemSafe(item).firstOrNull() ?: continue
+            if (!seen.add(media.postUri)) continue
+            val t = item.post.record.createdAt?.let { raw ->
+                runCatching { java.time.Instant.parse(raw).toEpochMilli() }.getOrNull()
+                    ?: runCatching { java.time.OffsetDateTime.parse(raw).toInstant().toEpochMilli() }.getOrNull()
+            } ?: 0L
+            out += t to media
+        }
+        out to body.cursor?.takeIf { it.isNotBlank() && body.feed.isNotEmpty() }
     }
 
     suspend fun getHubListContent(token: String, myDid: String, listUri: String, maxMembers: Int = 300): Result<HubListContent> = runCatching {
@@ -2573,7 +2606,7 @@ class BlueskyRepository {
                 .sortedWith(compareBy({ recency[it.value.did] ?: Int.MAX_VALUE }, { it.index }))
                 .map { it.value }
             val posts = hubListOriginalPosts(feed)
-            HubListContent(name, sortedMembers, posts, feedBody?.cursor?.takeIf { it.isNotBlank() && feed.isNotEmpty() })
+            HubListContent(name, sortedMembers, posts, feedBody?.cursor?.takeIf { it.isNotBlank() })
         }
     }
 

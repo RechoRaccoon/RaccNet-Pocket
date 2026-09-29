@@ -59,6 +59,12 @@ import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.PlaylistAdd
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.LocalFireDepartment
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Album
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -462,6 +468,8 @@ fun ProfileOverlay(
     // the parent-chain "tab remembering thing" restore.
     onSelectPostKindFilter: (PostKindFilter) -> Unit,
     onSelectReviewKindFilter: (ReviewKindFilter) -> Unit,
+    // Music History's sub-tabs: 0 = Recent, else "Top <year>".
+    onSelectMusicYear: (Int) -> Unit = {},
     // Feature request #7: experimental 3-wide Pinterest grid (Settings).
     pinterestThreeColumns: Boolean = false,
     // Feature request #8: "I hate fun" — blur Bluesky-labeled sexual/adult
@@ -872,6 +880,16 @@ fun ProfileOverlay(
                                     options = visibleBacklogFilters, selected = reviewKindFilter,
                                     liquidGlass = liquidGlass, tint = blended, labelOf = { it.label() },
                                     onSelect = onSelectReviewKindFilter
+                                )
+                            }
+                            MainViewModel.ProfileTab.MUSIC_HISTORY -> {
+                                // "Recent", then one "Top <year>" per year
+                                // with any history (appear as they load).
+                                ProfileSubFilterRow(
+                                    options = listOf(0) + state.musicYears, selected = state.musicYear,
+                                    liquidGlass = liquidGlass, tint = blended,
+                                    labelOf = { if (it == 0) "Recent" else "Top $it" },
+                                    onSelect = onSelectMusicYear
                                 )
                             }
                             else -> {}
@@ -2015,6 +2033,13 @@ private fun LazyListScope.profileResultsContent(
             }
         }
         MainViewModel.ProfileTab.MUSIC_HISTORY -> {
+            if (state.musicYear != 0) {
+                // "Top <year>": that year's Rocksky Wrapped.
+                profileMusicWrappedRows(
+                    year = state.musicYear, wrapped = state.musicWrapped[state.musicYear],
+                    liquidGlass = liquidGlass, tint = profileTint
+                )
+            } else {
             // Item 16/7: songs are list-only (the old 1/2/3-column
             // Grid-button cycle was removed per feedback) — see
             // profileMusicHistoryRows for the pagination/key fix.
@@ -2022,6 +2047,7 @@ private fun LazyListScope.profileResultsContent(
                 tracks = tabState?.musicHistory ?: emptyList(), loading = tabState?.loading ?: false,
                 liquidGlass = liquidGlass, tint = profileTint, onLoadMore = onLoadMore
             )
+            }
         }
     }
 
@@ -2763,6 +2789,338 @@ private fun MusicHistoryRow(track: RockskyTrack, liquidGlass: Boolean, tint: Col
             formatRelativeTime(track.playedAt), color = DimGray, fontSize = 12.sp, maxLines = 1,
             modifier = Modifier.align(Alignment.CenterVertically)
         )
+    }
+}
+
+// ─── Music History → "Top <year>" (Rocksky Wrapped) ─────────────────────────
+// A person's year in music, from Rocksky's own year-in-review endpoint
+// (app.rocksky.stats.getWrapped): a totals card with four stat tiles, then
+// their top artists, tracks, albums and genres. Laid out like the rest of
+// the profile — glass bubbles rimmed with each cover's own color, one item
+// per row of the profile's single LazyColumn.
+
+/** Small accent palette for the stat tiles and genre chips — Stellar pink
+ *  first, then colors that sit well beside it on the dark sky. */
+private val WrappedAccents = listOf(
+    Color(0xFFFF4FA1), Color(0xFFA78BFA), Color(0xFF22D3EE),
+    Color(0xFFFBBF24), Color(0xFF34D399), Color(0xFFFB7185), Color(0xFF818CF8)
+)
+
+private fun wrappedCount(n: Long): String = java.text.NumberFormat.getIntegerInstance().format(n)
+
+private fun wrappedListeningTime(minutes: Long): String {
+    if (minutes < 60) return "${minutes}m"
+    val h = minutes / 60
+    val m = minutes % 60
+    if (h < 24) return "${h}h ${m}m"
+    return "${h / 24}d ${h % 24}h"
+}
+
+/** Rocksky reports the peak hour in UTC; shown in the viewer's own time. */
+private fun wrappedPeakHour(hourUtc: Int): String {
+    val local = java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC).withHour(hourUtc).withMinute(0)
+        .withZoneSameInstant(java.time.ZoneId.systemDefault()).hour
+    return when {
+        local == 0 -> "12 AM"
+        local < 12 -> "$local AM"
+        local == 12 -> "12 PM"
+        else -> "${local - 12} PM"
+    }
+}
+
+private fun wrappedDay(date: String?): String? = runCatching {
+    java.time.LocalDate.parse(date).format(java.time.format.DateTimeFormatter.ofPattern("MMM d"))
+}.getOrNull()
+
+private fun LazyListScope.profileMusicWrappedRows(
+    year: Int,
+    wrapped: com.mediaviewer.model.RockskyWrapped?,
+    liquidGlass: Boolean,
+    tint: Color
+) {
+    if (wrapped == null) {
+        item(key = "wrapped_loading_$year") {
+            Box(Modifier.fillMaxWidth().padding(vertical = 60.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 1.5.dp)
+            }
+        }
+        return
+    }
+    item(key = "wrapped_totals_$year") {
+        WrappedTotalsCard(wrapped, liquidGlass, tint, Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+    }
+    if (wrapped.topArtists.isNotEmpty()) {
+        item(key = "wrapped_artists_h_$year") { WrappedSectionHeader("Top Artists", tint) }
+        wrapped.topArtists.forEachIndexed { i, e ->
+            item(key = "wrapped_artist_${year}_$i") {
+                if (i == 0) WrappedFeaturedRow(e, "#1 ARTIST", circle = true, liquidGlass, tint)
+                else WrappedRankRow(i + 1, e, circle = true, liquidGlass, tint)
+            }
+        }
+    }
+    if (wrapped.topTracks.isNotEmpty()) {
+        item(key = "wrapped_tracks_h_$year") { WrappedSectionHeader("Top Tracks", tint) }
+        wrapped.topTracks.forEachIndexed { i, e ->
+            item(key = "wrapped_track_${year}_$i") {
+                if (i == 0) WrappedFeaturedRow(e, "#1 TRACK", circle = false, liquidGlass, tint)
+                else WrappedRankRow(i + 1, e, circle = false, liquidGlass, tint)
+            }
+        }
+    }
+    if (wrapped.topAlbums.isNotEmpty()) {
+        item(key = "wrapped_albums_h_$year") { WrappedSectionHeader("Top Albums", tint) }
+        wrapped.topAlbums.chunked(3).forEachIndexed { r, row ->
+            item(key = "wrapped_albums_${year}_$r") {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    row.forEachIndexed { c, e ->
+                        WrappedAlbumCard(r * 3 + c + 1, e, liquidGlass, tint, Modifier.weight(1f))
+                    }
+                    repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+                }
+            }
+        }
+    }
+    if (wrapped.topGenres.isNotEmpty()) {
+        item(key = "wrapped_genres_h_$year") { WrappedSectionHeader("Top Genres", tint) }
+        item(key = "wrapped_genres_$year") { WrappedGenreChips(wrapped.topGenres, Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) }
+    }
+    item(key = "wrapped_credit_$year") {
+        Text(
+            "Stats from Rocksky", color = DimGray.copy(alpha = 0.7f), fontSize = 10.sp,
+            textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 6.dp)
+        )
+    }
+}
+
+/** A section title between two hairlines, the same way Hub rows are
+ *  labelled. */
+@Composable
+private fun WrappedSectionHeader(title: String, tint: Color) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 18.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        HorizontalDivider(modifier = Modifier.weight(1f), color = tint.copy(alpha = 0.6f))
+        Text(
+            title, color = androidx.compose.ui.graphics.lerp(tint, Color.White, 0.35f), fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 10.dp)
+        )
+        HorizontalDivider(modifier = Modifier.weight(1f), color = tint.copy(alpha = 0.6f))
+    }
+}
+
+/** Total scrobbles (big, in a gradient of the profile's own color), the
+ *  listening time, and four stat tiles: new artists, longest streak, peak
+ *  hour and best day. */
+@Composable
+private fun WrappedTotalsCard(w: com.mediaviewer.model.RockskyWrapped, liquidGlass: Boolean, tint: Color, modifier: Modifier = Modifier) {
+    val shape = RoundedCornerShape(24.dp)
+    Column(
+        modifier
+            .fillMaxWidth()
+            .then(
+                if (liquidGlass) Modifier.glassPanel(true, tint = tint, shape = shape)
+                else Modifier.clip(shape).background(
+                    Brush.verticalGradient(listOf(tint.copy(alpha = 0.22f), Color.White.copy(alpha = 0.04f)))
+                ).border(1.dp, tint.copy(alpha = 0.45f), shape)
+            )
+            .padding(horizontal = 14.dp, vertical = 18.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text("TOTAL SCROBBLES", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, letterSpacing = 3.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(4.dp))
+        val light = androidx.compose.ui.graphics.lerp(tint, Color.White, 0.7f)
+        val deep = androidx.compose.ui.graphics.lerp(tint, Color.White, 0.15f)
+        Text(
+            wrappedCount(w.totalScrobbles),
+            style = androidx.compose.ui.text.TextStyle(
+                brush = Brush.linearGradient(listOf(deep, light, deep)),
+                fontSize = 52.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-1).sp
+            ),
+            maxLines = 1
+        )
+        Text(
+            "${wrappedListeningTime(w.listeningMinutes)} of music in ${w.year}",
+            color = Color.White.copy(alpha = 0.75f), fontSize = 13.sp
+        )
+        Spacer(Modifier.height(16.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            WrappedStatTile(androidx.compose.material.icons.Icons.Default.Mic, WrappedAccents[1],
+                wrappedCount(w.newArtists), "New artists", liquidGlass, Modifier.weight(1f))
+            WrappedStatTile(androidx.compose.material.icons.Icons.Default.LocalFireDepartment, WrappedAccents[0],
+                "${w.longestStreakDays}d", "Longest streak", liquidGlass, Modifier.weight(1f))
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            WrappedStatTile(androidx.compose.material.icons.Icons.Default.Schedule, WrappedAccents[2],
+                w.peakHourUtc?.let { wrappedPeakHour(it) } ?: "—", "Peak hour", liquidGlass, Modifier.weight(1f))
+            WrappedStatTile(androidx.compose.material.icons.Icons.Default.CalendarMonth, WrappedAccents[3],
+                if (w.bestDayPlays > 0) "${wrappedCount(w.bestDayPlays)} plays" else "—",
+                wrappedDay(w.bestDayDate)?.let { "Best day · $it" } ?: "Best day", liquidGlass, Modifier.weight(1f))
+        }
+    }
+}
+
+@Composable
+private fun WrappedStatTile(
+    icon: androidx.compose.ui.graphics.vector.ImageVector, accent: Color, value: String, label: String,
+    liquidGlass: Boolean, modifier: Modifier = Modifier
+) {
+    val shape = RoundedCornerShape(16.dp)
+    Column(
+        modifier
+            .then(
+                if (liquidGlass) Modifier.glassPanel(true, tint = accent.copy(alpha = 0.55f), shape = shape)
+                else Modifier.clip(shape).background(Color.Black.copy(alpha = 0.25f)).border(1.dp, accent.copy(alpha = 0.3f), shape)
+            )
+            .padding(12.dp)
+    ) {
+        Box(
+            Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(accent.copy(alpha = 0.18f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(19.dp))
+        }
+        Spacer(Modifier.height(10.dp))
+        Text(value, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(label, color = DimGray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** Cover art / artist picture, with a music-note or person placeholder when
+ *  Rocksky has none. */
+@Composable
+private fun WrappedArt(url: String?, circle: Boolean, size: Dp) {
+    val shape = if (circle) CircleShape else RoundedCornerShape(size * 0.18f)
+    Box(Modifier.size(size).clip(shape).background(Color.White.copy(alpha = 0.08f)), contentAlignment = Alignment.Center) {
+        if (url != null) {
+            AsyncImage(model = url, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+        } else {
+            Icon(
+                if (circle) androidx.compose.material.icons.Icons.Default.Person else androidx.compose.material.icons.Icons.Default.MusicNote,
+                contentDescription = null, tint = DimGray, modifier = Modifier.size(size * 0.42f)
+            )
+        }
+    }
+}
+
+/** The #1 artist/track: a bigger bubble, rimmed and washed with its own
+ *  cover color. */
+@Composable
+private fun WrappedFeaturedRow(e: com.mediaviewer.model.RockskyWrappedEntry, badge: String, circle: Boolean, liquidGlass: Boolean, tint: Color) {
+    val coverTint = if (e.imageUrl != null) rememberDominantColor(e.imageUrl) else tint
+    val shape = RoundedCornerShape(20.dp)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 5.dp)
+            .then(
+                if (liquidGlass) Modifier.glassPanel(true, tint = coverTint, shape = shape)
+                else Modifier.clip(shape).background(
+                    Brush.horizontalGradient(listOf(coverTint.copy(alpha = 0.35f), Color.White.copy(alpha = 0.05f)))
+                ).border(1.dp, coverTint.copy(alpha = 0.6f), shape)
+            )
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        WrappedArt(e.imageUrl, circle, 76.dp)
+        Column(Modifier.weight(1f)) {
+            Text(badge, color = androidx.compose.ui.graphics.lerp(coverTint, Color.White, 0.45f), fontSize = 11.sp,
+                letterSpacing = 2.sp, fontWeight = FontWeight.Bold)
+            Text(e.title, color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            val sub = listOfNotNull(e.subtitle.takeIf { it.isNotBlank() }, "${wrappedCount(e.plays)} plays").joinToString(" · ")
+            Text(sub, color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 2.dp))
+        }
+    }
+}
+
+/** #2–#5: the same bubble shape as a Recent row, rank first, plays last. */
+@Composable
+private fun WrappedRankRow(rank: Int, e: com.mediaviewer.model.RockskyWrappedEntry, circle: Boolean, liquidGlass: Boolean, tint: Color) {
+    val coverTint = if (e.imageUrl != null) rememberDominantColor(e.imageUrl) else tint
+    val shape = RoundedCornerShape(16.dp)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .then(
+                if (liquidGlass) Modifier.glassPanel(true, tint = coverTint, shape = shape)
+                else Modifier.clip(shape).background(Color.White.copy(0.06f)).border(1.dp, coverTint.copy(alpha = 0.6f), shape)
+            )
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text("$rank", color = DimGray, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center, modifier = Modifier.width(18.dp))
+        WrappedArt(e.imageUrl, circle, 46.dp)
+        Column(Modifier.weight(1f)) {
+            Text(e.title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (e.subtitle.isNotBlank()) {
+                Text(e.subtitle, color = DimGray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+            }
+        }
+        Text(wrappedCount(e.plays), color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp, maxLines = 1)
+    }
+}
+
+@Composable
+private fun WrappedAlbumCard(rank: Int, e: com.mediaviewer.model.RockskyWrappedEntry, liquidGlass: Boolean, tint: Color, modifier: Modifier = Modifier) {
+    val coverTint = if (e.imageUrl != null) rememberDominantColor(e.imageUrl) else tint
+    val shape = RoundedCornerShape(16.dp)
+    Column(
+        modifier
+            .then(
+                if (liquidGlass) Modifier.glassPanel(true, tint = coverTint, shape = shape)
+                else Modifier.clip(shape).background(Color.White.copy(0.06f)).border(1.dp, coverTint.copy(alpha = 0.6f), shape)
+            )
+            .padding(6.dp)
+    ) {
+        Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(11.dp)).background(Color.White.copy(alpha = 0.08f)),
+            contentAlignment = Alignment.Center) {
+            if (e.imageUrl != null) {
+                AsyncImage(model = e.imageUrl, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            } else {
+                Icon(androidx.compose.material.icons.Icons.Default.Album, contentDescription = null, tint = DimGray, modifier = Modifier.size(30.dp))
+            }
+        }
+        Column(Modifier.padding(horizontal = 4.dp, vertical = 6.dp)) {
+            Text("#$rank", color = if (rank == 1) androidx.compose.ui.graphics.lerp(coverTint, Color.White, 0.45f) else DimGray,
+                fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text(e.title, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (e.subtitle.isNotBlank()) {
+                Text(e.subtitle, color = DimGray, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun WrappedGenreChips(genres: List<Pair<String, Long>>, modifier: Modifier = Modifier) {
+    FlowRow(
+        modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        genres.forEachIndexed { i, (genre, count) ->
+            val accent = WrappedAccents[i % WrappedAccents.size]
+            val shape = RoundedCornerShape(50)
+            Row(
+                Modifier.clip(shape).background(accent.copy(alpha = 0.12f)).border(1.dp, accent.copy(alpha = 0.45f), shape)
+                    .padding(horizontal = 14.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(genre, color = androidx.compose.ui.graphics.lerp(accent, Color.White, 0.15f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.width(6.dp))
+                Text(wrappedCount(count), color = Color.White.copy(alpha = 0.55f), fontSize = 13.sp)
+            }
+        }
     }
 }
 
