@@ -1834,13 +1834,6 @@ private fun LazyListScope.profileResultsContent(
     // PostKindFilter, and within the ALL/IMAGES/TEXT_POSTS sub-tabs, one of
     // three further layouts per that sub-tab's own remembered grid-mode
     // index (adjustment #5). HORIZONTAL_VIDEOS is always the list.
-    fun postsLayoutRows(allItems: List<MediaItem>, loading: Boolean) {
-        // Whether this tab has nothing left to load — lets an empty filter
-        // say "none" instead of looking for more forever.
-        filterRowsExhausted = tabState != null && tabState.loaded && tabState.cursor == null && !tabState.loading
-        postsLayoutRowsInner(allItems, loading)
-        filterRowsExhausted = false
-    }
     fun postsLayoutRowsInner(allItems: List<MediaItem>, loading: Boolean) {
         when (postKindFilter) {
             PostKindFilter.ALL, PostKindFilter.IMAGES -> when (gridModeFor(postKindFilter)) {
@@ -1890,6 +1883,13 @@ private fun LazyListScope.profileResultsContent(
                 filter = { postKindFilter.matches(it) }
             )
         }
+    }
+    fun postsLayoutRows(allItems: List<MediaItem>, loading: Boolean) {
+        // Whether this tab has nothing left to load — lets an empty filter
+        // say "none" instead of looking for more forever.
+        filterRowsExhausted = tabState != null && tabState.loaded && tabState.cursor == null && !tabState.loading
+        postsLayoutRowsInner(allItems, loading)
+        filterRowsExhausted = false
     }
 
     when (state.selectedTab) {
