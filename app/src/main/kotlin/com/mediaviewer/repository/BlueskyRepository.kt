@@ -2518,7 +2518,11 @@ class BlueskyRepository {
 
     private fun hubListOriginalPosts(feed: List<BskyFeedItem>): List<MediaItem> = feed
         .filter { it.reason == null && it.reply == null && it.post.record.reply == null }
-        .flatMap { parseFeedItemSafe(it) }
+        // A plain quote post is shown as the post it quotes, under the
+        // quoted person's name — someone who usually isn't on the list. Only
+        // keep tiles that are the member's own post (a quote with the
+        // member's own photo/video attached still counts).
+        .flatMap { item -> parseFeedItemSafe(item).filter { it.author.did == item.post.author.did } }
         .distinctBy { it.postUri }
 
     /** The next page of a Hub list row's posts (AppView), for scrolling on. */
@@ -2550,7 +2554,8 @@ class BlueskyRepository {
         for (item in body.feed) {
             if (item.reason != null || item.reply != null || item.post.record.reply != null) continue
             if (item.post.author.did != memberDid) continue
-            val media = parseFeedItemSafe(item).firstOrNull() ?: continue
+            // Same rule as hubListOriginalPosts: no tiles under someone else's name.
+            val media = parseFeedItemSafe(item).firstOrNull { it.author.did == memberDid } ?: continue
             if (!seen.add(media.postUri)) continue
             val t = item.post.record.createdAt?.let { raw ->
                 runCatching { java.time.Instant.parse(raw).toEpochMilli() }.getOrNull()
