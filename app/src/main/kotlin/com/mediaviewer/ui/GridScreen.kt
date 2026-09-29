@@ -277,12 +277,19 @@ fun GridScreen(
                         var velocity = 0f   // px per ms, + = downward
                         var multiTouch = false
                         var pullFired = false
+                        // Same rule as the Hub's swipe into the feed: only a
+                        // swipe that STARTS with the grid already scrolled
+                        // all the way up goes back to the Hub — scrolling up
+                        // to the top never overshoots into it; it takes a
+                        // second swipe.
+                        var armed: Boolean? = null
                         while (true) {
                             val event = awaitPointerEvent(PointerEventPass.Initial)
+                            if (armed == null) armed = !gridState.canScrollBackward
                             val pressed = event.changes.filter { it.pressed }
                             if (pressed.isEmpty()) {
                                 // Released: a quick flick down at the top counts too.
-                                if (!pullFired && !multiTouch && !pullBaseY.isNaN() &&
+                                if (armed == true && !pullFired && !multiTouch && !pullBaseY.isNaN() &&
                                     lastY - pullBaseY >= flickThresholdPx && velocity > 0.9f
                                 ) {
                                     latestOnSwipeDown()
@@ -298,7 +305,7 @@ fun GridScreen(
                                     velocity = velocity * 0.4f + v * 0.6f
                                 }
                                 lastY = y; lastT = t
-                                if (!gridState.canScrollBackward) {
+                                if (armed == true && !gridState.canScrollBackward) {
                                     if (pullBaseY.isNaN() || y < pullBaseY) pullBaseY = y
                                     if (!pullFired && y - pullBaseY >= pullThresholdPx) {
                                         pullFired = true

@@ -25,6 +25,9 @@ object UiToggles {
     private const val KEY_STAR_FRAME_RATE = "starry_background_fps"
     private const val KEY_OVERRIDE_COLORS = "override_app_colors"
     private const val KEY_OVERRIDE_COLOR = "override_app_color"
+    private const val KEY_DEV_TOOLS_UNLOCKED = "dev_tools_unlocked"
+    private const val KEY_DEV_FORCE_SCAN_BUBBLE = "dev_force_scan_bubble"
+    private const val KEY_SCAN_BUBBLE_DISMISSED = "scan_bubble_dismissed"
 
     /** Settings → UI Customization → "Loading Animation". */
     enum class LoadingAnimation(val label: String) {
@@ -101,6 +104,29 @@ object UiToggles {
     var visualizerCallMode by mutableStateOf(VisualizerCallMode.PAUSE)
         private set
 
+    /** Settings → hold the "Settings" tab for 10 seconds: the hidden
+     *  "Dev Tools" section at the bottom of Settings. */
+    var devToolsUnlocked by mutableStateOf(false)
+        private set
+
+    /** Dev Tools → the Hub's Reviews/Blogs rows are replaced by the
+     *  "scan your follows" bubble, so that flow can be tried any time. */
+    var devForceScanBubble by mutableStateOf(false)
+        private set
+
+    /** The Hub's "scan your follows" bubble was closed with its X — it
+     *  doesn't come back (the scan stays available in Settings). */
+    var scanBubbleDismissed by mutableStateOf(false)
+        private set
+
+    /** Dev Tools → "Preview Loading Animation": true while the preview is
+     *  playing (AppRoot runs it). Not saved. */
+    var devLoadingPreview by mutableStateOf(false)
+
+    /** Dev Tools → "Preview Login Page": the login page shown over the app
+     *  without signing out. Not saved. */
+    var devLoginPreview by mutableStateOf(false)
+
     /** Whether any loading transition/screen plays at all. */
     val loadingScreens: Boolean get() = loadingAnimation != LoadingAnimation.NONE
 
@@ -119,9 +145,30 @@ object UiToggles {
         starFrameRate = p.getInt(KEY_STAR_FRAME_RATE, 30).coerceIn(15, 120)
         overrideAppColors = p.getBoolean(KEY_OVERRIDE_COLORS, false)
         overrideColor = p.getInt(KEY_OVERRIDE_COLOR, 0xFFFF4FA1.toInt())
+        devToolsUnlocked = p.getBoolean(KEY_DEV_TOOLS_UNLOCKED, false)
+        devForceScanBubble = p.getBoolean(KEY_DEV_FORCE_SCAN_BUBBLE, false)
+        scanBubbleDismissed = p.getBoolean(KEY_SCAN_BUBBLE_DISMISSED, false)
         visualizerCallMode = p.getString(KEY_VISUALIZER_CALL_MODE, null)
             ?.let { name -> VisualizerCallMode.entries.firstOrNull { it.name == name } }
             ?: if (p.getBoolean(KEY_VISUALIZER_DURING_CALLS, false)) VisualizerCallMode.MUSIC_ONLY else VisualizerCallMode.PAUSE
+    }
+
+    fun updateDevToolsUnlocked(enabled: Boolean) {
+        devToolsUnlocked = enabled
+        if (!enabled) devForceScanBubble = false
+        prefs?.edit()?.putBoolean(KEY_DEV_TOOLS_UNLOCKED, enabled)?.putBoolean(KEY_DEV_FORCE_SCAN_BUBBLE, devForceScanBubble)?.apply()
+    }
+
+    fun dismissScanBubble() {
+        scanBubbleDismissed = true
+        // Closing it while Dev Tools forces it on turns that off too.
+        devForceScanBubble = false
+        prefs?.edit()?.putBoolean(KEY_SCAN_BUBBLE_DISMISSED, true)?.putBoolean(KEY_DEV_FORCE_SCAN_BUBBLE, false)?.apply()
+    }
+
+    fun updateDevForceScanBubble(enabled: Boolean) {
+        devForceScanBubble = enabled
+        prefs?.edit()?.putBoolean(KEY_DEV_FORCE_SCAN_BUBBLE, enabled)?.apply()
     }
 
     fun updateVisualizerCallMode(value: VisualizerCallMode) {

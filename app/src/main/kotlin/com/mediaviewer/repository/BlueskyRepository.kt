@@ -862,11 +862,17 @@ class BlueskyRepository {
         val mainCredit = firstStringField(subject, "mainCredit") ?: firstStringField(obj, "mainCredit")
         val mainCreditRole = firstStringField(subject, "mainCreditRole") ?: firstStringField(obj, "mainCreditRole")
         val imdbId = imdbIdField(subject) ?: imdbIdField(obj)
+        // The record's whole identifiers object (tmdb/igdb/isbn/… too), so a
+        // title opened from this review can be added to the backlog with
+        // the same identifiers Popfeed itself uses.
+        val identifiersJson = runCatching { subject.getAsJsonObject("identifiers") ?: obj.getAsJsonObject("identifiers") }
+            .getOrNull()?.toString()
         return PopfeedReview(
             uri = uri, mediaTitle = title, mediaImageUrl = image, mediaBackdropUrl = backdrop,
             ratingOutOf5 = rating5.coerceIn(0f, 5f), reviewText = text, createdAt = createdAt,
             mediaCategory = category, releaseDate = releaseDate, genres = genres,
-            mainCredit = mainCredit, mainCreditRole = mainCreditRole, imdbId = imdbId
+            mainCredit = mainCredit, mainCreditRole = mainCreditRole, imdbId = imdbId,
+            identifiersJson = identifiersJson
         )
     }
 
@@ -1358,6 +1364,7 @@ class BlueskyRepository {
             val mainCreditRole = firstStringField(obj, "mainCreditRole")
             val imdbId = imdbIdField(obj)
             result[rec.uri] = PopfeedBacklogItem(
+                identifiersJson = runCatching { obj.getAsJsonObject("identifiers") }.getOrNull()?.toString(),
                 uri = rec.uri, title = title, imageUrl = image, mediaBackdropUrl = backdrop,
                 createdAt = createdAt, mediaCategory = creativeWorkType, releaseDate = releaseDate,
                 genres = genres, mainCredit = mainCredit, mainCreditRole = mainCreditRole, imdbId = imdbId
@@ -1427,6 +1434,156 @@ class BlueskyRepository {
         target.creator?.let { record["mainCredit"] = it }
         target.creatorRole?.let { record["mainCreditRole"] = it }
         return createRecord(token, did, "social.popfeed.feed.review", record)
+    }
+
+    // ── Popfeed backlog: add / find (review page + title page "Backlog") ───
+    // Written with Popfeed's own lexicon (social.popfeed.feed.list /
+    // social.popfeed.feed.listItem — see Popfeed-Community/lexicons): a
+    // backlog entry is a listItem with status "#backlog", pointing at one of
+    // the account's own Popfeed lists. Everything here reads/writes only the
+    // signed-in account's own repo.
+
+    private val backlogListKeywords = listOf("backlog", "watchlist", "want_to", "towatch", "to_watch", "toplay", "to_play", "plan_to", "planning", "to_read", "toread")
+    private val identifierKeys = listOf("imdbId", "tmdbId", "tmdbTvSeriesId", "igdbId", "isbn13", "isbn10", "asin", "mbReleaseId", "other")
+
+    /** Every record in one of the signed-in account's own collections (paged). */
+    private suspend fun ownRecords(did: String, collection: String, maxPages: Int = 10): List<BskyRecordEnvelope> {
+        val out = ArrayList<BskyRecordEnvelope>()
+        var cursor: String? = null
+        var pages = 0
+        do {
+            val c = cursor
+            val body = runCatching { api.listRecords(null, did, collection, 100, c) }.getOrNull()
+                ?.takeIf { it.isSuccessful }?.body() ?: break
+            out += body.records
+            cursor = body.cursor
+            pages++
+        } while (!cursor.isNullOrBlank() && body.records.isNotEmpty() && pages < maxPages)
+        return out
+    }
+
+    /** Popfeed's creativeWorkType enum value for a title's category. */
+    private fun popfeedWorkType(raw: String?): String {
+        val t = raw?.lowercase()?.trim().orEmpty()
+        val known = setOf("movie", "tv_show", "video_game", "album", "book", "book_series", "episode", "ep", "tv_season", "tv_episode", "track")
+        return when {
+            t in known -> t
+            t == "film" -> "movie"
+            t.contains("season") -> "tv_season"
+            t.contains("episode") -> "tv_episode"
+            t.contains("tv") || t.contains("show") || t.contains("series") -> "tv_show"
+            t.contains("game") -> "video_game"
+            t.contains("book") -> "book"
+            t.contains("song") || t.contains("track") -> "track"
+            t.contains("album") || t.contains("music") -> "album"
+            else -> "movie"
+        }
+    }
+
+    private fun titleIdentifiers(target: TitleSearchResult): com.google.gson.JsonObject {
+        val obj = runCatching {
+            target.identifiersJson?.let { com.google.gson.JsonParser.parseString(it).asJsonObject }
+        }.getOrNull() ?: com.google.gson.JsonObject()
+        if (firstStringField(obj, "imdbId") == null && target.id.startsWith("imdb:")) obj.addProperty("imdbId", target.id.removePrefix("imdb:"))
+        return obj
+    }
+
+    private fun isBacklogRecord(obj: com.google.gson.JsonObject): Boolean {
+        val status = firstStringField(obj, "status")?.lowercase()?.removePrefix("#") ?: ""
+        val listType = firstStringField(obj, "listType")?.lowercase() ?: ""
+        return status == "backlog" || (status.isEmpty() && backlogListKeywords.any { listType.contains(it) })
+    }
+
+    private fun sameWork(obj: com.google.gson.JsonObject, target: TitleSearchResult, ids: com.google.gson.JsonObject): Boolean {
+        val type = firstStringField(obj, "creativeWorkType")?.lowercase()
+        val targetType = popfeedWorkType(target.mediaCategory)
+        if (type != null && target.mediaCategory != null && type != targetType) return false
+        val recIds = runCatching { obj.getAsJsonObject("identifiers") }.getOrNull()
+        if (recIds != null) {
+            for (k in identifierKeys) {
+                val a = firstStringField(ids, k) ?: continue
+                val b = firstStringField(recIds, k) ?: continue
+                return a == b
+            }
+        }
+        val recTitle = firstStringField(obj, "title") ?: return false
+        return recTitle.equals(target.title, ignoreCase = true)
+    }
+
+    /** The signed-in account's backlog entry (a listItem URI) for [target],
+     *  or null if it isn't in their backlog. */
+    suspend fun findPopfeedBacklogItem(did: String, target: TitleSearchResult): String? {
+        val ids = titleIdentifiers(target)
+        for (rec in ownRecords(did, "social.popfeed.feed.listItem")) {
+            val obj = rec.value?.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+            if (isBacklogRecord(obj) && sameWork(obj, target, ids)) return rec.uri
+        }
+        return null
+    }
+
+    /** Adds [target] to the signed-in account's Popfeed backlog and returns
+     *  the new listItem's URI. It goes on the list their existing backlog
+     *  entries use (same kind of title first), else a Popfeed list that
+     *  reads as a backlog/watchlist, else a new "Backlog" list. */
+    suspend fun addToPopfeedBacklog(token: String, did: String, target: TitleSearchResult): Result<String> = runCatching {
+        val workType = popfeedWorkType(target.mediaCategory)
+        val items = ownRecords(did, "social.popfeed.feed.listItem")
+            .mapNotNull { r -> r.value?.takeIf { it.isJsonObject }?.asJsonObject }
+            .filter { isBacklogRecord(it) && firstStringField(it, "listUri") != null }
+        val sameType = items.firstOrNull { firstStringField(it, "creativeWorkType")?.lowercase() == workType }
+        val template = sameType ?: items.firstOrNull()
+        var listUri = template?.let { firstStringField(it, "listUri") }
+        var listType = template?.let { firstStringField(it, "listType") }
+        if (listUri == null) {
+            val lists = ownRecords(did, "social.popfeed.feed.list", maxPages = 3)
+            val match = lists.firstOrNull { r ->
+                val o = r.value?.takeIf { it.isJsonObject }?.asJsonObject ?: return@firstOrNull false
+                val lt = firstStringField(o, "listType")?.lowercase() ?: ""
+                val name = firstStringField(o, "name")?.lowercase() ?: ""
+                backlogListKeywords.any { lt.contains(it) } || name.contains("backlog") || name.contains("watchlist")
+            }
+            if (match != null) {
+                listUri = match.uri
+                listType = match.value?.takeIf { it.isJsonObject }?.asJsonObject?.let { firstStringField(it, "listType") }
+            } else {
+                listType = "backlog"
+                listUri = createRecord(token, did, "social.popfeed.feed.list", mapOf(
+                    "\$type" to "social.popfeed.feed.list",
+                    "name" to "Backlog",
+                    "listType" to "backlog",
+                    "ordered" to false,
+                    "createdAt" to java.time.Instant.now().toString()
+                )).getOrThrow()
+            }
+        }
+        // Identifiers, typed the way the lexicon wants them (strings, plus
+        // integer episode/season numbers).
+        val identifiers = LinkedHashMap<String, Any>()
+        for ((k, v) in titleIdentifiers(target).entrySet()) {
+            if (!v.isJsonPrimitive) continue
+            val p = v.asJsonPrimitive
+            when {
+                p.isString -> if (p.asString.isNotBlank()) identifiers[k] = p.asString
+                p.isNumber -> identifiers[k] = p.asLong
+            }
+        }
+        val record = mutableMapOf<String, Any>(
+            "\$type" to "social.popfeed.feed.listItem",
+            "identifiers" to identifiers,
+            "creativeWorkType" to workType,
+            "status" to "#backlog",
+            "listUri" to listUri!!,
+            "addedAt" to java.time.Instant.now().toString(),
+            "title" to target.title
+        )
+        listType?.takeIf { it.isNotBlank() }?.let { record["listType"] = it }
+        target.posterUrl?.takeIf { it.startsWith("http") }?.let { record["posterUrl"] = it }
+        target.backdropUrl?.takeIf { it.startsWith("http") }?.let { record["backdropUrl"] = it }
+        if (target.releaseDate.isNotBlank()) record["releaseDate"] = target.releaseDate
+        if (target.genres.isNotEmpty()) record["genres"] = target.genres
+        target.creator?.let { record["mainCredit"] = it }
+        target.creatorRole?.let { record["mainCreditRole"] = it }
+        createRecord(token, did, "social.popfeed.feed.listItem", record).getOrThrow()
     }
 
     /** Item 10: "after posting the review it should remove it from the
@@ -2336,6 +2493,92 @@ class BlueskyRepository {
         "createdAt" to Instant.now().toString()
     ))
 
+    // ── Customize Hub: list rows ─────────────────────────────────────────────
+    // Everything here goes to Bluesky's AppView (service-auth'd straight to
+    // api.bsky.app, or the unauthenticated public AppView) — never to the
+    // list members' own PDSs, so a big list can't trip anyone's rate limits.
+    private val publicAppView by lazy { NetworkClient.buildDirectServiceApi("https://public.api.bsky.app/") }
+
+    /** A Hub list row's content: its [name], its members (most recently
+     *  active first) and their latest original posts (no reposts, no
+     *  replies). Two AppView calls for the posts + one per 100 members. */
+    data class HubListContent(val name: String?, val members: List<AuthorInfo>, val posts: List<MediaItem>)
+
+    suspend fun getHubListContent(token: String, myDid: String, listUri: String, maxMembers: Int = 300): Result<HubListContent> = runCatching {
+        coroutineScope {
+            val feedJob = async {
+                val resp = viaAppView(token, myDid, "app.bsky.feed.getListFeed") { a, auth -> a.getListFeed(auth, listUri, 100, null) }
+                resp.body()?.feed ?: emptyList()
+            }
+            val membersJob = async {
+                val members = ArrayList<AuthorInfo>()
+                var name: String? = null
+                var cursor: String? = null
+                do {
+                    val c = cursor
+                    val resp = viaAppView(token, myDid, "app.bsky.graph.getList") { a, auth -> a.getList(auth, listUri, 100, c) }
+                    val body = resp.body() ?: break
+                    if (name == null) name = runCatching { body.getAsJsonObject("list")?.get("name")?.asString }.getOrNull()
+                    body.getAsJsonArray("items")?.forEach { el ->
+                        val subj = runCatching { el.asJsonObject.getAsJsonObject("subject") }.getOrNull() ?: return@forEach
+                        val did = subj.get("did")?.asString ?: return@forEach
+                        val handle = subj.get("handle")?.asString ?: did
+                        val following = runCatching { subj.getAsJsonObject("viewer")?.get("following")?.asString }.getOrNull()
+                        members += AuthorInfo(
+                            did = did, handle = handle,
+                            displayName = subj.get("displayName")?.takeIf { !it.isJsonNull }?.asString?.ifBlank { null } ?: handle,
+                            avatarUrl = subj.get("avatar")?.takeIf { !it.isJsonNull }?.asString,
+                            followingUri = following, isFollowing = following != null
+                        )
+                    }
+                    cursor = body.get("cursor")?.takeIf { !it.isJsonNull }?.asString
+                } while (cursor != null && members.size < maxMembers)
+                name to members
+            }
+            val feed = feedJob.await()
+            val (name, rawMembers) = membersJob.await()
+            val members = rawMembers.distinctBy { it.did }.filterNot { com.mediaviewer.util.BlockedAccounts.isHidden(it.did) }
+            // Most recent poster first: order of each member's first
+            // appearance in the (newest-first) list feed; quiet members after.
+            val recency = HashMap<String, Int>()
+            feed.forEachIndexed { i, item ->
+                if (item.reason == null) recency.putIfAbsent(item.post.author.did, i)
+            }
+            val sortedMembers = members.withIndex()
+                .sortedWith(compareBy({ recency[it.value.did] ?: Int.MAX_VALUE }, { it.index }))
+                .map { it.value }
+            val posts = feed
+                .filter { it.reason == null && it.reply == null && it.post.record.reply == null }
+                .flatMap { parseFeedItemSafe(it) }
+                .distinctBy { it.postUri }
+            HubListContent(name, sortedMembers, posts)
+        }
+    }
+
+    /** Turns a Bluesky list link (https://bsky.app/profile/<handle or did>/lists/<id>)
+     *  or an at:// list URI into (at:// URI, list name). Public AppView only. */
+    suspend fun resolveListUrl(input: String): Result<Pair<String, String>> = runCatching {
+        val text = input.trim()
+        val atUri = if (text.startsWith("at://")) {
+            text
+        } else {
+            val m = Regex("""profile/([^/?#\s]+)/lists/([^/?#\s]+)""").find(text)
+                ?: error("That doesn't look like a Bluesky list link")
+            val actor = java.net.URLDecoder.decode(m.groupValues[1], "UTF-8")
+            val rkey = m.groupValues[2]
+            val did = if (actor.startsWith("did:")) actor else {
+                val resp = publicAppView.resolveHandle(actor)
+                resp.body()?.get("did")?.asString ?: error("Couldn't find @$actor")
+            }
+            "at://$did/app.bsky.graph.list/$rkey"
+        }
+        val resp = publicAppView.getList(null, atUri, 1, null)
+        val body = resp.body() ?: error("Couldn't open that list (${resp.code()})")
+        val name = runCatching { body.getAsJsonObject("list")?.get("name")?.asString }.getOrNull() ?: "List"
+        val canonical = runCatching { body.getAsJsonObject("list")?.get("uri")?.asString }.getOrNull() ?: atUri
+        canonical to name
+    }
+
     suspend fun getUserLists(token: String, did: String): Result<List<BskyList>> = runCatching {
         val resp = api.getLists("Bearer $token", did, 100)
         val body = resp.body() ?: error("Lists ${resp.code()}: ${resp.message()}")
@@ -3086,6 +3329,7 @@ class BlueskyRepository {
                                     likeCount = post.likeCount ?: 0, replyCount = post.replyCount ?: 0,
                                     repostCount = post.repostCount ?: 0,
                                     text = firstAlt.removePrefix(TEXTSHOT_ALT_PREFIX),
+                                    captionText = text.takeIf { it.isNotBlank() },
                                     labels = nsfwLabels
                                 )
                             )
@@ -3107,6 +3351,7 @@ class BlueskyRepository {
                                     text = firstAlt.removePrefix(TEXTSHOT_EMOJI_ALT_PREFIX),
                                     aspectRatio = resolvedRatio(first) ?: 1f,
                                     textshotImageUrl = first.fullsize ?: "",
+                                    captionText = text.takeIf { it.isNotBlank() },
                                     labels = nsfwLabels
                                 )
                             )

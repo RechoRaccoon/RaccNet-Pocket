@@ -251,6 +251,28 @@ interface BlueskyApi {
         @Query("limit") limit: Int = 100
     ): Response<BskyGetListsResponse>
 
+    /** Customize Hub → list rows: the latest posts by a list's members
+     *  (AppView — never the members' PDSs). */
+    @GET("xrpc/app.bsky.feed.getListFeed")
+    suspend fun getListFeed(
+        @Header("Authorization") token: String,
+        @Query("list") list: String,
+        @Query("limit") limit: Int = 50,
+        @Query("cursor") cursor: String? = null
+    ): Response<BskyTimelineResponse>
+
+    /** A list's own view plus its members (AppView). */
+    @GET("xrpc/app.bsky.graph.getList")
+    suspend fun getList(
+        @Header("Authorization") token: String?,
+        @Query("list") list: String,
+        @Query("limit") limit: Int = 100,
+        @Query("cursor") cursor: String? = null
+    ): Response<com.google.gson.JsonObject>
+
+    @GET("xrpc/com.atproto.identity.resolveHandle")
+    suspend fun resolveHandle(@Query("handle") handle: String): Response<com.google.gson.JsonObject>
+
     @GET("xrpc/app.bsky.graph.getActorStarterPacks")
     suspend fun getActorStarterPacks(
         @Header("Authorization") token: String,

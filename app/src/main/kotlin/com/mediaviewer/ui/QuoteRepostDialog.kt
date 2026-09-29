@@ -55,8 +55,26 @@ fun QuoteRepostDialog(
     val tint = dominantColor
     val overLimit = text.length > BSKY_POST_LIMIT
     val focus = remember { FocusRequester() }
-    LaunchedEffect(target.id) { kotlinx.coroutines.delay(250); runCatching { focus.requestFocus() } }
-
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    // Opens straight into typing: focus the field and explicitly raise the
+    // keyboard (requestFocus alone doesn't always show it on every IME).
+    LaunchedEffect(target.id) {
+        kotlinx.coroutines.delay(120)
+        runCatching { focus.requestFocus() }
+        keyboard?.show()
+    }
+    // The popup lives on top of the keyboard: once the keyboard has been up,
+    // closing it (Back, the keyboard's own hide key, a swipe) closes the
+    // popup too.
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val imeBottom = WindowInsets.ime.getBottom(density)
+    var keyboardWasShown by remember(target.id) { mutableStateOf(false) }
+    LaunchedEffect(imeBottom > 0) {
+        if (imeBottom > 0) keyboardWasShown = true
+        else if (keyboardWasShown && !submitting) onDismiss()
+    }
+    // Safety net: if the keyboard never comes up at all (hardware keyboard,
+    // unusual IME), Back still closes the popup.
     BackHandler(onBack = onDismiss)
 
     Box(
@@ -64,11 +82,10 @@ fun QuoteRepostDialog(
             .background(Color.Black.copy(alpha = if (liquidGlass) 0.22f else 0.6f))
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss)
             .padding(top = rememberTopCutoutClearance())
-            .imePadding()
-            .navigationBarsPadding()
-            .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
-        // Centered on screen (and above the keyboard while typing).
-        contentAlignment = Alignment.Center
+            // Sits right on top of the keyboard.
+            .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
+            .padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
+        contentAlignment = Alignment.BottomCenter
     ) {
         PopupSheetSurface(
             liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,

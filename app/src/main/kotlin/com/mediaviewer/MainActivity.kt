@@ -36,6 +36,7 @@ import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.createLifecycleAwareWindowRecomposer
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
@@ -63,6 +64,7 @@ import com.mediaviewer.ui.ProfileOverlay
 import com.mediaviewer.ui.fetchDominantColor
 import com.mediaviewer.ui.rememberLoadingTransition
 import com.mediaviewer.ui.ShatterOverlay
+import com.mediaviewer.ui.blockClicksBehind
 import com.mediaviewer.ui.recordLastTap
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.flow.first
@@ -154,6 +156,27 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
 
+    /** A bsky.app/profile/<actor> link Stellar was opened with, waiting to
+     *  be opened once the app (and your login) is ready. */
+    private val pendingProfileLink = mutableStateOf<String?>(null)
+
+    private fun handleLinkIntent(intent: android.content.Intent?) {
+        val data = intent?.data ?: return
+        if (intent?.action != android.content.Intent.ACTION_VIEW) return
+        val host = data.host?.lowercase() ?: return
+        if (host != "bsky.app" && host != "www.bsky.app") return
+        val segments = data.pathSegments ?: return
+        if (segments.size >= 2 && segments[0] == "profile" && segments[1].isNotBlank()) {
+            pendingProfileLink.value = segments[1]
+        }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleLinkIntent(intent)
+    }
+
     /** Opens the app already in your profile colors: the first frame is
      *  held back (the window's own background shows meanwhile) until "your
      *  color" is known — instantly on most launches, since it's remembered
@@ -183,6 +206,8 @@ class MainActivity : ComponentActivity() {
         com.mediaviewer.util.CrashBreadcrumbs.init(applicationContext)
         com.mediaviewer.util.UiToggles.init(applicationContext)
         com.mediaviewer.util.FontStore.init(applicationContext)
+        com.mediaviewer.util.ListRecency.init(applicationContext)
+        com.mediaviewer.util.HubLayout.init(applicationContext)
         com.mediaviewer.ui.ProfileColorStore.init(applicationContext)
         com.mediaviewer.ui.SelfProfileColors.init(applicationContext)
         // Audio visualizer: start noting music apps' audio sessions right
@@ -216,6 +241,11 @@ class MainActivity : ComponentActivity() {
             }
         }
         holdFirstFrameForProfileColors()
+        handleLinkIntent(intent)
+        // Reduced Animations: every Compose animation in the window reads
+        // its speed from AppMotion (0 = instant) — see util/AppMotion.kt.
+        com.mediaviewer.util.AppMotion.init(applicationContext)
+        installReducedMotionRecomposer()
         setContent {
             var crashLog by remember { mutableStateOf(readCrashLog(applicationContext)) }
             if (crashLog != null) {
@@ -233,7 +263,18 @@ class MainActivity : ComponentActivity() {
             }
             val selectedFont = com.mediaviewer.util.FontStore.selected
             val customFontFamily = remember(selectedFont) { com.mediaviewer.util.FontStore.familyFor(selectedFont) }
-            MediaViewerTheme(customFontFamily = customFontFamily) { AppRoot(viewModel) }
+            MediaViewerTheme(customFontFamily = customFontFamily) {
+                AppRoot(viewModel, pendingProfileLink = pendingProfileLink.value, onProfileLinkHandled = { pendingProfileLink.value = null })
+            }
+        }
+    }
+
+    @OptIn(androidx.compose.ui.InternalComposeUiApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
+    private fun installReducedMotionRecomposer() {
+        runCatching {
+            androidx.compose.ui.platform.WindowRecomposerPolicy.setFactory { rootView ->
+                rootView.createLifecycleAwareWindowRecomposer(com.mediaviewer.util.AppMotion)
+            }
         }
     }
 
@@ -280,7 +321,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun AppRoot(viewModel: MainViewModel) {
+private fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProfileLinkHandled: () -> Unit = {}) {
     val context            = androidx.compose.ui.platform.LocalContext.current
     val mediaItems         by viewModel.mediaItems.collectAsState()
     val currentIndex       by viewModel.currentIndex.collectAsState()
@@ -396,6 +437,9 @@ private fun AppRoot(viewModel: MainViewModel) {
     val likeTagPhase           by viewModel.likeTagPhase.collectAsState()
     val likeTagPending         by viewModel.likeTagPending.collectAsState()
     val datasetExportState     by viewModel.datasetExportState.collectAsState()
+    // Customize Hub: each Hub list row's loaded members/posts.
+    val hubLists               by viewModel.hubLists.collectAsState()
+    val titleBacklog           by viewModel.titleBacklog.collectAsState()
     // Settings → UI Customization → loading screens on/off (see UiToggles).
     val loadingScreens = com.mediaviewer.util.UiToggles.loadingScreens
 
@@ -405,6 +449,14 @@ private fun AppRoot(viewModel: MainViewModel) {
     // same real-time reflection the in-post glass panels do, instead of a plain
     // static tint.
     var currentBackdrop by remember { mutableStateOf<GlassBackdrop?>(null) }
+    // The open profile page's own backdrop/color — Add To opened from a
+    // profile blurs the profile, not the post hidden behind it.
+    var profileBackdrop by remember { mutableStateOf<GlassBackdrop?>(null) }
+    var profileTint by remember { mutableStateOf(NeutralGlassTint) }
+    // Profile QR code page: (account, its banner) while open.
+    var qrTarget by remember { mutableStateOf<Pair<com.mediaviewer.model.AuthorInfo, String?>?>(null) }
+    // Re-reads block state whenever it changes anywhere in the app.
+    val blockVersion by com.mediaviewer.util.BlockedAccounts.version.collectAsState()
     // Item 16: "your color" everywhere = the same banner/avatar blend your
     // profile page uses.
     SideEffect {
@@ -428,6 +480,20 @@ private fun AppRoot(viewModel: MainViewModel) {
     // The starry page backgrounds stop ticking while VRM mode is open (it
     // needs every bit of CPU/GPU it can get).
     SideEffect { com.mediaviewer.ui.SpaceSkyControl.paused = vrmModeOpen || cameraModeOpen }
+    // A bsky.app/profile/... link Stellar was opened with: open that
+    // profile once the app has started up (and you're signed in).
+    LaunchedEffect(pendingProfileLink, appInitialized, bskyLoggedIn) {
+        val actor = pendingProfileLink ?: return@LaunchedEffect
+        if (!appInitialized) return@LaunchedEffect
+        if (bskyLoggedIn) viewModel.openProfileFromLink(actor)
+        onProfileLinkHandled()
+    }
+    // Reduced Animations → every Compose animation (see util/AppMotion.kt).
+    // (Only once the saved settings have loaded, so the launch default
+    // can't briefly overwrite the real choice.)
+    LaunchedEffect(reducedAnimations, appInitialized) {
+        if (appInitialized) com.mediaviewer.util.AppMotion.update(context, reducedAnimations)
+    }
 
     // The audio visualizer is on by default but needs the microphone
     // permission to hear what the phone is playing (nothing is recorded):
@@ -533,6 +599,18 @@ private fun AppRoot(viewModel: MainViewModel) {
     }
     LaunchedEffect(appInitialized, selfColorReady) {
         if (appInitialized && selfColorReady && pixelController.phase != PixelPhase.HIDDEN) pixelController.finish()
+    }
+
+    // Dev Tools' loading-animation preview: starts with the intro, in your
+    // own colors (see the tap-to-advance layer near the end of AppRoot).
+    var devPreviewStep by remember { mutableIntStateOf(0) }
+    val devLoadingPreview = com.mediaviewer.util.UiToggles.devLoadingPreview
+    LaunchedEffect(devLoadingPreview) {
+        if (!devLoadingPreview) return@LaunchedEffect
+        devPreviewStep = 0
+        rootScope.launch {
+            if (pixelController.phase == PixelPhase.HIDDEN) pixelController.start(selfThemeColor)
+        }
     }
 
     // Scenario B — profile navigation: the instant a *new* profile overlay
@@ -806,7 +884,16 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onDownloadTaggerModel = viewModel::downloadTaggerModel,
                 onDownloadAllE621Saved = viewModel::downloadAllE621SavedMedia,
                 onOpenBlockedAccounts = viewModel::openBlockedAccounts,
-                datasetExportState = datasetExportState
+                datasetExportState = datasetExportState,
+                userLists = userLists,
+                userListsLoading = userListsLoading,
+                onEnsureUserLists = viewModel::ensureUserListsLoaded,
+                onAddHubList = viewModel::addHubList,
+                onAddHubListFromUrl = viewModel::addHubListFromUrl,
+                hubLists = hubLists,
+                onLoadHubList = { uri -> viewModel.loadHubListIfNeeded(uri) },
+                onOpenHubListPost = viewModel::openHubListPost,
+                onForceRefreshHub = viewModel::forceRefreshHub
             ),
             onCancelDownload          = viewModel::cancelDownloadAll,
             tagPostWhenLiked          = tagPostWhenLiked,
@@ -1110,9 +1197,21 @@ private fun AppRoot(viewModel: MainViewModel) {
                     onSelectReviewKindFilter = viewModel::selectReviewKindFilter,
                     pinterestThreeColumns = pinterestThreeColumns,
                     hateFunBlurNsfw   = hateFunBlurNsfw,
-                    onSaveOwnProfile  = viewModel::updateOwnProfile
+                    onSaveOwnProfile  = viewModel::updateOwnProfile,
+                    onBackdropChanged = { b, c -> profileBackdrop = b; profileTint = c },
+                    isBlocking = blockVersion.let { com.mediaviewer.util.BlockedAccounts.isBlocking(currentProfileOverlay.author.did) },
+                    onToggleBlock = viewModel::toggleBlockProfile,
+                    onOpenQr = { author, banner -> qrTarget = author to banner },
+                    titleBacklog = titleBacklog,
+                    onCheckTitleBacklog = viewModel::checkTitleBacklog,
+                    onToggleTitleBacklog = viewModel::toggleTitleBacklog
                 )
             }
+        }
+
+        // A profile's QR code page (profile interaction bar → QR button).
+        qrTarget?.let { (qrAuthor, qrBanner) ->
+            com.mediaviewer.ui.ProfileQrScreen(author = qrAuthor, bannerUrl = qrBanner, onClose = { qrTarget = null })
         }
 
         // Item 3: this used to render *before* ProfileOverlay below, so a
@@ -1239,6 +1338,7 @@ private fun AppRoot(viewModel: MainViewModel) {
         val listMemberships by viewModel.listMemberships.collectAsState()
         val listMembershipBusy by viewModel.listMembershipBusy.collectAsState()
         val creatingPickerList by viewModel.creatingPickerList.collectAsState()
+        val pickerOverProfile = profileOverlay?.let { !it.hidden } == true
         com.mediaviewer.ui.FadingPopupHost(listPickerDid, Modifier.zIndex(10f)) { _ ->
             ListPickerDialog(
                 lists         = userLists,
@@ -1246,8 +1346,8 @@ private fun AppRoot(viewModel: MainViewModel) {
                 listsLoading  = userListsLoading,
                 initialTab    = lastPickerTab,
                 liquidGlass   = liquidGlass,
-                dominantColor = currentDominantColor,
-                backdrop      = currentBackdrop,
+                dominantColor = if (pickerOverProfile) profileTint else currentDominantColor,
+                backdrop      = if (pickerOverProfile) profileBackdrop else currentBackdrop,
                 memberships   = listMemberships,
                 busy          = listMembershipBusy,
                 creating      = creatingPickerList,
@@ -1256,6 +1356,19 @@ private fun AppRoot(viewModel: MainViewModel) {
                 onCreate      = { kind, name, description, cover, done -> viewModel.createPickerList(kind, name, description, cover, done) },
                 onDismiss     = { viewModel.dismissListPicker() }
             )
+        }
+
+        // Settings → Dev Tools → "Preview Login Page": the login page over
+        // everything, without signing out. Back (or its back button) closes it.
+        if (com.mediaviewer.util.UiToggles.devLoginPreview) {
+            androidx.activity.compose.BackHandler { com.mediaviewer.util.UiToggles.devLoginPreview = false }
+            Box(Modifier.fillMaxSize().zIndex(10.9f).blockClicksBehind()) {
+                com.mediaviewer.ui.LoginScreen(
+                    isLoading = false,
+                    onLogin = { _, _ -> Toast.makeText(context, "Preview only — you're already signed in", Toast.LENGTH_SHORT).show() },
+                    onClose = { com.mediaviewer.util.UiToggles.devLoginPreview = false }
+                )
+            }
         }
 
         // Item 8: the camera-notch ring — hugs the real display cutout and
@@ -1338,6 +1451,32 @@ private fun AppRoot(viewModel: MainViewModel) {
         // screen, regardless of how many frames that takes to kick off.
         if (coldLaunchCovered) {
             Box(Modifier.fillMaxSize().background(Color.Black).zIndex(12f))
+        }
+
+        // Settings → Dev Tools → "Preview Loading Animation": plays the
+        // picked loading animation over everything. Tapping moves it along —
+        // Pixels: your colors → a second color (#FF4FA1) → its outro; the
+        // others: straight to the outro. Back ends it too.
+        if (com.mediaviewer.util.UiToggles.devLoadingPreview) {
+            fun endPreview() {
+                rootScope.launch {
+                    if (pixelController.phase != PixelPhase.HIDDEN) pixelController.finish()
+                    com.mediaviewer.util.UiToggles.devLoadingPreview = false
+                }
+            }
+            androidx.activity.compose.BackHandler { endPreview() }
+            Box(
+                Modifier.fillMaxSize().zIndex(14f).clickable(
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null
+                ) {
+                    val pixels = com.mediaviewer.util.UiToggles.loadingAnimation == com.mediaviewer.util.UiToggles.LoadingAnimation.PIXELS
+                    if (pixels && devPreviewStep == 0) {
+                        devPreviewStep = 1
+                        rootScope.launch { pixelController.updateColor(Color(0xFFFF4FA1)) }
+                    } else endPreview()
+                }
+            )
         }
 
         // Retro pixel-matrix transition overlay — last child so it draws

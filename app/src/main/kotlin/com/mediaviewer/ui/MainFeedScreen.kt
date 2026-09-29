@@ -945,6 +945,22 @@ private fun FeedView(
                 imageLoader.enqueue(ImageRequest.Builder(context).data(url).build())
             }
         }
+        // Multi-image posts outline their tiles in the author's profile
+        // color, which needs that account's banner + avatar sampled. Work
+        // those out ahead of time for the upcoming (and previous) posts, so
+        // the outlines are already there the moment a post is swiped to
+        // instead of popping in a second later.
+        (-2..6).mapNotNull { mediaItems.getOrNull(currentIndex + it) }
+            .filter { it.mediaGroup.size > 1 && it.author.did.isNotBlank() }
+            .distinctBy { it.author.did }
+            .filter { ProfileColorStore.get(it.author.did) == null }
+            .forEach { item ->
+                launch(kotlinx.coroutines.Dispatchers.Default) {
+                    runCatching {
+                        fetchProfileColors(context, item.author.did, item.author.avatarUrl, null, bannerKnown = false)
+                    }
+                }
+            }
     }
     DisposableEffect(Unit) { onDispose { com.mediaviewer.util.FeedVideoPool.releaseIdle() } }
 
@@ -1563,7 +1579,9 @@ private fun PostContent(
                         zoomOffset = offset,
                         interactive = !viewerClosing,
                         onAspect = { i, a -> if (imageAspects[i] != a) imageAspects[i] = a },
-                        onTap = { closeViewer() }
+                        onTap = { closeViewer() },
+                        onOverscrollNext = onSwipeLeft,
+                        onOverscrollPrev = onSwipeRight
                     )
                 }
             } else {
@@ -1792,8 +1810,15 @@ private fun PostContent(
                     )
                 }
                 val viewerShowing = isImageGrid && viewerIndex != null && !viewerClosing
-                val originalBubbleText = if (item.isTextOnly || item.isBlocked) "" else item.text
-                val bubbleText = if (translationState?.status == TranslationStatus.DONE && translationState.showingTranslated && originalBubbleText.isNotBlank())
+                // Text posts show their text on the card itself — except a
+                // Textshot's own caption (the regular post text typed
+                // alongside the Textshot), which gets the normal bubble.
+                val originalBubbleText = when {
+                    item.isBlocked -> ""
+                    item.isTextOnly -> item.captionText.orEmpty()
+                    else -> item.text
+                }
+                val bubbleText = if (!item.isTextOnly && translationState?.status == TranslationStatus.DONE && translationState.showingTranslated && originalBubbleText.isNotBlank())
                     translationState!!.translatedText else originalBubbleText
                 AnimatedContent(
                     targetState = viewerShowing,
@@ -2194,29 +2219,70 @@ private fun TextOnlyPostCard(
         return
     }
     val showTranslated = translationState?.status == TranslationStatus.DONE && translationState.showingTranslated
-    val displayText = if (showTranslated) translationState!!.translatedText else text
+    val displayText = (if (showTranslated) translationState!!.translatedText else text).ifBlank { " " }
     val toggleable = translationState?.status == TranslationStatus.DONE
-    LiquidGlassSurface(
-        modifier = Modifier
-            .fillMaxWidth(0.94f)
-            .heightIn(min = 160.dp, max = 520.dp)
-            .wrapContentHeight(),
-        shape = RoundedCornerShape(28.dp),
-        tint = dominantColor
+    // The whole text always shows (a long Textshot used to be cut off at 14
+    // lines here, while the profile's Text Posts tab showed all of it): the
+    // card grows into the space between the author row and the bottom
+    // bubbles, the text shrinks until it fits, and only if it still doesn't
+    // fit at the smallest size does the card scroll.
+    BoxWithConstraints(
+        Modifier.fillMaxSize().padding(top = 104.dp, bottom = 176.dp),
+        contentAlignment = Alignment.Center
     ) {
-        Box(Modifier.padding(horizontal = 18.dp, vertical = 26.dp), contentAlignment = Alignment.Center) {
-            Text(
-                displayText.ifBlank { " " },
-                color = Color.White, fontSize = 19.sp, lineHeight = 26.sp,
-                fontWeight = FontWeight.Medium, textAlign = TextAlign.Center,
-                overflow = TextOverflow.Ellipsis, maxLines = 14,
-                modifier = if (toggleable) {
-                    Modifier.clickable(
-                        indication = null, interactionSource = remember { MutableInteractionSource() },
-                        onClick = onToggleTranslationView
-                    )
-                } else Modifier
-            )
+        val density = LocalDensity.current
+        val measurer = androidx.compose.ui.text.rememberTextMeasurer()
+        val baseStyle = LocalTextStyle.current
+        val cardWidth = maxWidth * 0.94f
+        val maxCardHeight = maxHeight.coerceAtLeast(160.dp)
+        val hPad = 18.dp
+        val vPad = 26.dp
+        val (fontSizeSp, fits) = remember(displayText, cardWidth, maxCardHeight, baseStyle) {
+            val widthPx = with(density) { (cardWidth - hPad * 2).roundToPx() }.coerceAtLeast(1)
+            val heightPx = with(density) { (maxCardHeight - vPad * 2).toPx() }
+            var size = 19f
+            var fitsAtSize = false
+            while (size >= 11f) {
+                val result = measurer.measure(
+                    androidx.compose.ui.text.AnnotatedString(displayText),
+                    style = baseStyle.merge(androidx.compose.ui.text.TextStyle(
+                        fontSize = size.sp, lineHeight = (size * 1.37f).sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center
+                    )),
+                    constraints = androidx.compose.ui.unit.Constraints(maxWidth = widthPx)
+                )
+                if (result.size.height <= heightPx) { fitsAtSize = true; break }
+                if (size <= 11f) break
+                size -= 1f
+            }
+            size to fitsAtSize
+        }
+        LiquidGlassSurface(
+            modifier = Modifier
+                .width(cardWidth)
+                .heightIn(min = 160.dp, max = maxCardHeight)
+                .wrapContentHeight(),
+            shape = RoundedCornerShape(28.dp),
+            tint = dominantColor
+        ) {
+            Box(
+                // Scrolls only when even the smallest size can't fit it all,
+                // so normal text posts keep their swipe-up/down gestures.
+                Modifier.then(if (fits) Modifier else Modifier.verticalScroll(rememberScrollState()))
+                    .padding(horizontal = hPad, vertical = vPad).fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    displayText,
+                    color = Color.White, fontSize = fontSizeSp.sp, lineHeight = (fontSizeSp * 1.37f).sp,
+                    fontWeight = FontWeight.Medium, textAlign = TextAlign.Center,
+                    modifier = if (toggleable) {
+                        Modifier.clickable(
+                            indication = null, interactionSource = remember { MutableInteractionSource() },
+                            onClick = onToggleTranslationView
+                        )
+                    } else Modifier
+                )
+            }
         }
     }
 }
@@ -2597,14 +2663,51 @@ private fun MultiImageViewer(
     zoomOffset: Offset,
     interactive: Boolean,
     onAspect: (Int, Float) -> Unit,
-    onTap: () -> Unit
+    onTap: () -> Unit,
+    /** Swiping past the last image: on to the next post. */
+    onOverscrollNext: () -> Unit = {},
+    /** Swiping back past the first image: the previous post. */
+    onOverscrollPrev: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
     var pendingClose by remember { mutableStateOf<Job?>(null) }
+    val latestZoom = rememberUpdatedState(zoomScale)
+    val latestNext = rememberUpdatedState(onOverscrollNext)
+    val latestPrev = rememberUpdatedState(onOverscrollPrev)
     BoxWithConstraints(
         Modifier.fillMaxSize()
+            // Scrolling past either end of the images moves on to the
+            // next/previous post. Watched passively (Initial pass, nothing
+            // consumed) so the pager's own swiping is untouched; only a
+            // clearly horizontal drag that starts on the first/last image
+            // and pushes further out past it counts.
+            .pointerInput(interactive, images.size) {
+                if (!interactive) return@pointerInput
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val startPage = pagerState.currentPage
+                    val atStart = startPage == 0 && abs(pagerState.currentPageOffsetFraction) < 0.02f
+                    val atEnd = startPage == images.lastIndex && abs(pagerState.currentPageOffsetFraction) < 0.02f
+                    var dx = 0f; var dy = 0f
+                    var multi = false
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        if (event.changes.count { it.pressed } > 1) multi = true
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        val delta = change.positionChange()
+                        dx += delta.x; dy += delta.y
+                        if (!change.pressed) break
+                    }
+                    if (multi || latestZoom.value > 1.02f) return@awaitEachGesture
+                    val threshold = 72.dp.toPx()
+                    if (abs(dx) > threshold && abs(dx) > abs(dy) * 1.3f) {
+                        if (dx < 0 && atEnd && pagerState.currentPage == images.lastIndex) latestNext.value()
+                        else if (dx > 0 && atStart && pagerState.currentPage == 0) latestPrev.value()
+                    }
+                }
+            }
             // A single tap goes back to the grid — held back briefly so a
             // double-tap (like) doesn't also close it.
             .pointerInput(interactive) {
@@ -3062,7 +3165,9 @@ private fun MoreBubbleMenu(
 private fun GifActionButton(onClick: () -> Unit, tint: Color = Color.White) {
     val tap = rememberHapticTap()
     Box(
-        modifier = Modifier.clickable(onClick = { tap(); onClick() }).padding(horizontal = 8.dp, vertical = 10.dp)
+        // No ripple/"square shadow" press effect on the interaction bar.
+        modifier = Modifier.clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = { tap(); onClick() })
+            .padding(horizontal = 8.dp, vertical = 10.dp)
             .size(width = 30.dp, height = 26.dp),
         contentAlignment = Alignment.Center
     ) { Text("GIF", color = tint, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
@@ -3072,7 +3177,8 @@ private fun GifActionButton(onClick: () -> Unit, tint: Color = Color.White) {
 private fun ActionButton(icon: ImageVector, tint: Color, label: String? = null, onClick: () -> Unit) {
     val tap = rememberHapticTap()
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp),
-        modifier = Modifier.clickable(onClick = { tap(); onClick() }).padding(horizontal = 8.dp, vertical = 10.dp)) {
+        modifier = Modifier.clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = { tap(); onClick() })
+            .padding(horizontal = 8.dp, vertical = 10.dp)) {
         Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(26.dp))
         if (label != null) Text(label, color = tint, fontSize = 12.sp, fontWeight = FontWeight.Medium)
     }

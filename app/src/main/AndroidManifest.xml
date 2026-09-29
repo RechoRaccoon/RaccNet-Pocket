@@ -48,14 +48,33 @@
         android:theme="@style/Theme.MediaViewer"
         android:hardwareAccelerated="true">
 
+        <!-- singleTask: a Bluesky profile link opened from the camera, a
+             browser or another app lands in the Stellar that's already
+             running (onNewIntent) instead of starting a second copy. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Bluesky profile links (bsky.app/profile/...) can open in
+                 Stellar. Android only sends https links to an app once
+                 you allow it: Android Settings → Apps → Stellar → Open by
+                 default → Add link → bsky.app (Stellar's Settings has a
+                 shortcut straight there). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:scheme="http" />
+                <data android:host="bsky.app" />
+                <data android:host="www.bsky.app" />
+                <data android:pathPrefix="/profile/" />
             </intent-filter>
         </activity>
 

@@ -406,7 +406,9 @@ fun SettingsSheet(
                     else Modifier.background(OledBlack)
                 )
         ) {
-            if (liquidGlass) SpaceSky(dominantColor, Modifier.matchParentSize())
+            // Signed out (the login page): plain black space, no tint.
+            if (!bskyLoggedIn) SpaceSky(Color.Black, Modifier.matchParentSize())
+            else if (liquidGlass) SpaceSky(dominantColor, Modifier.matchParentSize())
         }
         Column(
             modifier = Modifier
@@ -531,7 +533,10 @@ fun SettingsSheet(
                             onOpenE621Hot = { onSwitchMode(AppMode.E621); onSearchE621("order:hot"); onSwipeToFeed() },
                             onOpenE621Search = { tags -> onSwitchMode(AppMode.E621); onSearchE621(tags); onSwipeToFeed() },
                             onOpenE621Favorites = { onSwitchMode(AppMode.E621); onShowE621Favorites(); onSwipeToFeed() },
-                            onOpenE621Following = { onSwitchMode(AppMode.E621); onShowE621Following(); onSwipeToFeed() }
+                            onOpenE621Following = { onSwitchMode(AppMode.E621); onShowE621Following(); onSwipeToFeed() },
+                            hubLists = settingsExtras.hubLists,
+                            onLoadHubList = settingsExtras.onLoadHubList,
+                            onOpenHubListPost = settingsExtras.onOpenHubListPost
                         )
                     }
                 }
@@ -575,7 +580,10 @@ fun SettingsSheet(
                 val profileFeed = authorFeedState?.author?.takeIf { !it.isSpecialFeed() }
                 ReturnToFeedBar(
                     returnToProfile = hubPage == HubPage.MAIN && pickedFeed == null && profileFeed != null,
-                    onReturnToProfile = onReturnToProfile,
+                    // Same as swiping up on the Hub: back into that
+                    // profile's feed in whichever of Timeline/Explore was
+                    // used last.
+                    onReturnToProfile = { if (bskyLoggedIn) { onSwitchMode(AppMode.BLUESKY); onSwipeToFeed() } else onReturnToProfile() },
                     liquidGlass = liquidGlass, tint = dominantColor, backdrop = null,
                     uploadBackdrop = hubBackgroundBackdrop,
                     onReturnToFeed = { explore -> onReturnToFeed(explore) },
@@ -701,7 +709,11 @@ private fun AtProtocolPageContent(
     onOpenE621Hot: () -> Unit = {},
     onOpenE621Search: (String) -> Unit = {},
     onOpenE621Favorites: () -> Unit = {},
-    onOpenE621Following: () -> Unit = {}
+    onOpenE621Following: () -> Unit = {},
+    // Customize Hub: list rows' content + actions (see HubListSection).
+    hubLists: Map<String, MainViewModel.HubListState> = emptyMap(),
+    onLoadHubList: (String) -> Unit = {},
+    onOpenHubListPost: (String, String, Int) -> Unit = { _, _, _ -> }
 ) {
     // Item 8: both of the new sections' fetches are lazy — kick them off once
     // when this page first composes rather than eagerly for every Hub visit
@@ -728,31 +740,10 @@ private fun AtProtocolPageContent(
         // screen has nothing to scroll (two fields + a button), so it gets
         // its own non-scrolling, fillMaxSize Column instead, which centering
         // actually works inside of.
-        var bskyId by remember { mutableStateOf("") }
-        var bskyPw by remember { mutableStateOf("") }
-        Column(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 36.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            OutlinedTextField(value = bskyId, onValueChange = { bskyId = it },
-                placeholder = { Text("handle or email", color = DimGray) },
-                singleLine = true, colors = fieldColors(), modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(12.dp))
-            OutlinedTextField(value = bskyPw, onValueChange = { bskyPw = it },
-                placeholder = { Text("app password", color = DimGray) },
-                singleLine = true, visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
-                colors = fieldColors(), modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(12.dp))
-            Button(onClick = { onLoginBluesky(bskyId.trim(), bskyPw) },
-                enabled = bskyId.isNotBlank() && bskyPw.isNotBlank() && !isLoading,
-                colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black),
-                modifier = Modifier.fillMaxWidth().height(46.dp)) {
-                if (isLoading) CircularProgressIndicator(Modifier.size(18.dp), color = Color.Black, strokeWidth = 2.dp)
-                else Text("Sign in to Bluesky", fontWeight = FontWeight.SemiBold)
-            }
-        }
+        // The login page: black space, the big Stellar logo, compact
+        // rounded fields in Stellar pink (see LoginScreen). The Hub's own
+        // background already draws the starry black sky behind it.
+        LoginScreen(isLoading = isLoading, onLogin = onLoginBluesky, drawBackground = false)
         return
     }
 
@@ -858,6 +849,10 @@ private fun AtProtocolPageContent(
             .verticalScroll(hubScroll)
             .padding(bottom = 16.dp)
     ) {
+        // Settings → Customize Hub decides which rows show, and in what
+        // order (see HubLayout); each row below is its own piece.
+        @Composable
+        fun FeedsSection() {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
             Text("Feeds", color = hubDividerLabel(dominantColor), fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
@@ -873,7 +868,10 @@ private fun AtProtocolPageContent(
             highlightedFeedUri = highlightedFeedUri, authorChipSelected = authorChipSelected,
             onTapAuthorChip = onTapAuthorChip
         )
+        }
 
+        @Composable
+        fun ButtonsSection() {
         Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
@@ -905,7 +903,10 @@ private fun AtProtocolPageContent(
                 SettingsGridButton("From Friends", Icons.Default.Send, Color.White, liquidGlass, Modifier.weight(1f), onShowFriends, panelTint = dominantColor, backdrop = backdrop)
             }
         }
+        }
 
+        @Composable
+        fun MutualsSection() {
         // ── Item 8: Mutuals — quick-access avatar row (DM/mutual contacts) ──
         // Bug fix: renamed from "Friends" to "Mutuals" — this row is
         // specifically the mutual-follow set (see loadDmRecipients), and
@@ -993,6 +994,7 @@ private fun AtProtocolPageContent(
                     }
                 }
             }
+        }
         }
 
         // ── Item: Live / Reviews / Blogs — reorderable Hub sections ──
@@ -1157,25 +1159,99 @@ private fun AtProtocolPageContent(
             }
         }
 
-        val notYetScanned = !followerScanCompletedOnce
-        val isScanningNow = followerScanState is MainViewModel.FollowerScanState.Scanning
-        val showScanIntro = notYetScanned && (isScanningNow || (subscribedReviewDids.isEmpty() && subscribedBlogDids.isEmpty()))
-
-        val sectionOrder = remember(hasCurrentLive, reviewsRecency, blogsRecency) {
-            val nonLive = listOf("reviews" to reviewsRecency, "blogs" to blogsRecency)
-                .sortedByDescending { it.second }.map { it.first }
-            if (hasCurrentLive) listOf("live") + nonLive else nonLive + listOf("live")
-        }
-        if (showScanIntro) {
-            ReviewsBlogsScanIntroBubble(followerScanState, liquidGlass, dominantColor, backdrop, onStartFollowerScan)
-        }
-        sectionOrder.forEach { key ->
-            when (key) {
-                "live" -> LiveSectionContent()
-                "reviews" -> if (!showScanIntro) ReviewsSectionContent()
-                "blogs" -> if (!showScanIntro) BlogsSectionContent()
+        @Composable
+        fun SwitchAccountsSection() {
+        // ── Switch Accounts — same avatar-row look as Mutuals, at the very
+        // bottom of the Hub. Only present once another AT Protocol account is
+        // signed in (and the person hasn't turned it off in Settings). Tapping
+        // an account switches to it straight away; the whole app refreshes.
+        if (showSwitchAccountsRow && otherAccounts.isNotEmpty()) {
+            Spacer(Modifier.height(14.dp))
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
+                Text("Switch Accounts", color = hubDividerLabel(dominantColor), fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 10.dp))
+                HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                otherAccounts.forEach { account ->
+                    val avatarShape = CircleShape
+                    Column(
+                        Modifier.width(60.dp).clickable { onSwitchAccount(account.did) },
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Box(
+                            Modifier.size(52.dp)
+                                .then(if (liquidGlass) Modifier.glassPanel(true, shape = avatarShape, tint = dominantColor) else Modifier.clip(avatarShape).background(Color.White.copy(0.1f))),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (account.avatarUrl != null) {
+                                AsyncImage(model = account.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                                    modifier = Modifier.size(46.dp).clip(avatarShape))
+                            } else {
+                                Box(Modifier.size(46.dp).clip(avatarShape).background(Color.White.copy(0.15f)))
+                            }
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(account.displayName.ifBlank { account.handle }, color = Color.White, fontSize = 10.sp, lineHeight = 11.sp,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
             }
         }
+        }
+
+        // Dev Tools can force the scan bubble in place of Reviews/Blogs;
+        // otherwise it shows until the first scan (or until its X closes it).
+        val notYetScanned = !followerScanCompletedOnce
+        val isScanningNow = followerScanState is MainViewModel.FollowerScanState.Scanning
+        val showScanIntro = com.mediaviewer.util.UiToggles.devForceScanBubble || isScanningNow || (
+            notYetScanned && !com.mediaviewer.util.UiToggles.scanBubbleDismissed &&
+                subscribedReviewDids.isEmpty() && subscribedBlogDids.isEmpty()
+        )
+
+        // Livestreams aren't a customizable row: when someone you follow is
+        // live they show just above the first Blogs/Reviews row, otherwise
+        // (nothing to show) they'd sit at the end.
+        var liveShown = false
+        var scanShown = false
+        com.mediaviewer.util.HubLayout.rows.filter { it.enabled }.forEach { row ->
+            when (row.id) {
+                com.mediaviewer.util.HubLayout.FEEDS -> FeedsSection()
+                com.mediaviewer.util.HubLayout.BUTTONS -> ButtonsSection()
+                com.mediaviewer.util.HubLayout.MUTUALS -> MutualsSection()
+                com.mediaviewer.util.HubLayout.BLOGS, com.mediaviewer.util.HubLayout.REVIEWS -> {
+                    if (!liveShown && hasCurrentLive) { LiveSectionContent(); liveShown = true }
+                    if (showScanIntro) {
+                        if (!scanShown) {
+                            scanShown = true
+                            ReviewsBlogsScanIntroBubble(
+                                followerScanState, liquidGlass, dominantColor, backdrop, onStartFollowerScan,
+                                followsCount = selfProfile?.followsCount ?: 0,
+                                onDismiss = { com.mediaviewer.util.UiToggles.dismissScanBubble() }
+                            )
+                        }
+                    } else if (row.id == com.mediaviewer.util.HubLayout.BLOGS) BlogsSectionContent() else ReviewsSectionContent()
+                }
+                com.mediaviewer.util.HubLayout.SWITCH_ACCOUNTS -> SwitchAccountsSection()
+                else -> {
+                    val uri = row.listUri
+                    if (uri != null) {
+                        HubListSection(
+                            row = row, state = hubLists[uri], liquidGlass = liquidGlass, tint = dominantColor,
+                            onLoad = { onLoadHubList(uri) },
+                            onOpenProfile = onOpenProfile,
+                            onOpenPost = { index -> onOpenHubListPost(uri, row.label, index) }
+                        )
+                    }
+                }
+            }
+        }
+        if (!liveShown) LiveSectionContent()
 
         // ── Live Link widget feature: mirrored row at the very bottom of
         // the Hub — per the feature request, only shown once at least one
@@ -1240,49 +1316,6 @@ private fun AtProtocolPageContent(
             }
         }
         }
-
-        // ── Switch Accounts — same avatar-row look as Mutuals, at the very
-        // bottom of the Hub. Only present once another AT Protocol account is
-        // signed in (and the person hasn't turned it off in Settings). Tapping
-        // an account switches to it straight away; the whole app refreshes.
-        if (showSwitchAccountsRow && otherAccounts.isNotEmpty()) {
-            Spacer(Modifier.height(14.dp))
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
-                Text("Switch Accounts", color = hubDividerLabel(dominantColor), fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(horizontal = 10.dp))
-                HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
-            }
-            Spacer(Modifier.height(8.dp))
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                otherAccounts.forEach { account ->
-                    val avatarShape = CircleShape
-                    Column(
-                        Modifier.width(60.dp).clickable { onSwitchAccount(account.did) },
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Box(
-                            Modifier.size(52.dp)
-                                .then(if (liquidGlass) Modifier.glassPanel(true, shape = avatarShape, tint = dominantColor) else Modifier.clip(avatarShape).background(Color.White.copy(0.1f))),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (account.avatarUrl != null) {
-                                AsyncImage(model = account.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                                    modifier = Modifier.size(46.dp).clip(avatarShape))
-                            } else {
-                                Box(Modifier.size(46.dp).clip(avatarShape).background(Color.White.copy(0.15f)))
-                            }
-                        }
-                        Spacer(Modifier.height(4.dp))
-                        Text(account.displayName.ifBlank { account.handle }, color = Color.White, fontSize = 10.sp, lineHeight = 11.sp,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                }
-            }
-        }
         Spacer(Modifier.height(8.dp))
     }
     } // fixed search bar + scrolling content
@@ -1300,11 +1333,8 @@ private fun AtProtocolPageContent(
     }
 }
 
-/** Feature: auto-subscribe — shown once [MainViewModel.startFollowerScan]
- *  finishes, summarizing what it found. A centered card over a dimmed
- *  scrim, dismissed only via its own close bubble (no scrim-tap-to-dismiss)
- *  since it's a one-shot informational result, not a sheet someone might
- *  want to swipe past. */
+/** The follower scan's result, once it finishes: a compact centered card —
+ *  the three numbers side by side, a short note, and Done. */
 @Composable
 private fun FollowerScanCompletionPopup(
     result: MainViewModel.FollowerScanState.Completed, liquidGlass: Boolean, dominantColor: Color,
@@ -1312,100 +1342,251 @@ private fun FollowerScanCompletionPopup(
 ) {
     val foundNothing = result.reviewsFound == 0 && result.blogsFound == 0
     val tap = rememberHapticTap()
-    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.6f)), contentAlignment = Alignment.Center) {
-        val cardShape = RoundedCornerShape(20.dp)
+    val accent = remember(dominantColor) { androidx.compose.ui.graphics.lerp(dominantColor, Color.White, 0.2f) }
+    Box(
+        Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f))
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {},
+        contentAlignment = Alignment.Center
+    ) {
+        val cardShape = RoundedCornerShape(26.dp)
+        @Composable
+        fun Stat(value: Int, label: String, modifier: Modifier) {
+            Column(
+                modifier.clip(RoundedCornerShape(16.dp)).background(Color.Black.copy(alpha = 0.3f)).padding(vertical = 10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("$value", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                Text(label, color = Color.White.copy(0.7f), fontSize = 11.sp, textAlign = TextAlign.Center)
+            }
+        }
         @Composable
         fun CardContent() {
             Column(
-                Modifier.padding(horizontal = 24.dp, vertical = 22.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 18.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text("Scan Complete", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    "Scanned ${result.accountsScanned} account${if (result.accountsScanned == 1) "" else "s"}.",
-                    color = Color.White.copy(0.85f), fontSize = 13.sp, textAlign = TextAlign.Center
-                )
-                Text(
-                    "${result.reviewsFound} had Reviews, ${result.blogsFound} had Blogs.",
-                    color = Color.White.copy(0.85f), fontSize = 13.sp, textAlign = TextAlign.Center
-                )
-                if (foundNothing) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "None of the accounts you follow had reviews or blogs. You can retry this scan anytime from Settings.",
-                        color = DimGray, fontSize = 12.sp, textAlign = TextAlign.Center, lineHeight = 16.sp
-                    )
+                Text("Scan Complete", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+                Spacer(Modifier.height(14.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Stat(result.accountsScanned, "Checked", Modifier.weight(1f))
+                    Stat(result.reviewsFound, "Reviews", Modifier.weight(1f))
+                    Stat(result.blogsFound, "Blogs", Modifier.weight(1f))
                 }
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    if (foundNothing) "Nobody you follow posts reviews or blogs yet. You can scan again anytime from Settings."
+                    else "Their latest reviews and blogs will show up in the Hub.",
+                    color = Color.White.copy(0.75f), fontSize = 12.sp, lineHeight = 16.sp, textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(14.dp))
                 Box(
-                    Modifier
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(Color.White.copy(0.15f))
-                        .clickable { tap(); onDismiss() }
-                        .padding(horizontal = 22.dp, vertical = 9.dp)
+                    Modifier.fillMaxWidth().height(40.dp).clip(RoundedCornerShape(20.dp))
+                        .background(accent.copy(alpha = 0.85f))
+                        .clickable { tap(); onDismiss() },
+                    contentAlignment = Alignment.Center
                 ) {
-                    Text("Close", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Done", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
+        val m = Modifier.padding(horizontal = 36.dp).widthIn(max = 360.dp).fillMaxWidth()
         if (liquidGlass) {
-            LiquidGlassSurface(Modifier.padding(horizontal = 32.dp), shape = cardShape, tint = dominantColor, backdrop = backdrop) { CardContent() }
+            LiquidGlassSurface(m, shape = cardShape, tint = dominantColor, backdrop = backdrop) { CardContent() }
         } else {
-            Box(Modifier.padding(horizontal = 32.dp).clip(cardShape).background(OledBlack)) { CardContent() }
+            Box(m.clip(cardShape).background(OffBlack).border(1.dp, dominantColor.copy(alpha = 0.5f), cardShape)) { CardContent() }
         }
     }
 }
 
-/** Feature: auto-subscribe — the Reviews/Blogs rows' empty-state
- *  replacement, shown (per spec) only to accounts with nothing in either
- *  subscribed list yet and who've never run the follower scan. Explains
- *  what the scan does and why it's paced/one-time, and doubles as the
- *  progress readout once [onStartFollowerScan] is tapped — same bubble,
- *  its copy just swaps to a running count while [scanState] is Scanning. */
+/** The Hub's "scan your follows for blogs and reviews" bubble: one compact,
+ *  round row — an X on the left (closes it for good), the question in the
+ *  middle, Start Scan on the right. While the scan runs the same bubble
+ *  shows how far it's got (with a progress bar when your follow count is
+ *  known). */
 @Composable
 private fun ReviewsBlogsScanIntroBubble(
     scanState: MainViewModel.FollowerScanState, liquidGlass: Boolean, dominantColor: Color,
-    backdrop: GlassBackdrop?, onStartScan: () -> Unit
+    backdrop: GlassBackdrop?, onStartScan: () -> Unit,
+    followsCount: Int = 0,
+    onDismiss: () -> Unit = {}
 ) {
     val scanning = scanState as? MainViewModel.FollowerScanState.Scanning
-    val shape = RoundedCornerShape(20.dp)
+    val shape = RoundedCornerShape(26.dp)
     val tap = rememberHapticTap()
+    val accent = remember(dominantColor) { androidx.compose.ui.graphics.lerp(dominantColor, Color.White, 0.2f) }
     @Composable
     fun BubbleContent() {
-        Column(Modifier.padding(horizontal = 20.dp, vertical = 18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            if (scanning != null) {
-                Text("Scanning who you follow…", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "${scanning.accountsScanned} checked · ${scanning.reviewsFound} Reviews · ${scanning.blogsFound} Blogs found so far",
-                    color = DimGray, fontSize = 12.sp, textAlign = TextAlign.Center
-                )
-                Spacer(Modifier.height(10.dp))
-                CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 1.5.dp)
-            } else {
-                Text(
-                    "This app combines multiple AT Proto apps into one, allowing you to write and view long-form blogs and title reviews. The blogs and reviews from the people you follow can show up here, but you'll need to initiate a one-time scan of who you follow to locally log which accounts post blogs and/or reviews so that the app can display their latest blogs/reviews here! Creating this on-device list helps avoid PDS rate limits.",
-                    color = Color.White.copy(0.85f), fontSize = 13.sp, lineHeight = 18.sp, textAlign = TextAlign.Center
-                )
-                Spacer(Modifier.height(14.dp))
+        if (scanning != null) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(16.dp), color = Color.White, strokeWidth = 1.5.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Scanning who you follow…", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                        val checked = if (followsCount > 0) "${scanning.accountsScanned} of ${followsCount + 1} checked" else "${scanning.accountsScanned} checked"
+                        Text(
+                            "$checked · ${scanning.reviewsFound} reviews · ${scanning.blogsFound} blogs",
+                            color = Color.White.copy(0.7f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                if (followsCount > 0) {
+                    Spacer(Modifier.height(8.dp))
+                    val fraction = (scanning.accountsScanned.toFloat() / (followsCount + 1)).coerceIn(0f, 1f)
+                    Box(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(0.12f))) {
+                        Box(Modifier.fillMaxHeight().fillMaxWidth(fraction).clip(RoundedCornerShape(2.dp)).background(accent))
+                    }
+                }
+            }
+        } else {
+            Row(
+                Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Box(
-                    Modifier
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(Color.White.copy(0.15f))
-                        .clickable { tap(); onStartScan() }
-                        .padding(horizontal = 22.dp, vertical = 9.dp)
+                    Modifier.size(30.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.3f))
+                        .clickable { tap(); onDismiss() },
+                    contentAlignment = Alignment.Center
                 ) {
-                    Text("Initiate Scan", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(16.dp))
+                }
+                Text(
+                    "Locally scan following for blogs and reviews? (This could take awhile if you're following thousands of people.)",
+                    color = Color.White.copy(0.9f), fontSize = 11.sp, lineHeight = 14.sp,
+                    modifier = Modifier.weight(1f).padding(horizontal = 10.dp)
+                )
+                Box(
+                    Modifier.height(32.dp).clip(RoundedCornerShape(16.dp))
+                        .background(accent.copy(alpha = 0.85f))
+                        .clickable { tap(); onStartScan() }
+                        .padding(horizontal = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("Start Scan", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
                 }
             }
         }
     }
     Spacer(Modifier.height(10.dp))
+    val m = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
     if (liquidGlass) {
-        LiquidGlassSurface(Modifier.fillMaxWidth().padding(horizontal = 16.dp), shape = shape, tint = dominantColor, backdrop = backdrop) { BubbleContent() }
+        LiquidGlassSurface(m, shape = shape, tint = dominantColor, backdrop = backdrop) { BubbleContent() }
     } else {
-        Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp).clip(shape).background(Color.White.copy(0.06f))) { BubbleContent() }
+        Box(m.clip(shape).background(Color.White.copy(0.06f))) { BubbleContent() }
+    }
+}
+
+/** Customize Hub → a Bluesky list as its own Hub row. "Accounts" mode: the
+ *  members' icons (like Mutuals), whoever posted most recently first.
+ *  "Posts" mode: the members' latest original posts, each with a little
+ *  bubble above saying whose it is, all the same height as the Blogs cards.
+ *  Loaded from Bluesky's AppView (see BlueskyRepository.getHubListContent). */
+@Composable
+private fun HubListSection(
+    row: com.mediaviewer.util.HubLayout.Row,
+    state: MainViewModel.HubListState?,
+    liquidGlass: Boolean,
+    tint: Color,
+    onLoad: () -> Unit,
+    onOpenProfile: (com.mediaviewer.model.AuthorInfo) -> Unit,
+    onOpenPost: (Int) -> Unit
+) {
+    LaunchedEffect(row.listUri) { onLoad() }
+    val loading = state == null || (state.loading && state.members.isEmpty() && state.posts.isEmpty())
+    Spacer(Modifier.height(14.dp))
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        HorizontalDivider(modifier = Modifier.weight(1f), color = tint.copy(alpha = 0.6f))
+        Text(row.label, color = hubDividerLabel(tint), fontSize = 12.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 10.dp).widthIn(max = 220.dp))
+        HorizontalDivider(modifier = Modifier.weight(1f), color = tint.copy(alpha = 0.6f))
+    }
+    Spacer(Modifier.height(8.dp))
+    val tap = rememberHapticTap()
+    if (!row.showPosts) {
+        val members = state?.members ?: emptyList()
+        if (loading) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                repeat(MUTUAL_SKELETON_SLOTS) {
+                    Column(Modifier.width(60.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        ShimmerBox(CircleShape, Modifier.size(52.dp))
+                        Spacer(Modifier.height(4.dp))
+                        ShimmerBox(RoundedCornerShape(3.dp), Modifier.width(40.dp).height(9.dp))
+                    }
+                }
+            }
+        } else if (members.isEmpty()) {
+            Text(
+                if (state?.failed == true) "Couldn't load this list" else "Nobody on this list yet",
+                color = DimGray, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), textAlign = TextAlign.Center
+            )
+        } else {
+            androidx.compose.foundation.lazy.LazyRow(
+                Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(members.size, key = { i -> members[i].did }) { i ->
+                    val member = members[i]
+                    val avatarShape = CircleShape
+                    Column(
+                        Modifier.width(60.dp).clickable { tap(); onOpenProfile(member) },
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        val memberTint = if (member.avatarUrl != null) rememberDominantColor(member.avatarUrl) else tint
+                        Box(
+                            Modifier.size(52.dp)
+                                .then(if (liquidGlass) Modifier.glassPanel(true, shape = avatarShape, tint = memberTint) else Modifier.clip(avatarShape).background(Color.White.copy(0.1f))),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (member.avatarUrl != null) {
+                                AsyncImage(model = member.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                                    modifier = Modifier.size(46.dp).clip(avatarShape))
+                            } else {
+                                Box(Modifier.size(46.dp).clip(avatarShape).background(Color.White.copy(0.15f)))
+                            }
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(member.displayName, color = Color.White, fontSize = 10.sp, lineHeight = 11.sp,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        }
+    } else {
+        val posts = state?.posts ?: emptyList()
+        if (loading) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                repeat(3) { ShimmerBox(RoundedCornerShape(12.dp), Modifier.width(110.dp).height(HUB_BLOG_CARD_HEIGHT + 26.dp)) }
+            }
+        } else if (posts.isEmpty()) {
+            Text(
+                if (state?.failed == true) "Couldn't load this list" else "No recent posts",
+                color = DimGray, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), textAlign = TextAlign.Center
+            )
+        } else {
+            androidx.compose.foundation.lazy.LazyRow(
+                Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.Top
+            ) {
+                items(posts.size, key = { i -> posts[i].postUri.ifBlank { posts[i].id } + "#" + i }) { i ->
+                    val post = posts[i]
+                    val authorTint = rememberAuthorProfileTint(post.author.did, post.author.avatarUrl)
+                    val tileWidth = hubPostTileWidth(post, HUB_BLOG_CARD_HEIGHT)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        HubAuthorBubble(
+                            displayName = post.author.displayName, avatarUrl = post.author.avatarUrl,
+                            liquidGlass = liquidGlass, tint = authorTint, cardWidth = tileWidth.coerceAtLeast(90.dp),
+                            onClick = { onOpenProfile(post.author) }
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        HubPostTile(post, authorTint, liquidGlass, HUB_BLOG_CARD_HEIGHT) { onOpenPost(i) }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1786,6 +1967,32 @@ private fun SettingsCreditsSwitch(
 ) {
     val tap = rememberHapticTap()
     val shape = RoundedCornerShape(20.dp)
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val view = LocalView.current
+    // Holding "Settings" for 10 seconds straight unlocks (or hides again)
+    // the hidden Dev Tools section at the bottom of the Settings page.
+    val devHold = Modifier.pointerInput(Unit) {
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            val released = withTimeoutOrNull(10_000L) {
+                while (true) {
+                    val event = awaitPointerEvent()
+                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                    if (!change.pressed) break
+                }
+                true
+            }
+            if (released == null) {
+                val unlock = !com.mediaviewer.util.UiToggles.devToolsUnlocked
+                com.mediaviewer.util.UiToggles.updateDevToolsUnlocked(unlock)
+                view.hubHaptic(HapticFeedbackConstants.LONG_PRESS)
+                android.widget.Toast.makeText(
+                    context, if (unlock) "Dev Tools unlocked — see the bottom of Settings" else "Dev Tools hidden",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
     @Composable
     fun Segments() {
         Row(Modifier.padding(3.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1798,6 +2005,7 @@ private fun SettingsCreditsSwitch(
                 Box(
                     Modifier
                         .height(height - 6.dp)
+                        .then(if (tab == SettingsTab.SETTINGS) devHold else Modifier)
                         .clip(RoundedCornerShape(17.dp))
                         .background(if (isSelected) Color.White.copy(alpha = 0.18f) else Color.Transparent)
                         .clickable { if (!isSelected) { tap(); onSelect(tab) } }
@@ -1923,7 +2131,9 @@ private fun ReturnToFeedBar(
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .fillMaxWidth()
-                    .padding(start = moreReserve + 6.dp, end = uploadReserve + 6.dp)
+                    // Spans the whole bar: over the Settings and Post
+                    // buttons too, not just Timeline/Explore.
+                    .padding(horizontal = 2.dp)
                     .layout { measurable, constraints ->
                         val h = 26.dp.roundToPx()
                         val placeable = measurable.measure(constraints.copy(minHeight = h, maxHeight = h))

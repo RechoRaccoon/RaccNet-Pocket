@@ -69,28 +69,31 @@ class RockskyRepository {
             }
         }
 
+    /** What [inferNowPlaying] found: whether the account has any Music
+     *  History at all, and the inferred "Listening to" track (null = none). */
+    data class InferredNowPlaying(val hasHistory: Boolean, val track: RockskyTrack?)
+
     /**
-     * Item 20: Rocksky's live now-playing endpoints rarely answer, so this
-     * works it out from the scrobble history instead: take the most recent
-     * scrobble, when it started and how long the song is — if now is still
-     * inside that window (plus up to a minute after the song ends, to allow
-     * for scrobbling delay), treat it as what the person is listening to.
-     * Null when the latest scrobble doesn't carry both a time and a length.
+     * "Listening to" workaround: Rocksky's live now-playing endpoints rarely
+     * answer, so the latest scrobble stands in for it. If that song started
+     * less than [windowMs] (5 minutes) ago, it's shown as what the person is
+     * listening to until 5 minutes after it started — i.e. whatever is left
+     * of the 5 minutes once the time since it started is taken off. A newer
+     * song showing up in the history replaces it (the caller re-checks).
      */
-    suspend fun inferNowPlaying(did: String): RockskyTrack? = withContext(Dispatchers.IO) {
+    suspend fun inferNowPlaying(did: String, windowMs: Long = 5 * 60_000L): InferredNowPlaying = withContext(Dispatchers.IO) {
         runCatching {
             val resp = api.getScrobbles(did, 1, 0)
             val dto = resp.body()?.scrobbles?.firstOrNull()
-                ?.takeIf { d -> d.uri?.startsWith("at://$did/") != false } ?: return@runCatching null
-            val startMs = parseTimeMs(dto.date ?: dto.createdAt) ?: return@runCatching null
-            var lengthMs = dto.duration ?: dto.track?.duration ?: return@runCatching null
-            if (lengthMs in 1L..10_000L) lengthMs *= 1000L // reported in seconds
-            if (lengthMs <= 0) return@runCatching null
-            val endsAt = startMs + lengthMs + 60_000L
+                ?.takeIf { d -> d.uri?.startsWith("at://$did/") != false }
+                ?: return@runCatching InferredNowPlaying(false, null)
+            val startMs = parseTimeMs(dto.date ?: dto.createdAt) ?: return@runCatching InferredNowPlaying(true, null)
             val now = System.currentTimeMillis()
-            if (now < startMs - 60_000L || now > endsAt) return@runCatching null
-            dto.toModel()?.copy(endsAtMs = endsAt)
-        }.getOrNull()
+            val endsAt = startMs + windowMs
+            // A little tolerance for a scrobble clock slightly ahead of ours.
+            if (now < startMs - 60_000L || now >= endsAt) return@runCatching InferredNowPlaying(true, null)
+            InferredNowPlaying(true, dto.toModel()?.copy(endsAtMs = endsAt))
+        }.getOrDefault(InferredNowPlaying(false, null))
     }
 
     private fun parseTimeMs(raw: String?): Long? {

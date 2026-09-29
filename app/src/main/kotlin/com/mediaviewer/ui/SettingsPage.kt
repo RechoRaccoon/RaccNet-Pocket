@@ -25,6 +25,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.material.icons.filled.DragIndicator
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.toArgb
@@ -72,7 +78,23 @@ data class SettingsExtras(
     /** Data and Privacy → Blocked Accounts → View. */
     val onOpenBlockedAccounts: () -> Unit = {},
     /** Media Tagging → Export Dataset progress (see MainViewModel.DatasetExportState). */
-    val datasetExportState: com.mediaviewer.viewmodel.MainViewModel.DatasetExportState = com.mediaviewer.viewmodel.MainViewModel.DatasetExportState.Idle
+    val datasetExportState: com.mediaviewer.viewmodel.MainViewModel.DatasetExportState = com.mediaviewer.viewmodel.MainViewModel.DatasetExportState.Idle,
+    // ── Customize Hub ──
+    /** Your own Bluesky lists (Customize Hub → Add list to Hub). */
+    val userLists: List<com.mediaviewer.model.BskyList> = emptyList(),
+    val userListsLoading: Boolean = false,
+    val onEnsureUserLists: () -> Unit = {},
+    /** (list URI, list name) */
+    val onAddHubList: (String, String) -> Unit = { _, _ -> },
+    /** (pasted list link, onDone(error or null)) */
+    val onAddHubListFromUrl: (String, (String?) -> Unit) -> Unit = { _, done -> done(null) },
+    /** Each Hub list row's loaded content, by list URI. */
+    val hubLists: Map<String, com.mediaviewer.viewmodel.MainViewModel.HubListState> = emptyMap(),
+    val onLoadHubList: (String) -> Unit = {},
+    /** (list URI, list name, index) — a post tapped in a Hub list row. */
+    val onOpenHubListPost: (String, String, Int) -> Unit = { _, _, _ -> },
+    // ── Dev Tools ──
+    val onForceRefreshHub: () -> Unit = {}
 )
 
 // ── Shared building blocks ──────────────────────────────────────────────────
@@ -545,41 +567,6 @@ internal fun SettingsPageContent(
             }
         }
 
-        // Glass Theme + its Background/Outline dials + the highlight toggle
-        // share one bubble; none of the rows inside draws its own outline.
-        SettingsBubble(liquidGlass, tint, backdrop) {
-            BubbleRow {
-                RowLabel("Glass Theme", Modifier.weight(1f))
-                CompactSwitch(liquidGlass, onToggleLiquidGlass)
-            }
-            if (liquidGlass) {
-                BubbleDivider()
-                BubbleRow {
-                    // widthIn(min=) rather than a fixed width: the app's
-                    // custom font is wider, and a fixed width wrapped
-                    // "Background" onto two lines.
-                    Text("Background", color = Color.White, fontSize = 13.sp, maxLines = 1, softWrap = false,
-                        modifier = Modifier.widthIn(min = 74.dp))
-                    CompactSlider(liquidGlassIntensity, onSetLiquidGlassIntensity, Modifier.weight(1f).padding(horizontal = 10.dp))
-                    Text("${(liquidGlassIntensity * 100).toInt()}%", color = DimGray, fontSize = 12.sp,
-                        modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
-                }
-                BubbleDivider()
-                BubbleRow {
-                    Text("Outline", color = Color.White, fontSize = 13.sp, maxLines = 1, softWrap = false,
-                        modifier = Modifier.widthIn(min = 74.dp))
-                    CompactSlider(glassRimIntensity, onSetGlassRimIntensity, Modifier.weight(1f).padding(horizontal = 10.dp))
-                    Text("${(glassRimIntensity * 100).toInt()}%", color = DimGray, fontSize = 12.sp,
-                        modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
-                }
-                BubbleDivider()
-                BubbleRow {
-                    RowLabel("Vibrant Outline Highlight", Modifier.weight(1f))
-                    CompactSwitch(glassRimVibrantSecondary, onToggleGlassRimVibrantSecondary)
-                }
-            }
-        }
-
         // App Font: "Import" adds a .ttf/.otf to the list; the list (styled
         // like Loading Animation) shows the selected font — Audiowide by
         // default, the Original system font second, then every import, each
@@ -634,16 +621,17 @@ internal fun SettingsPageContent(
             }
         }
 
+        // ── Customize Hub ───────────────────────────────────────────────
+        if (bskyLoggedIn) {
+            SectionHeader("Customize Hub", tint)
+            CustomizeHubSection(extras = extras, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop)
+        }
+
         // ── App Functionality ───────────────────────────────────────────
         SectionHeader("App Functionality", tint)
 
         ToggleBubble("Hide Text Only Posts", hideTextOnlyPosts, onToggleHideTextOnlyPosts, liquidGlass, tint, backdrop)
         ToggleBubble("I Hate Fun (Blur NSFW Content)", hateFunBlurNsfw, onToggleHateFunBlurNsfw, liquidGlass, tint, backdrop)
-        // Frame rate beside the camera cutout — see DebugOverlay.
-        ToggleBubble(
-            "FPS Overlay", com.mediaviewer.util.UiToggles.debugOverlay,
-            { com.mediaviewer.util.UiToggles.updateDebugOverlay(it) }, liquidGlass, tint, backdrop
-        )
 
         if (bskyLoggedIn) {
             // Runs the follower scan from scratch — for picking up accounts
@@ -701,6 +689,32 @@ internal fun SettingsPageContent(
         if (bskyLoggedIn) {
             ToggleBubble("Show \"Add To\" After Following", autoAddToOnFollow, onToggleAutoAddToOnFollow, liquidGlass, tint, backdrop)
         }
+
+        // Bluesky profile links (a scanned QR code, a link in the browser)
+        // can open in Stellar: Android keeps that choice in its own
+        // "Open by default" settings, so this jumps straight there.
+        val linkContext = androidx.compose.ui.platform.LocalContext.current
+        ActionBubble(
+            label = "Open Bluesky Links in Stellar",
+            sub = "Opens Android's settings for Stellar — tap \"Add link\" and turn on bsky.app, then profile links from your camera or browser open here.",
+            buttonLabel = "Set Up",
+            onClick = {
+                val pkg = android.net.Uri.parse("package:" + linkContext.packageName)
+                val intent = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                    android.content.Intent(android.provider.Settings.ACTION_APP_OPEN_BY_DEFAULT_SETTINGS, pkg)
+                } else {
+                    android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkg)
+                }
+                runCatching { linkContext.startActivity(intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                    .recoverCatching {
+                        linkContext.startActivity(
+                            android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkg)
+                                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }
+            },
+            liquidGlass = liquidGlass, tint = tint, backdrop = backdrop
+        )
 
         // ── Integrations ────────────────────────────────────────────────
         SectionHeader("Integrations", tint)
@@ -1030,6 +1044,76 @@ internal fun SettingsPageContent(
             }
         }
 
+        // ── Dev Tools (hidden: hold the "Settings" tab for 10 seconds) ─
+        if (com.mediaviewer.util.UiToggles.devToolsUnlocked) {
+            SectionHeader("Dev Tools", tint)
+            // Frame rate beside the camera cutout — see DebugOverlay.
+            ToggleBubble(
+                "FPS Overlay", com.mediaviewer.util.UiToggles.debugOverlay,
+                { com.mediaviewer.util.UiToggles.updateDebugOverlay(it) }, liquidGlass, tint, backdrop
+            )
+            // Glass Theme + its Background/Outline dials + the highlight toggle
+            // share one bubble; none of the rows inside draws its own outline.
+            SettingsBubble(liquidGlass, tint, backdrop) {
+                BubbleRow {
+                    RowLabel("Glass Theme", Modifier.weight(1f))
+                    CompactSwitch(liquidGlass, onToggleLiquidGlass)
+                }
+                if (liquidGlass) {
+                    BubbleDivider()
+                    BubbleRow {
+                        // widthIn(min=) rather than a fixed width: the app's
+                        // custom font is wider, and a fixed width wrapped
+                        // "Background" onto two lines.
+                        Text("Background", color = Color.White, fontSize = 13.sp, maxLines = 1, softWrap = false,
+                            modifier = Modifier.widthIn(min = 74.dp))
+                        CompactSlider(liquidGlassIntensity, onSetLiquidGlassIntensity, Modifier.weight(1f).padding(horizontal = 10.dp))
+                        Text("${(liquidGlassIntensity * 100).toInt()}%", color = DimGray, fontSize = 12.sp,
+                            modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
+                    }
+                    BubbleDivider()
+                    BubbleRow {
+                        Text("Outline", color = Color.White, fontSize = 13.sp, maxLines = 1, softWrap = false,
+                            modifier = Modifier.widthIn(min = 74.dp))
+                        CompactSlider(glassRimIntensity, onSetGlassRimIntensity, Modifier.weight(1f).padding(horizontal = 10.dp))
+                        Text("${(glassRimIntensity * 100).toInt()}%", color = DimGray, fontSize = 12.sp,
+                            modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
+                    }
+                    BubbleDivider()
+                    BubbleRow {
+                        RowLabel("Vibrant Outline Highlight", Modifier.weight(1f))
+                        CompactSwitch(glassRimVibrantSecondary, onToggleGlassRimVibrantSecondary)
+                    }
+                }
+            }
+            SettingsBubble(liquidGlass, tint, backdrop) {
+                BubbleRow {
+                    RowLabel("Show Scan Bubble in Hub", Modifier.weight(1f), sub = "Replaces the Reviews/Blogs rows with the scan-your-follows bubble.")
+                    CompactSwitch(com.mediaviewer.util.UiToggles.devForceScanBubble) { com.mediaviewer.util.UiToggles.updateDevForceScanBubble(it) }
+                }
+                BubbleDivider()
+                BubbleRow {
+                    RowLabel("Preview Loading Animation", Modifier.weight(1f), sub = "Tap the screen to move it along; Back closes it.")
+                    PillButton("Play", { com.mediaviewer.util.UiToggles.devLoadingPreview = true })
+                }
+                BubbleDivider()
+                BubbleRow {
+                    RowLabel("Preview Login Page", Modifier.weight(1f), sub = "Opens it without logging out; Back closes it.")
+                    PillButton("Open", { com.mediaviewer.util.UiToggles.devLoginPreview = true })
+                }
+                BubbleDivider()
+                BubbleRow {
+                    RowLabel("Force Refresh Hub", Modifier.weight(1f), sub = "Reloads every Hub row from scratch.")
+                    PillButton("Refresh", extras.onForceRefreshHub, enabled = bskyLoggedIn)
+                }
+                BubbleDivider()
+                BubbleRow {
+                    RowLabel("Hide Dev Tools", Modifier.weight(1f))
+                    PillButton("Hide", { com.mediaviewer.util.UiToggles.updateDevToolsUnlocked(false) }, color = DangerRed)
+                }
+            }
+        }
+
         Spacer(Modifier.height(16.dp))
     }
     }
@@ -1287,5 +1371,236 @@ internal fun CreditsPageContent() {
             })
         }
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+// ── Customize Hub ───────────────────────────────────────────────────────────
+
+/**
+ * Settings → Customize Hub: one bubble per Hub row (Feeds, 6 Button,
+ * Mutuals, Blogs, Reviews, Switch Accounts, then any added lists), each with
+ * a grab handle on the left to drag it into a new place and an on/off switch
+ * on the right. List rows also get an "Accounts"/"Posts" mode button and an
+ * X to remove them (tap once to arm, again to remove — same as deleting a
+ * post). The last bubble adds a list: one of yours, or "Other" to paste any
+ * Bluesky list link. Everything is saved in [com.mediaviewer.util.HubLayout].
+ */
+@Composable
+private fun CustomizeHubSection(
+    extras: SettingsExtras, liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?
+) {
+    val hub = com.mediaviewer.util.HubLayout
+    val rows = hub.rows
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val view = androidx.compose.ui.platform.LocalView.current
+    val gapPx = with(density) { 8.dp.toPx() }
+    var draggingId by remember { mutableStateOf<String?>(null) }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    val heights = remember { mutableStateMapOf<String, Int>() }
+
+    fun buzz() { runCatching { view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK) } }
+
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        rows.forEach { row ->
+            key(row.id) {
+                val dragging = draggingId == row.id
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .zIndex(if (dragging) 1f else 0f)
+                        .onSizeChanged { heights[row.id] = it.height }
+                        .graphicsLayer {
+                            translationY = if (dragging) dragOffset else 0f
+                            val s = if (dragging) 1.02f else 1f
+                            scaleX = s; scaleY = s
+                        }
+                ) {
+                    val handle = Modifier.pointerInput(row.id) {
+                        detectDragGestures(
+                            onDragStart = { draggingId = row.id; dragOffset = 0f; buzz() },
+                            onDragEnd = { draggingId = null; dragOffset = 0f },
+                            onDragCancel = { draggingId = null; dragOffset = 0f },
+                            onDrag = { change, amount ->
+                                change.consume()
+                                dragOffset += amount.y
+                                // Read live (not the composition's copy): a
+                                // move just made must count straight away.
+                                val list = hub.rows
+                                val idx = list.indexOfFirst { it.id == row.id }
+                                if (idx < 0) return@detectDragGestures
+                                if (dragOffset > 0f && idx < list.lastIndex) {
+                                    val step = (heights[list[idx + 1].id] ?: 0) + gapPx
+                                    if (step > gapPx && dragOffset > step / 2f) {
+                                        hub.move(idx, idx + 1); dragOffset -= step; buzz()
+                                    }
+                                } else if (dragOffset < 0f && idx > 0) {
+                                    val step = (heights[list[idx - 1].id] ?: 0) + gapPx
+                                    if (step > gapPx && -dragOffset > step / 2f) {
+                                        hub.move(idx, idx - 1); dragOffset += step; buzz()
+                                    }
+                                }
+                            }
+                        )
+                    }
+                    HubRowBubble(row = row, handle = handle, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop)
+                }
+            }
+        }
+
+        // ── Add list to Hub ──
+        var menuOpen by remember { mutableStateOf(false) }
+        var urlPopupOpen by remember { mutableStateOf(false) }
+        SettingsBubble(liquidGlass, tint, backdrop) {
+            BubbleRow {
+                RowLabel("Add list to Hub", Modifier.weight(1f))
+                Box {
+                    PillButton("Add", { extras.onEnsureUserLists(); menuOpen = true })
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        val lists = extras.userLists.filter { !it.purpose.contains("referencelist") }
+                        if (lists.isEmpty()) {
+                            DropdownMenuItem(
+                                text = { Text(if (extras.userListsLoading) "Loading your lists…" else "You have no lists yet", color = DimGray) },
+                                onClick = {}, enabled = false
+                            )
+                        }
+                        lists.forEach { list ->
+                            val added = rows.any { it.listUri == list.uri }
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        list.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                        fontWeight = if (added) FontWeight.SemiBold else FontWeight.Normal
+                                    )
+                                },
+                                onClick = { menuOpen = false; extras.onAddHubList(list.uri, list.name) }
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text("Other", fontWeight = FontWeight.SemiBold) },
+                            onClick = { menuOpen = false; urlPopupOpen = true }
+                        )
+                    }
+                }
+            }
+        }
+        if (urlPopupOpen) {
+            HubListUrlDialog(
+                liquidGlass = liquidGlass, tint = tint,
+                onAdd = { url, done -> extras.onAddHubListFromUrl(url) { err -> done(err); if (err == null) urlPopupOpen = false } },
+                onDismiss = { urlPopupOpen = false }
+            )
+        }
+    }
+}
+
+/** One row of Customize Hub: grab handle, name, (list: Accounts/Posts), on/off, (list: X). */
+@Composable
+private fun HubRowBubble(
+    row: com.mediaviewer.util.HubLayout.Row,
+    handle: Modifier,
+    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?
+) {
+    val hub = com.mediaviewer.util.HubLayout
+    SettingsBubble(liquidGlass, tint, backdrop) {
+        BubbleRow {
+            Box(
+                handle.size(width = 30.dp, height = 34.dp),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Icon(
+                    androidx.compose.material.icons.Icons.Default.DragIndicator,
+                    contentDescription = "Drag to reorder", tint = Color.White.copy(alpha = 0.7f),
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Text(
+                row.label, color = if (row.enabled) Color.White else DimGray, fontSize = 14.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).padding(end = 8.dp)
+            )
+            if (row.isList) {
+                PillButton(if (row.showPosts) "Posts" else "Accounts", { hub.setShowPosts(row.id, !row.showPosts) })
+                Spacer(Modifier.width(8.dp))
+            }
+            CompactSwitch(row.enabled) { hub.setEnabled(row.id, it) }
+            if (row.isList) {
+                Spacer(Modifier.width(8.dp))
+                RemoveHubListButton(onRemove = { hub.remove(row.id) })
+            }
+        }
+    }
+}
+
+/** The X on a Hub list row: the first tap asks ("Remove?" in red), the
+ *  second removes it — the same two-tap confirm as deleting a post. */
+@Composable
+private fun RemoveHubListButton(onRemove: () -> Unit) {
+    var confirming by remember { mutableStateOf(false) }
+    LaunchedEffect(confirming) {
+        if (confirming) { kotlinx.coroutines.delay(3000); confirming = false }
+    }
+    if (confirming) {
+        PillButton("Remove?", { confirming = false; onRemove() }, color = DangerRed)
+    } else {
+        CancelXButton({ confirming = true })
+    }
+}
+
+/** Customize Hub → Add → Other: a compact "List URL" popup. */
+@Composable
+private fun HubListUrlDialog(
+    liquidGlass: Boolean, tint: Color,
+    onAdd: (String, (String?) -> Unit) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var url by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            Modifier.fillMaxSize()
+                .clickable(
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null, onClick = onDismiss
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            val shape = RoundedCornerShape(20.dp)
+            @Composable
+            fun Content() {
+                Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("List URL", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                        textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CompactField(
+                            url, { url = it; error = null }, "https://bsky.app/profile/…/lists/…",
+                            Modifier.weight(1f), imeAction = ImeAction.Done,
+                            onDone = { if (url.isNotBlank() && !busy) { busy = true; onAdd(url.trim()) { err -> busy = false; error = err } } }
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        PillButton(
+                            if (busy) "…" else "Add",
+                            { busy = true; onAdd(url.trim()) { err -> busy = false; error = err } },
+                            enabled = url.isNotBlank() && !busy
+                        )
+                    }
+                    val err = error
+                    if (err != null) Text(err, color = DangerRed, fontSize = 11.sp, lineHeight = 13.sp)
+                }
+            }
+            val m = Modifier.fillMaxWidth(0.9f)
+                .clickable(
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null
+                ) {}
+            if (liquidGlass) {
+                LiquidGlassSurface(m, shape = shape, tint = tint) { Content() }
+            } else {
+                Box(m.clip(shape).background(OffBlack).border(1.dp, tint.copy(alpha = 0.5f), shape)) { Content() }
+            }
+        }
     }
 }

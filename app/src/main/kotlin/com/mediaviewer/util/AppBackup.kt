@@ -38,7 +38,9 @@ import java.io.File
 object AppBackup {
     private const val FORMAT = "stellar-backup"
     private const val VERSION = 1
-    private val SHARED_PREFS = listOf("ui_toggles", "vrm_settings")
+    // "hub_layout": Settings → Customize Hub (row order/toggles + Hub lists).
+    // "list_recency": Add To's most-recently-added-to order.
+    private val SHARED_PREFS = listOf("ui_toggles", "vrm_settings", "hub_layout", "list_recency")
 
     private val EXCLUDED = setOf(
         "bsky_access_jwt", "bsky_refresh_jwt", "bsky_did", "bsky_handle", "bsky_service_url",

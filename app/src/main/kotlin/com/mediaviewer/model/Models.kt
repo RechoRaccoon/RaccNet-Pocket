@@ -108,6 +108,10 @@ data class MediaItem(
     // Textshot-with-emoji posts: URL of the posted Textshot picture. Blank for
     // every other item. See isEmojiTextshot below.
     val textshotImageUrl: String = "",
+    /** Textshot posts: the regular post text written alongside the Textshot
+     *  picture (a caption, hashtags…) — [text] holds the Textshot's own
+     *  message. Nullable on purpose (old Gson caches have no such key). */
+    val captionText: String? = null,
     /** The author has blocked the signed-in user: shown with a "This user
      *  has you blocked" status, and liking/reposting/following is off. */
     val authorBlocksViewer: Boolean = false
@@ -169,7 +173,11 @@ data class MediaItem(
  *  profile does (named, no avatar): they get a title instead of a feed
  *  selector, and never appear in it. */
 val SPECIAL_FEED_NAMES = setOf("Saved Posts", "From Friends", "History")
-fun AuthorInfo.isSpecialFeed(): Boolean = avatarUrl == null && displayName in SPECIAL_FEED_NAMES
+/** A Hub list row's posts opened as a feed ride on the same mechanism,
+ *  marked by this prefix on the pseudo-author's handle. */
+const val HUB_LIST_FEED_HANDLE_PREFIX = "hublist:"
+fun AuthorInfo.isSpecialFeed(): Boolean =
+    avatarUrl == null && (displayName in SPECIAL_FEED_NAMES || handle.startsWith(HUB_LIST_FEED_HANDLE_PREFIX))
 
 data class AuthorInfo(
     val did: String,
@@ -921,7 +929,9 @@ data class PopfeedReview(
     // do the same open, key-free Wikipedia description lookup
     // (WikipediaRepository.fetchDescription) that TitleDetailOverlay now
     // does for Backlog items, without needing to re-derive it.
-    val imdbId: String? = null
+    val imdbId: String? = null,
+    /** The record's raw `identifiers` object as JSON (Backlog → add). */
+    val identifiersJson: String? = null
 )
 
 /** A single Popfeed backlog/watchlist entry (movie, TV show, or game the
@@ -958,7 +968,9 @@ data class PopfeedBacklogItem(
     // openProfileTitle's Wikipedia lookup (WikipediaRepository.
     // fetchDescription) find the exact right article instead of guessing
     // off the title alone.
-    val imdbId: String? = null
+    val imdbId: String? = null,
+    /** The record's raw `identifiers` object as JSON (Backlog → add). */
+    val identifiersJson: String? = null
 )
 
 // ── Settings Update ───────────────────────────────────────────────────────────
@@ -1309,7 +1321,10 @@ data class TitleSearchResult(
     // MainViewModel.openProfileTitle/fetchTitleOverviewFor). Required for
     // the CC BY-SA attribution row TitleDetailOverlay's description bubble
     // shows underneath the extract whenever [overview] came from Wikipedia.
-    val wikipediaArticleUrl: String? = null
+    val wikipediaArticleUrl: String? = null,
+    /** The source record's raw Popfeed `identifiers` object as JSON, when
+     *  known — used when adding this title to the backlog. */
+    val identifiersJson: String? = null
 )
 
 /** One parsed social.popfeed.feed.comment record, resolved to the author who

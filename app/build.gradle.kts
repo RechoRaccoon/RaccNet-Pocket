@@ -101,6 +101,9 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("com.google.code.gson:gson:2.10.1")
+    // Profile QR codes (ProfileQrScreen): ZXing's encoder only — the QR
+    // matrix it produces is drawn by Compose in Stellar's own style.
+    implementation("com.google.zxing:core:3.5.3")
     implementation("androidx.work:work-runtime-ktx:2.9.0")
 
     // Phase 4 — on-device translation (ML Kit Translate + Language Identification).

@@ -106,29 +106,39 @@ fun ListPickerDialog(
         onTabChange(tab.key)
     }
 
+    // Member counts / "List + Starter Pack" subtitles are gone — just the
+    // names. Every tab is ordered by the list you most recently added
+    // someone to (tracked on-device, see ListRecency), worked out once when
+    // the tab is shown so rows don't jump around while you're adding.
     val entries: List<PickerEntry> = remember(lists, starterPacks, activeTab) {
         val curate = lists.filter { !it.purpose.contains("modlist") && !it.purpose.contains("referencelist") }
-        when (activeTab) {
+        val raw = when (activeTab) {
             PickerTab.LISTS -> curate.map {
-                PickerEntry(it.uri, it.name, it.itemCount?.let { n -> "$n members" }, it.avatar, PickerTab.LISTS, it.uri)
+                PickerEntry(it.uri, it.name, null, it.avatar, PickerTab.LISTS, it.uri)
             }
             PickerTab.MODLISTS -> lists.filter { it.purpose.contains("modlist") }.map {
-                PickerEntry(it.uri, it.name, it.itemCount?.let { n -> "$n members" }, it.avatar, PickerTab.MODLISTS, it.uri)
+                PickerEntry(it.uri, it.name, null, it.avatar, PickerTab.MODLISTS, it.uri)
             }
             PickerTab.STARTER_PACKS -> starterPacks.mapNotNull { pack ->
                 val rec = pack.record ?: return@mapNotNull null
                 if (rec.list.isBlank()) return@mapNotNull null
-                PickerEntry(pack.uri, rec.name, pack.listItemCount?.let { n -> "$n members" }, null, PickerTab.STARTER_PACKS, rec.list)
+                PickerEntry(pack.uri, rec.name, null, null, PickerTab.STARTER_PACKS, rec.list)
             }
             PickerTab.BOTH -> {
                 val packByName = starterPacks.mapNotNull { p -> p.record?.let { r -> r.name to r.list } }
                     .filter { it.second.isNotBlank() }.toMap()
                 curate.mapNotNull { list ->
                     packByName[list.name]?.let { packList ->
-                        PickerEntry(list.uri, list.name, "List + Starter Pack", list.avatar, PickerTab.BOTH, list.uri, packList)
+                        PickerEntry(list.uri, list.name, null, list.avatar, PickerTab.BOTH, list.uri, packList)
                     }
                 }
             }
+        }
+        raw.sortedByDescending { e ->
+            maxOf(
+                com.mediaviewer.util.ListRecency.lastAdded(e.listUri),
+                e.additionalUri?.let { com.mediaviewer.util.ListRecency.lastAdded(it) } ?: 0L
+            )
         }
     }
 
@@ -143,7 +153,8 @@ fun ListPickerDialog(
             .imePadding()
             .navigationBarsPadding()
             .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
-        contentAlignment = Alignment.BottomCenter
+        // Centered in the middle of the screen.
+        contentAlignment = Alignment.Center
     ) {
         PopupSheetSurface(
             liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
@@ -178,7 +189,9 @@ fun ListPickerDialog(
                             ProfileStyleTabRow(
                                 labels = PickerTab.entries.map { it.label },
                                 selectedIndex = activeTab.ordinal,
-                                liquidGlass = liquidGlass, tint = tint
+                                liquidGlass = liquidGlass, tint = tint,
+                                // Same dim backing as the rest of the popup's bubbles.
+                                shadowed = true
                             ) { i -> switchTab(PickerTab.entries[i]) }
 
                             if (listsLoading && entries.isEmpty()) {
@@ -268,18 +281,18 @@ private fun EntryRow(entry: PickerEntry, tint: Color, isMember: Boolean, busy: B
                 overflow = TextOverflow.Ellipsis)
             if (entry.subtitle != null) Text(entry.subtitle, color = Color.White.copy(alpha = 0.75f), fontSize = 11.sp, maxLines = 1)
         }
-        // One button: + adds them, − takes them back off.
-        val bg by animateColorAsState(
-            if (isMember) lerp(tint, Color.Black, 0.2f).copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.32f),
-            label = "addToBg"
-        )
+        // One button: + adds them, − takes them back off. It doesn't light
+        // up or ripple when tapped — only the icon changes.
         Box(
             Modifier
                 .size(RowHeight)
                 .clip(RowShape)
-                .background(bg)
-                .border(1.dp, lerp(tint, Color.White, 0.4f).copy(alpha = if (isMember) 0.9f else 0.35f), RowShape)
-                .clickable(enabled = !busy, onClick = onToggle),
+                .background(Color.Black.copy(alpha = 0.32f))
+                .border(1.dp, lerp(tint, Color.White, 0.4f).copy(alpha = 0.35f), RowShape)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() }, indication = null,
+                    enabled = !busy, onClick = onToggle
+                ),
             contentAlignment = Alignment.Center
         ) {
             if (busy) {

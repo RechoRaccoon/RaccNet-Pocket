@@ -35,6 +35,8 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.QrCode2
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
@@ -467,7 +469,20 @@ fun ProfileOverlay(
     hateFunBlurNsfw: Boolean = false,
     // Item 19: own profile's edit popup → Save.
     onSaveOwnProfile: (displayName: String, bio: String, handle: String, avatar: android.net.Uri?, banner: android.net.Uri?, onDone: (String?) -> Unit) -> Unit =
-        { _, _, _, _, _, done -> done("Editing isn't available here") }
+        { _, _, _, _, _, done -> done("Editing isn't available here") },
+    /** Reports this page's live glass backdrop + color, so popups opened
+     *  over it (Add To) blur the profile instead of the post behind it. */
+    onBackdropChanged: (GlassBackdrop?, Color) -> Unit = { _, _ -> },
+    /** You're blocking this account (drives the bar's Block button). */
+    isBlocking: Boolean = false,
+    /** Block / unblock this account (same as the timeline's Block). */
+    onToggleBlock: (AuthorInfo) -> Unit = {},
+    /** The bar's QR code button: (author, banner URL). */
+    onOpenQr: (AuthorInfo, String?) -> Unit = { _, _ -> },
+    /** Title pages' Backlog/Remove button. */
+    titleBacklog: MainViewModel.TitleBacklogState? = null,
+    onCheckTitleBacklog: (TitleSearchResult) -> Unit = {},
+    onToggleTitleBacklog: (TitleSearchResult) -> Unit = {}
 ) {
     val author  = state.author
     val profile = state.profile
@@ -659,6 +674,7 @@ fun ProfileOverlay(
     val backdropLayer = rememberGraphicsLayer()
     var backdropOrigin by remember { mutableStateOf(Offset.Zero) }
     val backdrop = if (liquidGlass) remember(backdropLayer) { GlassBackdrop(backdropLayer) { backdropOrigin } } else null
+    LaunchedEffect(backdrop, blended) { onBackdropChanged(backdrop, blended) }
 
     var editingProfile by remember { mutableStateOf(false) }
     CompositionLocalProvider(LocalHateFunBlurNsfw provides hateFunBlurNsfw) {
@@ -952,7 +968,12 @@ fun ProfileOverlay(
                     onAddTo = { onOpenAddTo(author.did) },
                     onViewOnBluesky = { uriHandler.openUri("https://bsky.app/profile/${author.handle}") },
                     onDm = { onOpenDm(author) },
-                    onDmLongPress = { onNewGroupWith(author) }
+                    onDmLongPress = { onNewGroupWith(author) },
+                    // QR code + Block at the right end (no Block on your own).
+                    showBlock = selfDid.isNotBlank() && author.did != selfDid,
+                    isBlocking = isBlocking,
+                    onQr = { onOpenQr(author, profile?.bannerUrl) },
+                    onBlock = { onToggleBlock(author) }
                 )
             }
         }
@@ -1027,7 +1048,8 @@ fun ProfileOverlay(
                 onOpenReview = onOpenReviewCompose,
                 reviewSocial = reviewSocial, onLoadReviewSocial = onLoadReviewSocial,
                 onToggleReviewLike = onToggleReviewLike, onPostReviewComment = onPostReviewComment,
-                selfDid = selfDid, onDeleteReview = onDeleteReview
+                selfDid = selfDid, onDeleteReview = onDeleteReview,
+                backlogState = titleBacklog, onCheckBacklog = onCheckTitleBacklog, onToggleBacklog = onToggleTitleBacklog
             )
         }
     }
@@ -1076,7 +1098,11 @@ private fun ProfileInteractionBar(
     refreshing: Boolean, animateRefresh: Boolean, onRefresh: () -> Unit,
     gridMode: Int, gridCyclesListLayout: Boolean, showGrid: Boolean, showDm: Boolean,
     onGrid: () -> Unit, onAddTo: () -> Unit, onViewOnBluesky: () -> Unit, onDm: () -> Unit,
-    onDmLongPress: () -> Unit = {}
+    onDmLongPress: () -> Unit = {},
+    showBlock: Boolean = false,
+    isBlocking: Boolean = false,
+    onQr: () -> Unit = {},
+    onBlock: () -> Unit = {}
 ) {
     val shape = RoundedCornerShape(26.dp)
     val iconSize = 20.dp
@@ -1095,11 +1121,13 @@ private fun ProfileInteractionBar(
     // in the row — pushing its neighbors outward — rather than just scaling
     // the glyph inside an unchanged hit target.
     val addToIconSize = 28.dp
-    val addToBoxSize = 56.dp
+    // Slightly narrower slots than before, so the bar still fits a
+    // 360dp-wide phone now that QR code + Block sit at its right end.
+    val addToBoxSize = 50.dp
     @Composable
     fun IconButton(onClick: () -> Unit, content: @Composable () -> Unit) {
         Box(
-            Modifier.size(44.dp).clip(CircleShape).clickable(onClick = onClick),
+            Modifier.size(width = 40.dp, height = 44.dp).clip(CircleShape).clickable(onClick = onClick),
             contentAlignment = Alignment.Center,
             content = { content() }
         )
@@ -1165,7 +1193,7 @@ private fun ProfileInteractionBar(
                 // group chat with them instead.
                 val dmView = androidx.compose.ui.platform.LocalView.current
                 Box(
-                    Modifier.size(48.dp).clip(CircleShape).combinedClickable(
+                    Modifier.size(width = 44.dp, height = 48.dp).clip(CircleShape).combinedClickable(
                         onClick = { tap(); onDm() },
                         onLongClick = {
                             dmView.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
@@ -1175,6 +1203,20 @@ private fun ProfileInteractionBar(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(Icons.Default.Chat, contentDescription = "DM (hold for a group chat)", tint = Color.White, modifier = Modifier.size(iconSize))
+                }
+            }
+            // QR code of this profile's link, then Block at the very end.
+            IconButton(onClick = { tap(); onQr() }) {
+                Icon(Icons.Filled.QrCode2, contentDescription = "Profile QR code", tint = Color.White, modifier = Modifier.size(iconSize))
+            }
+            if (showBlock) {
+                IconButton(onClick = { tap(); onBlock() }) {
+                    Icon(
+                        Icons.Filled.Block,
+                        contentDescription = if (isBlocking) "Unblock" else "Block",
+                        tint = if (isBlocking) Color(0xFFFF6B6B) else Color.White,
+                        modifier = Modifier.size(iconSize)
+                    )
                 }
             }
         }
@@ -1187,10 +1229,25 @@ private fun ProfileInteractionBar(
         .height(if (liquidGlass) 60.dp else 52.dp).fillMaxWidth()
     val pillModifier = Modifier.height(pillHeight)
     Box(modifier = barModifier, contentAlignment = Alignment.Center) {
-        if (liquidGlass) {
-            LiquidGlassSurface(modifier = pillModifier, shape = shape, tint = tint, backdrop = backdrop) { BarContent() }
-        } else {
-            Box(pillModifier.clip(shape).background(Color.Black.copy(alpha = 0.7f))) { BarContent() }
+        Box {
+            if (liquidGlass) {
+                LiquidGlassSurface(modifier = pillModifier, shape = shape, tint = tint, backdrop = backdrop) { BarContent() }
+            } else {
+                Box(pillModifier.clip(shape).background(Color.Black.copy(alpha = 0.7f))) { BarContent() }
+            }
+            // Audio visualizer resting on top of the bar, as wide as the
+            // pill, in this profile's color — drawn just above it, so it
+            // takes no layout space and never moves the bar.
+            if (com.mediaviewer.util.UiToggles.audioVisualizer) {
+                AudioVisualizerBars(
+                    color = tint,
+                    modifier = Modifier
+                        .matchParentSize()
+                        .graphicsLayer { translationY = -size.height - 2.dp.toPx() }
+                        .padding(horizontal = 14.dp)
+                        .padding(top = 8.dp)
+                )
+            }
         }
     }
 }
@@ -1651,6 +1708,7 @@ private fun ProfileTabsRow(
             val shape = RoundedCornerShape(20.dp)
             Box(
                 Modifier
+                    .then(if (shadowed) Modifier.popupTextShadow(shape) else Modifier)
                     .then(
                         if (liquidGlass) Modifier.glassPanel(true, tint = if (isSelected) tint else tint.copy(alpha = 0.4f), shape = shape)
                         else Modifier.clip(shape).background(if (isSelected) Color.White.copy(0.15f) else Color.White.copy(0.06f))
@@ -2171,8 +2229,7 @@ private fun ThumbBox(item: MediaItem, tint: Color, shape: RoundedCornerShape, mo
         }
         if (!blurNsfw) {
             if (item.isVideo) {
-                Icon(Icons.Filled.PlayArrow, contentDescription = "Video", tint = Color.White.copy(0.9f),
-                    modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(playIconSize))
+                VideoCoverBadge(iconSize = (playIconSize - 4.dp).coerceAtLeast(12.dp), modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp))
             }
             if (item.mediaGroup.size > 1) {
                 MultiImageCountBadge(count = item.mediaGroup.size, modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp))
@@ -2233,8 +2290,7 @@ private fun SwipeableThumbBox(
         }
         if (!blurNsfw) {
             if (item.isVideo) {
-                Icon(Icons.Filled.PlayArrow, contentDescription = "Video", tint = Color.White.copy(0.9f),
-                    modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(18.dp))
+                VideoCoverBadge(modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp))
             }
             MultiImageCountBadge(count = item.mediaGroup.size, currentPage = pagerState.currentPage, modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp))
         }
@@ -2562,6 +2618,62 @@ private fun MultiImageCountBadge(count: Int, currentPage: Int = 0, modifier: Mod
             .padding(horizontal = 5.dp, vertical = 2.dp)
     ) {
         Text("${currentPage + 1}/$count", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/** Customize Hub → a list row in "Posts" mode: one post as a rounded,
+ *  outlined tile at its full aspect ratio, every tile the same [height]
+ *  (width follows the aspect ratio) — the profile Pinterest grid's tile,
+ *  just laid out in a row. Text posts get a small fixed-shape text card. */
+@Composable
+fun HubPostTile(item: MediaItem, tint: Color, liquidGlass: Boolean, height: Dp, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
+    if (item.isTextOnly && !item.isEmojiTextshot) {
+        val authorTint = if (item.author.did.isNotBlank()) rememberAuthorProfileTint(item.author.did, item.author.avatarUrl) else tint
+        val tap = rememberHapticTap()
+        Box(
+            Modifier.width(hubPostTileWidth(item, height)).height(height)
+                .then(
+                    if (liquidGlass) Modifier.glassPanel(true, tint = authorTint, shape = shape)
+                    else Modifier.clip(shape).background(Color.White.copy(0.06f))
+                )
+                .clip(shape)
+                .clickable { tap(); onClick() }
+                .padding(10.dp)
+        ) {
+            Text(
+                item.text, color = Color.White.copy(0.92f), fontSize = 10.sp, lineHeight = 13.sp,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    } else if (item.isEmojiTextshot) {
+        Box(Modifier.width(hubPostTileWidth(item, height)).height(height)) {
+            CompactTextPostBubble(item = item, liquidGlass = liquidGlass, tint = tint, shape = shape, onOpen = onClick)
+        }
+    } else {
+        ThumbBox(
+            item, tint, shape,
+            Modifier.width(hubPostTileWidth(item, height)).height(height),
+            liquidGlass, playIconSize = 16.dp, onClick = onClick
+        )
+    }
+}
+
+/** How wide [HubPostTile] draws [item] at [height]. */
+fun hubPostTileWidth(item: MediaItem, height: Dp): Dp = height * item.tileAspectRatio().coerceIn(0.5f, 1.9f)
+
+/** The video marker on a post's cover: bottom-right, on the same dark
+ *  rounded backing as [MultiImageCountBadge]. */
+@Composable
+private fun VideoCoverBadge(modifier: Modifier = Modifier, iconSize: Dp = 14.dp) {
+    Box(
+        modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(Color.Black.copy(alpha = 0.55f))
+            .padding(horizontal = 3.dp, vertical = 1.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(Icons.Filled.PlayArrow, contentDescription = "Video", tint = Color.White, modifier = Modifier.size(iconSize))
     }
 }
 
@@ -3335,7 +3447,20 @@ private fun BlogDetailOverlay(
             }
         }
 
-        // ── Interaction bar (like the profile's) ──
+        // Back: a round button level with the camera-notch bubble, on the
+        // far left, lined up with the text's left edge.
+        val notchY = rememberNotchCenterY()
+        val backSize = 40.dp
+        RoundBackButton(
+            liquidGlass = liquidGlass, tint = bubbleTint, backdrop = backdrop, onClick = onClose,
+            size = backSize,
+            modifier = Modifier.align(Alignment.TopStart)
+                .padding(start = 20.dp)
+                .offset(y = (notchY - backSize / 2).coerceAtLeast(4.dp))
+        )
+
+        // ── Interaction bar (like the profile's) — your own blogs only,
+        // for Edit/Delete. ──
         val barShape = RoundedCornerShape(26.dp)
         val pillHeight = if (liquidGlass) 44.dp else 36.dp
         @Composable
@@ -3348,10 +3473,6 @@ private fun BlogDetailOverlay(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                // Close (replaces the old top-left X).
-                BarIcon(onClick = onClose) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(21.dp))
-                }
                 if (isOwn) BarIcon(onClick = { onEdit(blog) }) {
                     Icon(Icons.Default.Edit, contentDescription = "Edit blog", tint = Color.White, modifier = Modifier.size(20.dp))
                 }
@@ -3360,9 +3481,7 @@ private fun BlogDetailOverlay(
                 }
             }
         }
-        // The shared interaction bar: Close (and, on your own blog,
-        // Edit/Delete).
-        Box(
+        if (isOwn) Box(
             Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navigationBars)
                 .height(if (liquidGlass) 60.dp else 52.dp).fillMaxWidth(),
             contentAlignment = Alignment.Center
@@ -3877,9 +3996,21 @@ fun TitleDetailOverlay(
     onPostReviewComment: (PopfeedReview, String) -> Unit = { _, _ -> },
     // Item 9: which review (if any) currently open belongs to me.
     selfDid: String = "",
-    onDeleteReview: (PopfeedReview) -> Unit = {}
+    onDeleteReview: (PopfeedReview) -> Unit = {},
+    // Backlog/Remove button: whether this title is in your Popfeed backlog.
+    backlogState: MainViewModel.TitleBacklogState? = null,
+    onCheckBacklog: (TitleSearchResult) -> Unit = {},
+    onToggleBacklog: (TitleSearchResult) -> Unit = {}
 ) {
     val tint = rememberDominantColor(title.posterUrl ?: title.backdropUrl ?: "")
+    LaunchedEffect(title.id, title.title) { onCheckBacklog(title) }
+    // "Backlog" to add it, "Remove" once it's in your backlog; "…" while
+    // that's being checked or changed. Null = not signed in (no button).
+    val backlogLabel: String? = if (selfDid.isBlank()) null else when {
+        backlogState == null || backlogState.checking || backlogState.busy -> "…"
+        backlogState.listItemUri != null -> "Remove"
+        else -> "Backlog"
+    }
     val uriHandler = LocalUriHandler.current
 
     // Item 9/11: the exact same live "record what's actually drawn behind
@@ -4119,7 +4250,10 @@ fun TitleDetailOverlay(
             // ── Fixed bottom bar (item 3/12) ────────────────────────────
             val currentReview = reviews.getOrNull(selectedIndex - 1)
             if (selectedIndex == 0 || currentReview == null) {
-                TitleReviewBar(liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, onClick = { onOpenReview(title) })
+                TitleReviewBar(
+                    liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, onClick = { onOpenReview(title) },
+                    backlogLabel = backlogLabel, onBacklog = { onToggleBacklog(title) }
+                )
             } else {
                 var showCommentBox by remember(currentReview.review.uri) { mutableStateOf(false) }
                 val social = reviewSocial[currentReview.review.uri]
@@ -4138,7 +4272,9 @@ fun TitleDetailOverlay(
                         onLike = { onToggleReviewLike(currentReview.review) },
                         onReview = { onOpenReview(title) },
                         onComment = { showCommentBox = !showCommentBox },
-                        onDelete = { onDeleteReview(currentReview.review) }
+                        onDelete = { onDeleteReview(currentReview.review) },
+                        backlogLabel = backlogLabel,
+                        onBacklog = { onToggleBacklog(title) }
                     )
                 }
             }
@@ -4396,27 +4532,35 @@ private fun ReviewPanel(fr: FriendPopfeedReview, social: MainViewModel.ReviewSoc
  *  mirrors) instead of its own bespoke 46dp/20dp-radius version, so the two
  *  actually match. */
 @Composable
-private fun TitleReviewBar(liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, onClick: () -> Unit) {
+private fun TitleReviewBar(
+    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, onClick: () -> Unit,
+    /** "Backlog"/"Remove"/"…" for the pill on the right of Review; null hides it. */
+    backlogLabel: String? = null,
+    onBacklog: () -> Unit = {}
+) {
     val shape = RoundedCornerShape(26.dp)
     // Fix 9: the shared light tap, via the shared helper.
     val tap = rememberHapticTap()
-    Box(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).height(60.dp)) {
+    @Composable
+    fun RowScope.Pill(label: String, weight: Float, textColor: Color, onPillClick: () -> Unit) {
+        val m = Modifier.weight(weight).fillMaxHeight().clickable(onClick = { tap(); onPillClick() })
         if (liquidGlass) {
-            LiquidGlassSurface(
-                Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp).clickable(onClick = { tap(); onClick() }),
-                shape = shape, tint = tint, backdrop = backdrop
-            ) {
+            LiquidGlassSurface(m, shape = shape, tint = tint, backdrop = backdrop) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("Review", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text(label, color = textColor, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
         } else {
-            Box(
-                Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp).clip(shape)
-                    .background(Color.White.copy(0.10f)).clickable(onClick = { tap(); onClick() }),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("Review", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Box(m.clip(shape).background(Color.White.copy(0.10f)), contentAlignment = Alignment.Center) {
+                Text(label, color = textColor, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+    }
+    Box(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).height(60.dp).padding(horizontal = 12.dp, vertical = 8.dp)) {
+        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Pill("Review", 2f, Color.White, onClick)
+            if (backlogLabel != null) {
+                Pill(backlogLabel, 1f, if (backlogLabel == "Remove") Color(0xFFFF6B6B) else Color.White, onBacklog)
             }
         }
     }
@@ -4432,7 +4576,10 @@ private fun TitleReviewBar(liquidGlass: Boolean, tint: Color, backdrop: GlassBac
 @Composable
 private fun LikeReviewCommentBar(
     liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, likedByMe: Boolean, isOwnReview: Boolean,
-    onLike: () -> Unit, onReview: () -> Unit, onComment: () -> Unit, onDelete: () -> Unit
+    onLike: () -> Unit, onReview: () -> Unit, onComment: () -> Unit, onDelete: () -> Unit,
+    /** "Backlog"/"Remove"/"…" — the segment after Comment; null hides it. */
+    backlogLabel: String? = null,
+    onBacklog: () -> Unit = {}
 ) {
     val shape = RoundedCornerShape(26.dp)
     // Fix 9: the shared light tap, via the shared helper.
@@ -4455,6 +4602,7 @@ private fun LikeReviewCommentBar(
             Segment("Like", if (likedByMe) Color(0xFFFF4D6D) else Color.White, onLike)
             Segment("Review", Color.White, onReview)
             Segment("Comment", Color.White, onComment)
+            if (backlogLabel != null) Segment(backlogLabel, if (backlogLabel == "Remove") Color(0xFFFF6B6B) else Color.White, onBacklog)
             if (isOwnReview) Segment("Delete", Color(0xFFFF6B6B), onDelete)
         }
     }
@@ -4536,7 +4684,10 @@ fun PostKindFilter.hasGridLayouts(): Boolean = isMasonryKind() || isListKind()
 /** Profile-style main tab row (the big pills), for arbitrary labels. */
 @Composable
 fun ProfileStyleTabRow(
-    labels: List<String>, selectedIndex: Int, liquidGlass: Boolean, tint: Color, onSelect: (Int) -> Unit
+    labels: List<String>, selectedIndex: Int, liquidGlass: Boolean, tint: Color,
+    /** Popups: each tab bubble gets the same dim backing as the popup's other bubbles. */
+    shadowed: Boolean = false,
+    onSelect: (Int) -> Unit
 ) {
     val tap = rememberHapticTap()
     Row(
@@ -4551,6 +4702,7 @@ fun ProfileStyleTabRow(
             val shape = RoundedCornerShape(20.dp)
             Box(
                 Modifier
+                    .then(if (shadowed) Modifier.popupTextShadow(shape) else Modifier)
                     .then(
                         if (liquidGlass) Modifier.glassPanel(true, tint = if (isSelected) tint else tint.copy(alpha = 0.4f), shape = shape)
                         else Modifier.clip(shape).background(if (isSelected) Color.White.copy(0.15f) else Color.White.copy(0.06f))

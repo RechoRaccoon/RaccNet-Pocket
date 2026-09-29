@@ -802,17 +802,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val items = filterHidden(_history.value.map { it.toMediaItem() })
         if (items.isEmpty()) { showToast("No history yet"); return }
         _currentIndex.value = 0
-        if (_authorFeedState.value == null) {
-            _authorFeedState.value = AuthorFeedSavedState(
-                author = AuthorInfo(_bskyDid.value, bskyHandle, "History", null),
-                items = _mediaItems.value, currentIndex = _currentIndex.value, cursor = feedCursor, feedUri = _selectedFeedUri.value
-            )
-        }
+        enterSpecialFeed("History")
         feedCursor = null
         activeFeedMode = ActiveFeedMode.HISTORY
         activeFeedActorDid = null
         _mediaItems.value = items
         _screenState.value = ScreenState.FEED
+    }
+
+    /** Switching into Saved Posts / From Friends / History: remembers the
+     *  feed to come back to (only the first time — the original feed stays
+     *  saved when hopping between these), and always relabels the header to
+     *  the one now showing. It used to keep whichever label came first, so
+     *  From Friends → Saved Posts still said "From Friends". */
+    private fun enterSpecialFeed(label: String) {
+        val cur = _authorFeedState.value
+        val author = AuthorInfo(_bskyDid.value, bskyHandle, label, null)
+        _authorFeedState.value = if (cur == null) {
+            AuthorFeedSavedState(
+                author = author, items = _mediaItems.value, currentIndex = _currentIndex.value,
+                cursor = feedCursor, feedUri = _selectedFeedUri.value
+            )
+        } else if (cur.author.displayName == label && cur.author.did == author.did) cur
+        else cur.copy(author = author)
     }
 
     // ── Saves / Bookmarks (Settings Update) ─────────────────────────────────────
@@ -821,12 +833,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             _isLoading.value = true
             _currentIndex.value = 0
-            if (_authorFeedState.value == null) {
-                _authorFeedState.value = AuthorFeedSavedState(
-                    author = AuthorInfo(_bskyDid.value, bskyHandle, "Saved Posts", null),
-                    items = _mediaItems.value, currentIndex = _currentIndex.value, cursor = feedCursor, feedUri = _selectedFeedUri.value
-                )
-            }
+            enterSpecialFeed("Saved Posts")
             var result = bskyRepo.getBookmarkedPosts(bskyToken)
             if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
                 if (refreshBskyTokenIfPossible()) result = bskyRepo.getBookmarkedPosts(bskyToken)
@@ -2468,6 +2475,118 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         loadFriendsReviewsIfNeeded(force = true)
     }
 
+    /** Settings → Dev Tools → "Force Refresh Hub": reloads every Hub row —
+     *  Mutuals, Reviews/Blogs, Livestreams, the feed list, your profile and
+     *  any Hub lists — ignoring what's already loaded. */
+    fun forceRefreshHub() {
+        if (!_bskyLoggedIn.value) return
+        tapHaptic()
+        refreshHub()
+        refreshBlueskyLiveNow()
+        liveFriendsLoaded = false
+        loadLiveFriendsIfNeeded()
+        loadAvailableFeeds()
+        loadSelfProfile()
+        com.mediaviewer.util.HubLayout.rows.filter { it.isList && it.enabled }.forEach { row ->
+            row.listUri?.let { loadHubListIfNeeded(it, force = true) }
+        }
+        showToast("Refreshing the Hub…")
+    }
+
+    // ── Customize Hub: list rows ─────────────────────────────────────────────
+    /** One Hub list row's loaded content (see BlueskyRepository.getHubListContent). */
+    data class HubListState(
+        val loading: Boolean = false,
+        val members: List<AuthorInfo> = emptyList(),
+        val posts: List<MediaItem> = emptyList(),
+        val loadedAt: Long = 0L,
+        val failed: Boolean = false
+    )
+    private val _hubLists = MutableStateFlow<Map<String, HubListState>>(emptyMap())
+    val hubLists: StateFlow<Map<String, HubListState>> = _hubLists
+    private val hubListLock = Any()
+
+    private fun setHubList(uri: String, transform: (HubListState) -> HubListState) {
+        synchronized(hubListLock) {
+            val map = _hubLists.value
+            _hubLists.value = map + (uri to transform(map[uri] ?: HubListState()))
+        }
+    }
+
+    /** Loads a Hub list row (members + their latest posts) from the AppView.
+     *  Kept for 5 minutes unless [force]d. */
+    fun loadHubListIfNeeded(uri: String, force: Boolean = false) {
+        if (!_bskyLoggedIn.value || uri.isBlank()) return
+        synchronized(hubListLock) {
+            val cur = _hubLists.value[uri]
+            if (cur?.loading == true) return
+            if (!force && cur != null && System.currentTimeMillis() - cur.loadedAt < 5 * 60_000L) return
+            _hubLists.value = _hubLists.value + (uri to (cur ?: HubListState()).copy(loading = true))
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            var result = bskyRepo.getHubListContent(bskyToken, _bskyDid.value, uri)
+            if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
+                if (refreshBskyTokenIfPossible()) result = bskyRepo.getHubListContent(bskyToken, _bskyDid.value, uri)
+            }
+            result.onSuccess { content ->
+                setHubList(uri) {
+                    HubListState(loading = false, members = content.members, posts = filterHidden(content.posts), loadedAt = System.currentTimeMillis())
+                }
+            }.onFailure {
+                setHubList(uri) { it.copy(loading = false, failed = true, loadedAt = System.currentTimeMillis()) }
+            }
+        }
+    }
+
+    /** Customize Hub → Add → one of your lists. */
+    fun addHubList(uri: String, name: String) {
+        com.mediaviewer.util.HubLayout.addList(uri, name)
+        loadHubListIfNeeded(uri, force = true)
+    }
+
+    /** Customize Hub → Add → Other → a pasted list link. [onDone] gets null
+     *  on success or an error message. */
+    fun addHubListFromUrl(url: String, onDone: (String?) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = bskyRepo.resolveListUrl(url)
+            withContext(Dispatchers.Main) {
+                result.onSuccess { (uri, name) -> addHubList(uri, name); onDone(null) }
+                    .onFailure { onDone(it.message ?: "Couldn't add that list") }
+            }
+        }
+    }
+
+    /** Customize Hub's list picker: makes sure your own lists are loaded. */
+    fun ensureUserListsLoaded() {
+        if (!_bskyLoggedIn.value || _userLists.value.isNotEmpty() || _userListsLoading.value) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _userListsLoading.value = true
+            bskyRepo.getUserLists(bskyToken, _bskyDid.value).onSuccess { _userLists.value = it }
+            _userListsLoading.value = false
+        }
+    }
+
+    /** Tapping a post in a Hub list row: opens that row's posts in the
+     *  timeline at [index], titled with the list's name. */
+    fun openHubListPost(listUri: String, name: String, index: Int) {
+        val items = _hubLists.value[listUri]?.posts ?: return
+        if (index !in items.indices) return
+        val author = AuthorInfo(_bskyDid.value, HUB_LIST_FEED_HANDLE_PREFIX + listUri, name.ifBlank { "List" }, null)
+        val cur = _authorFeedState.value
+        _authorFeedState.value = cur?.copy(author = author) ?: AuthorFeedSavedState(
+            author = author, items = _mediaItems.value, currentIndex = _currentIndex.value,
+            cursor = feedCursor, feedUri = _selectedFeedUri.value
+        )
+        feedCursor = null
+        // Fully loaded up front — no paging (same as History).
+        activeFeedMode = ActiveFeedMode.HISTORY
+        activeFeedActorDid = null
+        _mediaItems.value = items
+        _currentIndex.value = index
+        _navDirection.value = 0
+        _screenState.value = ScreenState.FEED
+    }
+
     // ── Item 8/19: Hub "Livestreams" section ─────────────────────────────────
     // Live status confirmed against the real place.stream.live.getLiveUsers
     // lexicon (see StreamplaceRepository.getLiveFriends) — unlike VODs, which
@@ -3576,24 +3695,35 @@ _bskyDid.value          = session.did
         // Item 16: "Listening to ..." bio line — this profile's live
         // now-playing state, if any (most accounts have nothing playing, or
         // no Rocksky connection at all — both are a normal null result).
-        viewModelScope.launch(Dispatchers.IO) {
-            // Item 20: official now-playing first; otherwise inferred from
-            // the latest scrobble's start time + song length. An inferred
-            // status is re-checked when that song should end (the next song
-            // may have started), for as long as this profile stays open.
-            var track = rockskyRepo.getNowPlaying(author.did) ?: rockskyRepo.inferNowPlaying(author.did)
+        nowPlayingJob?.cancel()
+        nowPlayingJob = viewModelScope.launch(Dispatchers.IO) {
+            // Official now-playing first. Otherwise (the usual case) the
+            // latest scrobble counts as "Listening to" for 5 minutes from
+            // when it started (see RockskyRepository.inferNowPlaying). While
+            // the profile stays open the history is re-checked every 30s, so
+            // a newer song replaces it and the status clears on time.
+            val official = rockskyRepo.getNowPlaying(author.did)
+            if (official != null) {
+                _profileOverlay.value?.takeIf { it.author.did == author.did }?.let { _profileOverlay.value = it.copy(nowPlaying = official) }
+                return@launch
+            }
             var checks = 0
             while (true) {
+                val inferred = rockskyRepo.inferNowPlaying(author.did)
                 val cur = _profileOverlay.value?.takeIf { it.author.did == author.did } ?: return@launch
-                _profileOverlay.value = cur.copy(nowPlaying = track)
-                val endsAt = track?.endsAtMs ?: 0L
-                if (endsAt <= 0L || ++checks > 40) return@launch
-                delay((endsAt - System.currentTimeMillis()).coerceIn(5_000L, 15 * 60_000L))
+                if (cur.nowPlaying != inferred.track) _profileOverlay.value = cur.copy(nowPlaying = inferred.track)
+                // No Music History at all: nothing to keep watching.
+                if (!inferred.hasHistory || ++checks > 240) return@launch
+                val endsAt = inferred.track?.endsAtMs ?: 0L
+                val wait = if (endsAt > 0L) (endsAt - System.currentTimeMillis()).coerceIn(1_000L, 30_000L) else 30_000L
+                delay(wait)
                 if (_profileOverlay.value?.author?.did != author.did) return@launch
-                track = rockskyRepo.inferNowPlaying(author.did)
             }
         }
     }
+
+    /** The open profile's "Listening to" watcher (one at a time). */
+    private var nowPlayingJob: kotlinx.coroutines.Job? = null
 
     /** Profile page "Refresh" button: re-fetches the open profile in place —
      *  header/counts, the selected tab, and the tab probes — without
@@ -3963,7 +4093,8 @@ _bskyDid.value          = session.did
         id = review.imdbId?.let { "imdb:$it" } ?: review.uri,
         title = review.mediaTitle, posterUrl = review.mediaImageUrl, backdropUrl = review.mediaBackdropUrl,
         releaseDate = review.releaseDate, creator = review.mainCredit, creatorRole = review.mainCreditRole,
-        genres = review.genres, mediaCategory = review.mediaCategory
+        genres = review.genres, mediaCategory = review.mediaCategory,
+        identifiersJson = review.identifiersJson
     )
 
     /** Same "patch in a Wikipedia synopsis a moment after the page opens"
@@ -4125,7 +4256,8 @@ _bskyDid.value          = session.did
                 id = item.uri, title = item.title, posterUrl = item.imageUrl,
                 backdropUrl = item.mediaBackdropUrl, mediaCategory = item.mediaCategory,
                 releaseDate = item.releaseDate, creator = item.mainCredit,
-                creatorRole = item.mainCreditRole, genres = item.genres
+                creatorRole = item.mainCreditRole, genres = item.genres,
+                identifiersJson = item.identifiersJson ?: item.imdbId?.let { """{"imdbId":"$it"}""" }
             )
         )
         viewModelScope.launch(Dispatchers.IO) {
@@ -4137,6 +4269,67 @@ _bskyDid.value          = session.did
             }
         }
     }
+    // ── Backlog button (review page + title page) ────────────────────────────
+    /** Whether the open title is in the signed-in account's Popfeed backlog
+     *  ([listItemUri] non-null = yes), for the Backlog/Remove button. */
+    data class TitleBacklogState(
+        val key: String,
+        val checking: Boolean = true,
+        val busy: Boolean = false,
+        val listItemUri: String? = null
+    )
+    private val _titleBacklog = MutableStateFlow<TitleBacklogState?>(null)
+    val titleBacklog: StateFlow<TitleBacklogState?> = _titleBacklog
+
+    private fun backlogKey(title: TitleSearchResult) = title.id + "|" + title.title
+
+    /** Looks up whether [title] is already in your backlog (so the button
+     *  shows "Remove" instead of "Backlog"). */
+    fun checkTitleBacklog(title: TitleSearchResult) {
+        if (!_bskyLoggedIn.value) return
+        val key = backlogKey(title)
+        val cur = _titleBacklog.value
+        if (cur != null && cur.key == key && (cur.checking || cur.busy)) return
+        _titleBacklog.value = TitleBacklogState(key, checking = true, listItemUri = cur?.takeIf { it.key == key }?.listItemUri)
+        viewModelScope.launch(Dispatchers.IO) {
+            val uri = runCatching { bskyRepo.findPopfeedBacklogItem(_bskyDid.value, title) }.getOrNull()
+            if (_titleBacklog.value?.key == key) _titleBacklog.value = TitleBacklogState(key, checking = false, listItemUri = uri)
+        }
+    }
+
+    /** Backlog → adds [title] to your Popfeed backlog; Remove → takes it off. */
+    fun toggleTitleBacklog(title: TitleSearchResult) {
+        val key = backlogKey(title)
+        val cur = _titleBacklog.value?.takeIf { it.key == key } ?: return
+        if (cur.checking || cur.busy) return
+        tapHaptic()
+        _titleBacklog.value = cur.copy(busy = true)
+        viewModelScope.launch(Dispatchers.IO) {
+            val existing = cur.listItemUri
+            if (existing != null) {
+                bskyRepo.removeBacklogListItem(bskyToken, _bskyDid.value, existing)
+                    .onSuccess {
+                        if (_titleBacklog.value?.key == key) _titleBacklog.value = TitleBacklogState(key, checking = false, listItemUri = null)
+                        showToast("Removed from your backlog")
+                    }
+                    .onFailure {
+                        if (_titleBacklog.value?.key == key) _titleBacklog.value = cur.copy(busy = false)
+                        _errorMessage.value = "Couldn't remove it: ${it.message}"
+                    }
+            } else {
+                bskyRepo.addToPopfeedBacklog(bskyToken, _bskyDid.value, title)
+                    .onSuccess { uri ->
+                        if (_titleBacklog.value?.key == key) _titleBacklog.value = TitleBacklogState(key, checking = false, listItemUri = uri)
+                        showToast("Added to your backlog")
+                    }
+                    .onFailure {
+                        if (_titleBacklog.value?.key == key) _titleBacklog.value = cur.copy(busy = false)
+                        _errorMessage.value = "Couldn't add it to your backlog: ${it.message}"
+                    }
+            }
+        }
+    }
+
     fun closeProfileTitle() {
         val cur = _profileOverlay.value ?: return
         if (cur.standaloneDetail) closeStandaloneDetail()
@@ -4388,15 +4581,7 @@ _bskyDid.value          = session.did
 
     private fun openFriendsFeed(items: List<MediaItem>) {
         _currentIndex.value = 0
-        if (_authorFeedState.value == null) {
-            _authorFeedState.value = AuthorFeedSavedState(
-                author       = AuthorInfo(_bskyDid.value, bskyHandle, "From Friends", null),
-                items        = _mediaItems.value,
-                currentIndex = _currentIndex.value,
-                cursor       = feedCursor,
-                feedUri      = _selectedFeedUri.value
-            )
-        }
+        enterSpecialFeed("From Friends")
         if (items.isEmpty()) {
             // Nothing to show — undo the overlay save and bounce back to Settings
             _authorFeedState.value = null
@@ -4417,15 +4602,7 @@ _bskyDid.value          = session.did
      *  posts load — no loading screen, no old feed showing in the meantime. */
     private fun beginFriendsFeedLoad() {
         _currentIndex.value = 0
-        if (_authorFeedState.value == null) {
-            _authorFeedState.value = AuthorFeedSavedState(
-                author       = AuthorInfo(_bskyDid.value, bskyHandle, "From Friends", null),
-                items        = _mediaItems.value,
-                currentIndex = _currentIndex.value,
-                cursor       = feedCursor,
-                feedUri      = _selectedFeedUri.value
-            )
-        }
+        enterSpecialFeed("From Friends")
         feedLoadGeneration++
         feedCursor = null
         activeFeedMode = ActiveFeedMode.FRIENDS
@@ -4623,6 +4800,76 @@ _bskyDid.value          = session.did
                         _mediaItems.value = _mediaItems.value.map {
                             if (it.author.did == targetDid) it.copy(isBlocked = true, blockUri = uri) else it
                         }
+                    }
+                    .onFailure { _errorMessage.value = "Block failed: ${it.message}" }
+            }
+        }
+    }
+
+    /** A bsky.app/profile/<handle or DID> link opened with Stellar (see
+     *  MainActivity's intent filter): looks the account up and opens its
+     *  profile page. */
+    fun openProfileFromLink(actor: String) {
+        if (!_bskyLoggedIn.value || actor.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            var result = bskyRepo.getFullProfile(bskyToken, actor)
+            if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
+                if (refreshBskyTokenIfPossible()) result = bskyRepo.getFullProfile(bskyToken, actor)
+            }
+            result.onSuccess { p ->
+                withContext(Dispatchers.Main) {
+                    // Any popup/overlay that would sit on top of it is closed first.
+                    _searchOpen.value = false
+                    _dmInboxOpen.value = false
+                    _inboxOpen.value = false
+                    openProfile(p.author)
+                }
+            }.onFailure { showToast("Couldn't open @$actor") }
+        }
+    }
+
+    /** Profile interaction bar → Block: the same block/unblock the
+     *  timeline's Block does, for the profile's own account. */
+    fun toggleBlockProfile(author: AuthorInfo) {
+        if (!_bskyLoggedIn.value || author.did.isBlank() || author.did == _bskyDid.value) return
+        tapHaptic()
+        val targetDid = author.did
+        fun markProfile(blocked: Boolean) {
+            val cur = _profileOverlay.value
+            if (cur != null && cur.author.did == targetDid) {
+                _profileOverlay.value = cur.copy(profile = cur.profile?.let { p -> p.copy(blockedEitherWay = blocked || p.blocksYou) })
+            }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            if (com.mediaviewer.util.BlockedAccounts.isBlocking(targetDid)) {
+                val uri = com.mediaviewer.util.BlockedAccounts.blockUriFor(targetDid) ?: run {
+                    // Not known yet: the profile view carries it.
+                    bskyRepo.getFullProfile(bskyToken, targetDid)
+                    com.mediaviewer.util.BlockedAccounts.blockUriFor(targetDid)
+                }
+                if (uri == null) { _errorMessage.value = "Couldn't unblock @${author.handle}"; return@launch }
+                bskyRepo.unblockUser(bskyToken, _bskyDid.value, uri)
+                    .onSuccess {
+                        showToast("Unblocked @${author.handle}")
+                        com.mediaviewer.util.BlockedAccounts.removeBlocking(targetDid)
+                        _blockedAccounts.value = _blockedAccounts.value.filterNot { it.author.did == targetDid }
+                        _mediaItems.value = _mediaItems.value.map {
+                            if (it.author.did == targetDid) it.copy(isBlocked = false, blockUri = null) else it
+                        }
+                        markProfile(false)
+                    }
+                    .onFailure { _errorMessage.value = "Unblock failed: ${it.message}" }
+            } else {
+                bskyRepo.blockUser(bskyToken, _bskyDid.value, targetDid)
+                    .onSuccess { uri ->
+                        showToast("Blocked @${author.handle}")
+                        com.mediaviewer.util.BlockedAccounts.addBlocking(targetDid, uri)
+                        _blockedAccounts.value = listOf(BlockedAccount(author, uri)) +
+                            _blockedAccounts.value.filterNot { it.author.did == targetDid }
+                        _mediaItems.value = _mediaItems.value.map {
+                            if (it.author.did == targetDid) it.copy(isBlocked = true, blockUri = uri) else it
+                        }
+                        markProfile(true)
                     }
                     .onFailure { _errorMessage.value = "Block failed: ${it.message}" }
             }
@@ -5472,7 +5719,11 @@ _bskyDid.value          = session.did
                 } else {
                     if (_listMemberships.value.containsKey(uri)) continue
                     bskyRepo.addToList(bskyToken, _bskyDid.value, uri, targetDid)
-                        .onSuccess { itemUri -> _listMemberships.value = _listMemberships.value + (uri to itemUri) }
+                        .onSuccess { itemUri ->
+                            _listMemberships.value = _listMemberships.value + (uri to itemUri)
+                            // Add To sorts by most recently added-to (on-device only).
+                            com.mediaviewer.util.ListRecency.noteAdded(uri)
+                        }
                         .onFailure { failed = "Couldn't add them: ${it.message}" }
                 }
             }
@@ -5569,7 +5820,7 @@ _bskyDid.value          = session.did
         _listPickerTargetDid.value = null
         viewModelScope.launch(Dispatchers.IO) {
             bskyRepo.addToList(bskyToken, _bskyDid.value, listUri, targetDid)
-                .onSuccess { showToast("Added to list") }
+                .onSuccess { com.mediaviewer.util.ListRecency.noteAdded(listUri); showToast("Added to list") }
                 .onFailure { _errorMessage.value = "Add to list failed: ${it.message}" }
             if (additionalListUri != null) {
                 bskyRepo.addToList(bskyToken, _bskyDid.value, additionalListUri, targetDid)
@@ -5740,6 +5991,7 @@ _bskyDid.value          = session.did
     }
 
     fun setReducedAnimations(enabled: Boolean) {
+        _reducedAnimations.value = enabled
         viewModelScope.launch { prefs.setReducedAnimations(enabled) }
     }
 
