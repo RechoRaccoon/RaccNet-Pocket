@@ -73,81 +73,90 @@ fun ProfileQrScreen(
     Box(Modifier.fillMaxSize().background(Color.Black).blockClicksBehind()) {
         SpaceSky(Color.Black, Modifier.matchParentSize())
         BoxWithConstraints(Modifier.fillMaxSize()) {
-            val qrSize = maxWidth
-            Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
-                Spacer(Modifier.height(rememberTopCutoutClearance() + 40.dp))
-                Spacer(Modifier.weight(1f))
-                // The logo sits right on top of the QR code, balancing the
-                // name/handle underneath it.
+            // The QR code sits dead center on the screen; the logo fills the
+            // space above it (anchored to its top edge) and the name/handle
+            // the space below it.
+            val qrSize = minOf(maxWidth, maxHeight * 0.6f)
+            val half = ((maxHeight - qrSize) / 2).coerceAtLeast(0.dp)
+            Column(
+                Modifier.align(Alignment.TopCenter).fillMaxWidth().height(half),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Bottom
+            ) {
                 Image(
                     painterResource(R.drawable.stellar_logo_vector), contentDescription = "Stellar",
                     modifier = Modifier.width((qrSize * 0.6f).coerceAtMost(300.dp))
                 )
                 Spacer(Modifier.height(10.dp))
-                Box(Modifier.size(qrSize), contentAlignment = Alignment.Center) {
-                    if (matrix != null) {
-                        Canvas(Modifier.matchParentSize()) {
-                            val n = matrix.size
-                            val quiet = 1
-                            val cell = size.width / (n + quiet * 2)
-                            val brush = Brush.linearGradient(listOf(start, end), start = Offset.Zero, end = Offset(size.width, size.height))
-                            // Space kept clear for the avatar (with a one-dot margin).
-                            val logoModules = (n * 0.24f).toInt().let { if (it % 2 == n % 2) it else it + 1 }.coerceAtLeast(5)
-                            val logoStart = (n - logoModules) / 2
-                            val logoEnd = logoStart + logoModules
-                            fun inFinder(x: Int, y: Int) =
-                                (x < 7 && y < 7) || (x >= n - 7 && y < 7) || (x < 7 && y >= n - 7)
-                            val dot = cell * 0.86f
-                            val inset = (cell - dot) / 2f
-                            for (y in 0 until n) for (x in 0 until n) {
-                                if (!matrix[y][x] || inFinder(x, y)) continue
-                                if (x in logoStart until logoEnd && y in logoStart until logoEnd) continue
-                                drawRoundRect(
-                                    brush = brush,
-                                    topLeft = Offset((x + quiet) * cell + inset, (y + quiet) * cell + inset),
-                                    size = Size(dot, dot),
-                                    cornerRadius = CornerRadius(dot * 0.42f, dot * 0.42f)
-                                )
-                            }
-                            // The three corner "eyes": a rounded ring with a rounded center.
-                            listOf(0 to 0, n - 7 to 0, 0 to n - 7).forEach { (fx, fy) ->
-                                val ox = (fx + quiet) * cell
-                                val oy = (fy + quiet) * cell
-                                val ring = cell * 7
-                                drawRoundRect(
-                                    brush = brush,
-                                    topLeft = Offset(ox + cell / 2f, oy + cell / 2f),
-                                    size = Size(ring - cell, ring - cell),
-                                    cornerRadius = CornerRadius(cell * 2f, cell * 2f),
-                                    style = Stroke(width = cell)
-                                )
-                                drawRoundRect(
-                                    brush = brush,
-                                    topLeft = Offset(ox + cell * 2f, oy + cell * 2f),
-                                    size = Size(cell * 3f, cell * 3f),
-                                    cornerRadius = CornerRadius(cell * 1.1f, cell * 1.1f)
-                                )
-                            }
+            }
+            Box(Modifier.size(qrSize).align(Alignment.Center), contentAlignment = Alignment.Center) {
+                if (matrix != null) {
+                    Canvas(Modifier.matchParentSize()) {
+                        val n = matrix.size
+                        val quiet = 1
+                        val cell = size.width / (n + quiet * 2)
+                        val brush = Brush.linearGradient(listOf(start, end), start = Offset.Zero, end = Offset(size.width, size.height))
+                        // Space kept clear for the avatar (with a one-dot margin).
+                        val logoModules = (n * 0.24f).toInt().let { if (it % 2 == n % 2) it else it + 1 }.coerceAtLeast(5)
+                        val logoStart = (n - logoModules) / 2
+                        val logoEnd = logoStart + logoModules
+                        fun inFinder(x: Int, y: Int) =
+                            (x < 7 && y < 7) || (x >= n - 7 && y < 7) || (x < 7 && y >= n - 7)
+                        val dot = cell * 0.86f
+                        val inset = (cell - dot) / 2f
+                        for (y in 0 until n) for (x in 0 until n) {
+                            if (!matrix[y][x] || inFinder(x, y)) continue
+                            if (x in logoStart until logoEnd && y in logoStart until logoEnd) continue
+                            drawRoundRect(
+                                brush = brush,
+                                topLeft = Offset((x + quiet) * cell + inset, (y + quiet) * cell + inset),
+                                size = Size(dot, dot),
+                                cornerRadius = CornerRadius(dot * 0.42f, dot * 0.42f)
+                            )
                         }
-                        // The profile picture in the middle.
-                        val avatarSize = qrSize * 0.2f
-                        Box(
-                            Modifier.size(avatarSize).clip(CircleShape)
-                                .background(Color.Black)
-                                .border(2.dp, Brush.linearGradient(listOf(start, end)), CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (!author.avatarUrl.isNullOrBlank()) {
-                                AsyncImage(
-                                    model = author.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize().padding(3.dp).clip(CircleShape)
-                                )
-                            }
+                        // The three corner "eyes": a rounded ring with a rounded center.
+                        listOf(0 to 0, n - 7 to 0, 0 to n - 7).forEach { (fx, fy) ->
+                            val ox = (fx + quiet) * cell
+                            val oy = (fy + quiet) * cell
+                            val ring = cell * 7
+                            drawRoundRect(
+                                brush = brush,
+                                topLeft = Offset(ox + cell / 2f, oy + cell / 2f),
+                                size = Size(ring - cell, ring - cell),
+                                cornerRadius = CornerRadius(cell * 2f, cell * 2f),
+                                style = Stroke(width = cell)
+                            )
+                            drawRoundRect(
+                                brush = brush,
+                                topLeft = Offset(ox + cell * 2f, oy + cell * 2f),
+                                size = Size(cell * 3f, cell * 3f),
+                                cornerRadius = CornerRadius(cell * 1.1f, cell * 1.1f)
+                            )
                         }
-                    } else {
-                        Text("Couldn't make a QR code for this profile", color = Color.White.copy(0.7f), fontSize = 13.sp)
                     }
+                    // The profile picture in the middle.
+                    val avatarSize = qrSize * 0.2f
+                    Box(
+                        Modifier.size(avatarSize).clip(CircleShape)
+                            .background(Color.Black)
+                            .border(2.dp, Brush.linearGradient(listOf(start, end)), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (!author.avatarUrl.isNullOrBlank()) {
+                            AsyncImage(
+                                model = author.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize().padding(3.dp).clip(CircleShape)
+                            )
+                        }
+                    }
+                } else {
+                    Text("Couldn't make a QR code for this profile", color = Color.White.copy(0.7f), fontSize = 13.sp)
                 }
+            }
+            Column(
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(half),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
                 Spacer(Modifier.height(14.dp))
                 Text(
                     author.displayName.ifBlank { author.handle }, color = Color.White, fontSize = 18.sp,
@@ -158,7 +167,6 @@ fun ProfileQrScreen(
                     "@${author.handle}", color = lerp(end, Color.White, 0.3f), fontSize = 13.sp, maxLines = 1,
                     overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, modifier = Modifier.padding(horizontal = 24.dp)
                 )
-                Spacer(Modifier.weight(1f))
             }
         }
         RoundBackButton(

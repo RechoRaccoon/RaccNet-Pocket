@@ -1363,6 +1363,8 @@ internal fun AboutPageContent() {
                 },
                 fontSize = 12.sp, lineHeight = 16.sp
             )
+
+            Header("Special thanks")
             Line("Rose (SomeDudeGT)", "publishing builds on GitHub", rose)
 
             Header("AT Protocol")
@@ -1679,8 +1681,17 @@ private fun OpenLinksSetupDialog(liquidGlass: Boolean, tint: Color, onDismiss: (
     val tap = rememberHapticTap()
     androidx.compose.ui.window.Dialog(
         onDismissRequest = onDismiss,
-        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
     ) {
+        // Blurs (and dims) everything behind the popup.
+        val window = (androidx.compose.ui.platform.LocalView.current.parent as? androidx.compose.ui.window.DialogWindowProvider)?.window
+        LaunchedEffect(window) {
+            if (window != null && android.os.Build.VERSION.SDK_INT >= 31) runCatching {
+                window.addFlags(android.view.WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+                window.attributes = window.attributes.apply { blurBehindRadius = 48 }
+            }
+            window?.setDimAmount(0.45f)
+        }
         Box(
             Modifier.fillMaxSize().clickable(
                 interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
@@ -1707,8 +1718,8 @@ private fun OpenLinksSetupDialog(liquidGlass: Boolean, tint: Color, onDismiss: (
                         "Open Bluesky Links in Stellar", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
                         textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
                     )
-                    Step("1", "In Bluesky's settings, open \"Open by default\" and set supported links to open in your browser (turn off \"In the app\").")
-                    Step("2", "In Stellar's settings, open \"Open by default\", tap \"Add link\" and turn on bsky.app.")
+                    Step("1", "Tap Bluesky Settings and choose \"In your browser\".")
+                    Step("2", "Tap Stellar Settings, then \"Add link\" and turn on bsky.app.")
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         listOf("Bluesky Settings" to "xyz.blueskyweb.app", "Stellar Settings" to context.packageName).forEach { (label, pkg) ->
                             Box(

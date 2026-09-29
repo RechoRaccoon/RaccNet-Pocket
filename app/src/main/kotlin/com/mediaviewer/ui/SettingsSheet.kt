@@ -1558,7 +1558,13 @@ private fun HubListSection(
         val posts = state?.posts ?: emptyList()
         if (loading) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                repeat(3) { ShimmerBox(RoundedCornerShape(12.dp), Modifier.width(110.dp).height(HUB_BLOG_CARD_HEIGHT + 26.dp)) }
+                repeat(4) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        ShimmerBox(RoundedCornerShape(12.dp), Modifier.width(72.dp).height(20.dp))
+                        Spacer(Modifier.height(6.dp))
+                        ShimmerBox(RoundedCornerShape(14.dp), Modifier.size(HUB_BLOG_CARD_HEIGHT))
+                    }
+                }
             }
         } else if (posts.isEmpty()) {
             Text(
@@ -1569,7 +1575,9 @@ private fun HubListSection(
             // Scrolling near the end of the row loads the next page.
             val rowState = androidx.compose.foundation.lazy.rememberLazyListState()
             val latestLoadMore by rememberUpdatedState(onLoadMore)
-            LaunchedEffect(rowState, posts.size) {
+            // Re-armed whenever a page finishes (even one that added nothing
+            // new), so sitting at the end keeps pulling until the list ends.
+            LaunchedEffect(rowState, posts.size, state?.loadingMore, state?.postsCursor) {
                 snapshotFlow {
                     val info = rowState.layoutInfo
                     val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1

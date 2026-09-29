@@ -2573,12 +2573,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (refreshBskyTokenIfPossible()) result = bskyRepo.getHubListContent(bskyToken, _bskyDid.value, uri)
             }
             result.onSuccess { content ->
+                val posts = filterHidden(content.posts)
                 setHubList(uri) {
                     HubListState(
-                        loading = false, members = content.members, posts = filterHidden(content.posts),
+                        loading = false, members = content.members, posts = posts,
                         loadedAt = System.currentTimeMillis(), postsCursor = content.postsCursor
                     )
                 }
+                // Only a few posts on the first page: fill the row right away.
+                if (posts.size < HUB_LIST_BATCH && content.postsCursor != null) loadMoreHubList(uri)
             }.onFailure {
                 setHubList(uri) { it.copy(loading = false, failed = true, loadedAt = System.currentTimeMillis()) }
             }
@@ -2596,13 +2599,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             next
         }
         viewModelScope.launch(Dispatchers.IO) {
-            val result = bskyRepo.getHubListPostsPage(bskyToken, _bskyDid.value, uri, cursor)
-            result.onSuccess { (posts, next) ->
+            // A list feed page is 100 items, but after dropping reposts,
+            // replies (and text-only posts, if that's on) a page can leave
+            // only a handful — so keep reading pages until there's a useful
+            // batch of new posts, or the list runs out (max 6 pages a go).
+            var next: String? = cursor
+            var added = 0
+            var pages = 0
+            var failed = false
+            while (next != null && added < HUB_LIST_BATCH && pages < 6) {
+                val page = next ?: break
+                val result = bskyRepo.getHubListPostsPage(bskyToken, _bskyDid.value, uri, page)
+                val ok = result.getOrNull()
+                if (ok == null) { failed = true; break }
+                pages++
+                next = ok.second
+                val newCursor = next
                 setHubList(uri) { st ->
                     val known = st.posts.mapTo(HashSet()) { it.postUri }
-                    st.copy(posts = st.posts + filterHidden(posts).filter { it.postUri !in known }, postsCursor = next, loadingMore = false)
+                    val fresh = filterHidden(ok.first).filter { it.postUri !in known }
+                    added += fresh.size
+                    st.copy(posts = st.posts + fresh, postsCursor = newCursor)
                 }
-            }.onFailure { setHubList(uri) { it.copy(loadingMore = false) } }
+            }
+            setHubList(uri) { it.copy(loadingMore = false, postsCursor = if (failed) it.postsCursor else next) }
         }
     }
 
@@ -6870,3 +6890,6 @@ _bskyDid.value          = session.did
         }
     }
 }
+
+/** How many new posts a Hub list row pulls in per batch. */
+private const val HUB_LIST_BATCH = 12
