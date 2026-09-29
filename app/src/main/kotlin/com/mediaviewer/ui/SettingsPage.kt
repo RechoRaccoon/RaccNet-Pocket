@@ -77,6 +77,11 @@ data class SettingsExtras(
 
 // ── Shared building blocks ──────────────────────────────────────────────────
 
+/** The Settings page's accent (switches, sliders, picked values): your
+ *  profile color — or Override App Colors' color — lifted to a readable
+ *  brightness, instead of a fixed green. */
+private val LocalSettingsAccent = androidx.compose.runtime.compositionLocalOf { VoteGreen }
+
 private val BubbleShape = RoundedCornerShape(14.dp)
 private val DangerRed = Color(0xFFEF5350)
 
@@ -152,7 +157,7 @@ private fun CompactSwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit) 
             checked = checked, onCheckedChange = { tap(); onCheckedChange(it) },
             modifier = Modifier.scale(0.7f),
             colors = SwitchDefaults.colors(
-                checkedThumbColor = Color.White, checkedTrackColor = VoteGreen,
+                checkedThumbColor = Color.White, checkedTrackColor = LocalSettingsAccent.current,
                 uncheckedThumbColor = DimGray, uncheckedTrackColor = Color.White.copy(0.1f)
             )
         )
@@ -174,7 +179,7 @@ private fun CompactSlider(value: Float, onValueChange: (Float) -> Unit, modifier
                     Modifier.fillMaxHeight()
                         .fillMaxWidth(fraction = sliderState.value.coerceIn(0f, 1f))
                         .clip(RoundedCornerShape(2.dp))
-                        .background(VoteGreen)
+                        .background(LocalSettingsAccent.current)
                 )
             }
         }
@@ -378,6 +383,7 @@ internal fun SettingsPageContent(
     val tint = dominantColor
     val anyLoggedIn = bskyLoggedIn || e621LoggedIn
 
+    androidx.compose.runtime.CompositionLocalProvider(LocalSettingsAccent provides headerColorFor(tint)) {
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -389,10 +395,37 @@ internal fun SettingsPageContent(
         ToggleBubble("Rounded Grid Tiles", squareGridRounded, onToggleSquareGridRounded, liquidGlass, tint, backdrop)
         // Twinkling stars + the odd shooting star behind every page (the
         // dim profile-color background stays either way).
-        ToggleBubble(
-            "Starry Background", com.mediaviewer.util.UiToggles.starryBackground,
-            { com.mediaviewer.util.UiToggles.updateStarryBackground(it) }, liquidGlass, tint, backdrop
-        )
+        SettingsBubble(liquidGlass, tint, backdrop) {
+            BubbleRow {
+                RowLabel("Starry Background", Modifier.weight(1f))
+                CompactSwitch(com.mediaviewer.util.UiToggles.starryBackground) { com.mediaviewer.util.UiToggles.updateStarryBackground(it) }
+            }
+            if (com.mediaviewer.util.UiToggles.starryBackground) {
+                BubbleDivider()
+                var fpsMenuExpanded by remember { mutableStateOf(false) }
+                BubbleRow {
+                    RowLabel(
+                        "Frame Rate Cap", Modifier.weight(1f),
+                        sub = "How smoothly the stars move. Lower lets your screen rest at its idle refresh rate."
+                    )
+                    Box {
+                        Text(
+                            "${com.mediaviewer.util.UiToggles.starFrameRate} FPS",
+                            color = LocalSettingsAccent.current, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.clickable { fpsMenuExpanded = true }
+                        )
+                        DropdownMenu(expanded = fpsMenuExpanded, onDismissRequest = { fpsMenuExpanded = false }) {
+                            com.mediaviewer.util.UiToggles.starFrameRateOptions.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text("$option FPS", fontWeight = if (option == com.mediaviewer.util.UiToggles.starFrameRate) FontWeight.SemiBold else FontWeight.Normal) },
+                                    onClick = { com.mediaviewer.util.UiToggles.updateStarFrameRate(option); fpsMenuExpanded = false }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // Override App Colors: everywhere the app would wear your profile
         // color, it wears the color picked here instead. Your own profile
         // page keeps its real colors.
@@ -443,7 +476,7 @@ internal fun SettingsPageContent(
                 Box {
                     Text(
                         currentAnim.label,
-                        color = VoteGreen, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                        color = LocalSettingsAccent.current, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.clickable { animMenuExpanded = true }
                     )
                     DropdownMenu(expanded = animMenuExpanded, onDismissRequest = { animMenuExpanded = false }) {
@@ -496,7 +529,7 @@ internal fun SettingsPageContent(
                     Box {
                         Text(
                             callMode.label,
-                            color = VoteGreen, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                            color = LocalSettingsAccent.current, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.clickable { callMenuExpanded = true }
                         )
                         DropdownMenu(expanded = callMenuExpanded, onDismissRequest = { callMenuExpanded = false }) {
@@ -570,7 +603,7 @@ internal fun SettingsPageContent(
                 Box {
                     Text(
                         fontStore.selectedName,
-                        color = VoteGreen, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                        color = LocalSettingsAccent.current, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.widthIn(max = 120.dp).clickable { fontMenuExpanded = true }
                     )
@@ -642,7 +675,7 @@ internal fun SettingsPageContent(
                             com.mediaviewer.util.TranslationManager.SUPPORTED_LANGUAGES
                                 .firstOrNull { it.first == translationTargetLang }?.second
                                 ?: com.mediaviewer.util.TranslationManager.displayNameFor(translationTargetLang),
-                            color = VoteGreen, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                            color = LocalSettingsAccent.current, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.clickable { langMenuExpanded = true }
                         )
                         DropdownMenu(expanded = langMenuExpanded, onDismissRequest = { langMenuExpanded = false }) {
@@ -666,7 +699,6 @@ internal fun SettingsPageContent(
         }
 
         if (bskyLoggedIn) {
-            ToggleBubble("Merge Lists and Starter Packs", combineListsAndPacks, onToggleCombineListsPacks, liquidGlass, tint, backdrop)
             ToggleBubble("Show \"Add To\" After Following", autoAddToOnFollow, onToggleAutoAddToOnFollow, liquidGlass, tint, backdrop)
         }
 
@@ -999,6 +1031,7 @@ internal fun SettingsPageContent(
         }
 
         Spacer(Modifier.height(16.dp))
+    }
     }
 }
 

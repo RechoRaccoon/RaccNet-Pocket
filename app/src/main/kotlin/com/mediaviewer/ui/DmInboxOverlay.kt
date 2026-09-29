@@ -495,10 +495,17 @@ private fun DmThreadView(
                     // message arrived/was sent), not when the list grew from
                     // the front.
                     var lastMessageId by remember { mutableStateOf<String?>(null) }
+                    // The thread opens already sitting on the newest message
+                    // (an instant jump, not an animated scroll down through
+                    // everything); older messages only load once the user
+                    // actually scrolls up after that.
+                    var positioned by remember(thread.convo.convoId) { mutableStateOf(false) }
                     LaunchedEffect(thread.messages.lastOrNull()?.id) {
                         val newLastId = thread.messages.lastOrNull()?.id
                         if (newLastId != null && newLastId != lastMessageId && thread.messages.isNotEmpty()) {
-                            listState.animateScrollToItem(thread.messages.size - 1 + if (thread.loadingMore) 1 else 0)
+                            val target = thread.messages.size - 1 + if (thread.loadingMore) 1 else 0
+                            if (!positioned) listState.scrollToItem(target) else listState.animateScrollToItem(target)
+                            positioned = true
                         }
                         lastMessageId = newLastId
                     }
@@ -508,7 +515,8 @@ private fun DmThreadView(
                     // what's currently loaded, same "near the edge" pattern
                     // used elsewhere in the app (e.g. GridScreen's
                     // shouldLoadMore).
-                    LaunchedEffect(listState, thread.cursor) {
+                    LaunchedEffect(listState, thread.cursor, positioned) {
+                        if (!positioned) return@LaunchedEffect
                         snapshotFlow { listState.firstVisibleItemIndex }
                             .collect { firstVisible ->
                                 if (firstVisible <= 2 && thread.cursor != null && !thread.loadingMore && !thread.loading) {

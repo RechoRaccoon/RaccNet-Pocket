@@ -107,7 +107,10 @@ data class MediaItem(
     val labels: List<String> = emptyList(),
     // Textshot-with-emoji posts: URL of the posted Textshot picture. Blank for
     // every other item. See isEmojiTextshot below.
-    val textshotImageUrl: String = ""
+    val textshotImageUrl: String = "",
+    /** The author has blocked the signed-in user: shown with a "This user
+     *  has you blocked" status, and liking/reposting/following is off. */
+    val authorBlocksViewer: Boolean = false
 ) {
     // Crash fix: mediaUrl/thumbUrl/textshotImageUrl/labels are all declared
     // as non-null Kotlin types with defaults ("", "", "", emptyList()) — but
@@ -161,6 +164,12 @@ data class MediaItem(
      *  every labeler using Bluesky's standard sexual-content vocabulary. */
     val isNsfwLabeled: Boolean get() = labels?.any { it == "porn" || it == "sexual" || it == "nudity" } == true
 }
+
+/** The app's own pseudo-feeds that ride on AuthorFeedSavedState like a
+ *  profile does (named, no avatar): they get a title instead of a feed
+ *  selector, and never appear in it. */
+val SPECIAL_FEED_NAMES = setOf("Saved Posts", "From Friends", "History")
+fun AuthorInfo.isSpecialFeed(): Boolean = avatarUrl == null && displayName in SPECIAL_FEED_NAMES
 
 data class AuthorInfo(
     val did: String,
@@ -744,7 +753,9 @@ data class ProfileData(
      *  (only people they follow) or "none". */
     val chatAllowIncoming: String = "following",
     /** Either of you has blocked the other. */
-    val blockedEitherWay: Boolean = false
+    val blockedEitherWay: Boolean = false,
+    /** They've blocked you. */
+    val blocksYou: Boolean = false
 )
 
 // Generic com.atproto.repo.listRecords envelope — used for any collection

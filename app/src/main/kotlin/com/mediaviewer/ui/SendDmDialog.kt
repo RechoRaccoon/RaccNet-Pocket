@@ -82,19 +82,22 @@ fun SendDmDialog(
             // from the post; tapping it closes the popup.
             .background(Color.Black.copy(alpha = if (liquidGlass) 0.22f else 0.6f))
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss)
+            // Top: just under the camera notch (where the Hub's search bar
+            // sits). Bottom: above the navigation bar — or the keyboard,
+            // which pushes it up while typing.
+            .padding(top = rememberTopCutoutClearance())
             .imePadding()
-            .padding(top = rememberTopCutoutClearance() + 8.dp)
             .navigationBarsPadding()
             .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
-        contentAlignment = Alignment.BottomCenter
+        contentAlignment = Alignment.Center
     ) {
         PopupSheetSurface(
             liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
-            modifier = Modifier.fillMaxWidth().fillMaxHeight(0.78f)
+            modifier = Modifier.fillMaxWidth().fillMaxHeight()
         ) {
             Column(Modifier.fillMaxSize()) {
                 PopupSheetHeader(
-                    title = "Share To",
+                    title = "Share with",
                     subtitle = if (selected.isNotEmpty()) "· ${selected.size}" else null,
                     liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
                     onClose = onDismiss
@@ -105,7 +108,8 @@ fun SendDmDialog(
                         loading && conversations.isEmpty() ->
                             CircularProgressIndicator(Modifier.align(Alignment.Center).size(26.dp), color = Color.White, strokeWidth = 1.5.dp)
                         conversations.isEmpty() ->
-                            Text("No conversations yet", color = DimGray, fontSize = 13.sp, modifier = Modifier.align(Alignment.Center))
+                            Text("No conversations yet", color = Color.White, fontSize = 13.sp,
+                                modifier = Modifier.align(Alignment.Center).popupTextShadow().padding(horizontal = 12.dp, vertical = 6.dp))
                         else -> LazyVerticalGrid(
                             columns = GridCells.Fixed(3),
                             contentPadding = PaddingValues(start = 10.dp, end = 10.dp, top = 6.dp, bottom = 12.dp),
@@ -128,54 +132,16 @@ fun SendDmDialog(
                     }
                 }
 
-                // ── Message pill: post thumbnail · text · send ──
-                val canSend = selected.isNotEmpty() && !sending
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(start = 10.dp, end = 10.dp, bottom = 10.dp, top = 2.dp)
-                        .heightIn(min = 50.dp)
-                        .popupFieldWell(tint, RoundedCornerShape(25.dp))
-                        .padding(start = 7.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    if (thumbUrl.isNotBlank()) {
-                        AsyncImage(
-                            model = thumbUrl, contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.size(36.dp).clip(RoundedCornerShape(10.dp))
-                        )
-                        Spacer(Modifier.width(10.dp))
-                    } else Spacer(Modifier.width(8.dp))
-                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                        BasicTextField(
-                            value = message, onValueChange = { message = it },
-                            textStyle = TextStyle(color = Color.White, fontSize = 14.sp, lineHeight = 19.sp),
-                            cursorBrush = SolidColor(Color.White),
-                            maxLines = 4,
-                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        if (message.isEmpty()) Text(
-                            if (selected.isEmpty()) "Pick someone, then add a message…" else "Add a message…",
-                            color = DimGray, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    val sendAlpha by animateFloatAsState(if (canSend || sending) 1f else 0.4f, label = "sendAlpha")
-                    Box(
-                        modifier = Modifier
-                            .size(38.dp)
-                            .graphicsLayer { alpha = sendAlpha }
-                            .clip(CircleShape)
-                            .background(lerp(tint, Color.White, 0.12f).copy(alpha = if (canSend) 0.95f else 0.35f))
-                            .clickable(enabled = canSend) { tap(); onSend(message.trim()) },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (sending) CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
-                        else Icon(Icons.Default.Send, contentDescription = "Send", tint = Color.White, modifier = Modifier.size(19.dp))
-                    }
-                }
+                PopupMessageBox(
+                    thumbUrl = thumbUrl,
+                    value = message, onValueChange = { message = it },
+                    placeholder = if (selected.isEmpty()) "Pick someone, then add a message…" else "Add a message…",
+                    tint = tint,
+                    canSend = selected.isNotEmpty() && !sending,
+                    sending = sending,
+                    onSend = { if (selected.isNotEmpty() && !sending) onSend(message.trim()) },
+                    modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 10.dp, top = 2.dp)
+                )
             }
         }
     }
@@ -188,7 +154,7 @@ private fun RecipientCell(convo: DmConversation, isSelected: Boolean, tint: Colo
         if (isSelected) 1f else 0f,
         spring(dampingRatio = 0.55f, stiffness = 500f), label = "recipientPop"
     )
-    // Their own profile color for the selection ring (group chats: the tint).
+    // Their own profile color for the selection ring and check.
     val ringColor = if (isSelected && !convo.isGroup && convo.member.did.isNotBlank())
         lerp(rememberAuthorProfileTint(convo.member.did, convo.member.avatarUrl), Color.White, 0.3f)
     else lerp(tint, Color.White, 0.35f)
@@ -211,11 +177,15 @@ private fun RecipientCell(convo: DmConversation, isSelected: Boolean, tint: Colo
                 }
             }
             if (pop > 0.01f) {
-                Box(
-                    Modifier.size(74.dp)
-                        .graphicsLayer { alpha = pop.coerceIn(0f, 1f); scaleX = 0.9f + 0.1f * pop; scaleY = 0.9f + 0.1f * pop }
-                        .border(2.5.dp, ringColor, CircleShape)
-                )
+                // Group chats' avatars are a cluster, not a circle — no ring
+                // around them, just the check.
+                if (!convo.isGroup) {
+                    Box(
+                        Modifier.size(74.dp)
+                            .graphicsLayer { alpha = pop.coerceIn(0f, 1f); scaleX = 0.9f + 0.1f * pop; scaleY = 0.9f + 0.1f * pop }
+                            .border(2.5.dp, ringColor, CircleShape)
+                    )
+                }
                 Box(
                     Modifier.align(Alignment.BottomEnd)
                         .graphicsLayer { scaleX = pop; scaleY = pop }
@@ -226,17 +196,22 @@ private fun RecipientCell(convo: DmConversation, isSelected: Boolean, tint: Colo
             }
         }
         Spacer(Modifier.height(6.dp))
-        Text(
-            convo.member.displayName, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-            lineHeight = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth()
-        )
-        val sub = if (convo.isGroup) "${convo.memberCount} people" else if (convo.member.handle.isNotBlank()) "@${convo.member.handle}" else ""
-        if (sub.isNotBlank()) {
+        Column(
+            Modifier.fillMaxWidth().popupTextShadow(RoundedCornerShape(10.dp)).padding(horizontal = 5.dp, vertical = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
             Text(
-                sub, color = DimGray, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
+                convo.member.displayName, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                lineHeight = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
             )
+            val sub = if (convo.isGroup) "${convo.memberCount} people" else if (convo.member.handle.isNotBlank()) "@${convo.member.handle}" else ""
+            if (sub.isNotBlank()) {
+                Text(
+                    sub, color = Color.White.copy(alpha = 0.9f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
     }
 }

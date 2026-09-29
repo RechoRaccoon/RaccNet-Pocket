@@ -151,7 +151,13 @@ fun SpaceSky(color: Color, modifier: Modifier = Modifier, dim: Float = SPACE_BAC
             if (SpaceSkyControl.paused) { delay(400); continue }
             val t = (System.nanoTime() - t0) / 1_000_000_000f
             shooting.advance(t)
-            if (shooting.activeOrImminent(t)) withFrameNanos { } else delay(50)
+            // Settings → Starry Background → Frame Rate Cap. At 120 a
+            // passing shooting star follows the display every frame;
+            // otherwise the sky redraws on a fixed timer so an idle screen
+            // can drop to its lower refresh rate.
+            val cap = UiToggles.starFrameRate.coerceIn(15, 120)
+            if (cap >= 120 && shooting.activeOrImminent(t)) withFrameNanos { }
+            else delay((1000L / cap).coerceAtLeast(8L))
             time.floatValue = (System.nanoTime() - t0) / 1_000_000_000f
         }
     }

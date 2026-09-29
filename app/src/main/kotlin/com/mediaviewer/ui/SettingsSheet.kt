@@ -98,6 +98,10 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.platform.LocalView
@@ -105,6 +109,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import com.mediaviewer.model.AppMode
+import com.mediaviewer.model.isSpecialFeed
 import com.mediaviewer.model.BskyFeedInfo
 import com.mediaviewer.model.DownloadProgress
 import com.mediaviewer.ui.theme.*
@@ -209,6 +214,8 @@ fun SettingsSheet(
     onShowE621Favorites: () -> Unit,
     onSwitchMode: (AppMode) -> Unit,
     onSwipeToFeed: () -> Unit,
+    /** The feed selector's picked profile: back to that profile page. */
+    onReturnToProfile: () -> Unit = {},
     /** Hub → Timeline/Explore after picking a different feed: open that
      *  feed in the timeline (explore = false) or Explore mode (true). */
     onOpenFeed: (uri: String?, explore: Boolean) -> Unit = { _, _ -> },
@@ -501,6 +508,7 @@ fun SettingsSheet(
                             onStartFollowerScan = onStartFollowerScan, onDismissFollowerScanResult = onDismissFollowerScanResult,
                             onRefreshHub = onRefreshHub,
                             onReturnToFeed = { onReturnToFeed(explore = false) },
+                            onSwipeBackToFeed = { if (bskyLoggedIn) { onSwitchMode(AppMode.BLUESKY); onSwipeToFeed() } },
                             hasVisitedFeed = hasVisitedFeed,
                             liveTwitchUrl = liveTwitchUrl, liveYoutubeUrl = liveYoutubeUrl,
                             liveActivePlatform = liveActivePlatform,
@@ -562,7 +570,12 @@ fun SettingsSheet(
                     .windowInsetsPadding(WindowInsets.navigationBars)
                     .padding(bottom = 10.dp)
             ) {
+                // A profile picked in the feed selector: Timeline/Explore
+                // become one "Return to Profile" button.
+                val profileFeed = authorFeedState?.author?.takeIf { !it.isSpecialFeed() }
                 ReturnToFeedBar(
+                    returnToProfile = hubPage == HubPage.MAIN && pickedFeed == null && profileFeed != null,
+                    onReturnToProfile = onReturnToProfile,
                     liquidGlass = liquidGlass, tint = dominantColor, backdrop = null,
                     uploadBackdrop = hubBackgroundBackdrop,
                     onReturnToFeed = { explore -> onReturnToFeed(explore) },
@@ -661,6 +674,8 @@ private fun AtProtocolPageContent(
     onRefreshHub: () -> Unit = {},
     // Item (this session): replaces the removed swipe-up-to-feed gesture.
     onReturnToFeed: () -> Unit = {},
+    /** A swipe up that starts at the very bottom of the page. */
+    onSwipeBackToFeed: () -> Unit = {},
     hasVisitedFeed: Boolean = false,
     feedDrag: HubFeedDragState = remember { HubFeedDragState() },
     onMoveFeed: (Int, Int) -> Unit = { _, _ -> },
@@ -806,12 +821,41 @@ private fun AtProtocolPageContent(
         }
 
         Spacer(Modifier.height(6.dp))
+    // At the very bottom of the Hub, a further swipe up returns to the
+    // Timeline/Explore page you came from — but only a swipe that *starts*
+    // at the bottom, so scrolling down to the end never overshoots into it.
+    val hubScroll = rememberScrollState()
+    val latestSwipeBack by rememberUpdatedState(onSwipeBackToFeed)
+    val swipeView = LocalView.current
     Column(
         Modifier
             .fillMaxWidth()
             .weight(1f)
             .clipToBounds()
-            .verticalScroll(rememberScrollState())
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    val armed = !hubScroll.canScrollForward
+                    if (!armed) return@awaitEachGesture
+                    var dy = 0f; var dx = 0f
+                    var fired = false
+                    val threshold = 90.dp.toPx()
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        if (event.changes.count { it.pressed } > 1) break
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (!change.pressed) break
+                        val d = change.positionChange()
+                        dy += d.y; dx += d.x
+                        if (!fired && feedDrag.active.not() && -dy > threshold && -dy > kotlin.math.abs(dx) * 1.5f) {
+                            fired = true
+                            swipeView.hubHaptic(HapticFeedbackConstants.VIRTUAL_KEY)
+                            latestSwipeBack()
+                        }
+                    }
+                }
+            }
+            .verticalScroll(hubScroll)
             .padding(bottom = 16.dp)
     ) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -856,7 +900,7 @@ private fun AtProtocolPageContent(
                 SettingsGridButton("DMs", Icons.Default.Chat, Color.White, liquidGlass, Modifier.weight(1f), onOpenDmInbox, panelTint = dominantColor, backdrop = backdrop, badge = dmUnreadCount)
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SettingsGridButton("Saves", Icons.Default.Star, BookmarkYellow, liquidGlass, Modifier.weight(1f), onShowSaves, panelTint = dominantColor, backdrop = backdrop)
+                SettingsGridButton("Saved Posts", Icons.Default.Star, BookmarkYellow, liquidGlass, Modifier.weight(1f), onShowSaves, panelTint = dominantColor, backdrop = backdrop)
                 SettingsGridButton("History", Icons.Default.History, Color.White, liquidGlass, Modifier.weight(1f), onShowHistory, panelTint = dominantColor, backdrop = backdrop)
                 SettingsGridButton("From Friends", Icons.Default.Send, Color.White, liquidGlass, Modifier.weight(1f), onShowFriends, panelTint = dominantColor, backdrop = backdrop)
             }
@@ -1786,6 +1830,8 @@ private fun SettingsCreditsSwitch(
  *  there's no feed to return to and nothing to refresh yet. */
 @Composable
 private fun ReturnToFeedBar(
+    returnToProfile: Boolean = false,
+    onReturnToProfile: () -> Unit = {},
     liquidGlass: Boolean,
     tint: Color,
     backdrop: GlassBackdrop?,
@@ -1907,8 +1953,12 @@ private fun ReturnToFeedBar(
                     }
                 }
             }
-            HalfPill("Timeline", onTimeline)
-            HalfPill("Explore", onExplore)
+            if (returnToProfile) {
+                HalfPill("Return to Profile") { tap(); onReturnToProfile() }
+            } else {
+                HalfPill("Timeline", onTimeline)
+                HalfPill("Explore", onExplore)
+            }
         }
         HubUploadBubble(
             liquidGlass, tint, size = barHeight, modifier = Modifier.align(Alignment.CenterEnd),
@@ -2542,7 +2592,8 @@ private fun HubFeedRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         val saved = authorFeedState
-        if (saved != null) {
+        // Saved Posts / From Friends / History aren't feeds to pick here.
+        if (saved != null && !saved.author.isSpecialFeed()) {
             AuthorChip(
                 author = saved.author, liquidGlass = liquidGlass, dominantColor = dominantColor,
                 selected = authorChipSelected,

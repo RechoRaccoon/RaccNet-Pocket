@@ -54,6 +54,7 @@ import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalConfiguration
@@ -360,7 +361,12 @@ fun MainFeedScreen(
     // Tag Media When Liked's queue, shown as a status bubble under the
     // author row (Settings → Show Tagging Status).
     likeTagPhase: MainViewModel.LikeTagPhase = MainViewModel.LikeTagPhase.IDLE,
-    likeTagPending: Int = 0
+    likeTagPending: Int = 0,
+    /** The More menu opened on a post: look up the author's list
+     *  memberships early so Add To opens with its + / − ready. */
+    onPrefetchListMemberships: (String) -> Unit = {},
+    /** Hub → "Return to Profile" (the feed selector's picked profile). */
+    onReturnToProfile: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
@@ -497,6 +503,7 @@ fun MainFeedScreen(
                     translationStates       = translationStates,
                     popupOpen               = popupOpen,
                     taggingStatusLabel      = taggingStatusLabel,
+                    onPrefetchListMemberships = onPrefetchListMemberships,
                     onBackdropChanged      = { backdrop, color ->
                         lastDominantColor = color
                         lastBackdrop = backdrop
@@ -585,13 +592,14 @@ fun MainFeedScreen(
                     onShowE621Favorites       = { onShowE621Favorites(); onSetScreen(ScreenState.FEED) },
                     onSwitchMode              = onSwipeToMode,
                     onSwipeToFeed             = onReturnToFeed,
+                    onReturnToProfile         = onReturnToProfile,
                     onOpenFeed                = onOpenFeed,
                     onEnterFeedView           = { explore -> onSetScreen(if (explore) ScreenState.GRID else ScreenState.FEED) },
                     selfProfile               = selfProfile,
                     hideTextOnlyPosts         = hideTextOnlyPosts,
                     onToggleHideTextOnlyPosts = onToggleHideTextOnlyPosts,
                     onOpenOwnProfile          = onOpenOwnProfile,
-                    onShowSaves               = { onShowSaves(); onSetScreen(ScreenState.FEED) },
+                    onShowSaves               = { onShowSaves(); onSetScreen(ScreenState.GRID) },
                     onShowHistory             = { onShowHistory(); onSetScreen(ScreenState.FEED) },
                     onOpenDmInbox             = onOpenDmInbox,
                     onOpenInbox               = onOpenInbox,
@@ -910,7 +918,8 @@ private fun FeedView(
     /** 0 = no comments; 1 = comments fully open (post blurred, UI faded). */
     commentsFraction: Float = 0f,
     popupOpen: Boolean = false,
-    taggingStatusLabel: String? = null
+    taggingStatusLabel: String? = null,
+    onPrefetchListMemberships: (String) -> Unit = {}
 ) {
     val context     = LocalContext.current
     // The app-wide loader (not a private one): prefetches land in the same
@@ -924,11 +933,17 @@ private fun FeedView(
             .filter { it.isVideo && !it.isBlocked }
             .mapNotNull { it.videoPlaylistUrl }
         com.mediaviewer.util.FeedVideoPool.preload(context, videoWindow)
-        (1..3).mapNotNull { mediaItems.getOrNull(currentIndex + it) }.forEach { item ->
-            if (!item.isVideo && item.mediaUrl.isNotBlank())
-                imageLoader.enqueue(ImageRequest.Builder(context).data(item.mediaUrl).build())
-            if (item.thumbUrl.isNotBlank())
-                imageLoader.enqueue(ImageRequest.Builder(context).data(item.thumbUrl).build())
+        // Images: this post and the next few — every image of a multi-image
+        // post (grid thumbnails and the full-size versions the viewer
+        // opens), not just the first.
+        (0..4).mapNotNull { mediaItems.getOrNull(currentIndex + it) }.forEach { item ->
+            val urls = buildList {
+                if (item.mediaGroup.size > 1) item.mediaGroup.forEach { g -> add(g.thumbUrl); add(g.mediaUrl) }
+                else { if (!item.isVideo) add(item.mediaUrl); add(item.thumbUrl) }
+            }
+            urls.filter { it.isNotBlank() }.distinct().forEach { url ->
+                imageLoader.enqueue(ImageRequest.Builder(context).data(url).build())
+            }
         }
     }
     DisposableEffect(Unit) { onDispose { com.mediaviewer.util.FeedVideoPool.releaseIdle() } }
@@ -992,6 +1007,7 @@ private fun FeedView(
                     reducedAnimations      = reducedAnimations,
                     uiHidden               = uiHidden || commentsFraction > 0.02f || popupOpen,
                     taggingStatusLabel     = taggingStatusLabel,
+                    onPrefetchListMemberships = onPrefetchListMemberships,
                     onSetUiHidden          = onSetUiHidden,
                     translationEnabled     = translationEnabled,
                     translationTargetLang  = translationTargetLang,
@@ -1049,7 +1065,8 @@ private fun PostContent(
     // only; item.isNsfwLabeled is always false for other modes anyway
     // since only Bluesky posts ever populate MediaItem.labels).
     hateFunBlurNsfw: Boolean = false,
-    taggingStatusLabel: String? = null
+    taggingStatusLabel: String? = null,
+    onPrefetchListMemberships: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
     var scale  by remember { mutableFloatStateOf(1f) }
@@ -1110,6 +1127,9 @@ private fun PostContent(
     // it to full screen (then swipe between them / pick from the selector
     // row above the interaction bar). ──
     val isImageGrid = !item.isVideo && !item.isTextOnly && item.mediaGroup.size >= 2
+    // The author has blocked the signed-in user (see MediaItem.authorBlocksViewer).
+    val authorBlocksViewer = appMode == AppMode.BLUESKY &&
+        (item.authorBlocksViewer || com.mediaviewer.util.BlockedAccounts.isBlockedBy(item.author.did))
     // Non-null while the fullscreen viewer is open (or animating in/out).
     var viewerIndex by remember(item.id) { mutableStateOf<Int?>(null) }
     var viewerClosing by remember(item.id) { mutableStateOf(false) }
@@ -1715,40 +1735,24 @@ private fun PostContent(
                         liquidGlass = liquidGlass,
                         dominantColor = dominantColor,
                         backdrop = glassBackdrop,
-                        onHorizontalSwipe = handleHorizontalSwipe
+                        onHorizontalSwipe = handleHorizontalSwipe,
+                        followEnabled = !authorBlocksViewer
                     )
                     // Status bubbles, centered right under the author row:
-                    // translation (Settings → Show Translation Status) and
-                    // like-tagging (Settings → Show Tagging Status).
+                    // translation (Settings → Show Translation Status),
+                    // like-tagging (Settings → Show Tagging Status) and
+                    // "This user has you blocked". Each one grows in and
+                    // shrinks back out on its own.
                     val showTranslateStatus = translationEnabled && com.mediaviewer.util.UiToggles.showTranslationStatus &&
                         item.text.isNotBlank() && translationState != null && translationState.status != TranslationStatus.IDLE
-                    val tagLabel = taggingStatusLabel
-                    AnimatedVisibility(
-                        visible = showTranslateStatus || tagLabel != null,
-                        enter = if (reducedAnimations) EnterTransition.None else fadeIn(FADE_ANIM) + expandVertically(),
-                        exit = if (reducedAnimations) ExitTransition.None else fadeOut(FADE_ANIM) + shrinkVertically(),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 10.dp).padding(bottom = 4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            if (showTranslateStatus) {
-                                TranslationIndicatorPill(
-                                    state = translationState!!, liquidGlass = liquidGlass,
-                                    dominantColor = dominantColor, backdrop = glassBackdrop,
-                                    onClick = onToggleTranslationView
-                                )
-                            }
-                            if (tagLabel != null) {
-                                StatusPill(
-                                    label = tagLabel, spinning = true, liquidGlass = liquidGlass,
-                                    tint = dominantColor, backdrop = glassBackdrop, onClick = null
-                                )
-                            }
-                        }
-                    }
+                    PostStatusRow(
+                        translation = if (showTranslateStatus) translationState else null,
+                        taggingLabel = taggingStatusLabel,
+                        blockedByAuthor = authorBlocksViewer,
+                        liquidGlass = liquidGlass, tint = dominantColor, backdrop = glassBackdrop,
+                        reducedAnimations = reducedAnimations,
+                        onToggleTranslationView = onToggleTranslationView
+                    )
                 }
             }
         }
@@ -1795,8 +1799,8 @@ private fun PostContent(
                     targetState = viewerShowing,
                     transitionSpec = {
                         if (reducedAnimations) EnterTransition.None togetherWith ExitTransition.None
-                        else (fadeIn(tween(240, delayMillis = 60)) + scaleIn(tween(240, delayMillis = 60), initialScale = 0.96f)) togetherWith
-                            fadeOut(tween(160))
+                        else ((fadeIn(tween(240, delayMillis = 60)) + scaleIn(tween(240, delayMillis = 60), initialScale = 0.96f)) togetherWith
+                            fadeOut(tween(160))) using SizeTransform(clip = false) { _, _ -> snap() }
                     },
                     contentAlignment = Alignment.BottomCenter,
                     label = "bubbleOrSelector"
@@ -1837,8 +1841,12 @@ private fun PostContent(
                     dominantColor = dominantColor,
                     backdrop = glassBackdrop,
                     moreMenuExpanded = moreMenuExpanded,
-                    onToggleMoreMenu = { moreMenuExpanded = !moreMenuExpanded },
-                    onVisibleBoundsChanged = { origin, size -> actionBarOrigin = origin; actionBarSize = size }
+                    onToggleMoreMenu = {
+                        moreMenuExpanded = !moreMenuExpanded
+                        if (moreMenuExpanded && appMode == AppMode.BLUESKY) onPrefetchListMemberships(item.author.did)
+                    },
+                    onVisibleBoundsChanged = { origin, size -> actionBarOrigin = origin; actionBarSize = size },
+                    interactionsBlocked = authorBlocksViewer
                 )
             }
         }
@@ -2094,7 +2102,8 @@ private fun QuickActionMenu(center: Offset, hoveredAction: QuickAction?, appMode
  *  between original and translated. */
 @Composable
 private fun TranslationIndicatorPill(
-    state: TranslationState, liquidGlass: Boolean, dominantColor: Color, backdrop: GlassBackdrop?, onClick: () -> Unit
+    state: TranslationState, liquidGlass: Boolean, dominantColor: Color, backdrop: GlassBackdrop?, onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val label = when (state.status) {
         TranslationStatus.TRANSLATING -> "Translating…"
@@ -2107,7 +2116,8 @@ private fun TranslationIndicatorPill(
         label = label,
         spinning = state.status == TranslationStatus.TRANSLATING,
         liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
-        onClick = if (state.status == TranslationStatus.DONE) onClick else null
+        onClick = if (state.status == TranslationStatus.DONE) onClick else null,
+        modifier = modifier
     )
 }
 
@@ -2115,7 +2125,8 @@ private fun TranslationIndicatorPill(
  *  like-tagging): an optional spinner and a one-line label. */
 @Composable
 private fun StatusPill(
-    label: String, spinning: Boolean, liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, onClick: (() -> Unit)?
+    label: String, spinning: Boolean, liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, onClick: (() -> Unit)?,
+    modifier: Modifier = Modifier
 ) {
     val shape = RoundedCornerShape(14.dp)
 
@@ -2141,9 +2152,9 @@ private fun StatusPill(
     }
 
     if (liquidGlass) {
-        LiquidGlassSurface(modifier = Modifier.widthIn(max = 300.dp), shape = shape, tint = tint, backdrop = backdrop) { PillBody() }
+        LiquidGlassSurface(modifier = modifier.widthIn(max = 300.dp), shape = shape, tint = tint, backdrop = backdrop) { PillBody() }
     } else {
-        Box(Modifier.widthIn(max = 300.dp).clip(shape).background(Color.Black.copy(0.5f))) { PillBody() }
+        Box(modifier.widthIn(max = 300.dp).clip(shape).background(Color.Black.copy(0.5f))) { PillBody() }
     }
 }
 
@@ -2219,7 +2230,8 @@ private fun TextOnlyPostCard(
 private fun AuthorRow(
     item: MediaItem, appMode: AppMode, onToggleFollow: () -> Unit, onTapAuthor: () -> Unit,
     modifier: Modifier, liquidGlass: Boolean, dominantColor: Color, backdrop: GlassBackdrop?,
-    onHorizontalSwipe: (Float) -> Unit = {}
+    onHorizontalSwipe: (Float) -> Unit = {},
+    followEnabled: Boolean = true
 ) {
     val author = item.author
     val pillShape = RoundedCornerShape(14.dp)
@@ -2281,7 +2293,8 @@ private fun AuthorRow(
             tint = dominantColor,
             backdrop = backdrop,
             onClick = onToggleFollow,
-            modifier = Modifier.fillMaxHeight().heightIn(min = 30.dp)
+            modifier = Modifier.fillMaxHeight().heightIn(min = 30.dp),
+            enabled = followEnabled
         )
     }
 }
@@ -2335,8 +2348,9 @@ private fun Modifier.quickTap(key: Any?, onTap: () -> Unit): Modifier = this.poi
 // ─── Post text bubble ─────────────────────────────────────────────────────────
 
 /** The post's text, in its own edge-to-edge bubble right above the
- *  interaction bar: compact (two lines, scrollable) until tapped, then it
- *  grows upward to show everything; tap again to shrink it back. */
+ *  interaction bar: one line (ending in "…" when there's more) until tapped,
+ *  then it grows upward — its bottom edge never moves — to show all of it;
+ *  tap again to shrink it back down. */
 @Composable
 private fun PostTextBubble(
     text: String,
@@ -2350,15 +2364,13 @@ private fun PostTextBubble(
     modifier: Modifier = Modifier
 ) {
     val shape = RoundedCornerShape(18.dp)
-    val scroll = rememberScrollState()
-    val screenH = LocalConfiguration.current.screenHeightDp.dp
-    LaunchedEffect(expanded) { if (!expanded) scroll.animateScrollTo(0) }
+    val progress = remember { Animatable(if (expanded) 1f else 0f) }
+    LaunchedEffect(expanded) {
+        val target = if (expanded) 1f else 0f
+        if (reducedAnimations) progress.snapTo(target)
+        else progress.animateTo(target, spring(dampingRatio = 0.86f, stiffness = 340f))
+    }
     val bubbleModifier = modifier
-        .animateContentSize(
-            animationSpec = if (reducedAnimations) snap()
-            else spring(dampingRatio = 0.84f, stiffness = 320f)
-        )
-        .heightIn(max = if (expanded) screenH * 0.5f else 58.dp)
         .clip(shape)
         .horizontalSwipeWatcher(onHorizontalSwipe)
         .clickable(
@@ -2368,11 +2380,27 @@ private fun PostTextBubble(
 
     @Composable
     fun Body() {
-        Box(Modifier.fillMaxWidth().verticalScroll(scroll).padding(horizontal = 14.dp, vertical = 10.dp)) {
-            Text(
-                text, color = Color.White.copy(alpha = 0.95f),
-                fontSize = 13.sp, lineHeight = 18.sp
-            )
+        val style = androidx.compose.ui.text.TextStyle(color = Color.White.copy(alpha = 0.95f), fontSize = 13.sp, lineHeight = 18.sp)
+        // Both versions are laid out; the bubble's height slides between the
+        // one-line height and the full height (the column it sits in is
+        // anchored at the bottom, so it grows upward) while the two
+        // cross-fade.
+        Layout(
+            content = {
+                Text(text, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(text, style = style)
+            },
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)
+        ) { measurables, constraints ->
+            val loose = constraints.copy(minHeight = 0, maxHeight = Constraints.Infinity)
+            val one = measurables[0].measure(loose)
+            val full = measurables[1].measure(loose)
+            val p = progress.value.coerceIn(0f, 1.1f)
+            val h = (one.height + (full.height - one.height) * p).roundToInt().coerceAtLeast(one.height)
+            layout(constraints.maxWidth, h) {
+                one.placeWithLayer(0, 0) { alpha = (1f - p * 4f).coerceIn(0f, 1f) }
+                full.placeWithLayer(0, 0) { alpha = ((p - 0.08f) * 4f).coerceIn(0f, 1f) }
+            }
         }
     }
 
@@ -2380,6 +2408,67 @@ private fun PostTextBubble(
         LiquidGlassSurface(modifier = bubbleModifier, shape = shape, tint = tint, backdrop = backdrop) { Body() }
     } else {
         Box(bubbleModifier.background(Color.Black.copy(alpha = 0.55f))) { Body() }
+    }
+}
+
+// ─── Post status bubbles ─────────────────────────────────────────────────────
+
+/** A status bubble that grows in when [value] appears (including every time
+ *  its post comes on screen) and shrinks smoothly back out when it goes —
+ *  still showing its last contents while it does. */
+@Composable
+private fun <T : Any> RowScope.AnimatedStatus(value: T?, reducedAnimations: Boolean, content: @Composable (T) -> Unit) {
+    val holder = remember { arrayOfNulls<Any>(1) }
+    if (value != null) holder[0] = value
+    val state = remember { MutableTransitionState(false) }
+    LaunchedEffect(value != null) { state.targetState = value != null }
+    AnimatedVisibility(
+        visibleState = state,
+        enter = if (reducedAnimations) EnterTransition.None
+            else fadeIn(tween(220)) + expandIn(tween(260, easing = FastOutSlowInEasing), expandFrom = Alignment.TopCenter) + scaleIn(tween(260), initialScale = 0.85f),
+        exit = if (reducedAnimations) ExitTransition.None
+            else fadeOut(tween(180)) + shrinkOut(tween(240, easing = FastOutSlowInEasing), shrinkTowards = Alignment.TopCenter) + scaleOut(tween(240), targetScale = 0.85f)
+    ) {
+        @Suppress("UNCHECKED_CAST")
+        val shown = (value ?: holder[0]) as T?
+        if (shown != null) content(shown)
+    }
+}
+
+@Composable
+private fun PostStatusRow(
+    translation: TranslationState?,
+    taggingLabel: String?,
+    blockedByAuthor: Boolean,
+    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
+    reducedAnimations: Boolean,
+    onToggleTranslationView: () -> Unit
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.Top
+    ) {
+        AnimatedStatus(if (blockedByAuthor) "blocked" else null, reducedAnimations) {
+            StatusPill(
+                label = "This user has you blocked", spinning = false, liquidGlass = liquidGlass,
+                tint = tint, backdrop = backdrop, onClick = null,
+                modifier = Modifier.padding(bottom = 4.dp)
+            )
+        }
+        AnimatedStatus(translation, reducedAnimations) { t ->
+            TranslationIndicatorPill(
+                state = t, liquidGlass = liquidGlass, dominantColor = tint, backdrop = backdrop,
+                onClick = onToggleTranslationView, modifier = Modifier.padding(bottom = 4.dp)
+            )
+        }
+        AnimatedStatus(taggingLabel, reducedAnimations) { label ->
+            StatusPill(
+                label = label, spinning = true, liquidGlass = liquidGlass,
+                tint = tint, backdrop = backdrop, onClick = null,
+                modifier = Modifier.padding(bottom = 4.dp)
+            )
+        }
     }
 }
 
@@ -2740,8 +2829,11 @@ private fun ActionRow(
     // edge was visibly missing by. Reporting bounds from *inside*, after
     // that padding's been applied, gives the caller the pill's true visible
     // edge to align against instead.
-    onVisibleBoundsChanged: (Offset, IntSize) -> Unit = { _, _ -> }
+    onVisibleBoundsChanged: (Offset, IntSize) -> Unit = { _, _ -> },
+    /** The author has blocked you: like / repost / quote are greyed out. */
+    interactionsBlocked: Boolean = false
 ) {
+    val blockedTint = Color.White.copy(alpha = 0.28f)
     @Composable
     fun RowContent() {
         if (appMode == AppMode.BLUESKY) {
@@ -2768,12 +2860,12 @@ private fun ActionRow(
             Row(modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                 ActionButton(if (item.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-                    if (item.isLiked) LikeRed else Color.White, null, onToggleLike)
+                    if (interactionsBlocked) blockedTint else if (item.isLiked) LikeRed else Color.White, null, onToggleLike)
                 ActionButton(if (item.isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
                     if (item.isBookmarked) BookmarkYellow else Color.White, null, onToggleBookmark)
                 ActionButton(Icons.Default.Repeat,
-                    if (item.isReposted) RepostGreen else Color.White, null, onToggleRepost)
-                ActionButton(Icons.Default.EditNote, if (item.isQuoteReposted) RepostGreen else Color.White, null, onQuoteRepost)
+                    if (interactionsBlocked) blockedTint else if (item.isReposted) RepostGreen else Color.White, null, onToggleRepost)
+                ActionButton(Icons.Default.EditNote, if (interactionsBlocked) blockedTint else if (item.isQuoteReposted) RepostGreen else Color.White, null, onQuoteRepost)
                 ActionButton(Icons.Default.Send, Color.White, null, onShare)
                 ActionButton(Icons.Default.Download, if (item.isDownloaded) BookmarkYellow else Color.White, null, onDownload)
                 GifActionButton(onDownloadGif, if (item.isGifDownloaded) BookmarkYellow else Color.White)

@@ -31,9 +31,14 @@ object BlockedAccounts {
 
     private fun bump() { _version.value = _version.value + 1 }
 
-    /** Either way: the user blocks them, or they block the user. */
+    /** Accounts the user is blocking — never shown anywhere. (Accounts that
+     *  block the user still show up, flagged with a "This user has you
+     *  blocked" status — see [isBlockedBy].) */
     fun isHidden(did: String?): Boolean =
-        !did.isNullOrBlank() && (blocking.containsKey(did) || blockedBy.contains(did))
+        !did.isNullOrBlank() && blocking.containsKey(did)
+
+    /** This account blocks the signed-in user. */
+    fun isBlockedBy(did: String?): Boolean = !did.isNullOrBlank() && blockedBy.contains(did)
 
     fun isBlocking(did: String?): Boolean = !did.isNullOrBlank() && blocking.containsKey(did)
 

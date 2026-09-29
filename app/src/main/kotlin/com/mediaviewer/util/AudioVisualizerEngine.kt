@@ -306,6 +306,7 @@ object AudioVisualizerEngine {
             smoothed[i] *= 0.6f
             if (smoothed[i] > 0.01f) any = true else smoothed[i] = 0f
         }
+        if (!any && levels.all { it == 0f }) return
         levels = if (any) smoothed.copyOf() else FloatArray(BAR_COUNT)
     }
 
@@ -364,6 +365,10 @@ object AudioVisualizerEngine {
             smoothed[i] = if (target > smoothed[i]) smoothed[i] + (target - smoothed[i]) * 0.6f
                 else smoothed[i] + (target - smoothed[i]) * 0.25f
         }
+        // Silence stays silence: don't hand the bars a "new" all-zero
+        // array ~20 times a second (each one would redraw them for nothing).
+        val silent = smoothed.all { it <= 0.001f }
+        if (silent && levels.all { it <= 0.001f }) return
         levels = smoothed.copyOf()
     }
 }

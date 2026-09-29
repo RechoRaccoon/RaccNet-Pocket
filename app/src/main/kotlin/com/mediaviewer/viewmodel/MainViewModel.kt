@@ -823,7 +823,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _currentIndex.value = 0
             if (_authorFeedState.value == null) {
                 _authorFeedState.value = AuthorFeedSavedState(
-                    author = AuthorInfo(_bskyDid.value, bskyHandle, "Saves", null),
+                    author = AuthorInfo(_bskyDid.value, bskyHandle, "Saved Posts", null),
                     items = _mediaItems.value, currentIndex = _currentIndex.value, cursor = feedCursor, feedUri = _selectedFeedUri.value
                 )
             }
@@ -836,7 +836,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 activeFeedMode = ActiveFeedMode.SAVES
                 activeFeedActorDid = null
                 _mediaItems.value = filterHidden(items)
-                _screenState.value = ScreenState.FEED
+                // Opens in Explore (grid) mode, like From Friends.
+                _screenState.value = ScreenState.GRID
             }.onFailure { _errorMessage.value = it.message }
             _isLoading.value = false
         }
@@ -1898,7 +1899,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun openDmThread(convo: DmConversation) {
         if (convo.convoId.isBlank()) return // no history yet — nothing to show
         markConvoRead(convo.convoId)
-        _dmThread.value = DmThreadState(
+        // A chat opened before shows straight away from memory while its
+        // newest messages are fetched underneath.
+        val cached = dmThreadCache[convo.convoId]
+        _dmThread.value = cached?.copy(convo = convo, loading = false, loadingMore = false) ?: DmThreadState(
             convo = convo, loading = true,
             members = if (convo.isGroup) convo.groupMembers.associateBy { it.did } else emptyMap()
         )
@@ -1913,14 +1917,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         viewModelScope.launch(Dispatchers.IO) {
-            bskyRepo.getConvoMessages(bskyToken, _bskyDid.value, convo.convoId)
+            // Just the newest page first (small, so it appears quickly);
+            // older messages load as the thread is scrolled up.
+            bskyRepo.getConvoMessages(bskyToken, _bskyDid.value, convo.convoId, limit = 30)
                 .onSuccess { (messages, cursor) ->
                     val cur = _dmThread.value
-                    _dmThread.value = cur?.copy(
+                    if (cur == null || cur.convo.convoId != convo.convoId) return@onSuccess
+                    val next = cur.copy(
                         messages = messages, embeddedPosts = buildEmbeddedPosts(messages),
                         loading = false, cursor = cursor,
                         members = if (convo.isGroup) groupSenders(messages) + cur.members else cur.members
                     )
+                    _dmThread.value = next
+                    dmThreadCache[convo.convoId] = next
                 }
                 .onFailure {
                     _dmThread.value = _dmThread.value?.copy(loading = false)
@@ -1982,7 +1991,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun buildEmbeddedPosts(messages: List<BskyMessageView>): Map<String, DmEmbeddedPost> =
         messages.mapNotNull { m -> bskyRepo.parseMessageEmbed(m.embed)?.let { m.id to it } }.toMap()
 
-    fun closeDmThread() { _dmThread.value = null }
+    fun closeDmThread() {
+        _dmThread.value?.let { t -> if (t.convo.convoId.isNotBlank() && !t.loading) dmThreadCache[t.convo.convoId] = t }
+        _dmThread.value = null
+    }
+
+    /** Each chat as last shown, so reopening it is instant. */
+    private val dmThreadCache = java.util.concurrent.ConcurrentHashMap<String, DmThreadState>()
 
     /** Group chats: the people who sent [messages], as far as known. */
     private fun groupSenders(messages: List<BskyMessageView>): Map<String, AuthorInfo> =
@@ -3154,7 +3169,7 @@ _bskyDid.value          = session.did
         // setMode()'s matching Log.d for why this is here. Logs a stack
         // trace too since loadFeed() has many call sites and knowing which
         // one fired during a repro is the whole point.
-        Log.d("Stellar-FeedState", "loadFeed(reset=$reset)", Exception("trace"))
+        Log.d("Stellar-FeedState", "loadFeed(reset=$reset)")
         if (_appMode.value == AppMode.E621) { loadE621Posts(reset); return }
         if (!_bskyLoggedIn.value) return
         // Every reset starts a new "generation": a slower response for a
@@ -3175,9 +3190,12 @@ _bskyDid.value          = session.did
                 val feedUri = _selectedFeedUri.value
                 // The pinned "Following" entry is a synthetic stand-in (it isn't a real
                 // feed generator), so it's served by getTimeline just like the no-selection case.
+                // A smaller first page comes back (and parses) noticeably
+                // faster; the next page is fetched right behind it.
+                val limit = if (reset) 30 else 50
                 return if (feedUri == null || feedUri == BlueskyRepository.FOLLOWING_FEED_URI)
-                    bskyRepo.getTimeline(bskyToken, feedCursor)
-                else bskyRepo.getFeed(bskyToken, feedUri, feedCursor)
+                    bskyRepo.getTimeline(bskyToken, feedCursor, limit)
+                else bskyRepo.getFeed(bskyToken, feedUri, feedCursor, limit)
             }
 
             var result = attempt()
@@ -3199,6 +3217,11 @@ _bskyDid.value          = session.did
             }.onFailure { _errorMessage.value = it.message }
             _isLoading.value = false
             isLoadingMore = false
+            // Get the second page ready before it's needed.
+            if (reset && result.isSuccess && feedCursor != null) {
+                delay(600)
+                if (generation == feedLoadGeneration && activeFeedMode == ActiveFeedMode.NORMAL) loadFeed(reset = false)
+            }
         }
     }
 
@@ -3365,6 +3388,8 @@ _bskyDid.value          = session.did
         // comments...) triggered it — centralized here instead of at every
         // individual call site.
         tapHaptic()
+        // Add To on this profile opens with its + / − already known.
+        if (author.did != _bskyDid.value) prefetchListMemberships(author.did)
         // Item 17: don't clobber a profile that's already open (visible or
         // hidden behind a post pager) — chain onto it via `parent` so
         // closeProfile() can unwind back through it instead of losing it.
@@ -3884,6 +3909,19 @@ _bskyDid.value          = session.did
      *  within search still restores the (closer, more specific) profile
      *  first; pinching a second time from the grid would fall through to
      *  the search restore in that nested case. */
+    /** Hub → "Return to Profile": back to the profile picked in the feed
+     *  selector — un-hiding it if it's still open behind the feed, or
+     *  opening it again if it was closed. */
+    fun returnToProfile() {
+        val author = _authorFeedState.value?.author ?: return
+        val overlay = _profileOverlay.value
+        if (overlay != null && overlay.author.did == author.did) {
+            if (overlay.hidden) _profileOverlay.value = overlay.copy(hidden = false)
+        } else {
+            openProfile(author)
+        }
+    }
+
     fun pinchInFromPost() {
         val overlay = _profileOverlay.value
         if (overlay != null && overlay.hidden) {
@@ -4108,6 +4146,7 @@ _bskyDid.value          = session.did
     fun toggleProfileFollow() {
         val cur = _profileOverlay.value ?: return
         val profile = cur.profile ?: return
+        if (profile.blocksYou) { showToast("This user has you blocked"); return }
         val author = profile.author
         val willFollow = !author.isFollowing
 
@@ -4661,6 +4700,7 @@ _bskyDid.value          = session.did
     fun openQuoteRepost() {
         val item = currentItem.value ?: return
         if (_appMode.value != AppMode.BLUESKY) return
+        if (_appMode.value == AppMode.BLUESKY && blocksViewer(item)) { showToast("This user has you blocked"); return }
         _quoteRepostTarget.value = item
     }
 
@@ -5178,7 +5218,8 @@ _bskyDid.value          = session.did
         if (next < _mediaItems.value.size) {
             _navDirection.value = 1
             _currentIndex.value = next
-            if (next >= _mediaItems.value.size - 5) loadMore()
+            // Fetch the next page well before the end is reached.
+            if (next >= _mediaItems.value.size - 15) loadMore()
         }
     }
 
@@ -5200,8 +5241,14 @@ _bskyDid.value          = session.did
 
     // ── Social Actions (optimistic updates) ───────────────────────────────────
 
+    /** Bluesky doesn't let you like, repost, quote or follow someone who's
+     *  blocked you (its own app refuses too), so those are switched off. */
+    private fun blocksViewer(item: MediaItem): Boolean =
+        item.authorBlocksViewer || com.mediaviewer.util.BlockedAccounts.isBlockedBy(item.author.did)
+
     fun toggleLike() {
         val item = currentItem.value ?: return
+        if (_appMode.value == AppMode.BLUESKY && blocksViewer(item)) { showToast("This user has you blocked"); return }
         if (_appMode.value == AppMode.BLUESKY) {
             if (item.isLiked) {
                 // Optimistic unlike
@@ -5232,6 +5279,7 @@ _bskyDid.value          = session.did
     fun toggleRepost() {
         val item = currentItem.value ?: return
         if (_appMode.value != AppMode.BLUESKY) return
+        if (_appMode.value == AppMode.BLUESKY && blocksViewer(item)) { showToast("This user has you blocked"); return }
         if (item.isReposted) {
             updateCurrentItem { it.copy(isReposted = false, repostUri = null, repostCount = (it.repostCount - 1).coerceAtLeast(0)) }
             viewModelScope.launch(Dispatchers.IO) {
@@ -5301,6 +5349,7 @@ _bskyDid.value          = session.did
     fun toggleFollow() {
         if (_appMode.value == AppMode.E621) { toggleE621Follow(); return }
         val item   = currentItem.value ?: return
+        if (_appMode.value == AppMode.BLUESKY && blocksViewer(item)) { showToast("This user has you blocked"); return }
         val author = item.author
         if (author.isFollowing) {
             updateCurrentItemAuthor { it.copy(isFollowing = false, followingUri = null) }
@@ -5364,15 +5413,39 @@ _bskyDid.value          = session.did
     val listMembershipBusy: StateFlow<Set<String>> = _listMembershipBusy
     private var listMembershipJob: Job? = null
 
-    private fun loadListMemberships(targetDid: String) {
-        listMembershipJob?.cancel()
-        _listMemberships.value = emptyMap()
-        _listMembershipsLoading.value = true
-        listMembershipJob = viewModelScope.launch(Dispatchers.IO) {
-            bskyRepo.getListMemberships(bskyToken, _bskyDid.value, targetDid)
-                .onSuccess { if (_listPickerTargetDid.value == targetDid) _listMemberships.value = it }
-            if (_listPickerTargetDid.value == targetDid) _listMembershipsLoading.value = false
+    /** Memberships looked up recently, by account (did -> time, list URI -> item URI). */
+    private val listMembershipCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Map<String, String>>>()
+    private val listMembershipFetches = java.util.concurrent.ConcurrentHashMap<String, Job>()
+
+    /** Starts looking up which of your lists [did] is on before Add To is
+     *  even opened (the More menu or a profile page opening), so the
+     *  + / − buttons are already right the moment it appears. */
+    fun prefetchListMemberships(did: String) {
+        if (!_bskyLoggedIn.value || did.isBlank()) return
+        val cached = listMembershipCache[did]
+        if (cached != null && System.currentTimeMillis() - cached.first < 5 * 60_000L) return
+        fetchListMemberships(did)
+    }
+
+    private fun fetchListMemberships(did: String): Job {
+        listMembershipFetches[did]?.takeIf { it.isActive }?.let { return it }
+        val job = viewModelScope.launch(Dispatchers.IO) {
+            bskyRepo.getListMemberships(bskyToken, _bskyDid.value, did).onSuccess { map ->
+                listMembershipCache[did] = System.currentTimeMillis() to map
+                if (_listPickerTargetDid.value == did) _listMemberships.value = map
+            }
+            if (_listPickerTargetDid.value == did) _listMembershipsLoading.value = false
         }
+        listMembershipFetches[did] = job
+        return job
+    }
+
+    private fun loadListMemberships(targetDid: String) {
+        val cached = listMembershipCache[targetDid]
+        // Known already: shown straight away, refreshed quietly underneath.
+        _listMemberships.value = cached?.second ?: emptyMap()
+        _listMembershipsLoading.value = cached == null
+        listMembershipJob = fetchListMemberships(targetDid)
     }
 
     /** Add To's + / − button: adds the account to [listUri] (and, merged
@@ -5382,10 +5455,13 @@ _bskyDid.value          = session.did
         val targetDid = _listPickerTargetDid.value ?: return
         if (listUri in _listMembershipBusy.value) return
         val uris = listOfNotNull(listUri, additionalListUri)
-        val removing = _listMemberships.value.containsKey(listUri)
         _listMembershipBusy.value = _listMembershipBusy.value + listUri
         tapHaptic()
         viewModelScope.launch(Dispatchers.IO) {
+            // Tapped before the lookup finished: let it finish first, so an
+            // account that's already on the list isn't added twice.
+            if (_listMembershipsLoading.value) listMembershipJob?.join()
+            val removing = _listMemberships.value.containsKey(listUri)
             var failed: String? = null
             for (uri in uris) {
                 if (removing) {
@@ -5401,6 +5477,7 @@ _bskyDid.value          = session.did
                 }
             }
             failed?.let { _errorMessage.value = it }
+            listMembershipCache[targetDid] = System.currentTimeMillis() to _listMemberships.value
             // Keep the member counts under each list honest.
             if (failed == null) {
                 val delta = if (removing) -1 else 1
@@ -5412,6 +5489,49 @@ _bskyDid.value          = session.did
                 }
             }
             _listMembershipBusy.value = _listMembershipBusy.value - listUri
+        }
+    }
+
+    private val _creatingPickerList = MutableStateFlow(false)
+    val creatingPickerList: StateFlow<Boolean> = _creatingPickerList
+
+    /** Add To → "Create new …". [kind]: "LISTS", "MODLISTS", "STARTER_PACKS"
+     *  or "BOTH" (a list and a starter pack under the same name, which Add
+     *  To's Both tab then treats as one). The new entry appears at the top
+     *  of its tab, ready for its + button. */
+    fun createPickerList(kind: String, name: String, description: String, coverUri: android.net.Uri?, onDone: (String?) -> Unit) {
+        val clean = name.trim()
+        if (clean.isBlank() || _creatingPickerList.value) return
+        _creatingPickerList.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            val context = getApplication<Application>()
+            val me = _bskyDid.value
+            val result = runCatching {
+                if (kind == "LISTS" || kind == "MODLISTS" || kind == "BOTH") {
+                    val purpose = if (kind == "MODLISTS") "modlist" else "curatelist"
+                    val uri = bskyRepo.createList(bskyToken, me, clean, description.trim(), purpose, context, coverUri).getOrThrow()
+                    val newList = BskyList(
+                        uri = uri, cid = "", name = clean, purpose = "app.bsky.graph.defs#$purpose",
+                        description = description.trim().ifBlank { null }, avatar = coverUri?.toString(), itemCount = 0
+                    )
+                    _userLists.value = listOf(newList) + _userLists.value
+                }
+                if (kind == "STARTER_PACKS" || kind == "BOTH") {
+                    val (packUri, listUri) = bskyRepo.createStarterPack(bskyToken, me, clean, description.trim()).getOrThrow()
+                    val pack = BskyStarterPackView(
+                        uri = packUri, cid = "",
+                        record = BskyStarterPackRecord(type = "app.bsky.graph.starterpack", name = clean, description = description.trim().ifBlank { null }, list = listUri),
+                        listItemCount = 1
+                    )
+                    _userStarterPacks.value = listOf(pack) + _userStarterPacks.value
+                }
+            }
+            _creatingPickerList.value = false
+            withContext(Dispatchers.Main) {
+                val err = result.exceptionOrNull()?.message
+                if (err != null) _errorMessage.value = "Couldn't create it: $err" else showToast("Created \"$clean\"")
+                onDone(err)
+            }
         }
     }
 
@@ -5441,7 +5561,6 @@ _bskyDid.value          = session.did
 
     fun dismissListPicker() {
         _listPickerTargetDid.value = null
-        listMembershipJob?.cancel()
         _listMembershipsLoading.value = false
     }
 

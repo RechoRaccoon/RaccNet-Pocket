@@ -22,6 +22,7 @@ object UiToggles {
     private const val KEY_VISUALIZER_CALL_MODE = "audio_visualizer_call_mode"
     private const val KEY_VISUALIZER_PERMISSION_ASKED = "audio_visualizer_permission_asked"
     private const val KEY_STARRY_BACKGROUND = "starry_background"
+    private const val KEY_STAR_FRAME_RATE = "starry_background_fps"
     private const val KEY_OVERRIDE_COLORS = "override_app_colors"
     private const val KEY_OVERRIDE_COLOR = "override_app_color"
 
@@ -70,6 +71,13 @@ object UiToggles {
     var starryBackground by mutableStateOf(true)
         private set
 
+    /** Settings → Starry Background → "Frame Rate Cap": how often the stars
+     *  (twinkles, shooting stars) redraw. Low by default so the screen can
+     *  drop to its idle refresh rate when nothing else is moving. */
+    var starFrameRate by mutableStateOf(30)
+        private set
+    val starFrameRateOptions = listOf(30, 60, 90, 120)
+
     /** Settings → UI Customization → "Override App Colors": everywhere the
      *  app would wear the signed-in account's profile color, it wears
      *  [overrideColor] instead (the account's own profile page keeps its
@@ -108,6 +116,7 @@ object UiToggles {
             ?: LoadingAnimation.SPACE
         audioVisualizer = p.getBoolean(KEY_AUDIO_VISUALIZER, true)
         starryBackground = p.getBoolean(KEY_STARRY_BACKGROUND, true)
+        starFrameRate = p.getInt(KEY_STAR_FRAME_RATE, 30).coerceIn(15, 120)
         overrideAppColors = p.getBoolean(KEY_OVERRIDE_COLORS, false)
         overrideColor = p.getInt(KEY_OVERRIDE_COLOR, 0xFFFF4FA1.toInt())
         visualizerCallMode = p.getString(KEY_VISUALIZER_CALL_MODE, null)
@@ -133,6 +142,11 @@ object UiToggles {
     fun updateOverrideColor(argb: Int) {
         overrideColor = argb or 0xFF000000.toInt()
         prefs?.edit()?.putInt(KEY_OVERRIDE_COLOR, overrideColor)?.apply()
+    }
+
+    fun updateStarFrameRate(fps: Int) {
+        starFrameRate = fps.coerceIn(15, 120)
+        prefs?.edit()?.putInt(KEY_STAR_FRAME_RATE, starFrameRate)?.apply()
     }
 
     fun updateStarryBackground(enabled: Boolean) {

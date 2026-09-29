@@ -446,8 +446,9 @@ class BlueskyRepository {
             chatAllowIncoming = runCatching {
                 body.associated?.asJsonObject?.getAsJsonObject("chat")?.get("allowIncoming")?.asString
             }.getOrNull() ?: "following",
-            blockedEitherWay = body.viewer?.blockedBy == true || body.viewer?.blocking != null
-        )
+            blockedEitherWay = body.viewer?.blockedBy == true || body.viewer?.blocking != null,
+            blocksYou = body.viewer?.blockedBy == true
+        ).also { com.mediaviewer.util.BlockedAccounts.noteViewer(body.did, body.viewer) }
     }
 
     /** Posts by URI as feed items (the Inbox opening the post it's about). */
@@ -2201,10 +2202,10 @@ class BlueskyRepository {
     /** Full linear message history for one conversation — powers the DMs inbox
      *  thread view. Bluesky returns messages newest-first; reversed here so
      *  callers get them in normal reading order (oldest at index 0). */
-    suspend fun getConvoMessages(token: String, myDid: String, convoId: String, cursor: String? = null)
+    suspend fun getConvoMessages(token: String, myDid: String, convoId: String, cursor: String? = null, limit: Int = 40)
         : Result<Pair<List<BskyMessageView>, String?>> = runCatching {
         ensureChatApi(myDid)
-        val resp = viaChat(token, myDid, "chat.bsky.convo.getMessages") { a, auth -> a.getMessages(auth, convoId, 50, cursor) }
+        val resp = viaChat(token, myDid, "chat.bsky.convo.getMessages") { a, auth -> a.getMessages(auth, convoId, limit, cursor) }
         val body = resp.body() ?: error("GetMessages ${resp.code()}: ${errorBodyText(resp)}")
         body.relatedProfiles?.forEach { p -> chatProfiles[p.did] = p.toAuthorInfo() }
         Pair(body.messages.reversed(), body.cursor)
@@ -2364,7 +2365,7 @@ class BlueskyRepository {
                     var pages = 0
                     do {
                         val resp = viaAppView(token, myDid, "app.bsky.graph.getListsWithMembership") { a, auth ->
-                            a.getListsWithMembership(auth, actorDid, 50, cursor)
+                            a.getListsWithMembership(auth, actorDid, 100, cursor)
                         }
                         val body = resp.body() ?: error("getListsWithMembership ${resp.code()}")
                         body.getAsJsonArray("listsWithMembership")?.forEach { e ->
@@ -2403,6 +2404,46 @@ class BlueskyRepository {
             if (r1.isFailure && r2.isFailure) throw (r1.exceptionOrNull() ?: Exception("membership lookup failed"))
         }
         out
+    }
+
+    /** Add To → "Create new …": makes one of your own lists. [purpose] is
+     *  "curatelist" (a normal list), "modlist" (a moderation list) or
+     *  "referencelist" (the list behind a starter pack). An optional cover
+     *  image is uploaded the same way Bluesky's app does it (a blob on the
+     *  list record's `avatar`). Returns the new list's URI. */
+    suspend fun createList(
+        token: String, did: String, name: String, description: String, purpose: String,
+        context: android.content.Context? = null, avatarUri: android.net.Uri? = null
+    ): Result<String> = runCatching {
+        val record = mutableMapOf<String, Any>(
+            "\$type" to "app.bsky.graph.list",
+            "purpose" to "app.bsky.graph.defs#$purpose",
+            "name" to name.take(64),
+            "createdAt" to Instant.now().toString()
+        )
+        if (description.isNotBlank()) record["description"] = description.take(300)
+        if (context != null && avatarUri != null) {
+            val up = uploadImageBlob(token, context, avatarUri).getOrThrow()
+            record["avatar"] = blobJson(up.blob)
+        }
+        createRecord(token, did, "app.bsky.graph.list", record).getOrThrow()
+    }
+
+    /** A new starter pack: its own (reference) list with you already on it —
+     *  the way Bluesky's app starts one — plus the pack record pointing at
+     *  it. Returns (pack URI, list URI). */
+    suspend fun createStarterPack(token: String, did: String, name: String, description: String): Result<Pair<String, String>> = runCatching {
+        val listUri = createList(token, did, name, "", "referencelist").getOrThrow()
+        runCatching { addToList(token, did, listUri, did).getOrThrow() }
+        val record = mutableMapOf<String, Any>(
+            "\$type" to "app.bsky.graph.starterpack",
+            "name" to name.take(50),
+            "list" to listUri,
+            "createdAt" to Instant.now().toString()
+        )
+        if (description.isNotBlank()) record["description"] = description.take(300)
+        val packUri = createRecord(token, did, "app.bsky.graph.starterpack", record).getOrThrow()
+        packUri to listUri
     }
 
     /** Takes someone back off a list (or starter pack's list). */
@@ -2920,7 +2961,10 @@ class BlueskyRepository {
     // just being capped/mis-rendered. This wraps each post individually so
     // one bad post is skipped instead of taking its whole page down with it.
     private fun parseFeedItemSafe(item: BskyFeedItem): List<MediaItem> =
-        runCatching { parseFeedItem(item) }.getOrDefault(emptyList())
+        runCatching { parseFeedItem(item) }.getOrDefault(emptyList()).let { list ->
+            // Their posts still show; they're just flagged (see MediaItem.authorBlocksViewer).
+            if (item.post.author.viewer?.blockedBy == true) list.map { it.copy(authorBlocksViewer = true) } else list
+        }
 
     private fun parseFeedItem(item: BskyFeedItem): List<MediaItem> {
         val post   = item.post

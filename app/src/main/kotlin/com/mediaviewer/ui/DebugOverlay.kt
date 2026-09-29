@@ -7,12 +7,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -36,23 +36,29 @@ fun DebugOverlay(
     modifier: Modifier = Modifier
 ) {
     var fps by remember { mutableIntStateOf(0) }
-    // Counts real frames (Choreographer ticks the UI actually gets to run)
-    // over half-second windows — drops show up as soon as the main thread
-    // is blocked or rendering falls behind.
+    // Counts frames the app actually draws (FrameMetrics), rather than
+    // asking for a frame every refresh to count them — which is what the
+    // old counter did, and that alone kept the screen from ever dropping to
+    // its lower idle refresh rate.
+    val view = androidx.compose.ui.platform.LocalView.current
+    val drawn = remember { java.util.concurrent.atomic.AtomicInteger(0) }
+    DisposableEffect(view) {
+        var ctx: android.content.Context? = view.context
+        while (ctx is android.content.ContextWrapper && ctx !is android.app.Activity) ctx = ctx.baseContext
+        val window = (ctx as? android.app.Activity)?.window
+        val listener = android.view.Window.OnFrameMetricsAvailableListener { _, _, _ -> drawn.incrementAndGet() }
+        runCatching { window?.addOnFrameMetricsAvailableListener(listener, android.os.Handler(android.os.Looper.getMainLooper())) }
+        onDispose { runCatching { window?.removeOnFrameMetricsAvailableListener(listener) } }
+    }
     LaunchedEffect(Unit) {
-        var frames = 0
-        var windowStart = 0L
+        var last = android.os.SystemClock.uptimeMillis()
         while (true) {
-            withFrameNanos { t ->
-                if (windowStart == 0L) windowStart = t
-                frames++
-                val span = t - windowStart
-                if (span >= 500_000_000L) {
-                    fps = Math.round(frames * 1_000_000_000.0 / span).toInt()
-                    frames = 0
-                    windowStart = t
-                }
-            }
+            kotlinx.coroutines.delay(500)
+            val now = android.os.SystemClock.uptimeMillis()
+            val frames = drawn.getAndSet(0)
+            val next = Math.round(frames * 1000.0 / (now - last).coerceAtLeast(1L)).toInt()
+            last = now
+            if (next != fps) fps = next
         }
     }
     val color = readableTint(tint)

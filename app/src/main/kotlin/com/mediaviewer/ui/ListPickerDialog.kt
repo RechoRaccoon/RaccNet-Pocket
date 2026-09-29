@@ -1,57 +1,77 @@
 package com.mediaviewer.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.FormatListBulleted
-import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import com.mediaviewer.model.BskyList
 import com.mediaviewer.model.BskyStarterPackView
 import com.mediaviewer.ui.theme.*
 import com.mediaviewer.util.rememberHapticTap
 
-private enum class PickerTab { LISTS, STARTER_PACKS }
+/** Add To's tabs, in order. [key] is what's remembered between openings. */
+private enum class PickerTab(val key: String, val label: String, val createLabel: String) {
+    LISTS("LISTS", "Lists", "Create new List"),
+    STARTER_PACKS("STARTER_PACKS", "Starter Packs", "Create new Starter Pack"),
+    BOTH("BOTH", "Both", "Create merged List + Starter Pack"),
+    MODLISTS("MODLISTS", "Moderation Lists", "Create new Moderation List")
+}
 
-private data class CombinedEntry(
+private data class PickerEntry(
+    val key: String,
     val name: String,
+    val subtitle: String?,
+    val avatarUrl: String?,
+    val kind: PickerTab,
+    /** The list the account is added to / removed from. */
     val listUri: String,
-    val starterPackListUri: String,
-    val avatarUrl: String?
+    /** "Both": the same-named starter pack's list, kept in step. */
+    val additionalUri: String? = null
 )
 
 /**
- * Add To — the account's lists and starter packs, each with a + (add them)
- * or − (take them back off) button on the far right. Tapping one never
- * closes the popup; the round X in the corner (or Back, or tapping outside)
- * does. Same presentation as Share To / Quote Repost: in-place glass that
+ * Add To — your Lists, Starter Packs, both at once (a list and a starter pack
+ * that share a name) or Moderation Lists, each with a + (add them) or −
+ * (take them back off) button on the far right; the popup stays open until
+ * its X, Back or a tap outside. The last row of every tab creates a new one.
+ *
+ * Only as tall as its rows need (capped to the screen). In-place glass that
  * live-blurs the post, faded/scaled in and out via [FadingPopupHost].
  */
 @Composable
@@ -60,155 +80,144 @@ fun ListPickerDialog(
     starterPacks: List<BskyStarterPackView>,
     listsLoading: Boolean,
     initialTab: String,
-    combineMode: Boolean,
     liquidGlass: Boolean,
     dominantColor: Color = NeutralGlassTint,
     backdrop: GlassBackdrop? = null,
     /** List URI -> list item URI for every list the account is already on. */
     memberships: Map<String, String> = emptyMap(),
-    membershipsLoading: Boolean = false,
     /** List URIs with an add/remove in flight. */
     busy: Set<String> = emptySet(),
+    creating: Boolean = false,
     onTabChange: (String) -> Unit,
-    /** + / −: add to (or remove from) the list, and its merged starter pack. */
     onToggle: (listUri: String, additionalUri: String?) -> Unit,
+    /** (tab key, name, description, cover image, onDone(error or null)) */
+    onCreate: (String, String, String, android.net.Uri?, (String?) -> Unit) -> Unit = { _, _, _, _, _ -> },
     onDismiss: () -> Unit
 ) {
     var activeTab by remember(initialTab) {
-        mutableStateOf(if (initialTab == "STARTER_PACKS") PickerTab.STARTER_PACKS else PickerTab.LISTS)
+        mutableStateOf(PickerTab.entries.firstOrNull { it.key == initialTab } ?: PickerTab.LISTS)
     }
-    var swipeDx by remember { mutableFloatStateOf(0f) }
+    // Non-null while the "Create new …" form is showing.
+    var creatingKind by remember { mutableStateOf<PickerTab?>(null) }
     val tint = dominantColor
 
     fun switchTab(tab: PickerTab) {
         activeTab = tab
-        onTabChange(if (tab == PickerTab.LISTS) "LISTS" else "STARTER_PACKS")
+        onTabChange(tab.key)
     }
 
-    // Compute combined entries (List + StarterPack with matching name)
-    val combinedEntries = remember(lists, starterPacks) {
-        val packByName = starterPacks.mapNotNull { pack ->
-            pack.record?.name?.let { name -> name to pack.record.list }
-        }.toMap()
-        lists.mapNotNull { list ->
-            packByName[list.name]?.let { packListUri ->
-                CombinedEntry(name = list.name, listUri = list.uri, starterPackListUri = packListUri, avatarUrl = list.avatar)
+    val entries: List<PickerEntry> = remember(lists, starterPacks, activeTab) {
+        val curate = lists.filter { !it.purpose.contains("modlist") && !it.purpose.contains("referencelist") }
+        when (activeTab) {
+            PickerTab.LISTS -> curate.map {
+                PickerEntry(it.uri, it.name, it.itemCount?.let { n -> "$n members" }, it.avatar, PickerTab.LISTS, it.uri)
+            }
+            PickerTab.MODLISTS -> lists.filter { it.purpose.contains("modlist") }.map {
+                PickerEntry(it.uri, it.name, it.itemCount?.let { n -> "$n members" }, it.avatar, PickerTab.MODLISTS, it.uri)
+            }
+            PickerTab.STARTER_PACKS -> starterPacks.mapNotNull { pack ->
+                val rec = pack.record ?: return@mapNotNull null
+                if (rec.list.isBlank()) return@mapNotNull null
+                PickerEntry(pack.uri, rec.name, pack.listItemCount?.let { n -> "$n members" }, null, PickerTab.STARTER_PACKS, rec.list)
+            }
+            PickerTab.BOTH -> {
+                val packByName = starterPacks.mapNotNull { p -> p.record?.let { r -> r.name to r.list } }
+                    .filter { it.second.isNotBlank() }.toMap()
+                curate.mapNotNull { list ->
+                    packByName[list.name]?.let { packList ->
+                        PickerEntry(list.uri, list.name, "List + Starter Pack", list.avatar, PickerTab.BOTH, list.uri, packList)
+                    }
+                }
             }
         }
     }
 
-    BackHandler(onBack = onDismiss)
+    BackHandler(onBack = { if (creatingKind != null) creatingKind = null else onDismiss() })
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black.copy(alpha = if (liquidGlass) 0.22f else 0.6f))
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss)
-            .padding(top = rememberTopCutoutClearance() + 8.dp)
+            .padding(top = rememberTopCutoutClearance())
+            .imePadding()
             .navigationBarsPadding()
             .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
         contentAlignment = Alignment.BottomCenter
     ) {
         PopupSheetSurface(
             liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 180.dp)
-                .fillMaxHeight(0.7f)
-                // Horizontal drag switches between My Lists and Starter Packs.
-                .pointerInput(combineMode) {
-                    if (!combineMode) {
-                        detectHorizontalDragGestures(
-                            onDragEnd = {
-                                if (swipeDx < -60f) switchTab(PickerTab.STARTER_PACKS)
-                                else if (swipeDx > 60f) switchTab(PickerTab.LISTS)
-                                swipeDx = 0f
-                            },
-                            onDragCancel = { swipeDx = 0f }
-                        ) { _, dragAmount -> swipeDx += dragAmount }
-                    }
-                }
+            // Wraps its rows; the list inside scrolls once it runs out of room.
+            modifier = Modifier.fillMaxWidth().wrapContentHeight().animateContentSize()
         ) {
-            Column(modifier = Modifier.fillMaxSize()) {
+            Column(Modifier.fillMaxWidth()) {
                 PopupSheetHeader(
                     title = "Add To",
                     liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
                     onClose = onDismiss
                 )
-                if (!combineMode) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        TabButton(
-                            label = "My Lists",
-                            selected = activeTab == PickerTab.LISTS,
-                            liquidGlass = liquidGlass,
-                            dominantColor = tint,
-                            backdrop = backdrop,
-                            modifier = Modifier.weight(1f),
-                            onClick = { switchTab(PickerTab.LISTS) }
-                        )
-                        TabButton(
-                            label = "Starter Packs",
-                            selected = activeTab == PickerTab.STARTER_PACKS,
-                            liquidGlass = liquidGlass,
-                            dominantColor = tint,
-                            backdrop = backdrop,
-                            modifier = Modifier.weight(1f),
-                            onClick = { switchTab(PickerTab.STARTER_PACKS) }
-                        )
-                    }
-                }
-
-                HorizontalDivider(color = Color.White.copy(alpha = 0.08f), modifier = Modifier.padding(top = 4.dp))
-
-                @Composable
-                fun Entry(name: String, subtitle: String?, avatarUrl: String?, isPack: Boolean, listUri: String, additionalUri: String?) {
-                    EntryRow(
-                        name = name, subtitle = subtitle, avatarUrl = avatarUrl, isPack = isPack,
-                        liquidGlass = liquidGlass, tint = tint,
-                        isMember = memberships.containsKey(listUri),
-                        busy = listUri in busy,
-                        membershipKnown = !membershipsLoading,
-                        onToggle = { onToggle(listUri, additionalUri) }
-                    )
-                }
-
-                Box(Modifier.weight(1f).fillMaxWidth()) {
-                    if (combineMode) {
-                        PickerBody(loading = listsLoading) {
-                            if (combinedEntries.isEmpty() && !listsLoading) {
-                                item { EmptyLabel("No matching Lists + Starter Packs found.\nMake sure they share the same name.") }
+                AnimatedContent(
+                    targetState = creatingKind,
+                    transitionSpec = {
+                        val dir = if (targetState != null) 1 else -1
+                        (slideInHorizontally(tween(220)) { it * dir / 3 } + fadeIn(tween(200))) togetherWith
+                            (slideOutHorizontally(tween(200)) { -it * dir / 3 } + fadeOut(tween(150)))
+                    },
+                    label = "addToMode"
+                ) { formKind ->
+                    if (formKind != null) {
+                        CreateListForm(
+                            kind = formKind, tint = tint, creating = creating,
+                            onBack = { creatingKind = null },
+                            onCreate = { name, description, cover ->
+                                onCreate(formKind.key, name, description, cover) { err -> if (err == null) creatingKind = null }
                             }
-                            items(combinedEntries, key = { it.listUri }) { entry ->
-                                Entry(entry.name, null, entry.avatarUrl, false, entry.listUri, entry.starterPackListUri)
-                            }
-                        }
+                        )
                     } else {
-                        AnimatedContent(
-                            targetState = activeTab,
-                            transitionSpec = {
-                                val dir = if (targetState == PickerTab.STARTER_PACKS) 1 else -1
-                                (slideInHorizontally(tween(200)) { it * dir } + fadeIn(tween(170))) togetherWith
-                                (slideOutHorizontally(tween(200)) { -it * dir } + fadeOut(tween(130)))
-                            },
-                            label = "tab"
-                        ) { tab ->
-                            PickerBody(loading = listsLoading) {
-                                when (tab) {
-                                    PickerTab.LISTS -> {
-                                        if (lists.isEmpty() && !listsLoading) item { EmptyLabel("You have no lists yet.") }
-                                        items(lists, key = { it.uri }) { list ->
-                                            Entry(list.name, list.itemCount?.let { "$it members" }, list.avatar, false, list.uri, null)
+                        Column(Modifier.fillMaxWidth()) {
+                            ProfileStyleTabRow(
+                                labels = PickerTab.entries.map { it.label },
+                                selectedIndex = activeTab.ordinal,
+                                liquidGlass = liquidGlass, tint = tint
+                            ) { i -> switchTab(PickerTab.entries[i]) }
+
+                            if (listsLoading && entries.isEmpty()) {
+                                Box(Modifier.fillMaxWidth().height(96.dp), contentAlignment = Alignment.Center) {
+                                    CircularProgressIndicator(color = Color.White, strokeWidth = 1.5.dp, modifier = Modifier.size(24.dp))
+                                }
+                            } else {
+                                val maxListHeight = (androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp * 0.62f).dp
+                                LazyColumn(
+                                    modifier = Modifier.fillMaxWidth().heightIn(max = maxListHeight),
+                                    contentPadding = PaddingValues(top = 2.dp, bottom = 12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    if (entries.isEmpty()) {
+                                        item(key = "empty") {
+                                            Box(Modifier.fillMaxWidth().padding(vertical = 6.dp), contentAlignment = Alignment.Center) {
+                                                Text(
+                                                    when (activeTab) {
+                                                        PickerTab.LISTS -> "You have no lists yet."
+                                                        PickerTab.STARTER_PACKS -> "You have no Starter Packs yet."
+                                                        PickerTab.BOTH -> "No List + Starter Pack pairs yet (same name)."
+                                                        PickerTab.MODLISTS -> "You have no moderation lists yet."
+                                                    },
+                                                    color = Color.White, fontSize = 13.sp,
+                                                    modifier = Modifier.popupTextShadow().padding(horizontal = 12.dp, vertical = 6.dp)
+                                                )
+                                            }
                                         }
                                     }
-                                    PickerTab.STARTER_PACKS -> {
-                                        if (starterPacks.isEmpty() && !listsLoading) item { EmptyLabel("You have no Starter Packs yet.") }
-                                        items(starterPacks, key = { it.uri }) { pack ->
-                                            val listUri = pack.record?.list ?: return@items
-                                            Entry(pack.record.name, pack.listItemCount?.let { "$it members" }, null, true, listUri, null)
-                                        }
+                                    items(entries, key = { it.key }) { entry ->
+                                        EntryRow(
+                                            entry = entry, tint = tint,
+                                            isMember = memberships.containsKey(entry.listUri),
+                                            busy = entry.listUri in busy,
+                                            onToggle = { onToggle(entry.listUri, entry.additionalUri) }
+                                        )
+                                    }
+                                    item(key = "create_${activeTab.key}") {
+                                        CreateRow(label = activeTab.createLabel, tint = tint) { creatingKind = activeTab }
                                     }
                                 }
                             }
@@ -220,106 +229,63 @@ fun ListPickerDialog(
     }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Rows ───────────────────────────────────────────────────────────────────
+
+private val RowHeight = 40.dp
+private val RowShape = RoundedCornerShape(12.dp)
 
 @Composable
-private fun TabButton(
-    label: String,
-    selected: Boolean,
-    liquidGlass: Boolean,
-    dominantColor: Color = NeutralGlassTint,
-    backdrop: GlassBackdrop? = null,
-    modifier: Modifier,
-    onClick: () -> Unit
-) {
-    val tap = rememberHapticTap()
-    val shape = RoundedCornerShape(14.dp)
-    val m = modifier.height(34.dp).clip(shape).clickable(onClick = { tap(); onClick() })
-    if (liquidGlass && selected) {
-        LiquidGlassSurface(modifier = m, shape = shape, tint = dominantColor, backdrop = backdrop, contentAlignment = Alignment.Center) {
-            Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-        }
-    } else {
+private fun EntryRow(entry: PickerEntry, tint: Color, isMember: Boolean, busy: Boolean, onToggle: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        // Cover (or an icon for its kind), on the same dim backing as the name.
         Box(
-            m.background(if (selected) Color.White.copy(0.14f) else Color.White.copy(0.04f)),
+            Modifier.size(RowHeight).clip(RowShape).background(Color.Black.copy(alpha = 0.32f)),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                label, color = if (selected) Color.White else DimGray, fontSize = 13.sp,
-                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
-            )
-        }
-    }
-}
-
-@Composable
-private fun PickerBody(loading: Boolean, content: LazyListScope.() -> Unit) {
-    if (loading) {
-        Box(Modifier.fillMaxWidth().height(110.dp), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator(color = Color.White, strokeWidth = 1.5.dp, modifier = Modifier.size(26.dp))
-        }
-    } else {
-        LazyColumn(modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(vertical = 6.dp), content = content)
-    }
-}
-
-@Composable
-private fun EmptyLabel(text: String) {
-    Box(Modifier.fillMaxWidth().height(90.dp).padding(horizontal = 20.dp), contentAlignment = Alignment.Center) {
-        Text(text, color = DimGray, fontSize = 13.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-    }
-}
-
-@Composable
-private fun EntryRow(
-    name: String, subtitle: String?, avatarUrl: String?, isPack: Boolean,
-    liquidGlass: Boolean = false, tint: Color = NeutralGlassTint,
-    isMember: Boolean, busy: Boolean, membershipKnown: Boolean,
-    onToggle: () -> Unit
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 12.dp, top = 7.dp, bottom = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        if (avatarUrl != null) {
-            AsyncImage(model = avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
-                modifier = Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)))
-        } else {
-            // Item 3: placeholder icon is white (not grey) in Glass mode so it
-            // reads clearly against the clear/tinted glass background.
-            Box(modifier = Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).background(Color.White.copy(0.09f)),
-                contentAlignment = Alignment.Center) {
+            if (entry.avatarUrl != null) {
+                AsyncImage(model = entry.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().clip(RowShape))
+            } else {
                 Icon(
-                    imageVector = if (isPack) Icons.Default.Groups else Icons.Default.FormatListBulleted,
-                    contentDescription = null,
-                    tint = if (liquidGlass) Color.White else DimGray,
-                    modifier = Modifier.size(18.dp)
+                    imageVector = when (entry.kind) {
+                        PickerTab.STARTER_PACKS -> Icons.Default.Groups
+                        PickerTab.MODLISTS -> Icons.Default.Shield
+                        else -> Icons.Default.FormatListBulleted
+                    },
+                    contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp)
                 )
             }
         }
-        Column(modifier = Modifier.weight(1f)) {
-            Text(name, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-            if (subtitle != null) Text(subtitle, color = DimGray, fontSize = 11.sp)
+        Column(
+            modifier = Modifier.weight(1f).height(RowHeight).popupTextShadow(RowShape).padding(horizontal = 12.dp),
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(entry.name, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1,
+                overflow = TextOverflow.Ellipsis)
+            if (entry.subtitle != null) Text(entry.subtitle, color = Color.White.copy(alpha = 0.75f), fontSize = 11.sp, maxLines = 1)
         }
         // One button: + adds them, − takes them back off.
         val bg by animateColorAsState(
-            if (isMember) androidx.compose.ui.graphics.lerp(tint, Color.White, 0.2f).copy(alpha = 0.9f) else Color.White.copy(alpha = 0.1f),
+            if (isMember) lerp(tint, Color.Black, 0.2f).copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.32f),
             label = "addToBg"
         )
         Box(
             Modifier
-                .size(34.dp)
-                .clip(CircleShape)
+                .size(RowHeight)
+                .clip(RowShape)
                 .background(bg)
-                .border(1.dp, androidx.compose.ui.graphics.lerp(tint, Color.White, 0.35f).copy(alpha = if (isMember) 0f else 0.6f), CircleShape)
-                .clickable(enabled = !busy && membershipKnown, onClick = onToggle),
+                .border(1.dp, lerp(tint, Color.White, 0.4f).copy(alpha = if (isMember) 0.9f else 0.35f), RowShape)
+                .clickable(enabled = !busy, onClick = onToggle),
             contentAlignment = Alignment.Center
         ) {
-            when {
-                busy || !membershipKnown -> CircularProgressIndicator(Modifier.size(15.dp), color = Color.White, strokeWidth = 1.5.dp)
-                else -> AnimatedContent(
+            if (busy) {
+                CircularProgressIndicator(Modifier.size(15.dp), color = Color.White, strokeWidth = 1.5.dp)
+            } else {
+                AnimatedContent(
                     targetState = isMember,
                     transitionSpec = { (scaleIn(tween(180)) + fadeIn(tween(180))) togetherWith (scaleOut(tween(140)) + fadeOut(tween(140))) },
                     label = "addToIcon"
@@ -332,5 +298,112 @@ private fun EntryRow(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun CreateRow(label: String, tint: Color, onClick: () -> Unit) {
+    val tap = rememberHapticTap()
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp).height(RowHeight)
+            .clip(RowShape)
+            .background(lerp(tint, Color.Black, 0.45f).copy(alpha = 0.55f))
+            .border(1.dp, lerp(tint, Color.White, 0.4f).copy(alpha = 0.5f), RowShape)
+            .clickable { tap(); onClick() }
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Icon(Icons.Default.Add, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+        Text(label, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+// ─── "Create new …" ─────────────────────────────────────────────────────────
+
+@Composable
+private fun CreateListForm(
+    kind: PickerTab,
+    tint: Color,
+    creating: Boolean,
+    onBack: () -> Unit,
+    onCreate: (name: String, description: String, cover: android.net.Uri?) -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+    var cover by remember { mutableStateOf<android.net.Uri?>(null) }
+    // Lists and moderation lists carry a cover image; starter packs don't
+    // (Bluesky draws their card itself).
+    val supportsCover = kind != PickerTab.STARTER_PACKS
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri -> if (uri != null) cover = uri }
+    val tap = rememberHapticTap()
+    val nameLimit = if (kind == PickerTab.STARTER_PACKS || kind == PickerTab.BOTH) 50 else 64
+
+    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(
+                Modifier.size(34.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.34f))
+                    .clickable { tap(); onBack() },
+                contentAlignment = Alignment.Center
+            ) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(18.dp)) }
+            Text(
+                kind.createLabel, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.popupTextShadow().padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (supportsCover) {
+                Box(
+                    Modifier.size(72.dp).clip(RoundedCornerShape(16.dp))
+                        .background(Color.Black.copy(alpha = 0.32f))
+                        .border(1.dp, lerp(tint, Color.White, 0.4f).copy(alpha = 0.6f), RoundedCornerShape(16.dp))
+                        .clickable { tap(); picker.launch("image/*") },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (cover != null) {
+                        AsyncImage(model = cover, contentDescription = "Cover", contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)))
+                    } else {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, tint = Color.White, modifier = Modifier.size(22.dp))
+                            Text("Cover", color = Color.White, fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                FormField(name, { name = it.take(nameLimit) }, "Name", tint, singleLine = true)
+                FormField(description, { description = it.take(300) }, "Description (optional)", tint, singleLine = false)
+            }
+        }
+        val enabled = name.isNotBlank() && !creating
+        Box(
+            Modifier.fillMaxWidth().height(44.dp).clip(RoundedCornerShape(22.dp))
+                .background(if (enabled) lerp(tint, Color.White, 0.12f) else Color.White.copy(alpha = 0.08f))
+                .clickable(enabled = enabled) { tap(); onCreate(name.trim(), description.trim(), if (supportsCover) cover else null) },
+            contentAlignment = Alignment.Center
+        ) {
+            if (creating) CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
+            else Text("Create", color = if (enabled) Color.White else Color.White.copy(alpha = 0.5f), fontSize = 14.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+private fun FormField(value: String, onChange: (String) -> Unit, placeholder: String, tint: Color, singleLine: Boolean) {
+    Box(
+        Modifier.fillMaxWidth().heightIn(min = 40.dp)
+            .popupFieldWell(tint, RoundedCornerShape(14.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        BasicTextField(
+            value = value, onValueChange = onChange, singleLine = singleLine, maxLines = if (singleLine) 1 else 3,
+            textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
+            cursorBrush = SolidColor(Color.White),
+            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+            modifier = Modifier.fillMaxWidth()
+        )
+        if (value.isEmpty()) Text(placeholder, color = Color.White.copy(alpha = 0.5f), fontSize = 14.sp)
     }
 }

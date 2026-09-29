@@ -917,7 +917,9 @@ private fun AppRoot(viewModel: MainViewModel) {
             // Share To / Quote Repost / Add To fade the post's own UI away.
             popupOpen                 = sendPopupTarget != null || quoteRepostTarget != null || listPickerDid != null,
             likeTagPhase              = likeTagPhase,
-            likeTagPending            = likeTagPending
+            likeTagPending            = likeTagPending,
+            onPrefetchListMemberships = viewModel::prefetchListMemberships,
+            onReturnToProfile         = viewModel::returnToProfile
         )
         } // if (!vrmModeOpen) — see the comment above this call
 
@@ -1235,23 +1237,23 @@ private fun AppRoot(viewModel: MainViewModel) {
         }
 
         val listMemberships by viewModel.listMemberships.collectAsState()
-        val listMembershipsLoading by viewModel.listMembershipsLoading.collectAsState()
         val listMembershipBusy by viewModel.listMembershipBusy.collectAsState()
+        val creatingPickerList by viewModel.creatingPickerList.collectAsState()
         com.mediaviewer.ui.FadingPopupHost(listPickerDid, Modifier.zIndex(10f)) { _ ->
             ListPickerDialog(
                 lists         = userLists,
                 starterPacks  = userStarterPacks,
                 listsLoading  = userListsLoading,
                 initialTab    = lastPickerTab,
-                combineMode   = combineListsPacks,
                 liquidGlass   = liquidGlass,
                 dominantColor = currentDominantColor,
                 backdrop      = currentBackdrop,
                 memberships   = listMemberships,
-                membershipsLoading = listMembershipsLoading,
                 busy          = listMembershipBusy,
+                creating      = creatingPickerList,
                 onTabChange   = { tab -> viewModel.setPickerTab(tab) },
                 onToggle      = { listUri, additionalUri -> viewModel.toggleListMembership(listUri, additionalUri) },
+                onCreate      = { kind, name, description, cover, done -> viewModel.createPickerList(kind, name, description, cover, done) },
                 onDismiss     = { viewModel.dismissListPicker() }
             )
         }

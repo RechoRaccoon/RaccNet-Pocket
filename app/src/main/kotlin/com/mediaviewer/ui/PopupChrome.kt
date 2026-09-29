@@ -19,12 +19,15 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -32,6 +35,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
@@ -101,7 +105,13 @@ fun PopupSheetSurface(
     }
 }
 
-/** The popup's title row: title centered, a round X on the right. */
+/** A soft, rounded dark backing behind text sitting on a popup's glass, so
+ *  titles, names and handles stay readable over any post color. */
+fun Modifier.popupTextShadow(shape: Shape = RoundedCornerShape(12.dp)): Modifier =
+    this.clip(shape).background(Color.Black.copy(alpha = 0.32f))
+
+/** The popup's title row: a plain round X on the left, the title centered
+ *  on its own dimmed backing. */
 @Composable
 fun PopupSheetHeader(
     title: String,
@@ -112,25 +122,27 @@ fun PopupSheetHeader(
     modifier: Modifier = Modifier,
     subtitle: String? = null
 ) {
-    Box(modifier.fillMaxWidth().padding(start = 16.dp, end = 10.dp, top = 10.dp, bottom = 4.dp)) {
-        Row(Modifier.align(Alignment.Center).padding(horizontal = 44.dp)) {
+    Box(modifier.fillMaxWidth().padding(start = 10.dp, end = 16.dp, top = 10.dp, bottom = 4.dp)) {
+        Row(
+            Modifier.align(Alignment.Center).padding(horizontal = 44.dp)
+                .popupTextShadow().padding(horizontal = 14.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text(
                 title, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
                 textAlign = TextAlign.Center, maxLines = 1
             )
             if (subtitle != null) {
                 Spacer(Modifier.size(6.dp))
-                Text(
-                    subtitle, color = lerp(tint, Color.White, 0.6f), fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                    maxLines = 1, modifier = Modifier.align(Alignment.CenterVertically)
-                )
+                Text(subtitle, color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1)
             }
         }
-        PopupCloseBubble(liquidGlass, tint, backdrop, onClose, Modifier.align(Alignment.CenterEnd))
+        PopupCloseBubble(liquidGlass, tint, backdrop, onClose, Modifier.align(Alignment.CenterStart))
     }
 }
 
-/** Round X that closes a popup. */
+/** Round X that closes a popup — a plain dark bubble with a white X (not
+ *  tinted), the same everywhere. */
 @Composable
 fun PopupCloseBubble(
     liquidGlass: Boolean,
@@ -140,14 +152,88 @@ fun PopupCloseBubble(
     modifier: Modifier = Modifier
 ) {
     val tap = rememberHapticTap()
-    val m = modifier.size(34.dp).clip(CircleShape).clickable { tap(); onClose() }
-    if (liquidGlass) {
-        LiquidGlassSurface(modifier = m, shape = CircleShape, tint = tint, backdrop = backdrop, contentAlignment = Alignment.Center) {
-            Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(18.dp))
+    Box(
+        modifier.size(34.dp).clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.34f))
+            .border(1.dp, Color.White.copy(alpha = 0.16f), CircleShape)
+            .clickable { tap(); onClose() },
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(18.dp))
+    }
+}
+
+/**
+ * The message box shared by Share with and Quote Repost: the post's
+ * thumbnail, a text field that grows as you type (up to [maxLines]), an
+ * optional character counter inside on the right, and the send button.
+ */
+@Composable
+fun PopupMessageBox(
+    thumbUrl: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    tint: Color,
+    canSend: Boolean,
+    sending: Boolean,
+    onSend: () -> Unit,
+    modifier: Modifier = Modifier,
+    counter: String? = null,
+    counterOver: Boolean = false,
+    maxLines: Int = 5,
+    focusRequester: androidx.compose.ui.focus.FocusRequester? = null
+) {
+    val tap = rememberHapticTap()
+    Row(
+        modifier
+            .fillMaxWidth()
+            .heightIn(min = 50.dp)
+            .popupFieldWell(tint, RoundedCornerShape(25.dp))
+            .padding(start = 7.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.Bottom
+    ) {
+        if (thumbUrl.isNotBlank()) {
+            coil.compose.AsyncImage(
+                model = thumbUrl, contentDescription = null,
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.size(38.dp).clip(RoundedCornerShape(11.dp))
+            )
+            Spacer(Modifier.width(10.dp))
+        } else Spacer(Modifier.width(8.dp))
+        Box(Modifier.weight(1f).heightIn(min = 38.dp), contentAlignment = Alignment.CenterStart) {
+            androidx.compose.foundation.text.BasicTextField(
+                value = value, onValueChange = onValueChange,
+                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp, lineHeight = 19.sp),
+                cursorBrush = androidx.compose.ui.graphics.SolidColor(Color.White),
+                maxLines = maxLines,
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                    capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.Sentences
+                ),
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+                    .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            )
+            if (value.isEmpty()) Text(
+                placeholder, color = Color.White.copy(alpha = 0.5f), fontSize = 14.sp, maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+            )
         }
-    } else {
-        Box(m.background(Color.White.copy(alpha = 0.1f)), contentAlignment = Alignment.Center) {
-            Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(18.dp))
+        if (counter != null) {
+            Text(
+                counter, color = if (counterOver) Color(0xFFFF6B8A) else Color.White.copy(alpha = 0.55f),
+                fontSize = 11.sp, modifier = Modifier.padding(start = 6.dp, end = 6.dp, bottom = 12.dp)
+            )
+        } else Spacer(Modifier.width(8.dp))
+        Box(
+            modifier = Modifier
+                .size(38.dp)
+                .clip(CircleShape)
+                .background(lerp(tint, Color.White, 0.12f).copy(alpha = if (canSend) 0.95f else 0.3f))
+                .clickable(enabled = canSend && !sending) { tap(); onSend() },
+            contentAlignment = Alignment.Center
+        ) {
+            if (sending) androidx.compose.material3.CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
+            else Icon(Icons.Default.Send, contentDescription = "Send", tint = Color.White.copy(alpha = if (canSend) 1f else 0.5f), modifier = Modifier.size(19.dp))
         }
     }
 }

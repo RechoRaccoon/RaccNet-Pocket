@@ -798,9 +798,10 @@ fun ProfileOverlay(
                                 // from memory, reconciling once fresh data
                                 // arrives.
                                 val remembered = state.seededSubtabs[MainViewModel.ProfileTab.POSTS] ?: emptySet()
-                                val visiblePostFilters = PostKindFilter.entries.filter {
-                                    it == postKindFilter || it.name in remembered || loadedPosts.any { item -> it.matches(item) }
-                                }
+                                // Every post type is always offered; an empty one
+                                // looks further down the profile (see
+                                // emptyAfterFilterLoadMore).
+                                val visiblePostFilters = PostKindFilter.entries
                                 if (visiblePostFilters.size > 1) {
                                     ProfileSubFilterRow(
                                         options = visiblePostFilters, selected = postKindFilter,
@@ -822,9 +823,7 @@ fun ProfileOverlay(
                                 // covers both Reposts and Likes, keyed by
                                 // whichever is selected).
                                 val remembered = state.seededSubtabs[state.selectedTab] ?: emptySet()
-                                val visiblePostFilters = PostKindFilter.entries.filter {
-                                    it == postKindFilter || it.name in remembered || loadedItems.any { item -> it.matches(item) }
-                                }
+                                val visiblePostFilters = PostKindFilter.entries
                                 if (visiblePostFilters.size > 1) {
                                     ProfileSubFilterRow(
                                         options = visiblePostFilters, selected = postKindFilter,
@@ -875,9 +874,7 @@ fun ProfileOverlay(
                             tabs = availableTabs, selectedTab = state.selectedTab, onSelectTab = onSelectTab,
                             liquidGlass = liquidGlass, tint = blended,
                             postKindFilter = postKindFilter, onSelectPostKindFilter = onSelectPostKindFilter,
-                            visiblePostFilters = PostKindFilter.entries.filter {
-                                it == postKindFilter || it.name in rememberedPost || (subFilterTabState?.items ?: emptyList()).any { item -> it.matches(item) }
-                            },
+                            visiblePostFilters = PostKindFilter.entries,
                             mediaKindFilter = mediaKindFilter, onSelectMediaKindFilter = { mediaKindFilter = it },
                             visibleMediaFilters = MediaKindFilter.entries.filter {
                                 it == mediaKindFilter || (subFilterTabState?.items ?: emptyList()).any { item -> it.matches(item) }
@@ -957,6 +954,20 @@ fun ProfileOverlay(
                     onDm = { onOpenDm(author) },
                     onDmLongPress = { onNewGroupWith(author) }
                 )
+            }
+        }
+
+        // They've blocked you: a status bubble just under the camera notch,
+        // there straight away (no animation) for as long as the page is open.
+        if (profile?.blocksYou == true) {
+            Box(
+                Modifier.align(Alignment.TopCenter).padding(top = rememberTopCutoutClearance() + 4.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color.Black.copy(alpha = 0.45f))
+                    .border(1.dp, androidx.compose.ui.graphics.lerp(blended, Color.White, 0.3f).copy(alpha = 0.7f), RoundedCornerShape(14.dp))
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Text("This user has you blocked", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
         }
 
@@ -1279,6 +1290,7 @@ private fun ProfileHeaderSection(
                 isOwnProfile = isOwnProfile,
                 // Both follow each other: the button reads "Mutuals".
                 isMutual = profile?.followedByMe == true,
+                followEnabled = profile?.blocksYou != true,
                 backdrop = bannerBackdrop,
                 onToggleFollow = onToggleFollow,
                 onClose = onClose,
@@ -1403,6 +1415,7 @@ private fun ProfileBannerOverlayLayout(
     avatarColor: Color,
     isOwnProfile: Boolean,
     isMutual: Boolean = false,
+    followEnabled: Boolean = true,
     // Big Update #4 (extended to profiles): live backdrop of the banner photo
     // itself, re-recorded every frame by ProfileHeaderSection — see the
     // comment there. Every glass piece in this layout sits directly over
@@ -1440,7 +1453,7 @@ private fun ProfileBannerOverlayLayout(
                 // bubble the size of the X on the left (and level with it).
                 EditGlassBubble(liquidGlass = liquidGlass, tint = bannerColor, onClick = onEditProfile, backdrop = backdrop)
             } else {
-                FollowButton(isFollowing = author.isFollowing, liquidGlass = liquidGlass, tint = bannerColor, onClick = onToggleFollow, backdrop = backdrop, isMutual = isMutual)
+                FollowButton(isFollowing = author.isFollowing, liquidGlass = liquidGlass, tint = bannerColor, onClick = onToggleFollow, backdrop = backdrop, isMutual = isMutual, enabled = followEnabled)
             }
         }.first().measure(loose)
 
@@ -1822,6 +1835,13 @@ private fun LazyListScope.profileResultsContent(
     // three further layouts per that sub-tab's own remembered grid-mode
     // index (adjustment #5). HORIZONTAL_VIDEOS is always the list.
     fun postsLayoutRows(allItems: List<MediaItem>, loading: Boolean) {
+        // Whether this tab has nothing left to load — lets an empty filter
+        // say "none" instead of looking for more forever.
+        filterRowsExhausted = tabState != null && tabState.loaded && tabState.cursor == null && !tabState.loading
+        postsLayoutRowsInner(allItems, loading)
+        filterRowsExhausted = false
+    }
+    fun postsLayoutRowsInner(allItems: List<MediaItem>, loading: Boolean) {
         when (postKindFilter) {
             PostKindFilter.ALL, PostKindFilter.IMAGES -> when (gridModeFor(postKindFilter)) {
                 2 -> profileMediaGridRows(
@@ -2072,11 +2092,31 @@ private fun Modifier.tileRim(tint: Color, shape: RoundedCornerShape, liquidGlass
     )
 }
 
+/** Set (only while a profile tab's rows are being built) when that tab has
+ *  loaded everything — see profileResultsContent's postsLayoutRows. */
+private var filterRowsExhausted = false
+
+/** A post-type filter with nothing in it yet: keeps loading more of the
+ *  profile until something turns up, and says so plainly once everything
+ *  has been loaded and there's still nothing. */
 private fun <T> emptyAfterFilterLoadMore(
     scope: LazyListScope, matched: List<T>, rawItems: List<*>, loading: Boolean, onLoadMore: () -> Unit, key: String
 ) {
-    if (matched.isEmpty() && rawItems.isNotEmpty() && !loading) {
-        scope.item(key = key) { LaunchedEffect(rawItems.size) { onLoadMore() } }
+    if (matched.isNotEmpty() || rawItems.isEmpty()) return
+    val exhausted = filterRowsExhausted
+    scope.item(key = key) {
+        Box(Modifier.fillMaxWidth().padding(vertical = 48.dp), contentAlignment = Alignment.Center) {
+            if (exhausted && !loading) {
+                Text("No posts of this type", color = DimGray, fontSize = 13.sp)
+            } else {
+                if (!loading) LaunchedEffect(rawItems.size) { onLoadMore() }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(14.dp), color = Color.White, strokeWidth = 1.5.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Looking for more…", color = DimGray, fontSize = 13.sp)
+                }
+            }
+        }
     }
 }
 
@@ -2159,6 +2199,16 @@ private fun SwipeableThumbBox(
     onSeedSubImageIndex: (String, Int) -> Unit, onClick: () -> Unit, rounded: Boolean = true
 ) {
     val pagerState = rememberPagerState(pageCount = { item.mediaGroup.size })
+    // Every image of the post is fetched as soon as the tile appears (not
+    // only once it's swiped to), so paging through them is instant.
+    val preloadContext = androidx.compose.ui.platform.LocalContext.current
+    LaunchedEffect(item.id) {
+        val loader = coil.Coil.imageLoader(preloadContext)
+        item.mediaGroup.drop(1).forEach { g ->
+            val url = g.thumbUrl.ifBlank { g.mediaUrl }
+            if (url.isNotBlank()) loader.enqueue(coil.request.ImageRequest.Builder(preloadContext).data(url).build())
+        }
+    }
     // Fix 9: the shared light tap, via the shared helper.
     val tap = rememberHapticTap()
     Box(

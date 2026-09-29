@@ -28,6 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mediaviewer.model.AppMode
+import com.mediaviewer.model.isSpecialFeed
 import com.mediaviewer.model.BskyFeedInfo
 import com.mediaviewer.model.MediaItem
 import com.mediaviewer.ui.theme.*
@@ -224,7 +225,7 @@ fun GridScreen(
         snapshotFlow {
             val info = gridState.layoutInfo
             val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-            info.totalItemsCount > 0 && last >= info.totalItemsCount - 12
+            info.totalItemsCount > 0 && last >= info.totalItemsCount - 30
         }.distinctUntilChanged().filter { it }.collect { onLoadMore() }
     }
 
@@ -332,7 +333,18 @@ fun GridScreen(
                 }) {
                     Spacer(Modifier.height(topClearance))
                     // ── Feeds (profile-style main tabs) / e621 tag search ─────────────
-                    if (appMode == AppMode.BLUESKY) {
+                    val specialFeed = authorFeedState?.author?.takeIf { appMode == AppMode.BLUESKY && it.isSpecialFeed() }
+                    if (specialFeed != null) {
+                        // Saved Posts / From Friends: their name, big and
+                        // centered, in place of the feed selector.
+                        HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
+                        Text(
+                            specialFeed.displayName,
+                            color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp)
+                        )
+                    } else if (appMode == AppMode.BLUESKY) {
                         val saved = authorFeedState
                         val labels = buildList {
                             if (saved != null) add(saved.author.displayName.ifBlank { "@" + saved.author.handle })
