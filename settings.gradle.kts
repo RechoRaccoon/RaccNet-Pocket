@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "Stellar"
-include(":app")
+include(":shared", ":androidApp")

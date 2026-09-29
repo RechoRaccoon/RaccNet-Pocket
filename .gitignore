@@ -1,6 +1,8 @@
 # Build outputs
 /build
 /app/build
+/androidApp/build
+/shared/build
 
 # Gradle
 .gradle
@@ -17,4 +19,4 @@ captures/
 .cxx
 
 # Generated
-/app/release/
+/androidApp/release/

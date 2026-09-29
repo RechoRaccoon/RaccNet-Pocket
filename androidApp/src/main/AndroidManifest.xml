@@ -52,7 +52,7 @@
              browser or another app lands in the Stellar that's already
              running (onNewIntent) instead of starting a second copy. -->
         <activity
-            android:name=".MainActivity"
+            android:name="com.mediaviewer.MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
@@ -82,7 +82,7 @@
              RestartActivity's doc comment for why this has to live in its
              own process. -->
         <activity
-            android:name=".RestartActivity"
+            android:name="com.mediaviewer.RestartActivity"
             android:process=":restart"
             android:exported="false"
             android:excludeFromRecents="true"
@@ -96,7 +96,7 @@
              itself doesn't allow fully hiding a provider from that picker;
              it just won't be functional without a saved link either way. -->
         <receiver
-            android:name=".widget.LiveLinkWidgetProvider"
+            android:name="com.mediaviewer.widget.LiveLinkWidgetProvider"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
