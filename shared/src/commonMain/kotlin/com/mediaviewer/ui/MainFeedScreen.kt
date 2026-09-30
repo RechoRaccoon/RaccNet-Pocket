@@ -1749,7 +1749,7 @@ private fun PostContent(
             Column(
                 Modifier.fillMaxWidth()
                     // Sideways the camera cutout is at a side: keep clear of it.
-                    .then(if (landscape) Modifier.windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal)) else Modifier)
+                    .then(if (landscape) Modifier.landscapeSideSafe() else Modifier)
             ) {
                 // Item 7: "Sent by" header shown above the regular post header for DM-shared posts
                 item.sentByAuthor?.let { sender ->
@@ -1825,8 +1825,8 @@ private fun PostContent(
                 // (portrait: edge to edge, as always).
                 modifier = if (landscape) Modifier
                     .align(Alignment.BottomStart)
-                    .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Start))
-                    .width(LANDSCAPE_CLUSTER_WIDTH)
+                    .landscapeSideSafe()
+                    .width(landscapeClusterWidth(appMode, liquidGlass))
                 else Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
@@ -1920,8 +1920,8 @@ private fun PostContent(
                     onClick = { moreMenuExpanded = false; onLandscapeFullscreen() },
                     modifier = Modifier.align(Alignment.BottomEnd)
                         .windowInsetsPadding(WindowInsets.navBarSpace)
-                        .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.End))
-                        .padding(end = 14.dp, bottom = if (liquidGlass) 8.dp else 4.dp)
+                        .landscapeSideSafe()
+                        .padding(end = 12.dp, bottom = if (liquidGlass) 8.dp else 4.dp)
                 )
             }
             }
@@ -3062,7 +3062,8 @@ private fun ActionRow(
             // already used, now with Like as the first anchor and the new
             // "More" button (item 4) as the last.
             Row(modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                horizontalArrangement = if (LocalCompactActionRow.current) Arrangement.SpaceBetween else Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically) {
                 // Toggled-on actions light up in the post author's own
                 // profile color (brightened to read on the glass) instead
                 // of fixed red/green/yellow — like the rest of the UI.
@@ -3091,7 +3092,8 @@ private fun ActionRow(
             // Item 10: e621 mode has no upload action, so the bar is just the
             // four remaining buttons spread evenly across the full width.
             Row(modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                horizontalArrangement = if (LocalCompactActionRow.current) Arrangement.SpaceBetween else Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically) {
                 val activeTint = vividAccent(dominantColor)
                 ActionButton(Icons.Default.ArrowUpward, if (item.e621UserVote == 1) activeTint else Color.White, null) { onE621Vote(1) }
                 ActionButton(Icons.Default.ArrowDownward, if (item.e621UserVote == -1) activeTint else Color.White, null) { onE621Vote(-1) }
@@ -3216,7 +3218,7 @@ private fun GifActionButton(onClick: () -> Unit, tint: Color = Color.White) {
     Box(
         // No ripple/"square shadow" press effect on the interaction bar.
         modifier = Modifier.clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = { tap(); onClick() })
-            .padding(horizontal = 8.dp, vertical = 10.dp)
+            .padding(horizontal = if (LocalCompactActionRow.current) ACTION_COMPACT_PAD else 8.dp, vertical = 10.dp)
             .size(width = 30.dp, height = 26.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -3229,9 +3231,10 @@ private fun GifActionButton(onClick: () -> Unit, tint: Color = Color.White) {
 @Composable
 private fun ActionButton(icon: ImageVector, tint: Color, label: String? = null, onClick: () -> Unit) {
     val tap = rememberHapticTap()
+    val compact = LocalCompactActionRow.current
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp),
         modifier = Modifier.clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = { tap(); onClick() })
-            .padding(horizontal = 8.dp, vertical = 10.dp)) {
+            .padding(horizontal = if (compact) ACTION_COMPACT_PAD else 8.dp, vertical = 10.dp)) {
         Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(26.dp))
         if (label != null) Text(label, color = tint, fontSize = 12.sp, fontWeight = FontWeight.Medium)
     }
@@ -3594,8 +3597,21 @@ private fun haptic(context: PlatformContext) {
     } catch (_: Exception) {}
 }
 
-/** Width of the landscape bottom cluster (text bubble, visualizer, bar). */
-private val LANDSCAPE_CLUSTER_WIDTH = 440.dp
+/** Landscape: the interaction bar's buttons sit close together (see
+ *  [landscapeClusterWidth]); portrait spreads them across the full width. */
+private val LocalCompactActionRow = androidx.compose.runtime.staticCompositionLocalOf { false }
+private val ACTION_COMPACT_PAD = 5.dp
+
+/** Landscape bottom cluster width: just enough for the interaction bar's
+ *  buttons packed close (text bubble and visualizer match it). */
+private fun landscapeClusterWidth(appMode: AppMode, liquidGlass: Boolean): Dp {
+    val iconButton = 26.dp + ACTION_COMPACT_PAD * 2
+    val gifButton = 30.dp + ACTION_COMPACT_PAD * 2
+    val (icons, gifs) = if (appMode == AppMode.BLUESKY) 7 to 1 else 4 to 1
+    val buttons = iconButton * icons + gifButton * gifs
+    val gaps = 4.dp * (icons + gifs - 1)
+    return buttons + gaps + 20.dp + (if (liquidGlass) 24.dp else 0.dp)
+}
 
 /** Landscape: the post's UI drawn smaller (everything scaled by the same
  *  factor, so it stays proportional) to leave the picture more room. */
@@ -3605,8 +3621,23 @@ private fun LandscapeChromeScale(landscape: Boolean, content: @Composable () -> 
     val d = androidx.compose.ui.platform.LocalDensity.current
     androidx.compose.runtime.CompositionLocalProvider(
         androidx.compose.ui.platform.LocalDensity provides androidx.compose.ui.unit.Density(d.density * 0.78f, d.fontScale),
+        LocalCompactActionRow provides true,
         content = content
     )
+}
+
+/** Landscape side margin: the camera cutout's width, applied to BOTH sides
+ *  so the UI sits evenly (and clear of rounded screen corners) whichever
+ *  way the phone is turned. */
+@Composable
+private fun Modifier.landscapeSideSafe(): Modifier {
+    val cutout = WindowInsets.displayCutout
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val dir = androidx.compose.ui.platform.LocalLayoutDirection.current
+    val side = with(density) {
+        maxOf(cutout.getLeft(this, dir), cutout.getRight(this, dir)).toDp()
+    }.coerceAtLeast(16.dp)
+    return this.padding(horizontal = side)
 }
 
 /** Landscape's round fullscreen button (bottom right). */

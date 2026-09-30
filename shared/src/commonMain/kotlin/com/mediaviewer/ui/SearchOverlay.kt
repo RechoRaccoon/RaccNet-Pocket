@@ -312,7 +312,7 @@ fun SearchOverlay(
             HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
             // Content-type sub-tabs — Posts and Tagged only.
             if (isPosts && state.posts.isNotEmpty()) {
-                PostKindSubTabRow(state.posts, postsKind, liquidGlass, profileTint) { postsKind = it }
+                PostKindSubTabRow(state.posts, postsKind, liquidGlass, profileTint, showAll = true) { postsKind = it }
             } else if (isLiked && hasTaggedDataset && likedTagResults.isNotEmpty()) {
                 PostKindSubTabRow(likedTagResults, taggedKind, liquidGlass, profileTint) { taggedKind = it }
             }
@@ -381,7 +381,8 @@ fun SearchOverlay(
                                     gridMode = resultsGridMode(gridScreen, postsKind), tint = profileTint, liquidGlass = liquidGlass,
                                     onTapItem = { item -> state.posts.indexOf(item).takeIf { it >= 0 }?.let(onOpenPost) },
                                     // More results as you scroll, like every other feed.
-                                    onLoadMore = onLoadMorePosts
+                                    onLoadMore = onLoadMorePosts,
+                                    exhausted = state.postsCursor == null
                                 )
                             }
                         }

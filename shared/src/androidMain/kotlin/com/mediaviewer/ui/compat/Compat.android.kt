@@ -1,5 +1,8 @@
 package com.mediaviewer.ui.compat
 
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.navigationBarsIgnoringVisibility
+
 import android.os.Handler
 import android.os.Looper
 import androidx.compose.ui.graphics.asImageBitmap
@@ -127,4 +130,4 @@ actual fun applyReducedAnimations(context: PlatformContext, reduced: Boolean) =
 
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 actual val androidx.compose.foundation.layout.WindowInsets.Companion.navBarSpace: androidx.compose.foundation.layout.WindowInsets
-    @Composable get() = androidx.compose.foundation.layout.WindowInsets.navigationBarsIgnoringVisibility
+    @Composable get() = WindowInsets.navigationBarsIgnoringVisibility

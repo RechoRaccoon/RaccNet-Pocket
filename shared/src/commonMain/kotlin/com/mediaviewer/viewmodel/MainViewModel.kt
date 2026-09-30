@@ -4312,6 +4312,11 @@ _bskyDid.value          = session.did
                 cursor       = feedCursor,
                 feedUri      = _selectedFeedUri.value
             )
+        } else {
+            // Already showing another profile's (or list's) posts: keep the
+            // original feed saved, but the Feeds row bubble must show THIS
+            // profile's name and avatar — it used to keep the first one's.
+            _authorFeedState.value = _authorFeedState.value!!.copy(author = cur.author)
         }
         feedCursor = null
         activeFeedMode = ActiveFeedMode.AUTHOR
@@ -4871,6 +4876,8 @@ _bskyDid.value          = session.did
                     cursor       = feedCursor,
                     feedUri      = _selectedFeedUri.value
                 )
+            } else {
+                _authorFeedState.value = _authorFeedState.value!!.copy(author = AuthorInfo(_bskyDid.value, bskyHandle, "Liked Posts", null))
             }
             var result = bskyRepo.getActorLikes(bskyToken, _bskyDid.value)
             if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
@@ -5137,6 +5144,22 @@ _bskyDid.value          = session.did
     /** A bsky.app/profile/<handle or DID> link opened with Stellar (see
      *  MainActivity's intent filter): looks the account up and opens its
      *  profile page. */
+    private val profileCardCache = HashMap<String, AuthorInfo>()
+
+    /** A profile shared in a DM (its bsky.app link): who it is, for the
+     *  message's profile card. Cached for the session. */
+    suspend fun profileCard(actor: String): AuthorInfo? {
+        if (actor.isBlank() || !_bskyLoggedIn.value) return null
+        com.mediaviewer.platform.synchronizedCompat(profileCardCache) { profileCardCache[actor] }?.let { return it }
+        return withContext(Dispatchers.IO) {
+            var result = bskyRepo.getFullProfile(bskyToken, actor)
+            if (result.isFailure && isAuthError(result.exceptionOrNull()?.message) && refreshBskyTokenIfPossible()) {
+                result = bskyRepo.getFullProfile(bskyToken, actor)
+            }
+            result.getOrNull()?.author?.also { a -> com.mediaviewer.platform.synchronizedCompat(profileCardCache) { profileCardCache[actor] = a } }
+        }
+    }
+
     fun openProfileFromLink(actor: String, postRkey: String? = null) {
         if (!_bskyLoggedIn.value || actor.isBlank()) return
         viewModelScope.launch(Dispatchers.IO) {

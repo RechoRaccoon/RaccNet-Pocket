@@ -98,11 +98,15 @@ fun DmInboxOverlay(
     onToggleReaction: (String, String) -> Unit = { _, _ -> },
     /** The signed-in account (whose reactions/messages are "mine"). */
     selfDid: String = "",
+    /** Looks up a shared profile (bsky.app/profile/… link) for its card. */
+    resolveProfileCard: suspend (String) -> com.mediaviewer.model.AuthorInfo? = { null },
     /** The big + button: start a new chat or group. */
     onNewChat: () -> Unit = {},
     /** 1:1 chat header: start a group with this person. */
     onNewGroupWith: (com.mediaviewer.model.AuthorInfo) -> Unit = {}
 ) {
+    val profileCards = remember(resolveProfileCard, onTapAuthor) { DmProfileCards(resolveProfileCard, onTapAuthor) }
+    androidx.compose.runtime.CompositionLocalProvider(LocalDmProfileCards provides profileCards) {
     val tap = rememberHapticTap()
     // Back: an open chat returns to the DM list; the list returns to the Hub.
     com.mediaviewer.ui.compat.BackHandler { if (thread != null) onCloseThread() else onClose() }
@@ -280,6 +284,7 @@ fun DmInboxOverlay(
             }
         }
     }
+    }
 }
 
 @Composable
@@ -361,7 +366,7 @@ private fun DmConvoRow(convo: DmConversation, liquidGlass: Boolean, selfTint: Co
             }
             Spacer(Modifier.height(2.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                val preview = convo.lastMessageText.ifBlank {
+                val preview = (sharedProfileActor(convo.lastMessageText)?.let { (_, rest) -> rest.ifBlank { "Shared a profile" } } ?: convo.lastMessageText).ifBlank {
                     if (convo.isGroup) "${maxOf(convo.memberCount, convo.groupMembers.size + 1)} members" else ""
                 }
                 Text(
@@ -884,8 +889,16 @@ private fun DmBubble(
                 }
                 Spacer(Modifier.height(6.dp))
             }
-            if (msg.text.isNotBlank()) {
-                Text(msg.text, color = Color.White, fontSize = 14.sp, lineHeight = 18.sp)
+            // A shared profile (Stellar/Bluesky send its bsky.app link): the
+            // link itself is replaced by a small profile card below.
+            val sharedProfile = remember(msg.text) { sharedProfileActor(msg.text) }
+            val shownText = if (sharedProfile != null) sharedProfile.second else msg.text
+            if (shownText.isNotBlank()) {
+                Text(shownText, color = Color.White, fontSize = 14.sp, lineHeight = 18.sp)
+            }
+            if (sharedProfile != null) {
+                if (shownText.isNotBlank()) Spacer(Modifier.height(8.dp))
+                SharedProfileCard(sharedProfile.first)
             }
             // Item 12 follow-up: the shared-post card is now bigger (larger
             // thumbnail, more breathing room) and tappable — tapping it
@@ -1243,5 +1256,67 @@ private fun describeSystemMessage(msg: BskyMessageView, members: Map<String, com
         "systemMessageDataEnableJoinLink" -> "Invite link turned on"
         "systemMessageDataDisableJoinLink" -> "Invite link turned off"
         else -> "Group updated"
+    }
+}
+
+/** Where a DM thread gets shared-profile details from, and what tapping
+ *  one does (open that profile). */
+class DmProfileCards(
+    val resolve: suspend (String) -> com.mediaviewer.model.AuthorInfo?,
+    val open: (com.mediaviewer.model.AuthorInfo) -> Unit
+)
+private val LocalDmProfileCards = androidx.compose.runtime.staticCompositionLocalOf<DmProfileCards?> { null }
+
+private val profileLinkRegex = Regex("""https?://(?:www\.)?bsky\.app/profile/([^/\s?#]+)/?(?=\s|$)""")
+
+/** If [text] shares a profile — a bsky.app/profile/<handle or did> link
+ *  (not a post link) — returns (actor, the text without the link). */
+internal fun sharedProfileActor(text: String): Pair<String, String>? {
+    val m = profileLinkRegex.findAll(text).lastOrNull() ?: return null
+    val actor = m.groupValues[1].takeIf { it.isNotBlank() } ?: return null
+    val rest = (text.substring(0, m.range.first) + text.substring(m.range.last + 1)).trim()
+    return actor to rest
+}
+
+/** A shared profile inside a DM bubble: smaller than a shared-post card —
+ *  the round avatar (ringed in their profile color) with the name and
+ *  handle below it. Tap opens the profile. */
+@Composable
+private fun SharedProfileCard(actor: String) {
+    val cards = LocalDmProfileCards.current
+    val tap = rememberHapticTap()
+    var author by remember(actor) { mutableStateOf<com.mediaviewer.model.AuthorInfo?>(null) }
+    LaunchedEffect(actor, cards) { author = runCatching { cards?.resolve?.invoke(actor) }.getOrNull() }
+    val a = author
+    val ring = if (a != null) androidx.compose.ui.graphics.lerp(rememberAuthorProfileTint(a.did, a.avatarUrl), Color.White, 0.3f)
+        else Color.White.copy(alpha = 0.4f)
+    val innerShape = RoundedCornerShape(14.dp)
+    Column(
+        Modifier.widthIn(min = 150.dp, max = 190.dp).clip(innerShape)
+            .background(Color.Black.copy(0.22f))
+            .clickable(enabled = a != null) { tap(); a?.let { cards?.open?.invoke(it) } }
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            Modifier.size(58.dp).clip(CircleShape).border(2.dp, ring, CircleShape).padding(3.dp)
+                .clip(CircleShape).background(Color.White.copy(0.1f)),
+            contentAlignment = Alignment.Center
+        ) {
+            if (a?.avatarUrl != null) {
+                AsyncImage(model = a.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            } else {
+                Text((a?.displayName ?: actor).take(1).uppercase(), color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            a?.displayName ?: actor, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        )
+        Text(
+            "@" + (a?.handle ?: actor), color = Color.White.copy(0.65f), fontSize = 11.sp,
+            maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        )
     }
 }

@@ -5202,10 +5202,15 @@ fun ProfileStyleTabRow(
  *  one loaded post matches it (the selected one always stays). */
 @Composable
 fun PostKindSubTabRow(
-    items: List<MediaItem>, selected: PostKindFilter, liquidGlass: Boolean, tint: Color, onSelect: (PostKindFilter) -> Unit
+    items: List<MediaItem>, selected: PostKindFilter, liquidGlass: Boolean, tint: Color,
+    /** Offer every post type even when none are loaded yet (like a
+     *  profile): an empty one keeps loading further results to fill it. */
+    showAll: Boolean = false,
+    onSelect: (PostKindFilter) -> Unit
 ) {
-    val visible = remember(items, selected) {
-        PostKindFilter.entries.filter { it == selected || it == PostKindFilter.ALL || items.any { item -> it.matches(item) } }
+    val visible = remember(items, selected, showAll) {
+        if (showAll) PostKindFilter.entries
+        else PostKindFilter.entries.filter { it == selected || it == PostKindFilter.ALL || items.any { item -> it.matches(item) } }
     }
     if (visible.size > 1) {
         ProfileSubFilterRow(
@@ -5228,8 +5233,12 @@ fun LazyListScope.sharedPostResults(
     roundedGridTiles: Boolean = false,
     onTapItem: (MediaItem) -> Unit,
     onSeedSubImageIndex: (String, Int) -> Unit = { _, _ -> },
-    onLoadMore: () -> Unit = {}
+    onLoadMore: () -> Unit = {},
+    /** Nothing further to load (non-null = this caller knows; see
+     *  emptyAfterFilterLoadMore's "No posts of this type"). */
+    exhausted: Boolean? = null
 ) {
+    if (exhausted != null) filterRowsExhausted = exhausted
     val tap: (List<MediaItem>, Int) -> Unit = { list, i -> list.getOrNull(i)?.let(onTapItem) }
     val match: (MediaItem) -> Boolean = { filter.matches(it) }
     when (filter) {

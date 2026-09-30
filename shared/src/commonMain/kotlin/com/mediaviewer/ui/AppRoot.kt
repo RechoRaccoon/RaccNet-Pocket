@@ -1002,6 +1002,7 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                 onTapAuthor     = { author -> viewModel.closeDmInbox(); viewModel.openProfile(author) },
                 onLoadMoreMessages   = viewModel::loadMoreDmMessages,
                 onOpenSharedPostsFeed = viewModel::openDmThreadSharedPostsFeed,
+                resolveProfileCard = { actor -> viewModel.profileCard(actor) },
                 onToggleReaction     = viewModel::toggleDmReaction,
                 selfDid              = bskyDid,
                 onNewChat            = { viewModel.openNewChat() },
