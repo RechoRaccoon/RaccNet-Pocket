@@ -393,6 +393,9 @@ fun MainFeedScreen(
     // so the chrome stays hidden/shown consistently as the user swipes between
     // posts instead of resetting on every navigation.
     var uiHidden by remember { mutableStateOf(false) }
+    // Landscape only: the round fullscreen button's own "UI hidden" (it
+    // never changes portrait). Landscape starts from portrait's uiHidden.
+    var landscapeFullscreen by remember { mutableStateOf(false) }
     // Phase 4 — on-device translation: cached per post-id (not per-composition,
     // same reasoning as subImageIndices above) so re-visiting an already-
     // translated post doesn't re-run the translator, and so the "showing
@@ -490,8 +493,11 @@ fun MainFeedScreen(
                     subImageIndices        = subImageIndices,
                     textExpanded           = textExpanded,
                     onToggleTextExpanded    = { textExpanded = !textExpanded },
-                    uiHidden               = uiHidden,
-                    onSetUiHidden           = { uiHidden = it },
+                    uiHidden               = uiHidden || (isLandscape && landscapeFullscreen),
+                    onSetUiHidden           = { hidden -> if (!hidden) landscapeFullscreen = false; uiHidden = hidden },
+                    landscape              = isLandscape,
+                    onLandscapeFullscreen  = { landscapeFullscreen = true },
+                    onRevealUi             = { landscapeFullscreen = false; uiHidden = false },
                     translationEnabled      = translationEnabled,
                     translationTargetLang   = translationTargetLang,
                     translationStates       = translationStates,
@@ -904,6 +910,9 @@ private fun FeedView(
     onToggleTextExpanded: () -> Unit,
     uiHidden: Boolean = false,
     onSetUiHidden: (Boolean) -> Unit = {},
+    landscape: Boolean = false,
+    onLandscapeFullscreen: () -> Unit = {},
+    onRevealUi: () -> Unit = {},
     translationEnabled: Boolean = false,
     translationTargetLang: String = "en",
     translationStates: androidx.compose.runtime.snapshots.SnapshotStateMap<String, TranslationState> = remember { mutableStateMapOf() },
@@ -1021,6 +1030,11 @@ private fun FeedView(
                     taggingStatusLabel     = taggingStatusLabel,
                     onPrefetchListMemberships = onPrefetchListMemberships,
                     onSetUiHidden          = onSetUiHidden,
+                    landscape              = landscape,
+                    // Hidden by the user (not by comments/popups): a tap anywhere brings it back.
+                    tapToRevealUi          = landscape && uiHidden && commentsFraction <= 0.02f && !popupOpen,
+                    onLandscapeFullscreen  = onLandscapeFullscreen,
+                    onRevealUi             = onRevealUi,
                     translationEnabled     = translationEnabled,
                     translationTargetLang  = translationTargetLang,
                     translationState       = translationStates[item.id],
@@ -1068,6 +1082,12 @@ private fun PostContent(
     reducedAnimations: Boolean,
     uiHidden: Boolean = false,
     onSetUiHidden: (Boolean) -> Unit = {},
+    /** Sideways: smaller UI, bottom cluster a compact width on the left,
+     *  author row at the very top, and a round fullscreen button. */
+    landscape: Boolean = false,
+    tapToRevealUi: Boolean = false,
+    onLandscapeFullscreen: () -> Unit = {},
+    onRevealUi: () -> Unit = {},
     translationEnabled: Boolean = false,
     translationTargetLang: String = "en",
     translationState: TranslationState? = null,
@@ -1135,6 +1155,9 @@ private fun PostContent(
     var moreMenuExpanded by remember(item.id) { mutableStateOf(false) }
     var actionBarOrigin  by remember(item.id) { mutableStateOf<Offset?>(null) }
     var actionBarSize    by remember(item.id) { mutableStateOf(IntSize.Zero) }
+    // The More button's own bounds: the More bubbles stand right on it.
+    var moreButtonOrigin by remember(item.id) { mutableStateOf<Offset?>(null) }
+    var moreButtonSize   by remember(item.id) { mutableStateOf(IntSize.Zero) }
 
     // ── Multi-image posts: every image at once as a grid, tap one to zoom
     // it to full screen (then swipe between them / pick from the selector
@@ -1720,7 +1743,12 @@ private fun PostContent(
             exit = if (reducedAnimations) ExitTransition.None else fadeOut(FADE_ANIM),
             modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter).zIndex(2f)
         ) {
-            Column(Modifier.fillMaxWidth()) {
+            LandscapeChromeScale(landscape) {
+            Column(
+                Modifier.fillMaxWidth()
+                    // Sideways the camera cutout is at a side: keep clear of it.
+                    .then(if (landscape) Modifier.windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal)) else Modifier)
+            ) {
                 // Item 7: "Sent by" header shown above the regular post header for DM-shared posts
                 item.sentByAuthor?.let { sender ->
                     SentByHeader(
@@ -1733,7 +1761,7 @@ private fun PostContent(
                         showReply = !item.sentByIsRepost,
                         modifier = Modifier.fillMaxWidth()
                             .background(Color.Black.copy(0.55f))
-                            .padding(top = rememberTopCutoutClearance())
+                            .padding(top = if (landscape) 6.dp else rememberTopCutoutClearance())
                             .padding(horizontal = 10.dp, vertical = 6.dp)
                     )
                 }
@@ -1746,7 +1774,8 @@ private fun PostContent(
                 if (!item.isBlocked) {
                     AuthorRow(item, appMode, onToggleFollow, onTapAuthor,
                         Modifier.fillMaxWidth()
-                            .then(if (item.sentByAuthor == null) Modifier.padding(top = rememberTopCutoutClearance()) else Modifier),
+                            // Sideways: right at the very top (no notch row there).
+                            .then(if (item.sentByAuthor == null) Modifier.padding(top = if (landscape) 6.dp else rememberTopCutoutClearance()) else Modifier),
                         liquidGlass = liquidGlass,
                         dominantColor = dominantColor,
                         backdrop = glassBackdrop,
@@ -1770,6 +1799,7 @@ private fun PostContent(
                     )
                 }
             }
+            }
         }
 
         // Four extra quick-shortcuts (item 3) now live as diagonal buttons in the
@@ -1786,8 +1816,16 @@ private fun PostContent(
             exit = if (reducedAnimations) ExitTransition.None else fadeOut(FADE_ANIM),
             modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).zIndex(2f)
         ) {
+            LandscapeChromeScale(landscape) {
+            Box(Modifier.fillMaxWidth()) {
             Column(
-                modifier = Modifier.fillMaxWidth(),
+                // Sideways: a compact fixed width at the bottom left
+                // (portrait: edge to edge, as always).
+                modifier = if (landscape) Modifier
+                    .align(Alignment.BottomStart)
+                    .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Start))
+                    .width(LANDSCAPE_CLUSTER_WIDTH)
+                else Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 // The visualizer takes up no layout space at all (drawn upward
@@ -1868,9 +1906,50 @@ private fun PostContent(
                         if (moreMenuExpanded && appMode == AppMode.BLUESKY) onPrefetchListMemberships(item.author.did)
                     },
                     onVisibleBoundsChanged = { origin, size -> actionBarOrigin = origin; actionBarSize = size },
+                    onMoreButtonBounds = { origin, size -> moreButtonOrigin = origin; moreButtonSize = size },
                     interactionsBlocked = authorBlocksViewer
                 )
             }
+            if (landscape) {
+                // Round fullscreen button, bottom right: hides the UI
+                // (landscape only); a tap anywhere brings it back.
+                LandscapeFullscreenButton(
+                    liquidGlass = liquidGlass, tint = dominantColor, backdrop = glassBackdrop,
+                    onClick = { moreMenuExpanded = false; onLandscapeFullscreen() },
+                    modifier = Modifier.align(Alignment.BottomEnd)
+                        .windowInsetsPadding(WindowInsets.navigationBars)
+                        .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.End))
+                        .padding(end = 14.dp, bottom = if (liquidGlass) 8.dp else 4.dp)
+                )
+            }
+            }
+            }
+        }
+
+        // Landscape with the UI hidden: any tap brings it back (watched
+        // without consuming, so swipes, double-tap-to-like etc still work).
+        if (tapToRevealUi) {
+            val revealLatest by rememberUpdatedState(onRevealUi)
+            Box(
+                Modifier.fillMaxSize().zIndex(7f).pointerInput(Unit) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        val startMs = down.uptimeMillis
+                        var moved = false
+                        var multi = false
+                        while (true) {
+                            val ev = awaitPointerEvent(PointerEventPass.Initial)
+                            if (ev.changes.size > 1) multi = true
+                            val c = ev.changes.firstOrNull { it.id == down.id } ?: break
+                            if ((c.position - down.position).getDistance() > viewConfiguration.touchSlop) moved = true
+                            if (!c.pressed) {
+                                if (!moved && !multi && c.uptimeMillis - startMs < 350) revealLatest()
+                                break
+                            }
+                        }
+                    }
+                }
+            )
         }
 
         // Items 5-8: rendered as a sibling of the recorded backdrop box (same
@@ -1885,10 +1964,13 @@ private fun PostContent(
         // swipes to a different post, or navigates to the hub, comments, or
         // grid — never from an outside tap.
         val barOrigin = actionBarOrigin
-        if (moreMenuExpanded && barOrigin != null && !uiHidden) {
+        val moreOrigin = moreButtonOrigin
+        if (barOrigin != null && moreOrigin != null) {
             MoreBubbleMenu(
-                anchorOriginRoot = barOrigin,
-                anchorSize = actionBarSize,
+                visible = moreMenuExpanded && !uiHidden,
+                anchorOriginRoot = moreOrigin,
+                anchorSize = moreButtonSize,
+                barTopRoot = barOrigin.y,
                 containerRootOrigin = postBoxRootOrigin,
                 onDismissRequest = { moreMenuExpanded = false },
                 liquidGlass = liquidGlass, tint = dominantColor, backdrop = glassBackdrop,
@@ -2041,19 +2123,19 @@ private fun QuickActionMenu(center: Offset, hoveredAction: QuickAction?, appMode
     val radius = 70.dp
     val diag = radius * 0.7071f // equal distance from center on the diagonals
     val actions = if (appMode == AppMode.BLUESKY) listOf(
-        Triple(QuickAction.TOP,          Icons.Filled.Favorite,  if (item.isLiked) LikeRed else Color.White),
+        Triple(QuickAction.TOP,          Icons.Filled.Favorite,  if (item.isLiked) vividAccent(dominantColor) else Color.White),
         Triple(QuickAction.TOP_RIGHT,    Icons.Default.Send,     Color.White),
-        Triple(QuickAction.RIGHT,        Icons.Default.Repeat,   if (item.isReposted) RepostGreen else Color.White),
-        Triple(QuickAction.BOTTOM_RIGHT, Icons.Default.EditNote, if (item.isQuoteReposted) RepostGreen else Color.White),
-        Triple(QuickAction.BOTTOM,       Icons.Default.Download, if (item.isDownloaded) BookmarkYellow else Color.White),
+        Triple(QuickAction.RIGHT,        Icons.Default.Repeat,   if (item.isReposted) vividAccent(dominantColor) else Color.White),
+        Triple(QuickAction.BOTTOM_RIGHT, Icons.Default.EditNote, if (item.isQuoteReposted) vividAccent(dominantColor) else Color.White),
+        Triple(QuickAction.BOTTOM,       Icons.Default.Download, if (item.isDownloaded) vividAccent(dominantColor) else Color.White),
         Triple(QuickAction.BOTTOM_LEFT,  Icons.Default.Block,    if (item.isBlocked) Color(0xFFE0245E) else Color.White),
-        Triple(QuickAction.LEFT,         Icons.Filled.Bookmark,  if (item.isBookmarked) BookmarkYellow else Color.White),
-        Triple(QuickAction.TOP_LEFT,     Icons.Default.Download, if (item.isGifDownloaded) BookmarkYellow else Color.White) // rendered as "GIF" text, see below
+        Triple(QuickAction.LEFT,         Icons.Filled.Bookmark,  if (item.isBookmarked) vividAccent(dominantColor) else Color.White),
+        Triple(QuickAction.TOP_LEFT,     Icons.Default.Download, if (item.isGifDownloaded) vividAccent(dominantColor) else Color.White) // rendered as "GIF" text, see below
     ) else listOf(
-        Triple(QuickAction.TOP,    Icons.Default.ArrowUpward,   if (item.e621UserVote == 1) VoteGreen else Color.White),
-        Triple(QuickAction.RIGHT,  Icons.Filled.Star,           if (item.isBookmarked) BookmarkYellow else Color.White),
-        Triple(QuickAction.BOTTOM, Icons.Default.ArrowDownward, if (item.e621UserVote == -1) VoteRed else Color.White),
-        Triple(QuickAction.LEFT,   Icons.Default.Download,      if (item.isDownloaded) BookmarkYellow else Color.White)
+        Triple(QuickAction.TOP,    Icons.Default.ArrowUpward,   if (item.e621UserVote == 1) vividAccent(dominantColor) else Color.White),
+        Triple(QuickAction.RIGHT,  Icons.Filled.Star,           if (item.isBookmarked) vividAccent(dominantColor) else Color.White),
+        Triple(QuickAction.BOTTOM, Icons.Default.ArrowDownward, if (item.e621UserVote == -1) vividAccent(dominantColor) else Color.White),
+        Triple(QuickAction.LEFT,   Icons.Default.Download,      if (item.isDownloaded) vividAccent(dominantColor) else Color.White)
     )
     Box(Modifier.fillMaxSize().zIndex(3f)) {
         actions.forEach { (action, icon, tint) ->
@@ -2582,18 +2664,29 @@ private fun MultiImageGrid(
     val rim = remember(outline) {
         Brush.linearGradient(listOf(lerp(outline, Color.White, 0.35f), outline, lerp(outline, Color.White, 0.2f)))
     }
+    // The tiles are sized to fit between the author bubble (top) and the
+    // text + interaction bars (bottom), but the group itself sits centered
+    // on the screen — only nudged up/down if centering would run it into
+    // either of those.
+    val topClear = 104.dp
+    val bottomClear = 176.dp
     BoxWithConstraints(
-        Modifier.fillMaxSize().padding(start = 16.dp, end = 16.dp, top = 104.dp, bottom = 176.dp),
-        contentAlignment = Alignment.Center
+        Modifier.fillMaxSize().padding(start = 16.dp, end = 16.dp),
+        contentAlignment = Alignment.TopCenter
     ) {
         val gap = 8.dp
         val cellW = (maxWidth - gap * (cols - 1)) / cols
-        val cellH = (maxHeight - gap * (rows.size - 1)) / rows.size
+        val cellH = (maxHeight - topClear - bottomClear - gap * (rows.size - 1)) / rows.size
         val cell = minOf(cellW, cellH).coerceAtLeast(48.dp)
+        val groupH = cell * rows.size + gap * (rows.size - 1)
+        val centeredTop = (maxHeight - groupH) / 2
+        val maxTop = (maxHeight - bottomClear - groupH).coerceAtLeast(topClear)
+        val groupTop = centeredTop.coerceIn(topClear, maxTop)
         Column(
             verticalArrangement = Arrangement.spacedBy(gap),
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier
+                .padding(top = groupTop)
                 .graphicsLayer { this.alpha = alpha }
                 .then(if (blurred) Modifier.blur(90.dp) else Modifier)
         ) {
@@ -2937,6 +3030,8 @@ private fun ActionRow(
     // that padding's been applied, gives the caller the pill's true visible
     // edge to align against instead.
     onVisibleBoundsChanged: (Offset, IntSize) -> Unit = { _, _ -> },
+    /** The More button's own bounds (the More bubbles stand on it). */
+    onMoreButtonBounds: (Offset, IntSize) -> Unit = { _, _ -> },
     /** The author has blocked you: like / repost / quote are greyed out. */
     interactionsBlocked: Boolean = false
 ) {
@@ -2966,20 +3061,26 @@ private fun ActionRow(
             // "More" button (item 4) as the last.
             Row(modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                // Toggled-on actions light up in the post author's own
+                // profile color (brightened to read on the glass) instead
+                // of fixed red/green/yellow — like the rest of the UI.
+                val activeTint = vividAccent(dominantColor)
                 ActionButton(if (item.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-                    if (interactionsBlocked) blockedTint else if (item.isLiked) LikeRed else Color.White, null, onToggleLike)
+                    if (interactionsBlocked) blockedTint else if (item.isLiked) activeTint else Color.White, null, onToggleLike)
                 ActionButton(if (item.isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
-                    if (item.isBookmarked) BookmarkYellow else Color.White, null, onToggleBookmark)
+                    if (item.isBookmarked) activeTint else Color.White, null, onToggleBookmark)
                 ActionButton(Icons.Default.Repeat,
-                    if (interactionsBlocked) blockedTint else if (item.isReposted) RepostGreen else Color.White, null, onToggleRepost)
-                ActionButton(Icons.Default.EditNote, if (interactionsBlocked) blockedTint else if (item.isQuoteReposted) RepostGreen else Color.White, null, onQuoteRepost)
+                    if (interactionsBlocked) blockedTint else if (item.isReposted) activeTint else Color.White, null, onToggleRepost)
+                ActionButton(Icons.Default.EditNote, if (interactionsBlocked) blockedTint else if (item.isQuoteReposted) activeTint else Color.White, null, onQuoteRepost)
+                ActionButton(Icons.Default.Download, if (item.isDownloaded) activeTint else Color.White, null, onDownload)
+                GifActionButton(onDownloadGif, if (item.isGifDownloaded) activeTint else Color.White)
                 ActionButton(Icons.Default.Send, Color.White, null, onShare)
-                ActionButton(Icons.Default.Download, if (item.isDownloaded) BookmarkYellow else Color.White, null, onDownload)
-                GifActionButton(onDownloadGif, if (item.isGifDownloaded) BookmarkYellow else Color.White)
                 // Item 6: the hamburger icon flips to an X while the menu is
                 // up, and back again once it closes — same button, same
                 // tap target, just toggling moreMenuExpanded either way.
-                ActionButton(if (moreMenuExpanded) Icons.Default.Close else Icons.Default.Menu, Color.White, null, onToggleMoreMenu)
+                Box(Modifier.onGloballyPositioned { onMoreButtonBounds(it.positionInRoot(), it.size) }) {
+                    ActionButton(if (moreMenuExpanded) Icons.Default.Close else Icons.Default.Menu, Color.White, null, onToggleMoreMenu)
+                }
             }
         } else {
             // Item 15: matches the AT Protocol bar's layout language — no raw score
@@ -2989,12 +3090,13 @@ private fun ActionRow(
             // four remaining buttons spread evenly across the full width.
             Row(modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                ActionButton(Icons.Default.ArrowUpward, if (item.e621UserVote == 1) VoteGreen else Color.White, null) { onE621Vote(1) }
-                ActionButton(Icons.Default.ArrowDownward, if (item.e621UserVote == -1) VoteRed else Color.White, null) { onE621Vote(-1) }
+                val activeTint = vividAccent(dominantColor)
+                ActionButton(Icons.Default.ArrowUpward, if (item.e621UserVote == 1) activeTint else Color.White, null) { onE621Vote(1) }
+                ActionButton(Icons.Default.ArrowDownward, if (item.e621UserVote == -1) activeTint else Color.White, null) { onE621Vote(-1) }
                 ActionButton(if (item.isBookmarked) Icons.Filled.Star else Icons.Outlined.StarBorder,
-                    if (item.isBookmarked) BookmarkYellow else Color.White, null, onToggleBookmark)
-                ActionButton(Icons.Default.Download, if (item.isDownloaded) BookmarkYellow else Color.White, null, onDownload)
-                GifActionButton(onDownloadGif, if (item.isGifDownloaded) BookmarkYellow else Color.White)
+                    if (item.isBookmarked) activeTint else Color.White, null, onToggleBookmark)
+                ActionButton(Icons.Default.Download, if (item.isDownloaded) activeTint else Color.White, null, onDownload)
+                GifActionButton(onDownloadGif, if (item.isGifDownloaded) activeTint else Color.White)
             }
         }
     }
@@ -3056,8 +3158,11 @@ private fun ActionRow(
  *  round" as the bar, not rounder or flatter. */
 @Composable
 private fun MoreBubbleMenu(
+    visible: Boolean,
     anchorOriginRoot: Offset,
     anchorSize: IntSize,
+    /** Top of the interaction bar: the bubbles start just above it. */
+    barTopRoot: Float,
     containerRootOrigin: Offset,
     onDismissRequest: () -> Unit,
     liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
@@ -3068,103 +3173,39 @@ private fun MoreBubbleMenu(
     isOwnPost: Boolean = false,
     onDelete: () -> Unit = {}
 ) {
-    val tap = rememberHapticTap()
-    // Delete is two taps: the first turns the bubble into a confirmation
-    // (the menu stays open), the second deletes.
+    // Delete is two taps: the first turns the bubble red (the menu stays
+    // open), the second deletes.
     var confirmDelete by remember { mutableStateOf(false) }
-    val items = buildList {
+    LaunchedEffect(visible) { if (!visible) confirmDelete = false }
+    val actions = buildList {
         if (isOwnPost) {
-            add(GlassMenuItem(if (confirmDelete) "Tap again to delete" else "Delete", keepOpen = !confirmDelete) {
-                if (confirmDelete) { onDelete() } else { confirmDelete = true }
-            })
+            add(BubbleAction(
+                if (confirmDelete) "Tap again to delete" else "Delete",
+                icon = if (confirmDelete) Icons.Default.DeleteForever else Icons.Default.Delete,
+                iconTint = if (confirmDelete) Color(0xFFFF5A7A) else null,
+                keepOpen = !confirmDelete
+            ) { if (confirmDelete) onDelete() else confirmDelete = true })
         }
         if (supportsFeedInteractions) {
-            add(GlassMenuItem("Show more like this") { onShowMoreLikeThis() })
-            add(GlassMenuItem("Show less like this") { onShowLessLikeThis() })
+            add(BubbleAction("Show more like this", icon = Icons.Default.ThumbUp) { onShowMoreLikeThis() })
+            add(BubbleAction("Show less like this", icon = Icons.Default.ThumbDown) { onShowLessLikeThis() })
         }
-        add(GlassMenuItem("Add account to list") { onAddAccountToList() })
-        if (!isOwnPost) add(GlassMenuItem("Report") { onReport() })
-        add(GlassMenuItem("Block") { onBlock() })
-    }
-    val density = LocalDensity.current
-    val bubbleHeightDp = 40.dp   // item 5: doubled from the old 20dp
-    val gapDp = 5.dp             // compact — a seam between bubbles, not a big gap
-    val shape = RoundedCornerShape(26.dp) // item 5: same roundness as the interaction bar
-    val stackHeightPx = with(density) {
-        (bubbleHeightDp * items.size + gapDp * (items.size - 1)).roundToPx()
-    }
-    // Bug fix (follow-up — spacing above the bar didn't match spacing
-    // between bubbles): this used to be a separate, larger 8dp constant,
-    // so the gap between the stack and the bar visibly didn't match the
-    // tighter 5dp seams between bubbles within the stack. Deriving it from
-    // the same `gapDp` makes every gap in the stack — between bubbles, and
-    // between the stack and the bar — exactly the same size.
-    val gapAboveAnchorPx = with(density) { gapDp.roundToPx() }
-    // Stack's shared right edge pinned flush with the action bar's own
-    // right edge, bottom edge sitting just above the bar's top edge.
-    val stackTopRightRoot = anchorOriginRoot +
-        Offset(anchorSize.width.toFloat(), -(stackHeightPx + gapAboveAnchorPx).toFloat())
-    val stackTopRightLocal = stackTopRightRoot - containerRootOrigin
-    // Bug fix (item 1 — bubbles never appeared): `stackTopRightLocal` is the
-    // *right* edge the stack needs to end at, but `Modifier.offset(x, y)`
-    // positions this Column's own top-*left* corner. Using the right-edge
-    // coordinate directly as that left-corner offset shoved the whole stack
-    // one full stack-width further right than intended — since the anchor
-    // (the interaction bar) already spans nearly the full screen width, that
-    // pushed the entire menu off the right edge of the screen, so it was
-    // technically showing, just permanently off-screen and untappable. The
-    // stack's width isn't known until it's actually measured (it's sized to
-    // its widest child via IntrinsicSize.Max), so the true left-edge offset
-    // is only computed once `measuredWidthPx` comes back from
-    // `onSizeChanged` below; until then this renders invisibly (alpha 0) at
-    // a safe fallback position for exactly one layout pass instead of
-    // flashing at the wrong spot.
-    var measuredWidthPx by remember { mutableStateOf(0) }
-    val offsetX = with(density) { (stackTopRightLocal.x - measuredWidthPx).toDp() }
-    val offsetY = with(density) { stackTopRightLocal.y.toDp() }
-
-    Column(
-        modifier = Modifier
-            .offset(x = offsetX, y = offsetY)
-            .onSizeChanged { measuredWidthPx = it.width }
-            .alpha(if (measuredWidthPx > 0) 1f else 0f)
-            .width(IntrinsicSize.Max)
-            .zIndex(6f)
-            // Item 8: swallows taps that land in the gaps between bubbles
-            // so they don't fall through to the post underneath, without
-            // closing the menu — same as tapping a bubble itself doesn't
-            // close it via this route (each bubble's own click closes it
-            // explicitly, after running its action).
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {},
-        verticalArrangement = Arrangement.spacedBy(gapDp),
-        horizontalAlignment = Alignment.End
-    ) {
-        items.forEach { item ->
-            val bubbleModifier = Modifier
-                .fillMaxWidth()
-                .height(bubbleHeightDp)
-                .clip(shape)
-                .clickable { tap(); if (!item.keepOpen) onDismissRequest(); item.onClick() }
-            val labelColor = if (item.destructive) Color(0xFFE0245E) else Color.White
-            if (liquidGlass) {
-                LiquidGlassSurface(modifier = bubbleModifier, shape = shape, tint = tint, backdrop = backdrop) {
-                    Text(
-                        item.label, color = labelColor, fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                        textAlign = TextAlign.Center, maxLines = 1,
-                        modifier = Modifier.align(Alignment.Center).padding(horizontal = 14.dp)
-                    )
-                }
-            } else {
-                Box(bubbleModifier.background(Color.Black.copy(alpha = 0.55f)), contentAlignment = Alignment.Center) {
-                    Text(
-                        item.label, color = labelColor, fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                        textAlign = TextAlign.Center, maxLines = 1,
-                        modifier = Modifier.padding(horizontal = 14.dp)
-                    )
-                }
-            }
+        add(BubbleAction("Add account to list", icon = Icons.Filled.PlaylistAdd) { onAddAccountToList() })
+        if (!isOwnPost) {
+            add(BubbleAction("Report", icon = Icons.Default.Flag) { onReport() })
+            add(BubbleAction("Block", icon = Icons.Default.Block) { onBlock() })
         }
     }
+    BubbleActionStack(
+        visible = visible,
+        anchorOriginRoot = Offset(anchorOriginRoot.x, barTopRoot),
+        anchorSize = anchorSize,
+        containerRootOrigin = containerRootOrigin,
+        actions = actions,
+        liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+        onDismissRequest = onDismissRequest,
+        gapAboveAnchor = 6.dp
+    )
 }
 
 @Composable
@@ -3549,4 +3590,38 @@ private fun haptic(context: PlatformContext) {
     try {
         com.mediaviewer.ui.compat.vibrateOneShot(context, 38)
     } catch (_: Exception) {}
+}
+
+/** Width of the landscape bottom cluster (text bubble, visualizer, bar). */
+private val LANDSCAPE_CLUSTER_WIDTH = 440.dp
+
+/** Landscape: the post's UI drawn smaller (everything scaled by the same
+ *  factor, so it stays proportional) to leave the picture more room. */
+@Composable
+private fun LandscapeChromeScale(landscape: Boolean, content: @Composable () -> Unit) {
+    if (!landscape) { content(); return }
+    val d = androidx.compose.ui.platform.LocalDensity.current
+    androidx.compose.runtime.CompositionLocalProvider(
+        androidx.compose.ui.platform.LocalDensity provides androidx.compose.ui.unit.Density(d.density * 0.78f, d.fontScale),
+        content = content
+    )
+}
+
+/** Landscape's round fullscreen button (bottom right). */
+@Composable
+private fun LandscapeFullscreenButton(
+    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
+    onClick: () -> Unit, modifier: Modifier = Modifier
+) {
+    val tap = rememberHapticTap()
+    val m = modifier.size(46.dp).clip(CircleShape).clickable { tap(); onClick() }
+    if (liquidGlass) {
+        LiquidGlassSurface(modifier = m, shape = CircleShape, tint = tint, backdrop = backdrop, contentAlignment = Alignment.Center) {
+            Icon(Icons.Default.Fullscreen, contentDescription = "Fullscreen", tint = Color.White, modifier = Modifier.size(24.dp))
+        }
+    } else {
+        Box(m.background(Color.Black.copy(alpha = 0.55f)), contentAlignment = Alignment.Center) {
+            Icon(Icons.Default.Fullscreen, contentDescription = "Fullscreen", tint = Color.White, modifier = Modifier.size(24.dp))
+        }
+    }
 }

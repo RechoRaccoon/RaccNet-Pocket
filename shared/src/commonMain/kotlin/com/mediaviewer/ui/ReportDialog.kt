@@ -105,7 +105,9 @@ fun ReportDialog(
                 )
 
                 Column(
-                    Modifier.fillMaxWidth().heightIn(max = 380.dp).verticalScroll(rememberScrollState())
+                    // Shrinks (and scrolls) when the keyboard is up, so the
+                    // message box always stays on top of the keyboard.
+                    Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(max = 380.dp).verticalScroll(rememberScrollState())
                         .padding(horizontal = 10.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {

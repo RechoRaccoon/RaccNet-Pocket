@@ -121,6 +121,32 @@ actual fun CameraModeScreen(
     DisplayRefreshCap(60f)
     val scope = rememberCoroutineScope()
 
+    // The bound Preview, so its target rotation can follow the screen: the
+    // activity isn't recreated on rotation, so without this the preview
+    // kept the rotation it was bound with and showed up 90° off in
+    // landscape.
+    var boundPreview by remember { mutableStateOf<Preview?>(null) }
+    DisposableEffect(hostView) {
+        val dm = context.getSystemService(android.content.Context.DISPLAY_SERVICE) as? android.hardware.display.DisplayManager
+        val listener = object : android.hardware.display.DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) {}
+            override fun onDisplayRemoved(displayId: Int) {}
+            override fun onDisplayChanged(displayId: Int) {
+                val display = hostView.display ?: return
+                if (display.displayId != displayId) return
+                boundPreview?.let { p -> if (p.targetRotation != display.rotation) p.targetRotation = display.rotation }
+            }
+        }
+        dm?.registerDisplayListener(listener, android.os.Handler(android.os.Looper.getMainLooper()))
+        onDispose { dm?.unregisterDisplayListener(listener) }
+    }
+    // Also on every configuration change (covers the 90° turns straight away).
+    val rotationConfig = androidx.compose.ui.platform.LocalConfiguration.current
+    LaunchedEffect(rotationConfig.orientation, rotationConfig.screenWidthDp) {
+        val display = hostView.display ?: return@LaunchedEffect
+        boundPreview?.let { p -> if (p.targetRotation != display.rotation) p.targetRotation = display.rotation }
+    }
+
     // ── Camera binding ──────────────────────────────────────────────────
     LaunchedEffect(hasCameraPermission, frontCamera) {
         if (!hasCameraPermission) return@LaunchedEffect
@@ -143,6 +169,7 @@ actual fun CameraModeScreen(
             .setTargetRotation(hostView.display?.rotation ?: android.view.Surface.ROTATION_0)
             .build()
         preview.setSurfaceProvider(renderer.surfaceProvider)
+        boundPreview = preview
         runCatching {
             provider.unbindAll()
             provider.bindToLifecycle(lifecycleOwner, selector, preview)

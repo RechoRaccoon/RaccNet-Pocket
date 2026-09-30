@@ -950,6 +950,12 @@ class MainViewModel(
         if (foreground && wasBackground && _bskyLoggedIn.value) {
             refreshInboxUnreadNow()
             refreshDmConvosQuick()
+            // Hub list rows: reload any that went stale or came back empty
+            // / failed while the app was away (each keeps its 5-minute rule).
+            _hubLists.value.forEach { (uri, st) ->
+                val empty = st.members.isEmpty() && st.posts.isEmpty()
+                loadHubListIfNeeded(uri, force = empty || st.failed)
+            }
         }
     }
 
@@ -1728,7 +1734,10 @@ class MainViewModel(
         val starterPacks: List<SearchStarterPackResult> = emptyList(),
         val feeds: List<SearchFeedResult> = emptyList(),
         val loading: Boolean = false,
-        val hasSearched: Boolean = false
+        val hasSearched: Boolean = false,
+        /** Posts tab: where the next page of results starts (null = no more). */
+        val postsCursor: String? = null,
+        val loadingMorePosts: Boolean = false
     )
 
     private val _searchOpen = MutableStateFlow(false)
@@ -1786,8 +1795,11 @@ class MainViewModel(
             _searchState.value = _searchState.value.copy(loading = true)
             when (filter) {
                 SearchFilter.POSTS -> {
-                    bskyRepo.searchPosts(bskyToken, query).onSuccess { (posts, _) ->
-                        _searchState.value = _searchState.value.copy(posts = posts, loading = false, hasSearched = true)
+                    bskyRepo.searchPosts(bskyToken, query).onSuccess { (posts, cursor) ->
+                        _searchState.value = _searchState.value.copy(
+                            posts = posts, loading = false, hasSearched = true,
+                            postsCursor = cursor?.takeIf { it.isNotBlank() }, loadingMorePosts = false
+                        )
                     }.onFailure { _searchState.value = _searchState.value.copy(loading = false, hasSearched = true) }
                 }
                 // Item 2: kept only as a safety net — typing on the Liked
@@ -1822,6 +1834,33 @@ class MainViewModel(
                     }.onFailure { _searchState.value = _searchState.value.copy(loading = false, hasSearched = true) }
                 }
             }
+        }
+    }
+
+    /** Search page's Posts tab scrolled near its end: the next page, like
+     *  every other feed in the app. */
+    fun loadMoreSearchPosts() {
+        val st = _searchState.value
+        val cursor = st.postsCursor ?: return
+        if (st.loading || st.loadingMorePosts || st.query.isBlank() || st.filter != SearchFilter.POSTS) return
+        _searchState.value = st.copy(loadingMorePosts = true)
+        val query = st.query
+        viewModelScope.launch(Dispatchers.IO) {
+            var result = bskyRepo.searchPosts(bskyToken, query, cursor)
+            if (result.isFailure && isAuthError(result.exceptionOrNull()?.message) && refreshBskyTokenIfPossible()) {
+                result = bskyRepo.searchPosts(bskyToken, query, cursor)
+            }
+            val cur = _searchState.value
+            if (cur.query != query) return@launch
+            result.onSuccess { (posts, next) ->
+                val known = cur.posts.mapTo(HashSet()) { it.id }
+                val fresh = posts.filter { it.id !in known }
+                _searchState.value = cur.copy(
+                    posts = cur.posts + fresh,
+                    postsCursor = next?.takeIf { it.isNotBlank() && it != cursor },
+                    loadingMorePosts = false
+                )
+            }.onFailure { _searchState.value = cur.copy(loadingMorePosts = false) }
         }
     }
 
@@ -2285,6 +2324,8 @@ class MainViewModel(
     }
 
     companion object {
+        /** Marks a Share with target that's a profile, not a post. */
+        const val PROFILE_SHARE_PREFIX = "profile-share:"
         private const val SCAN_CONCURRENCY = 2
         private const val SCAN_STAGGER_MS = 350L
     }
@@ -5641,6 +5682,21 @@ _bskyDid.value          = session.did
         if (_dmConversations.value.isEmpty()) loadDmConversations()
     }
 
+    /** A profile page's Share button: the same "Share with" popup as posts,
+     *  sending the profile's bsky.app link (the way Bluesky shares profiles
+     *  in chats — a tappable link; chat embeds only carry posts). */
+    fun openShareProfile(author: AuthorInfo) {
+        if (author.did.isBlank()) return
+        _sendPopupTarget.value = MediaItem(
+            id = PROFILE_SHARE_PREFIX + author.did,
+            author = author,
+            thumbUrl = author.avatarUrl.orEmpty(),
+            text = "https://bsky.app/profile/" + author.handle.ifBlank { author.did }
+        )
+        _sendPopupSelected.value = emptySet()
+        if (_dmConversations.value.isEmpty()) loadDmConversations()
+    }
+
     fun dismissSendPopup() {
         if (_sendPopupSending.value) return
         _sendPopupTarget.value = null
@@ -5670,7 +5726,12 @@ _bskyDid.value          = session.did
                 if (convoId.isNullOrBlank()) {
                     failures++
                 } else {
-                    bskyRepo.sendMessage(bskyToken, _bskyDid.value, convoId, message, item.postUri, item.postCid)
+                    if (item.id.startsWith(PROFILE_SHARE_PREFIX)) {
+                        val text = listOf(message.trim(), item.text).filter { it.isNotBlank() }.joinToString("\n")
+                        bskyRepo.sendMessage(bskyToken, _bskyDid.value, convoId, text)
+                    } else {
+                        bskyRepo.sendMessage(bskyToken, _bskyDid.value, convoId, message, item.postUri, item.postCid)
+                    }
                         .onFailure { failures++; lastError = it.message }
                 }
             }

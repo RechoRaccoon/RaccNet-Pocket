@@ -2100,6 +2100,22 @@ class BlueskyRepository {
         return createRecord(token, did, "app.bsky.feed.post", record)
     }
 
+    /** Byte-offset link facets for every http(s) URL in [text], so links
+     *  (e.g. a shared profile's bsky.app address) are tappable in Bluesky. */
+    private fun buildLinkFacets(text: String): List<Map<String, Any>> {
+        val regex = Regex("https?://[^\\s]+")
+        return regex.findAll(text).map { m ->
+            val url = m.value.trimEnd('.', ',', ')', '!', '?')
+            val start = m.range.first
+            val byteStart = text.substring(0, start).encodeToByteArray().size
+            val byteEnd = byteStart + url.encodeToByteArray().size
+            mapOf(
+                "index" to mapOf("byteStart" to byteStart, "byteEnd" to byteEnd),
+                "features" to listOf(mapOf("\$type" to "app.bsky.richtext.facet#link", "uri" to url))
+            )
+        }.toList()
+    }
+
     /** Builds byte-offset facets so #hashtags render as tappable tags (item 5). */
     private fun buildHashtagFacets(text: String): List<Map<String, Any>> {
         val regex = Regex("(?<=^|[\\s])#([a-zA-Z0-9_]+)")
@@ -2441,7 +2457,7 @@ class BlueskyRepository {
         replyToMessageId: String? = null
     ): Result<Unit> = runCatching {
         ensureChatApi(myDid)
-        val facets = buildHashtagFacets(text).takeIf { it.isNotEmpty() }
+        val facets = (buildHashtagFacets(text) + buildLinkFacets(text)).takeIf { it.isNotEmpty() }
         val embed  = if (embedPostUri != null && embedPostCid != null) mapOf(
             "\$type" to "app.bsky.embed.record",
             "record" to mapOf("uri" to embedPostUri, "cid" to embedPostCid)
@@ -2619,6 +2635,10 @@ class BlueskyRepository {
         coroutineScope {
             val feedJob = async {
                 val resp = viaAppView(token, myDid, "app.bsky.feed.getListFeed") { a, auth -> a.getListFeed(auth, listUri, 100, null) }
+                // A failed call (e.g. an access token that expired while the
+                // app sat in the background) must fail the load — it used
+                // to read as an empty list and stick until a restart.
+                if (!resp.isSuccessful) error("ListFeed ${resp.code()}: ${errorBodyText(resp)}")
                 resp.body()
             }
             val membersJob = async {
@@ -2628,6 +2648,7 @@ class BlueskyRepository {
                 do {
                     val c = cursor
                     val resp = viaAppView(token, myDid, "app.bsky.graph.getList") { a, auth -> a.getList(auth, listUri, 100, c) }
+                    if (!resp.isSuccessful && c == null) error("GetList ${resp.code()}: ${errorBodyText(resp)}")
                     val body = resp.body() ?: break
                     if (name == null) name = runCatching { body.getAsJsonObject("list")?.get("name")?.asString }.getOrNull()
                     body.getAsJsonArray("items")?.forEach { el ->

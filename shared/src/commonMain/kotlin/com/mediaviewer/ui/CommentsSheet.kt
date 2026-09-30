@@ -224,7 +224,7 @@ fun CommentsSheet(
                         if (tags.isEmpty()) {
                             item { Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) { Text("no tags", color = DimGray, fontSize = 14.sp) } }
                         } else {
-                            items(tags) { tag -> TagRow(tag, onTagClick, onTagAdd, onTagExclude) }
+                            items(tags) { tag -> TagRow(tag, liquidGlass, dominantColor, backdrop, onTagClick) }
                         }
                     }
                 } else {
@@ -374,42 +374,33 @@ fun CommentsSheet(
     }
 }
 
+/** One tag on the Tags page: its own short, compact blurred bubble,
+ *  edge to edge, with the tag centered. Tap searches that tag. */
 @Composable
-private fun TagRow(tag: String, onTagClick: (String) -> Unit, onTagAdd: (String) -> Unit, onTagExclude: (String) -> Unit) {
+private fun TagRow(
+    tag: String, liquidGlass: Boolean, dominantColor: Color, backdrop: GlassBackdrop?,
+    onTagClick: (String) -> Unit
+) {
     val tap = rememberHapticTap()
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
+    val shape = RoundedCornerShape(14.dp)
+    val m = Modifier
+        .fillMaxWidth()
+        .padding(horizontal = 12.dp, vertical = 3.dp)
+        .height(34.dp)
+        .clip(shape)
+        .clickable { tap(); onTagClick(tag) }
+    val label: @Composable () -> Unit = {
         Text(
-            tag.replace('_', ' '),
-            color    = Color.White,
-            fontSize = 13.sp,
-            modifier = Modifier.weight(1f).clickable { tap(); onTagClick(tag) }
+            tag.replace('_', ' '), color = Color.White, fontSize = 13.sp,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center, maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 14.dp)
         )
-        Box(
-            modifier = Modifier
-                .size(28.dp)
-                .clip(CircleShape)
-                .background(VoteGreen.copy(alpha = 0.15f))
-                .clickable { tap(); onTagAdd(tag) },
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(Icons.Default.Add, contentDescription = "Add to search", tint = VoteGreen, modifier = Modifier.size(16.dp))
-        }
-        Box(
-            modifier = Modifier
-                .size(28.dp)
-                .clip(CircleShape)
-                .background(VoteRed.copy(alpha = 0.15f))
-                .clickable { tap(); onTagExclude(tag) },
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(Icons.Default.Remove, contentDescription = "Exclude from search", tint = VoteRed, modifier = Modifier.size(16.dp))
-        }
+    }
+    if (liquidGlass) {
+        LiquidGlassSurface(m, shape = shape, tint = dominantColor.copy(alpha = 0.5f), backdrop = backdrop, contentAlignment = Alignment.Center) { label() }
+    } else {
+        Box(m.background(Color.White.copy(alpha = 0.08f)), contentAlignment = Alignment.Center) { label() }
     }
 }
 

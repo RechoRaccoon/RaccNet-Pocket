@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import androidx.compose.foundation.border
+
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -100,6 +102,7 @@ fun SearchOverlay(
     onOpenPost: (Int) -> Unit,
     onOpenAccount: (AuthorInfo) -> Unit,
     onAddFeed: (com.mediaviewer.model.SearchFeedResult) -> Unit = {},
+    onLoadMorePosts: () -> Unit = {},
     onClose: () -> Unit
 ) {
     com.mediaviewer.ui.compat.BackHandler(onBack = onClose)
@@ -205,16 +208,17 @@ fun SearchOverlay(
             // panel is showing beneath it, and the panel's top corners are
             // square to meet them) — so the seam is invisible even though
             // they're two separately-positioned elements.
+            // Same size, spacing and position as the Hub's search bar (the
+            // back button lives up in the camera row instead, see below).
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 14.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                SearchCloseBubble(liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop, onClick = onClose)
                 val fieldShape = if (showSuggestions) {
-                    RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp, bottomStart = 0.dp, bottomEnd = 0.dp)
+                    RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp, bottomStart = 0.dp, bottomEnd = 0.dp)
                 } else {
-                    RoundedCornerShape(24.dp)
+                    RoundedCornerShape(22.dp)
                 }
                 @Composable
                 fun SearchFieldContent() {
@@ -349,6 +353,14 @@ fun SearchOverlay(
                     state.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 1.5.dp)
                     }
+                    // People tab before searching: the accounts you searched
+                    // for and opened recently.
+                    state.filter == MainViewModel.SearchFilter.ACCOUNTS && state.query.isBlank() -> {
+                        RecentAccountSearchesList(
+                            liquidGlass = liquidGlass, backdrop = searchBackdrop,
+                            onOpen = { author -> com.mediaviewer.util.RecentAccountSearches.record(author); onOpenAccount(author) }
+                        )
+                    }
                     !state.hasSearched -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text("Search posts, accounts, and starter packs", color = DimGray, fontSize = 13.sp)
                     }
@@ -365,18 +377,31 @@ fun SearchOverlay(
                         if (state.posts.isEmpty()) EmptyResultsText() else {
                             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp)) {
                                 sharedPostResults(
-                                    items = state.posts, loading = false, filter = postsKind,
+                                    items = state.posts, loading = state.loadingMorePosts, filter = postsKind,
                                     gridMode = resultsGridMode(gridScreen, postsKind), tint = profileTint, liquidGlass = liquidGlass,
-                                    onTapItem = { item -> state.posts.indexOf(item).takeIf { it >= 0 }?.let(onOpenPost) }
+                                    onTapItem = { item -> state.posts.indexOf(item).takeIf { it >= 0 }?.let(onOpenPost) },
+                                    // More results as you scroll, like every other feed.
+                                    onLoadMore = onLoadMorePosts
                                 )
                             }
                         }
                     }
                     state.filter == MainViewModel.SearchFilter.ACCOUNTS -> {
                         if (state.accounts.isEmpty()) EmptyResultsText() else {
-                            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp)) {
+                            LazyColumn(
+                                Modifier.fillMaxSize(),
+                                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 96.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
                                 items(state.accounts, key = { it.author.did }) { result ->
-                                    AccountResultRow(result = result, liquidGlass = liquidGlass, onClick = { onOpenAccount(result.author) })
+                                    AccountResultRow(
+                                        author = result.author, description = result.description, isFollowing = result.isFollowing,
+                                        liquidGlass = liquidGlass, backdrop = searchBackdrop,
+                                        onClick = {
+                                            com.mediaviewer.util.RecentAccountSearches.record(result.author)
+                                            onOpenAccount(result.author)
+                                        }
+                                    )
                                 }
                             }
                         }
@@ -406,6 +431,18 @@ fun SearchOverlay(
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
             )
         }
+
+        // Back: a round button level with the camera-notch bubble on the far
+        // left — the same place a blog's back button sits.
+        val notchY = rememberNotchCenterY()
+        val backSize = rememberNotchBubbleSize()
+        RoundBackButton(
+            liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop, onClick = onClose,
+            size = backSize,
+            modifier = Modifier.align(Alignment.TopStart)
+                .padding(start = 20.dp)
+                .offset(y = (notchY - backSize / 2).coerceAtLeast(0.dp))
+        )
 
         // Item 4: the suggestions panel — a later sibling of the Column
         // above (so it draws on top of the filter row and results grid,
@@ -489,30 +526,104 @@ private fun SearchPostCell(item: MediaItem, onClick: () -> Unit) {
     }
 }
 
+/** One account in the People results / Recent Searches: its own compact
+ *  glass bubble in that account's profile color — avatar ringed in the
+ *  same color, name, handle, a line of their bio, and "Following" when
+ *  you follow them. [onRemove] adds a small X (Recent Searches). */
 @Composable
-private fun AccountResultRow(result: SearchAccountResult, liquidGlass: Boolean, onClick: () -> Unit) {
+private fun AccountResultRow(
+    author: AuthorInfo,
+    description: String?,
+    isFollowing: Boolean,
+    liquidGlass: Boolean,
+    backdrop: GlassBackdrop?,
+    onClick: () -> Unit,
+    onRemove: (() -> Unit)? = null
+) {
     val tap = rememberHapticTap()
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = { tap(); onClick() }).padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    val color = rememberAuthorProfileTint(author.did, author.avatarUrl)
+    val accent = vividAccent(color)
+    val shape = RoundedCornerShape(22.dp)
+    val m = Modifier.fillMaxWidth().clip(shape).clickable(onClick = { tap(); onClick() })
+    val content: @Composable () -> Unit = {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                Modifier.size(44.dp).clip(CircleShape)
+                    .border(1.5.dp, accent.copy(alpha = 0.85f), CircleShape)
+                    .padding(2.dp).clip(CircleShape).background(Color.White.copy(0.1f))
+            ) {
+                if (author.avatarUrl != null) {
+                    AsyncImage(model = author.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                } else {
+                    Icon(Icons.Default.Person, contentDescription = null, tint = DimGray, modifier = Modifier.align(Alignment.Center).size(22.dp))
+                }
+            }
+            Column(Modifier.weight(1f)) {
+                Text(author.displayName.ifBlank { author.handle }, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("@${author.handle}", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (!description.isNullOrBlank()) {
+                    Text(description.replace('\n', ' '), color = Color.White.copy(0.78f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 1.dp))
+                }
+            }
+            if (isFollowing) {
+                Text(
+                    "Following", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.clip(RoundedCornerShape(12.dp)).background(accent.copy(alpha = 0.28f))
+                        .border(1.dp, accent.copy(alpha = 0.7f), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                )
+            }
+            if (onRemove != null) {
+                Box(
+                    Modifier.size(28.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.3f))
+                        .clickable { tap(); onRemove() },
+                    contentAlignment = Alignment.Center
+                ) { Icon(Icons.Default.Close, contentDescription = "Remove from recent searches", tint = Color.White, modifier = Modifier.size(15.dp)) }
+            }
+        }
+    }
+    if (liquidGlass) {
+        LiquidGlassSurface(modifier = m, shape = shape, tint = color, backdrop = backdrop) { content() }
+    } else {
+        Box(m.background(androidx.compose.ui.graphics.lerp(OffBlack, color, 0.18f))) { content() }
+    }
+}
+
+/** People tab before any search: "Recent Searches" — accounts you
+ *  searched for and opened, newest first (kept on this device). */
+@Composable
+private fun RecentAccountSearchesList(liquidGlass: Boolean, backdrop: GlassBackdrop?, onOpen: (AuthorInfo) -> Unit) {
+    val context = com.mediaviewer.ui.compat.LocalContext.current
+    remember { com.mediaviewer.util.RecentAccountSearches.ensureLoaded(context); true }
+    val recents = com.mediaviewer.util.RecentAccountSearches.accounts
+    if (recents.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("Search posts, accounts, and starter packs", color = DimGray, fontSize = 13.sp)
+        }
+        return
+    }
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 96.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        Box(Modifier.size(44.dp).clip(CircleShape).background(Color.White.copy(0.1f))) {
-            if (result.author.avatarUrl != null) {
-                AsyncImage(model = result.author.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-            } else {
-                Icon(Icons.Default.Person, contentDescription = null, tint = DimGray, modifier = Modifier.align(Alignment.Center).size(22.dp))
-            }
+        item(key = "recent_header") {
+            Text(
+                "Recent Searches", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.fillMaxWidth().padding(start = 6.dp, bottom = 4.dp)
+            )
         }
-        Column(Modifier.weight(1f)) {
-            Text(result.author.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("@${result.author.handle}", color = DimGray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (!result.description.isNullOrBlank()) {
-                Text(result.description, color = Color.White.copy(0.7f), fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
-            }
-        }
-        if (result.isFollowing) {
-            Text("Following", color = VoteGreen, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+        items(recents, key = { it.did }) { author ->
+            AccountResultRow(
+                author = author, description = null, isFollowing = false,
+                liquidGlass = liquidGlass, backdrop = backdrop,
+                onClick = { onOpen(author) },
+                onRemove = { com.mediaviewer.util.RecentAccountSearches.remove(author.did) }
+            )
         }
     }
 }

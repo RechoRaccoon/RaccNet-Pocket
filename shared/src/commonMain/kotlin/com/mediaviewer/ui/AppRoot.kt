@@ -764,7 +764,7 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
             pinterestThreeColumns     = pinterestThreeColumns,
             onTogglePinterestThreeColumns = viewModel::setPinterestThreeColumns,
             // Share To / Quote Repost / Add To fade the post's own UI away.
-            popupOpen                 = sendPopupTarget != null || quoteRepostTarget != null || listPickerDid != null || (reportTarget != null && reportTarget?.fromProfile != true),
+            popupOpen                 = (sendPopupTarget != null && sendPopupTarget?.id?.startsWith(com.mediaviewer.viewmodel.MainViewModel.PROFILE_SHARE_PREFIX) != true) || quoteRepostTarget != null || listPickerDid != null || (reportTarget != null && reportTarget?.fromProfile != true),
             likeTagPhase              = likeTagPhase,
             likeTagPending            = likeTagPending,
             onPrefetchListMemberships = viewModel::prefetchListMemberships,
@@ -873,6 +873,7 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                 onSelectFilter     = viewModel::setSearchFilter,
                 onOpenPost         = viewModel::openPostFromSearch,
                 onOpenAccount      = { author -> viewModel.closeSearch(); viewModel.openProfile(author) },
+                onLoadMorePosts    = viewModel::loadMoreSearchPosts,
                 onAddFeed          = viewModel::addSavedFeedFromSearch,
                 onClose            = viewModel::closeSearch
             )
@@ -965,6 +966,7 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                     isBlocking = blockVersion.let { com.mediaviewer.util.BlockedAccounts.isBlocking(currentProfileOverlay.author.did) },
                     onToggleBlock = viewModel::toggleBlockProfile,
                     onReportAccount = viewModel::openReportForProfile,
+                    onShareProfile = viewModel::openShareProfile,
                     onOpenQr = { author, banner -> qrTarget = author to banner },
                     titleBacklog = titleBacklog,
                     onCheckTitleBacklog = viewModel::checkTitleBacklog,
@@ -1070,8 +1072,9 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                 selected        = sendPopupSelected,
                 sending         = sendPopupSending,
                 liquidGlass     = liquidGlass,
-                dominantColor   = currentDominantColor,
-                backdrop        = currentBackdrop,
+                // A shared profile wears that profile page's colors.
+                dominantColor   = if (target.id.startsWith(com.mediaviewer.viewmodel.MainViewModel.PROFILE_SHARE_PREFIX)) profileTint else currentDominantColor,
+                backdrop        = if (target.id.startsWith(com.mediaviewer.viewmodel.MainViewModel.PROFILE_SHARE_PREFIX)) profileBackdrop else currentBackdrop,
                 onToggleSelect  = viewModel::toggleSendRecipient,
                 onSend          = viewModel::sendToSelectedRecipients,
                 onDismiss       = viewModel::dismissSendPopup
@@ -1211,8 +1214,9 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                 interactive = notchInteractive,
                 modifier = Modifier.zIndex(11f),
                 // Camera: Stellar's own camera page (see CameraModeScreen).
-                onOpenCamera = viewModel::openCameraMode,
-                onOpenVrm = viewModel::openVrmMode
+                // The QR page closes when Camera / VRM mode opens over it.
+                onOpenCamera = { qrTarget = null; viewModel.openCameraMode() },
+                onOpenVrm = { qrTarget = null; viewModel.openVrmMode() }
             )
             // Settings → App Functionality → "FPS Overlay": the frame rate in
             // the same color the current page (and the notch ring) wears.

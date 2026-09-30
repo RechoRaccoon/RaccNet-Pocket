@@ -295,14 +295,18 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Fully hides the phone status bar (clock, battery, wifi/signal icons, etc).
-     * Uses immersive-sticky behavior so a swipe from the edge only shows the
-     * bar temporarily and it re-hides itself; the nav bar is left alone.
+     * Fully hides the phone status bar (clock, battery, wifi/signal icons, etc)
+     * and the navigation bar. Uses immersive-sticky behavior so a swipe from
+     * the edge only shows them temporarily and they re-hide themselves.
      */
     private fun hideSystemStatusBar() {
         val controller = androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
         controller.systemBarsBehavior =
             androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        controller.hide(androidx.core.view.WindowInsetsCompat.Type.statusBars())
+        // Status bar AND navigation bar: the whole screen is Stellar's (a
+        // swipe in from the edge shows them briefly). The UI pads by the
+        // live navigation-bar insets, which drop to zero while it's
+        // hidden, so the freed space is used instead of leaving a gap.
+        controller.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
     }
 }

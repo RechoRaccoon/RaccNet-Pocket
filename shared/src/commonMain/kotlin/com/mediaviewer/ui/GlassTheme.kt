@@ -1,5 +1,13 @@
 package com.mediaviewer.ui
 
+import androidx.compose.foundation.shape.CircleShape
+
+import androidx.compose.foundation.interaction.MutableInteractionSource
+
+import androidx.compose.ui.zIndex
+
+import kotlinx.coroutines.launch
+
 import com.mediaviewer.platform.sharedPreferences
 
 import kotlinx.coroutines.IO
@@ -961,5 +969,155 @@ fun ScrollToTopGlassBubble(liquidGlass: Boolean, tint: Color, backdrop: GlassBac
         LiquidGlassSurface(modifier = base, shape = shape, tint = tint, backdrop = backdrop, contentAlignment = Alignment.Center) { icon() }
     } else {
         Box(base.background(Color.Black.copy(0.6f)), contentAlignment = Alignment.Center) { icon() }
+    }
+}
+
+/** A profile color turned into an "on" accent that reads clearly on its
+ *  own glass: full enough and bright enough to stand apart from white
+ *  (toggled-on Like / Repost / Bookmark / Download, the More menu…). */
+fun vividAccent(c: Color): Color {
+    val hsv = FloatArray(3)
+    com.mediaviewer.ui.compat.PlatformColor.colorToHSV(c.toArgb(), hsv)
+    // Near-grey colors keep their hue-less look but still get brighter.
+    if (hsv[1] > 0.08f) hsv[1] = hsv[1].coerceIn(0.55f, 0.9f)
+    hsv[2] = hsv[2].coerceAtLeast(0.9f)
+    return Color(com.mediaviewer.ui.compat.PlatformColor.HSVToColor(hsv))
+}
+
+/** One round button in a [BubbleActionStack]: an icon ([icon], or custom
+ *  [iconContent] such as the Bluesky butterfly), [label] for accessibility. */
+class BubbleAction(
+    val label: String,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    val iconContent: (@Composable (Modifier, Color) -> Unit)? = null,
+    /** Icon color override (e.g. red for a "tap again to delete" state). */
+    val iconTint: Color? = null,
+    /** Tapping it runs [onClick] without closing the menu. */
+    val keepOpen: Boolean = false,
+    val onClick: () -> Unit
+)
+
+/**
+ * The "More" menu on posts and profiles: a column of round glass icon
+ * bubbles standing on the More button. Opening, the bubbles pop out one at
+ * a time from the bottom up — each grows and slides up out of the bar with
+ * a small haptic tick, so you feel every bubble arrive; closing plays it
+ * in reverse (top first). Stays composed while animating out: pass
+ * [visible] rather than adding/removing this composable.
+ *
+ * Positioned in its container's own coordinate space from the More
+ * button's root-relative bounds ([anchorOriginRoot]/[anchorSize]) and the
+ * container's root origin, so the glass blur lines up with the backdrop.
+ */
+@Composable
+fun BubbleActionStack(
+    visible: Boolean,
+    anchorOriginRoot: Offset,
+    anchorSize: androidx.compose.ui.unit.IntSize,
+    containerRootOrigin: Offset,
+    /** Top to bottom. */
+    actions: List<BubbleAction>,
+    liquidGlass: Boolean,
+    tint: Color,
+    backdrop: GlassBackdrop?,
+    onDismissRequest: () -> Unit,
+    /** Where the stack's bottom sits: this far above the anchor's top. */
+    gapAboveAnchor: Dp = 8.dp,
+) {
+    val n = actions.size
+    val progress = remember(n) { List(n) { androidx.compose.animation.core.Animatable(0f) } }
+    var present by remember { mutableStateOf(visible) }
+    if (visible) present = true
+    val view = com.mediaviewer.ui.compat.rememberPlatformView()
+    val tap = com.mediaviewer.util.rememberHapticTap()
+    LaunchedEffect(visible, n) {
+        if (visible) {
+            // Bottom bubble first (index n-1 is the bottom one).
+            kotlinx.coroutines.coroutineScope {
+                for (k in 0 until n) {
+                    val i = n - 1 - k
+                    launch {
+                        kotlinx.coroutines.delay(k * 55L)
+                        runCatching { view.performHapticFeedback(com.mediaviewer.ui.compat.HapticFeedbackConstants.VIRTUAL_KEY) }
+                        progress[i].animateTo(
+                            1f,
+                            androidx.compose.animation.core.spring(dampingRatio = 0.62f, stiffness = 520f)
+                        )
+                    }
+                }
+            }
+        } else if (present) {
+            // Top bubble first on the way back in.
+            kotlinx.coroutines.coroutineScope {
+                for (k in 0 until n) {
+                    launch {
+                        kotlinx.coroutines.delay(k * 40L)
+                        runCatching { view.performHapticFeedback(com.mediaviewer.ui.compat.HapticFeedbackConstants.CLOCK_TICK) }
+                        progress[k].animateTo(
+                            0f,
+                            androidx.compose.animation.core.tween(150, easing = androidx.compose.animation.core.FastOutLinearInEasing)
+                        )
+                    }
+                }
+            }
+            present = false
+        }
+    }
+    if (!present || n == 0) return
+
+    val density = LocalDensity.current
+    val bubble = 46.dp
+    val gap = 8.dp
+    val bubblePx = with(density) { bubble.toPx() }
+    val gapPx = with(density) { gap.toPx() }
+    val stackHeightPx = bubblePx * n + gapPx * (n - 1)
+    val centerX = anchorOriginRoot.x + anchorSize.width / 2f - containerRootOrigin.x
+    val bottomY = anchorOriginRoot.y - containerRootOrigin.y - with(density) { gapAboveAnchor.toPx() }
+    val left = centerX - bubblePx / 2f
+    val top = bottomY - stackHeightPx
+
+    Column(
+        modifier = Modifier
+            .offset { IntOffset(left.toInt(), top.toInt()) }
+            .zIndex(6f)
+            // Taps in the gaps between bubbles don't fall through.
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {},
+        verticalArrangement = Arrangement.spacedBy(gap),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        actions.forEachIndexed { i, action ->
+            val p = progress[i]
+            // Distance from this bubble down to the anchor: it rises out of the bar.
+            val rise = (n - i) * (bubblePx + gapPx) * 0.55f
+            val shape = CircleShape
+            val m = Modifier
+                .size(bubble)
+                .graphicsLayer {
+                    val v = p.value
+                    alpha = v.coerceIn(0f, 1f)
+                    val sc = 0.35f + 0.65f * v
+                    scaleX = sc; scaleY = sc
+                    translationY = (1f - v) * rise
+                }
+                .clip(shape)
+                .clickable(enabled = visible) {
+                    tap()
+                    if (!action.keepOpen) onDismissRequest()
+                    action.onClick()
+                }
+            val iconColor = action.iconTint ?: Color.White
+            val iconModifier = Modifier.size(22.dp)
+            val icon: @Composable () -> Unit = {
+                when {
+                    action.iconContent != null -> action.iconContent.invoke(iconModifier, iconColor)
+                    action.icon != null -> Icon(action.icon, contentDescription = action.label, tint = iconColor, modifier = iconModifier)
+                }
+            }
+            if (liquidGlass) {
+                LiquidGlassSurface(modifier = m, shape = shape, tint = tint, backdrop = backdrop, contentAlignment = Alignment.Center) { icon() }
+            } else {
+                Box(m.background(Color.Black.copy(alpha = 0.6f)), contentAlignment = Alignment.Center) { icon() }
+            }
+        }
     }
 }

@@ -1,5 +1,9 @@
 package com.mediaviewer.ui
 
+import androidx.compose.material.icons.filled.Send
+
+import androidx.compose.material.icons.filled.Flag
+
 import androidx.compose.foundation.interaction.MutableInteractionSource
 
 import androidx.compose.ui.zIndex
@@ -465,6 +469,7 @@ fun ProfileOverlay(
     /** Block / unblock this account (same as the timeline's Block). */
     onToggleBlock: (AuthorInfo) -> Unit = {},
     onReportAccount: (AuthorInfo) -> Unit = {},
+    onShareProfile: (AuthorInfo) -> Unit = {},
     /** The bar's QR code button: (author, banner URL). */
     onOpenQr: (AuthorInfo, String?) -> Unit = { _, _ -> },
     /** Title pages' Backlog/Remove button. */
@@ -946,6 +951,8 @@ fun ProfileOverlay(
         // bar's pill sits so the stack can line up with its right edge.
         var profileMoreOpen by remember(author.did) { mutableStateOf(false) }
         var profilePillBounds by remember { mutableStateOf<Pair<Offset, IntSize>?>(null) }
+        var profileMoreBounds by remember { mutableStateOf<Pair<Offset, IntSize>?>(null) }
+        var profileRootOrigin by remember { mutableStateOf<Offset?>(null) }
         if (profile != null || !state.loadingProfile) {
             Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 8.dp)) {
                 ProfileInteractionBar(
@@ -968,29 +975,52 @@ fun ProfileOverlay(
                     ),
                     onGrid = { onGridButtonTap() },
                     onAddTo = { onOpenAddTo(author.did) },
-                    onViewOnBluesky = { uriHandler.openUri("https://bsky.app/profile/${author.handle}") },
                     onDm = { onOpenDm(author) },
                     onDmLongPress = { onNewGroupWith(author) },
-                    // QR code + Block at the right end (no Block on your own).
-                    showBlock = selfDid.isNotBlank() && author.did != selfDid,
+                    // Share (after DM): the same "Share with" popup as posts.
+                    showShare = selfDid.isNotBlank(),
+                    onShare = { onShareProfile(author) },
+                    // QR code, then More (Bluesky link / Report / Block).
+                    showBlock = true,
                     isBlocking = isBlocking,
                     onQr = { onOpenQr(author, profile?.bannerUrl) },
                     moreOpen = profileMoreOpen,
                     onToggleMore = { profileMoreOpen = !profileMoreOpen },
-                    onPillBounds = { origin, size -> profilePillBounds = origin to size }
+                    onPillBounds = { origin, size -> profilePillBounds = origin to size },
+                    onMoreBounds = { origin, size -> profileMoreBounds = origin to size }
                 )
             }
+            // More: Bluesky link on top, then Report and Block (not on your
+            // own profile) — round glass bubbles popping up off the button,
+            // drawn over the audio visualizer.
             val pill = profilePillBounds
-            if (profileMoreOpen && pill != null && selfDid.isNotBlank() && author.did != selfDid) {
-                ProfileMoreStack(
-                    anchorOriginRoot = pill.first, anchorSize = pill.second,
-                    liquidGlass = liquidGlass, tint = blended, backdrop = backdrop,
-                    items = listOf(
-                        GlassMenuItem("Report") { onReportAccount(author) },
-                        GlassMenuItem(if (isBlocking) "Unblock" else "Block") { onToggleBlock(author) }
-                    ),
-                    onDismissRequest = { profileMoreOpen = false }
-                )
+            val more = profileMoreBounds
+            Box(Modifier.fillMaxSize().onGloballyPositioned { profileRootOrigin = it.positionInRoot() }) {
+                val rootOrigin = profileRootOrigin
+                if (pill != null && more != null && rootOrigin != null) {
+                    val isOwn = selfDid.isNotBlank() && author.did == selfDid
+                    BubbleActionStack(
+                        visible = profileMoreOpen,
+                        anchorOriginRoot = Offset(more.first.x, pill.first.y),
+                        anchorSize = more.second,
+                        containerRootOrigin = rootOrigin,
+                        actions = buildList {
+                            add(BubbleAction("View on Bluesky", iconContent = { m, c -> BlueskyLogoIcon(m, tint = c) }) {
+                                uriHandler.openUri("https://bsky.app/profile/${author.handle}")
+                            })
+                            if (!isOwn && selfDid.isNotBlank()) {
+                                add(BubbleAction("Report", icon = Icons.Filled.Flag) { onReportAccount(author) })
+                                add(BubbleAction(
+                                    if (isBlocking) "Unblock" else "Block", icon = Icons.Filled.Block,
+                                    iconTint = if (isBlocking) Color(0xFFFF6B6B) else null
+                                ) { onToggleBlock(author) })
+                            }
+                        },
+                        liquidGlass = liquidGlass, tint = blended, backdrop = backdrop,
+                        onDismissRequest = { profileMoreOpen = false },
+                        gapAboveAnchor = 10.dp
+                    )
+                }
             }
         }
 
@@ -1113,15 +1143,18 @@ private fun ProfileInteractionBar(
     liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
     refreshing: Boolean, animateRefresh: Boolean, onRefresh: () -> Unit,
     gridMode: Int, gridCyclesListLayout: Boolean, showGrid: Boolean, showDm: Boolean,
-    onGrid: () -> Unit, onAddTo: () -> Unit, onViewOnBluesky: () -> Unit, onDm: () -> Unit,
+    onGrid: () -> Unit, onAddTo: () -> Unit, onDm: () -> Unit,
     onDmLongPress: () -> Unit = {},
+    showShare: Boolean = false,
+    onShare: () -> Unit = {},
     showBlock: Boolean = false,
     isBlocking: Boolean = false,
     onQr: () -> Unit = {},
     /** "More" (where Block used to be): opens the Report / Block stack. */
     moreOpen: Boolean = false,
     onToggleMore: () -> Unit = {},
-    onPillBounds: (Offset, IntSize) -> Unit = { _, _ -> }
+    onPillBounds: (Offset, IntSize) -> Unit = { _, _ -> },
+    onMoreBounds: (Offset, IntSize) -> Unit = { _, _ -> }
 ) {
     val shape = RoundedCornerShape(26.dp)
     val iconSize = 20.dp
@@ -1204,9 +1237,6 @@ private fun ProfileInteractionBar(
             BigIconButton(onClick = { tap(); onAddTo() }) {
                 Icon(Icons.Filled.PlaylistAdd, contentDescription = "Add To", tint = Color.White, modifier = Modifier.size(addToIconSize))
             }
-            IconButton(onClick = { tap(); onViewOnBluesky() }) {
-                BlueskyLogoIcon(Modifier.size(iconSize), tint = Color.White)
-            }
             if (showDm) {
                 // Tap: open (or start) your chat with them. Hold: start a
                 // group chat with them instead.
@@ -1224,7 +1254,13 @@ private fun ProfileInteractionBar(
                     Icon(Icons.Default.Chat, contentDescription = "DM (hold for a group chat)", tint = Color.White, modifier = Modifier.size(iconSize))
                 }
             }
-            // QR code of this profile's link, then Block at the very end.
+            if (showShare) {
+                // Same Share button (and popup) as on posts.
+                IconButton(onClick = { tap(); onShare() }) {
+                    Icon(Icons.Default.Send, contentDescription = "Share profile", tint = Color.White, modifier = Modifier.size(iconSize))
+                }
+            }
+            // QR code of this profile's link, then More at the very end.
             IconButton(onClick = { tap(); onQr() }) {
                 Icon(Icons.Filled.QrCode2, contentDescription = "Profile QR code", tint = Color.White, modifier = Modifier.size(iconSize))
             }
@@ -1232,6 +1268,7 @@ private fun ProfileInteractionBar(
                 // "More" — Report / Block, in the same stacked bubbles as a
                 // post's More menu. Red while you're blocking them, like the
                 // old Block button.
+                Box(Modifier.onGloballyPositioned { onMoreBounds(it.positionInRoot(), it.size) }) {
                 IconButton(onClick = { tap(); onToggleMore() }) {
                     Icon(
                         if (moreOpen) Icons.Default.Close else Icons.Default.Menu,
@@ -1239,6 +1276,7 @@ private fun ProfileInteractionBar(
                         tint = if (isBlocking && !moreOpen) Color(0xFFFF6B6B) else Color.White,
                         modifier = Modifier.size(iconSize)
                     )
+                }
                 }
             }
         }
@@ -5356,71 +5394,5 @@ fun PostResultTile(
         }
         PostKindFilter.VERTICAL_VIDEOS ->
             ThumbBox(item, tint, RoundedCornerShape(10.dp), Modifier.fillMaxWidth().aspectRatio(9f / 16f), liquidGlass, onClick = onClick)
-    }
-}
-
-/** A profile's "More" stack (Report over Block): the same individually
- *  separate glass pill bubbles as a post's More menu, right edge flush with
- *  the interaction bar's pill and sitting just above it — drawn over the
- *  audio visualizer. Closes with the bar's X (or after picking one). */
-@Composable
-private fun ProfileMoreStack(
-    anchorOriginRoot: Offset,
-    anchorSize: IntSize,
-    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
-    items: List<GlassMenuItem>,
-    onDismissRequest: () -> Unit
-) {
-    val tap = rememberHapticTap()
-    val density = LocalDensity.current
-    val bubbleHeightDp = 40.dp
-    val gapDp = 5.dp
-    val shape = RoundedCornerShape(26.dp)
-    var containerOrigin by remember { mutableStateOf<Offset?>(null) }
-    var measured by remember { mutableStateOf(IntSize.Zero) }
-    Box(Modifier.fillMaxSize().onGloballyPositioned { containerOrigin = it.positionInRoot() }) {
-        val origin = containerOrigin
-        if (origin != null) {
-            val gapPx = with(density) { gapDp.toPx() }
-            val right = anchorOriginRoot.x + anchorSize.width - origin.x
-            val bottom = anchorOriginRoot.y - gapPx - origin.y
-            Column(
-                modifier = Modifier
-                    .offset { IntOffset((right - measured.width).toInt(), (bottom - measured.height).toInt()) }
-                    .onSizeChanged { measured = it }
-                    .alpha(if (measured.width > 0) 1f else 0f)
-                    .width(IntrinsicSize.Max)
-                    .zIndex(6f)
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {},
-                verticalArrangement = Arrangement.spacedBy(gapDp),
-                horizontalAlignment = Alignment.End
-            ) {
-                items.forEach { item ->
-                    val bubbleModifier = Modifier
-                        .fillMaxWidth()
-                        .height(bubbleHeightDp)
-                        .clip(shape)
-                        .clickable { tap(); if (!item.keepOpen) onDismissRequest(); item.onClick() }
-                    val labelColor = if (item.destructive) Color(0xFFE0245E) else Color.White
-                    if (liquidGlass) {
-                        LiquidGlassSurface(modifier = bubbleModifier, shape = shape, tint = tint, backdrop = backdrop) {
-                            Text(
-                                item.label, color = labelColor, fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                                textAlign = TextAlign.Center, maxLines = 1,
-                                modifier = Modifier.align(Alignment.Center).padding(horizontal = 14.dp)
-                            )
-                        }
-                    } else {
-                        Box(bubbleModifier.background(Color.Black.copy(alpha = 0.55f)), contentAlignment = Alignment.Center) {
-                            Text(
-                                item.label, color = labelColor, fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                                textAlign = TextAlign.Center, maxLines = 1,
-                                modifier = Modifier.padding(horizontal = 14.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
     }
 }
