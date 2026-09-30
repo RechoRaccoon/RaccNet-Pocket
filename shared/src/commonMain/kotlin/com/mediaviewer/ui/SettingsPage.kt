@@ -643,28 +643,28 @@ internal fun SettingsPageContent(
         SectionHeader("App Functionality", tint)
 
         ToggleBubble("Hide Text Only Posts", hideTextOnlyPosts, onToggleHideTextOnlyPosts, liquidGlass, tint, backdrop)
-        if (com.mediaviewer.util.AdultContentPolicy.appliesHere && bskyLoggedIn) {
-            // iOS: adult content follows the account's own Bluesky setting,
-            // which can only be changed on the Bluesky website (App Store
-            // rule) — shown here with a shortcut, never as an in-app switch.
-            val adultAllowed = com.mediaviewer.util.AdultContentPolicy.accountAllowsAdult
-            val adultContext = com.mediaviewer.ui.compat.LocalContext.current
-            SettingsBubble(liquidGlass, tint, backdrop) {
-                BubbleRow {
-                    RowLabel(
-                        "Adult Content: " + if (adultAllowed) "On" else "Off", Modifier.weight(1f),
-                        sub = "Follows your Bluesky account. Change it on the Bluesky website: Settings → Moderation → \"Enable adult content\", then refresh your feed."
-                    )
-                    PillButton("Open", { com.mediaviewer.ui.compat.openUrl(adultContext, "https://bsky.app/moderation") })
-                }
+        // NSFW Content: managed by the Bluesky account itself ("Enable adult
+        // content" on the Bluesky website). On iOS that account setting is
+        // the only switch (App Store rule — see AdultContentPolicy); Android
+        // also keeps its own "I Hate Fun" blur, in the same bubble.
+        val nsfwContext = com.mediaviewer.ui.compat.LocalContext.current
+        SettingsBubble(liquidGlass, tint, backdrop) {
+            BubbleRow {
+                RowLabel(
+                    "NSFW Content", Modifier.weight(1f),
+                    sub = if (com.mediaviewer.util.AdultContentPolicy.appliesHere)
+                        "Hidden unless adult content is enabled on your Bluesky account. Refresh your feed after changing it."
+                    else null
+                )
+                PillButton("Manage on Bluesky", { com.mediaviewer.ui.compat.openUrl(nsfwContext, "https://bsky.app/moderation") })
+            }
+            if (!com.mediaviewer.util.AdultContentPolicy.appliesHere) {
                 BubbleDivider()
                 BubbleRow {
                     RowLabel("I Hate Fun (Blur NSFW Content)", Modifier.weight(1f))
                     CompactSwitch(hateFunBlurNsfw, onToggleHateFunBlurNsfw)
                 }
             }
-        } else {
-            ToggleBubble("I Hate Fun (Blur NSFW Content)", hateFunBlurNsfw, onToggleHateFunBlurNsfw, liquidGlass, tint, backdrop)
         }
 
         if (bskyLoggedIn) {

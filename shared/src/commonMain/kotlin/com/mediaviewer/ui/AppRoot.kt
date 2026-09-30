@@ -87,7 +87,9 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
     val classicProfileTabRow by viewModel.classicProfileTabRow.collectAsState()
     val squareGridRounded by viewModel.squareGridRounded.collectAsState()
     val pinterestThreeColumns by viewModel.pinterestThreeColumns.collectAsState()
-    val hateFunBlurNsfw by viewModel.hateFunBlurNsfw.collectAsState()
+    val hateFunBlurNsfwPref by viewModel.hateFunBlurNsfw.collectAsState()
+    // iOS has no "I Hate Fun" blur (adult content follows the Bluesky account there).
+    val hateFunBlurNsfw = hateFunBlurNsfwPref && !com.mediaviewer.util.AdultContentPolicy.appliesHere
     val liquidGlass        by viewModel.liquidGlass.collectAsState()
     val liquidGlassIntensity by viewModel.liquidGlassIntensity.collectAsState()
     val glassRimIntensity  by viewModel.glassRimIntensity.collectAsState()
