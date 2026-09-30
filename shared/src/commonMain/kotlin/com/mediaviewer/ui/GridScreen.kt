@@ -466,7 +466,7 @@ fun GridScreen(
                 pendingAnchor = middleAnchor(gridState)
                 cycleResultsGridMode(gridScreen, kind)
             },
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
+            modifier = Modifier.align(Alignment.BottomCenter)
         )
         // Back-to-top arrow, same as on profiles (glass that blurs the grid).
         androidx.compose.animation.AnimatedVisibility(

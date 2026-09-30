@@ -956,7 +956,7 @@ fun ProfileOverlay(
         var profileMoreBounds by remember { mutableStateOf<Pair<Offset, IntSize>?>(null) }
         var profileRootOrigin by remember { mutableStateOf<Offset?>(null) }
         if (profile != null || !state.loadingProfile) {
-            Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().windowInsetsPadding(WindowInsets.navBarSpace).padding(bottom = 8.dp)) {
+            Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().windowInsetsPadding(WindowInsets.navBarSpace)) {
                 ProfileInteractionBar(
                     liquidGlass = liquidGlass, tint = blended, backdrop = backdrop,
                     refreshing = state.refreshing, animateRefresh = !reducedAnimations, onRefresh = onRefresh,

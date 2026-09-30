@@ -429,19 +429,19 @@ fun SearchOverlay(
                 filter = if (isPosts || isLiked) kindForTab else null,
                 gridMode = resultsGridMode(gridScreen, kindForTab),
                 onGrid = { cycleResultsGridMode(gridScreen, kindForTab) },
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
+                modifier = Modifier.align(Alignment.BottomCenter)
             )
         }
 
-        // Back: a round button level with the camera-notch bubble on the far
-        // left — the same place a blog's back button sits.
+        // Back: a round button level with the camera-notch bubble, its left
+        // edge lined up with the search bar's (this page's 16dp margin).
         val notchY = rememberNotchCenterY()
         val backSize = rememberNotchBubbleSize()
         RoundBackButton(
             liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop, onClick = onClose,
             size = backSize,
             modifier = Modifier.align(Alignment.TopStart)
-                .padding(start = 20.dp)
+                .padding(start = 16.dp)
                 .offset(y = (notchY - backSize / 2).coerceAtLeast(0.dp))
         )
 
