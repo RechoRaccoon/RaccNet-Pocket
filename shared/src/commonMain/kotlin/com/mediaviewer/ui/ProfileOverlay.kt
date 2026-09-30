@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import com.mediaviewer.ui.compat.navBarSpace
+
 import androidx.compose.material.icons.filled.Send
 
 import androidx.compose.material.icons.filled.Flag
@@ -746,7 +748,7 @@ fun ProfileOverlay(
             // of being cut off at the gap's edge.
             contentPadding = PaddingValues(
                 top = rememberTopCutoutClearance(),
-                bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 16.dp + 76.dp
+                bottom = WindowInsets.navBarSpace.asPaddingValues().calculateBottomPadding() + 16.dp + 76.dp
             ),
             modifier = Modifier.fillMaxSize()
         ) {
@@ -954,7 +956,7 @@ fun ProfileOverlay(
         var profileMoreBounds by remember { mutableStateOf<Pair<Offset, IntSize>?>(null) }
         var profileRootOrigin by remember { mutableStateOf<Offset?>(null) }
         if (profile != null || !state.loadingProfile) {
-            Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 8.dp)) {
+            Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().windowInsetsPadding(WindowInsets.navBarSpace).padding(bottom = 8.dp)) {
                 ProfileInteractionBar(
                     liquidGlass = liquidGlass, tint = blended, backdrop = backdrop,
                     refreshing = state.refreshing, animateRefresh = !reducedAnimations, onRefresh = onRefresh,
@@ -1285,7 +1287,7 @@ private fun ProfileInteractionBar(
     // Item 2 (round 2) + fix (per feedback): the bar keeps its full-width
     // 60dp/52dp slot, but the pill inside it now hugs its own buttons and
     // sits centered horizontally instead of stretching edge to edge.
-    val barModifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars)
+    val barModifier = Modifier.windowInsetsPadding(WindowInsets.navBarSpace)
         .height(if (liquidGlass) 60.dp else 52.dp).fillMaxWidth()
     val pillModifier = Modifier.height(pillHeight)
     Box(modifier = barModifier, contentAlignment = Alignment.Center) {
@@ -3845,7 +3847,7 @@ private fun BlogDetailOverlay(
                     Text(blog.bodyText.ifBlank { "This blog has no readable text content." },
                         color = Color.White.copy(0.92f), fontSize = 15.sp, lineHeight = 23.sp)
                 }
-                Spacer(Modifier.height(120.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()))
+                Spacer(Modifier.height(120.dp + WindowInsets.navBarSpace.asPaddingValues().calculateBottomPadding()))
             }
         }
 
@@ -3899,7 +3901,7 @@ private fun BlogDetailOverlay(
             }
         }
         if (isOwn) Box(
-            Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navigationBars)
+            Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navBarSpace)
                 .height(if (liquidGlass) 60.dp else 52.dp).fillMaxWidth(),
             contentAlignment = Alignment.Center
         ) {
@@ -5034,7 +5036,7 @@ private fun TitleReviewBar(
             }
         }
     }
-    Box(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).height(60.dp).padding(horizontal = 12.dp, vertical = 8.dp)) {
+    Box(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navBarSpace).height(60.dp).padding(horizontal = 12.dp, vertical = 8.dp)) {
         Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Pill("Review", 2f, Color.White, onClick)
             if (backlogLabel != null) {
@@ -5075,7 +5077,7 @@ private fun LikeReviewCommentBar(
             Box(modifier.clip(shape).background(Color.White.copy(0.10f)), contentAlignment = Alignment.Center) { Label() }
         }
     }
-    Box(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).height(60.dp).padding(horizontal = 12.dp, vertical = 8.dp)) {
+    Box(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navBarSpace).height(60.dp).padding(horizontal = 12.dp, vertical = 8.dp)) {
         Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Segment("Like", if (likedByMe) Color(0xFFFF4D6D) else Color.White, onLike)
             Segment("Review", Color.White, onReview)
@@ -5303,7 +5305,7 @@ fun ResultsInteractionBar(
             }
         }
     }
-    Box(modifier.windowInsetsPadding(WindowInsets.navigationBars).height(if (liquidGlass) 60.dp else 52.dp).fillMaxWidth(), contentAlignment = Alignment.Center) {
+    Box(modifier.windowInsetsPadding(WindowInsets.navBarSpace).height(if (liquidGlass) 60.dp else 52.dp).fillMaxWidth(), contentAlignment = Alignment.Center) {
         if (liquidGlass) {
             LiquidGlassSurface(modifier = Modifier.height(pillHeight), shape = shape, tint = tint, backdrop = backdrop) { BarContent() }
         } else {

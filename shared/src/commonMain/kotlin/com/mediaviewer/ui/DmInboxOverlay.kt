@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import com.mediaviewer.ui.compat.navBarSpace
+
 import com.mediaviewer.ui.compat.rememberPlatformView
 
 import androidx.compose.ui.graphics.layer.drawLayer
@@ -254,7 +256,7 @@ fun DmInboxOverlay(
                     // New chat / new group.
                     val fabShape = CircleShape
                     val fabModifier = Modifier.align(Alignment.BottomEnd)
-                        .navigationBarsPadding().padding(end = 18.dp, bottom = 18.dp)
+                        .windowInsetsPadding(WindowInsets.navBarSpace).padding(end = 18.dp, bottom = 18.dp)
                         .size(60.dp)
                     val fabContent: @Composable () -> Unit = {
                         Box(Modifier.fillMaxSize().clickable { tap(); onNewChat() }, contentAlignment = Alignment.Center) {
@@ -616,12 +618,12 @@ private fun DmThreadView(
         // directly on top of it instead of staying pinned to the bottom of
         // the screen underneath it. `WindowInsets.ime.union(...navigationBars)`
         // (rather than stacking two separate `.imePadding()` /
-        // `.navigationBarsPadding()` modifiers, which would add both insets
+        // `.windowInsetsPadding(WindowInsets.navBarSpace)` modifiers, which would add both insets
         // together and leave a gap above the keyboard on 3-button nav)
         // takes whichever of the two is currently larger.
         Column(
             Modifier.fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
+                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navBarSpace))
                 .padding(horizontal = 10.dp, vertical = 10.dp)
         ) {
             // "Replying to …" — slides in above the field while a reply is set.

@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import com.mediaviewer.ui.compat.navBarSpace
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -130,7 +132,7 @@ private fun AppMessageToast(modifier: Modifier = Modifier) {
     AnimatedVisibility(
         visible = visible && message != null,
         enter = fadeIn(), exit = fadeOut(),
-        modifier = modifier.windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 48.dp, start = 24.dp, end = 24.dp)
+        modifier = modifier.windowInsetsPadding(WindowInsets.navBarSpace).padding(bottom = 48.dp, start = 24.dp, end = 24.dp)
     ) {
         Text(
             message.orEmpty(),

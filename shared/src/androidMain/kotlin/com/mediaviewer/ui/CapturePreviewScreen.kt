@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import com.mediaviewer.ui.compat.navBarSpace
+
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
@@ -287,7 +289,7 @@ actual fun CapturePreviewScreen(
             // Bottom: interaction-bar style, two halves.
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 18.dp)
-                    .windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 18.dp),
+                    .windowInsetsPadding(WindowInsets.navBarSpace).padding(bottom = 18.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 CaptureActionButton(

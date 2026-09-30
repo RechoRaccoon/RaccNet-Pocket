@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import com.mediaviewer.ui.compat.navBarSpace
+
 import com.mediaviewer.platform.PlatformUri as Uri
 
 import com.mediaviewer.ui.compat.rememberPlatformView
@@ -383,7 +385,7 @@ fun ComposePostScreen(
     val bottomInsetModifier: Modifier = when {
         emojiPanelOpen && emojiTabEditing -> Modifier.padding(bottom = imeDp + EmojiPanelCompactHeight)
         emojiPanelOpen -> Modifier.padding(bottom = emojiPanelHeight)
-        else -> Modifier.imePadding().navigationBarsPadding()
+        else -> Modifier.imePadding().windowInsetsPadding(WindowInsets.navBarSpace)
     }
 
     // Emoji only exist inside Textshot text (each is one private-use character).

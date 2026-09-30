@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import com.mediaviewer.ui.compat.navBarSpace
+
 import com.mediaviewer.ui.compat.coilContext
 
 import coil3.request.crossfade
@@ -1895,7 +1897,7 @@ private fun PostContent(
                 ActionRow(item, appMode, onToggleLike, onToggleRepost, onToggleBookmark, onE621Vote,
                     onQuoteRepost, onDownload, onDownloadGif, onBlockAccount, onSendPost,
                     Modifier.fillMaxWidth()
-                        .windowInsetsPadding(WindowInsets.navigationBars)
+                        .windowInsetsPadding(WindowInsets.navBarSpace)
                         .height(if (liquidGlass) 60.dp else 52.dp),
                     liquidGlass = liquidGlass,
                     dominantColor = dominantColor,
@@ -1917,7 +1919,7 @@ private fun PostContent(
                     liquidGlass = liquidGlass, tint = dominantColor, backdrop = glassBackdrop,
                     onClick = { moreMenuExpanded = false; onLandscapeFullscreen() },
                     modifier = Modifier.align(Alignment.BottomEnd)
-                        .windowInsetsPadding(WindowInsets.navigationBars)
+                        .windowInsetsPadding(WindowInsets.navBarSpace)
                         .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.End))
                         .padding(end = 14.dp, bottom = if (liquidGlass) 8.dp else 4.dp)
                 )

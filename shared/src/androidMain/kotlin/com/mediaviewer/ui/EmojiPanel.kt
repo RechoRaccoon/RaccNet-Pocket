@@ -1,5 +1,11 @@
 package com.mediaviewer.ui
 
+import androidx.compose.foundation.layout.WindowInsets
+
+import androidx.compose.foundation.layout.windowInsetsPadding
+
+import com.mediaviewer.ui.compat.navBarSpace
+
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -183,7 +189,7 @@ internal actual fun EmojiPanel(
             .background(panelBg)
             // Swallow taps so they never fall through to the composer behind.
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {}
-            .then(if (compact) Modifier else Modifier.navigationBarsPadding())
+            .then(if (compact) Modifier else Modifier.windowInsetsPadding(WindowInsets.navBarSpace))
     ) {
         Box(Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(alpha = 0.08f)))
 

@@ -1,5 +1,11 @@
 package com.mediaviewer.ui
 
+import androidx.compose.foundation.layout.WindowInsets
+
+import androidx.compose.foundation.layout.windowInsetsPadding
+
+import com.mediaviewer.ui.compat.navBarSpace
+
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
@@ -81,7 +87,7 @@ fun ReportDialog(
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss)
             .padding(top = rememberTopCutoutClearance())
             .imePadding()
-            .navigationBarsPadding()
+            .windowInsetsPadding(WindowInsets.navBarSpace)
             .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
         contentAlignment = Alignment.Center
     ) {

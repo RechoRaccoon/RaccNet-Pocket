@@ -124,3 +124,7 @@ actual fun appPackageName(context: PlatformContext): String = context.packageNam
 
 actual fun applyReducedAnimations(context: PlatformContext, reduced: Boolean) =
     com.mediaviewer.util.AppMotion.update(context, reduced)
+
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+actual val androidx.compose.foundation.layout.WindowInsets.Companion.navBarSpace: androidx.compose.foundation.layout.WindowInsets
+    @Composable get() = androidx.compose.foundation.layout.WindowInsets.navigationBarsIgnoringVisibility

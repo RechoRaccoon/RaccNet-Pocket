@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import com.mediaviewer.ui.compat.navBarSpace
+
 import com.mediaviewer.ui.compat.BackHandler
 import com.mediaviewer.ui.compat.rememberLauncherForActivityResult
 import com.mediaviewer.ui.compat.ActivityResultContracts
@@ -162,7 +164,7 @@ fun ListPickerDialog(
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss)
             .padding(top = rememberTopCutoutClearance())
             .imePadding()
-            .navigationBarsPadding()
+            .windowInsetsPadding(WindowInsets.navBarSpace)
             .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
         // Centered in the middle of the screen.
         contentAlignment = Alignment.Center

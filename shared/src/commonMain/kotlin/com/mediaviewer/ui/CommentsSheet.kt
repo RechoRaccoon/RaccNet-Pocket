@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import com.mediaviewer.ui.compat.navBarSpace
+
 import com.mediaviewer.platform.PlatformUri
 import com.mediaviewer.ui.compat.rememberLauncherForActivityResult
 import com.mediaviewer.ui.compat.ActivityResultContracts
@@ -295,7 +297,7 @@ fun CommentsSheet(
             if (!showTags) {
                 Column(
                     Modifier.fillMaxWidth()
-                        .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
+                        .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navBarSpace))
                         .padding(horizontal = 10.dp, vertical = 10.dp)
                 ) {
                     replyTarget?.let { target ->

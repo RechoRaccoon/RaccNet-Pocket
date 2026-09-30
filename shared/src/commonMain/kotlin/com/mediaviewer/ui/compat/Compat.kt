@@ -140,3 +140,9 @@ expect fun appPackageName(context: PlatformContext): String
 /** Settings → Reduced Animations (every Compose animation jumps to its
  *  end). Android applies it to the whole window; iOS doesn't yet. */
 expect fun applyReducedAnimations(context: PlatformContext, reduced: Boolean)
+
+/** The space the phone's navigation bar takes, kept even while Stellar has
+ *  it hidden (Android), so bottom bars stay exactly where they always sat.
+ *  iOS: the home-indicator area. */
+expect val androidx.compose.foundation.layout.WindowInsets.Companion.navBarSpace: androidx.compose.foundation.layout.WindowInsets
+    @Composable get

@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import com.mediaviewer.ui.compat.navBarSpace
+
 import com.mediaviewer.util.rememberHapticTap
 import com.mediaviewer.ui.compat.rememberLauncherForActivityResult
 import com.mediaviewer.ui.compat.ActivityResultContracts
@@ -569,7 +571,7 @@ fun SettingsSheet(
             // it is gone), just clear of the system navigation bar.
             Box(
                 Modifier.fillMaxWidth().padding(horizontal = 14.dp).padding(top = 6.dp)
-                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .windowInsetsPadding(WindowInsets.navBarSpace)
                     .padding(bottom = 10.dp)
             ) {
                 // A profile picked in the feed selector: Timeline/Explore

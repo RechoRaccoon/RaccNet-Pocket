@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import com.mediaviewer.ui.compat.navBarSpace
+
 import com.mediaviewer.ui.compat.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -87,7 +89,7 @@ fun SendDmDialog(
             // which pushes it up while typing.
             .padding(top = rememberTopCutoutClearance())
             .imePadding()
-            .navigationBarsPadding()
+            .windowInsetsPadding(WindowInsets.navBarSpace)
             .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
         contentAlignment = Alignment.Center
     ) {

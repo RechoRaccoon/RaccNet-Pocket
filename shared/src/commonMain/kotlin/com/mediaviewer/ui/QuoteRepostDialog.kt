@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import com.mediaviewer.ui.compat.navBarSpace
+
 import com.mediaviewer.ui.compat.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -83,7 +85,7 @@ fun QuoteRepostDialog(
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss)
             .padding(top = rememberTopCutoutClearance())
             // Sits right on top of the keyboard.
-            .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
+            .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navBarSpace))
             .padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
         contentAlignment = Alignment.BottomCenter
     ) {

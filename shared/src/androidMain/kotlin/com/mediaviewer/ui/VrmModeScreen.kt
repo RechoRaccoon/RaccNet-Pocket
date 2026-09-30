@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import com.mediaviewer.ui.compat.navBarSpace
+
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.heightIn
@@ -753,7 +755,7 @@ actual fun VrmModeScreen(
                     onCameraError = { cameraError = it }
                 )
             } else {
-                Box(Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.navigationBars).padding(top = 72.dp)) {
+                Box(Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.navBarSpace).padding(top = 72.dp)) {
                     Text(
                         "Warming up trackers…",
                         color = Color.White.copy(0.7f), fontSize = 12.sp,
@@ -1678,7 +1680,7 @@ private fun VrmTrackingOverlay(
             fontSize = 12.sp,
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .windowInsetsPadding(WindowInsets.navigationBars)
+                .windowInsetsPadding(WindowInsets.navBarSpace)
                 .padding(16.dp)
         )
     }
@@ -2890,7 +2892,7 @@ internal fun CaptureControlsBar(
     modifier: Modifier = Modifier
 ) {
     androidx.compose.foundation.layout.Column(
-        modifier.windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 28.dp),
+        modifier.windowInsetsPadding(WindowInsets.navBarSpace).padding(bottom = 28.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(Modifier.height(30.dp), contentAlignment = Alignment.Center) {
