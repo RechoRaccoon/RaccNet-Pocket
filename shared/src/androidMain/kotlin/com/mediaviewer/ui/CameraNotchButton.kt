@@ -70,13 +70,13 @@ import com.mediaviewer.util.rememberHapticTap
  * surrounding UI is already using.
  */
 @Composable
-fun CameraNotchButton(
+actual fun CameraNotchButton(
     liquidGlass: Boolean,
     tint: Color,
-    modifier: Modifier = Modifier,
+    modifier: Modifier,
     /** False = a passive ring: drawn, but untappable, and touches pass
      *  straight through to whatever is underneath. */
-    interactive: Boolean = true,
+    interactive: Boolean,
     onOpenCamera: () -> Unit,
     onOpenVrm: () -> Unit
 ) {

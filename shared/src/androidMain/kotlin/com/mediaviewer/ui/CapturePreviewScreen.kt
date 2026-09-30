@@ -112,7 +112,7 @@ private val LANDSCAPE_CROPS = listOf(
  *    the crop first.
  */
 @Composable
-fun CapturePreviewScreen(
+actual fun CapturePreviewScreen(
     uri: Uri,
     isVideo: Boolean,
     liquidGlass: Boolean,

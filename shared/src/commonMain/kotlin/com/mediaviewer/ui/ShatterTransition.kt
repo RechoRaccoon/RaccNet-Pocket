@@ -1,17 +1,5 @@
 package com.mediaviewer.ui
 
-import android.app.Activity
-import android.content.Context
-import android.content.ContextWrapper
-import android.graphics.Bitmap
-import android.os.Build
-import android.os.Handler
-import android.os.Looper
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.view.HapticFeedbackConstants
-import android.view.PixelCopy
-import android.view.View
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -26,7 +14,6 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalView
 import com.mediaviewer.util.UiToggles
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -76,7 +63,7 @@ class ShatterTransitionController(private val scope: CoroutineScope) {
     internal var fallTime by mutableFloatStateOf(-1f)
         private set
 
-    internal var view: View? = null
+    internal var view: com.mediaviewer.ui.compat.PlatformView? = null
     /** The last place the user touched, in window coordinates. */
     var lastTap: Offset? = null
 
@@ -88,17 +75,18 @@ class ShatterTransitionController(private val scope: CoroutineScope) {
         val v = view ?: return@withLock
         phase = PixelPhase.WIPE_IN
         fallTime = -1f
-        val bmp = captureWindow(v)
+        val bmp = v.captureScreen()
+        if (bmp == null) { phase = PixelPhase.HIDDEN; return@withLock }
         val w = bmp.width.toFloat()
         val h = bmp.height.toFloat()
         val tap = lastTap?.takeIf { it.x in 0f..w && it.y in 0f..h } ?: Offset(w / 2f, h / 2f)
         lastTap = null
-        val pattern = buildPattern(tap, w, h, Random(System.nanoTime()))
+        val pattern = buildPattern(tap, w, h, Random(com.mediaviewer.platform.nanoTime()))
         origin = tap
         shards = pattern.first
         cracks = pattern.second
         crackRadius.snapTo(0f)
-        image = bmp.asImageBitmap()
+        image = bmp
         // Let the overlay actually reach the screen before the caller swaps
         // the page underneath it.
         androidx.compose.runtime.withFrameNanos { }
@@ -106,12 +94,12 @@ class ShatterTransitionController(private val scope: CoroutineScope) {
         phase = PixelPhase.LOADING
         val reach = hypot(max(tap.x, w - tap.x), max(tap.y, h - tap.y)) * 1.05f
         crackJob = scope.launch {
-            crunch(v)
+            runCatching { v.crunchHaptic() }
             crackRadius.animateTo(
                 reach,
                 androidx.compose.animation.core.tween(340, easing = androidx.compose.animation.core.FastOutSlowInEasing)
             )
-            crackDoneAtMs = System.currentTimeMillis()
+            crackDoneAtMs = com.mediaviewer.platform.currentTimeMillis()
         }
     }
 
@@ -122,10 +110,10 @@ class ShatterTransitionController(private val scope: CoroutineScope) {
         if (image == null) { phase = PixelPhase.HIDDEN; return@withLock }
         crackJob?.join()
         // "Wait a quick moment" after the cracks, then let go.
-        val sinceCrack = System.currentTimeMillis() - crackDoneAtMs
+        val sinceCrack = com.mediaviewer.platform.currentTimeMillis() - crackDoneAtMs
         if (sinceCrack < PAUSE_MS) delay(PAUSE_MS - sinceCrack)
         phase = PixelPhase.WIPE_OUT
-        view?.let { runCatching { it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY) } }
+        view?.let { runCatching { it.performHapticFeedback(com.mediaviewer.ui.compat.HapticFeedbackConstants.VIRTUAL_KEY) } }
         val startNs = androidx.compose.runtime.withFrameNanos { it }
         while (true) {
             val t = (androidx.compose.runtime.withFrameNanos { it } - startNs) / 1_000_000_000f
@@ -137,27 +125,6 @@ class ShatterTransitionController(private val scope: CoroutineScope) {
         cracks = emptyList()
         fallTime = -1f
         phase = PixelPhase.HIDDEN
-    }
-
-    /** A short crunchy buzz as the glass cracks. */
-    private fun crunch(v: View) {
-        val vib = runCatching {
-            if (Build.VERSION.SDK_INT >= 31) {
-                (v.context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? android.os.VibratorManager)?.defaultVibrator
-            } else {
-                @Suppress("DEPRECATION")
-                v.context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-            }
-        }.getOrNull()
-        val ok = runCatching {
-            if (vib == null || !vib.hasVibrator()) return@runCatching false
-            val timings = longArrayOf(0, 18, 22, 12, 30, 9, 40, 6)
-            val amps = intArrayOf(0, 255, 0, 170, 0, 110, 0, 70)
-            if (vib.hasAmplitudeControl()) vib.vibrate(VibrationEffect.createWaveform(timings, amps, -1))
-            else vib.vibrate(VibrationEffect.createOneShot(30, VibrationEffect.DEFAULT_AMPLITUDE))
-            true
-        }.getOrDefault(false)
-        if (!ok) runCatching { v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS) }
     }
 
     companion object {
@@ -265,51 +232,12 @@ private fun buildPattern(tap: Offset, w: Float, h: Float, rnd: Random): Pair<Lis
     return shards to cracks
 }
 
-// ── Screenshot ─────────────────────────────────────────────────────────────
-
-private tailrec fun Context.findActivity(): Activity? = when (this) {
-    is Activity -> this
-    is ContextWrapper -> baseContext.findActivity()
-    else -> null
-}
-
-/** The window exactly as it's on screen (PixelCopy keeps blur and other
- *  render effects); falls back to drawing the view tree, then to black. */
-internal suspend fun captureWindow(v: View): Bitmap {
-    val root = v.rootView
-    val w = root.width.coerceAtLeast(1)
-    val h = root.height.coerceAtLeast(1)
-    val window = v.context.findActivity()?.window
-    if (window != null && root.isLaidOut) {
-        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val ok = runCatching {
-            suspendCancellableCoroutine<Boolean> { cont ->
-                PixelCopy.request(window, bmp, { result ->
-                    if (cont.isActive) cont.resume(result == PixelCopy.SUCCESS)
-                }, Handler(Looper.getMainLooper()))
-            }
-        }.getOrDefault(false)
-        if (ok) return bmp
-        bmp.recycle()
-    }
-    runCatching {
-        if (root.isLaidOut) {
-            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-            val c = android.graphics.Canvas(bmp)
-            c.drawColor(android.graphics.Color.BLACK)
-            root.draw(c)
-            return bmp
-        }
-    }
-    return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { eraseColor(android.graphics.Color.BLACK) }
-}
-
 // ── Drawing ────────────────────────────────────────────────────────────────
 
 @Composable
 fun rememberShatterTransitionController(): ShatterTransitionController {
     val scope = rememberCoroutineScope()
-    val view = LocalView.current
+    val view = com.mediaviewer.ui.compat.rememberPlatformView()
     return remember { ShatterTransitionController(scope) }.also { it.view = view }
 }
 

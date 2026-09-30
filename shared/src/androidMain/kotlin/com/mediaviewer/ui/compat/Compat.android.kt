@@ -41,6 +41,8 @@ internal class AndroidPlatformView(val view: android.view.View) : PlatformView {
             ?.firstOrNull { it.height() > 0 && it.top < maxTopPx }
         return rect?.exactCenterY()
     }
+
+    override fun crunchHaptic() = com.mediaviewer.ui.shatterCrunch(view)
 }
 
 @Composable
@@ -119,3 +121,6 @@ actual fun vibrateOneShot(context: PlatformContext, ms: Long) {
 actual fun restartApp(context: PlatformContext) = com.mediaviewer.RestartActivity.restartApp(context)
 
 actual fun appPackageName(context: PlatformContext): String = context.packageName
+
+actual fun applyReducedAnimations(context: PlatformContext, reduced: Boolean) =
+    com.mediaviewer.util.AppMotion.update(context, reduced)

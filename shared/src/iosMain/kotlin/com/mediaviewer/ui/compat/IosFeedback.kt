@@ -5,6 +5,11 @@ import platform.UIKit.*
 
 /** Android haptic constants → iOS feedback generators. */
 internal object IosFeedback {
+    /** Shatter's crack: one heavy thud. */
+    fun crunch() {
+        runCatching { UIImpactFeedbackGenerator(style = UIImpactFeedbackStyle.UIImpactFeedbackStyleHeavy).impactOccurred() }
+    }
+
     fun perform(constant: Int) {
         runCatching {
             when (constant) {

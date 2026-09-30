@@ -120,7 +120,7 @@ actual object AudioVisualizerEngine {
      *  announce, so the visualizer can attach to them later even if the
      *  music started before the feed was opened. Harmless if nothing ever
      *  broadcasts. */
-    fun watchPlayerSessions(context: Context) {
+    actual fun watchPlayerSessions(context: Context) {
         if (receiverRegistered) return
         val filter = IntentFilter().apply {
             addAction(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION)

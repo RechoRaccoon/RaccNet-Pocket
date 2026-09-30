@@ -30,6 +30,8 @@ private object IosPlatformView : PlatformView {
     /** iOS doesn't expose the Dynamic Island's shape; callers fall back to
      *  the top safe-area clearance. */
     override fun displayCutoutCenterYPx(maxTopPx: Float): Float? = null
+
+    override fun crunchHaptic() = IosFeedback.crunch()
 }
 
 @Composable
@@ -119,3 +121,5 @@ actual fun restartApp(context: PlatformContext) = AppEvents.requestRestart()
 
 actual fun appPackageName(context: PlatformContext): String =
     platform.Foundation.NSBundle.mainBundle.bundleIdentifier ?: "rechoraccoon.stellar"
+
+actual fun applyReducedAnimations(context: PlatformContext, reduced: Boolean) {}

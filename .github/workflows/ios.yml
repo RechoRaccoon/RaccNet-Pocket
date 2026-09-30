@@ -33,8 +33,27 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
-      - name: Build Kotlin frameworks (device + simulator)
-        run: gradle :shared:linkReleaseFrameworkIosArm64 :shared:linkReleaseFrameworkIosSimulatorArm64 --stacktrace
+      # The Kotlin/Native compiler + iOS libraries (~1 GB), kept between
+      # runs so they aren't downloaded every time.
+      - name: Cache Kotlin/Native toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('build.gradle.kts', 'shared/build.gradle.kts', 'gradle.properties') }}
+          restore-keys: konan-${{ runner.os }}-
+
+      - name: Build Kotlin framework (iPhone)
+        run: gradle :shared:linkReleaseFrameworkIosArm64 --stacktrace
+
+      # Compose Multiplatform reads fonts/images from the app bundle's
+      # compose-resources folder (Res.font.audiowide, the Stellar logo…).
+      - name: Copy Compose resources into the app
+        run: |
+          DEST=iosApp/compose-resources/composeResources/com.mediaviewer.resources
+          rm -rf iosApp/compose-resources
+          mkdir -p "$DEST"
+          cp -R shared/src/commonMain/composeResources/. "$DEST/"
+          find iosApp/compose-resources -type f
 
       - name: Generate Xcode project
         run: |
@@ -51,25 +70,9 @@ jobs:
           cp -R build/ios/Build/Products/Release-iphoneos/Stellar.app Payload/
           zip -qry Stellar-unsigned.ipa Payload
 
-      - name: Build simulator app (for Appetize.io)
-        run: |
-          xcodebuild -project iosApp/iosApp.xcodeproj -scheme iosApp \
-            -configuration Release -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath build/ios-sim \
-            CODE_SIGNING_ALLOWED=NO build
-          cd build/ios-sim/Build/Products/Release-iphonesimulator
-          zip -qry "$GITHUB_WORKSPACE/Stellar-simulator.zip" Stellar.app
-
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
           name: Stellar-iOS-unsigned
           path: Stellar-unsigned.ipa
-          retention-days: 30
-
-      - name: Upload simulator app
-        uses: actions/upload-artifact@v4
-        with:
-          name: Stellar-iOS-simulator
-          path: Stellar-simulator.zip
           retention-days: 30

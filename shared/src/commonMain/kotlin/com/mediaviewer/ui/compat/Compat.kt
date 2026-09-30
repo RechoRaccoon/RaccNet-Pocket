@@ -57,6 +57,9 @@ interface PlatformView {
     /** The vertical center (px) of a display cutout whose top is above
      *  [maxTopPx], or null when there isn't one. */
     fun displayCutoutCenterYPx(maxTopPx: Float): Float?
+
+    /** A short crunchy buzz (Shatter's glass cracking). */
+    fun crunchHaptic()
 }
 
 /** rememberPlatformView() on Android, wrapped. */
@@ -133,3 +136,7 @@ expect fun restartApp(context: PlatformContext)
 
 /** This app's package / bundle id. */
 expect fun appPackageName(context: PlatformContext): String
+
+/** Settings → Reduced Animations (every Compose animation jumps to its
+ *  end). Android applies it to the whole window; iOS doesn't yet. */
+expect fun applyReducedAnimations(context: PlatformContext, reduced: Boolean)

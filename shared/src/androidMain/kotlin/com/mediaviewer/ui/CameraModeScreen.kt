@@ -67,7 +67,7 @@ import kotlinx.coroutines.withContext
  *    output (screen, recorder, stream), mirrored for the selfie camera.
  */
 @Composable
-fun CameraModeScreen(
+actual fun CameraModeScreen(
     liquidGlass: Boolean,
     tint: Color,
     onClose: () -> Unit,

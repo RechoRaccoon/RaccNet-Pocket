@@ -152,7 +152,7 @@ import kotlinx.coroutines.withContext
  * layout to add next.
  */
 @Composable
-fun VrmModeScreen(
+actual fun VrmModeScreen(
     liquidGlass: Boolean,
     tint: Color,
     onClose: () -> Unit,

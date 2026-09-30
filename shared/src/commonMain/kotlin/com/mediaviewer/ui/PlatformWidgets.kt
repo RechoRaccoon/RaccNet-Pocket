@@ -43,3 +43,49 @@ expect fun EmbeddedWebView(url: String, modifier: Modifier = Modifier)
 /** Textshot's rendered image for [text] (the same renderer the uploaded
  *  image uses), or null where Textshot can't render. Blocking. */
 expect fun renderTextshotPreview(text: String, store: EmojiStore): ImageBitmap?
+
+/** The ring around the camera cutout: tap to open Camera / VRM mode
+ *  (Android only — on iOS there's nothing drawn there). */
+@Composable
+expect fun CameraNotchButton(
+    liquidGlass: Boolean,
+    tint: Color,
+    modifier: Modifier = Modifier,
+    /** False = a passive ring: drawn, but untappable. */
+    interactive: Boolean = true,
+    onOpenCamera: () -> Unit,
+    onOpenVrm: () -> Unit
+)
+
+/** Settings → "FPS Overlay": the frame rate beside the camera cutout. */
+@Composable
+expect fun DebugOverlay(tint: Color, modifier: Modifier = Modifier)
+
+/** VRM mode (Android only). */
+@Composable
+expect fun VrmModeScreen(
+    liquidGlass: Boolean,
+    tint: Color,
+    onClose: () -> Unit,
+    onCapture: (imageUri: PlatformUri?, videoUri: PlatformUri?) -> Unit
+)
+
+/** The notch bubble's Camera page (Android only for now). */
+@Composable
+expect fun CameraModeScreen(
+    liquidGlass: Boolean,
+    tint: Color,
+    onClose: () -> Unit,
+    onCapture: (imageUri: PlatformUri?, videoUri: PlatformUri?) -> Unit
+)
+
+/** Review page for a Camera / VRM capture. */
+@Composable
+expect fun CapturePreviewScreen(
+    uri: PlatformUri,
+    isVideo: Boolean,
+    liquidGlass: Boolean,
+    tint: Color,
+    onClose: () -> Unit,
+    onCreatePost: (PlatformUri) -> Unit
+)

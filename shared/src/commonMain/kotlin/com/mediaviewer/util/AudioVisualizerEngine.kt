@@ -17,6 +17,9 @@ expect object AudioVisualizerEngine {
 
     fun hasPermission(context: PlatformContext): Boolean
 
+    /** Starts noting music apps' audio sessions (once permission is granted). */
+    fun watchPlayerSessions(context: PlatformContext)
+
     /** Main thread. Starts listening while at least one caller holds it. */
     fun acquire(context: PlatformContext)
 

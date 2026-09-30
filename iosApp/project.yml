@@ -11,6 +11,12 @@ targets:
     platform: iOS
     sources:
       - iosApp
+      # Fonts/images from shared/src/commonMain/composeResources, copied here
+      # by the workflow (see ios.yml) — Compose reads them from
+      # Stellar.app/compose-resources at runtime.
+      - path: compose-resources
+        type: folder
+        buildPhase: resources
     scheme: {}
     settings:
       base:
@@ -29,5 +35,7 @@ targets:
         # runs — see .github/workflows/ios.yml.
         "FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]": "$(inherited) $(SRCROOT)/../shared/build/bin/iosArm64/releaseFramework"
         "FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]": "$(inherited) $(SRCROOT)/../shared/build/bin/iosSimulatorArm64/releaseFramework"
-        OTHER_LDFLAGS: "$(inherited) -framework Shared"
+        # The system frameworks the Kotlin code uses (video, web embeds,
+        # photo picker, file types).
+        OTHER_LDFLAGS: "$(inherited) -framework Shared -framework AVFoundation -framework AVKit -framework CoreMedia -framework WebKit -framework Photos -framework PhotosUI -framework UniformTypeIdentifiers"
         "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64

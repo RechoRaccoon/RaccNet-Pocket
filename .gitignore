@@ -20,3 +20,5 @@ captures/
 
 # Generated
 /androidApp/release/
+# Copied in by the iOS workflow
+/iosApp/compose-resources

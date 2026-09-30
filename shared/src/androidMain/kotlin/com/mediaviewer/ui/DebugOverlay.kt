@@ -31,9 +31,9 @@ import androidx.compose.ui.unit.sp
  * color on its page…); never takes touches.
  */
 @Composable
-fun DebugOverlay(
+actual fun DebugOverlay(
     tint: Color,
-    modifier: Modifier = Modifier
+    modifier: Modifier
 ) {
     var fps by remember { mutableIntStateOf(0) }
     // Counts frames the app actually draws (FrameMetrics), rather than

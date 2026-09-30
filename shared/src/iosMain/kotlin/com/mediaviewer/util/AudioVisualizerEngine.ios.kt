@@ -8,6 +8,7 @@ actual object AudioVisualizerEngine {
     actual val levels: FloatArray get() = flat
     actual val status: String get() = "Not available on iOS"
     actual fun hasPermission(context: PlatformContext): Boolean = false
+    actual fun watchPlayerSessions(context: PlatformContext) {}
     actual fun acquire(context: PlatformContext) {}
     actual fun release() {}
 }
