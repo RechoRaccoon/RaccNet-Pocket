@@ -55,13 +55,13 @@ actual object AudioVisualizerEngine {
 
     /** Current bar heights, 0..1 — Compose state. Read it inside a draw
      *  block so new frames only redraw the bars, never recompose them. */
-    actual var levels by mutableStateOf(FloatArray(BAR_COUNT))
-        private set
+    private var _levels by mutableStateOf(FloatArray(BAR_COUNT))
+    actual val levels: FloatArray get() = _levels
 
     /** Plain-language state for the Settings row — how it's going now, or
      *  how it went the last time the bars were on screen ("" = never ran). */
-    actual var status by mutableStateOf("")
-        private set
+    private var _status by mutableStateOf("")
+    actual val status: String get() = _status
 
     private var users = 0
     private var visualizer: Visualizer? = null
@@ -147,7 +147,7 @@ actual object AudioVisualizerEngine {
             val now = SystemClock.uptimeMillis()
             val ctx = appContext
             if (ctx == null || !hasPermission(ctx)) {
-                status = "Needs the microphone permission (nothing is recorded)."
+                _status = "Needs the microphone permission (nothing is recorded)."
                 teardownVisualizer()
                 decay()
                 main.postDelayed(this, 1_000)
@@ -160,7 +160,7 @@ actual object AudioVisualizerEngine {
             if (callSafe && attachedSession == MIX) teardownVisualizer()
             if (callSafe && visualizer == null && pickPlayerSession(now) == null) {
                 muted = true
-                status = "On a call — waiting for your music app's own audio. Try pausing and playing your music."
+                _status = "On a call — waiting for your music app's own audio. Try pausing and playing your music."
                 decay()
                 main.postDelayed(this, 400)
                 return
@@ -184,7 +184,7 @@ actual object AudioVisualizerEngine {
                 if (next != null) createVisualizer(next)
             }
             muted = inCall && !(callSafe && attachedSession > 0)
-            status = when {
+            _status = when {
                 inCall && !callSafe -> "Paused during calls."
                 callSafe && visualizer == null -> "On a call — waiting for your music app's own audio. Try pausing and playing your music."
                 callSafe && now - lastSignalMs < 1_500 -> "Listening to your music app only (on a call)."
@@ -255,7 +255,7 @@ actual object AudioVisualizerEngine {
         }
         teardownVisualizer()
         smoothed.fill(0f)
-        levels = FloatArray(BAR_COUNT)
+        _levels = FloatArray(BAR_COUNT)
         // [status] is kept: Settings shows how it went last time.
     }
 
@@ -307,7 +307,7 @@ actual object AudioVisualizerEngine {
             if (smoothed[i] > 0.01f) any = true else smoothed[i] = 0f
         }
         if (!any && levels.all { it == 0f }) return
-        levels = if (any) smoothed.copyOf() else FloatArray(BAR_COUNT)
+        _levels = if (any) smoothed.copyOf() else FloatArray(BAR_COUNT)
     }
 
     /** The waveform only proves there's sound (some phones deliver an
@@ -369,6 +369,6 @@ actual object AudioVisualizerEngine {
         // array ~20 times a second (each one would redraw them for nothing).
         val silent = smoothed.all { it <= 0.001f }
         if (silent && levels.all { it <= 0.001f }) return
-        levels = smoothed.copyOf()
+        _levels = smoothed.copyOf()
     }
 }

@@ -53,8 +53,8 @@ actual class EmojiStore private constructor(context: Context) {
 
     /** Observable by Compose — read this (directly or via [entryFor]) inside
      *  composition and the UI recomposes when emoji/folders change. */
-    actual var state by mutableStateOf(EmojiState(EmojiIndex()))
-        private set
+    private var _state by mutableStateOf(EmojiState(EmojiIndex()))
+    actual val state: EmojiState get() = _state
 
     @Volatile private var loaded = false
     private val lock = Any()
@@ -75,7 +75,7 @@ actual class EmojiStore private constructor(context: Context) {
             val emojis = safe.emojis.filter { File(dir, it.file).exists() }
             val keep = emojis.map { it.id }.toSet()
             val folders = safe.folders.map { f -> f.copy(emojiIds = f.emojiIds.filter { it in keep }) }
-            state = EmojiState(EmojiIndex(emojis, folders))
+            _state = EmojiState(EmojiIndex(emojis, folders))
             loaded = true
         }
     }
@@ -94,7 +94,7 @@ actual class EmojiStore private constructor(context: Context) {
     }
 
     private fun commit(next: EmojiIndex) {
-        state = EmojiState(next)
+        _state = EmojiState(next)
         persist(next)
     }
 
