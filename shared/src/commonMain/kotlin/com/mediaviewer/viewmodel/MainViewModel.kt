@@ -3573,6 +3573,11 @@ _bskyDid.value          = session.did
     fun loadAvailableFeeds() {
         if (!_bskyLoggedIn.value) return
         viewModelScope.launch(Dispatchers.IO) {
+            // iOS: adult content follows the account's own Bluesky setting
+            // (turned on at bsky.app) — see AdultContentPolicy.
+            if (com.mediaviewer.util.AdultContentPolicy.appliesHere) {
+                bskyRepo.getAdultContentEnabled(bskyToken).onSuccess { com.mediaviewer.util.AdultContentPolicy.update(it) }
+            }
             var result = bskyRepo.getSavedFeeds(bskyToken, _bskyDid.value)
             if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
                 if (refreshBskyTokenIfPossible()) result = bskyRepo.getSavedFeeds(bskyToken, _bskyDid.value)
@@ -5259,6 +5264,60 @@ _bskyDid.value          = session.did
     fun openListPickerForProfile(did: String) {
         if (_appMode.value != AppMode.BLUESKY) return
         openListPicker(did)
+    }
+
+    // ── Reporting (Bluesky moderation) ─────────────────────────────────────────
+
+    private val _reportTarget = MutableStateFlow<com.mediaviewer.model.ReportTarget?>(null)
+    /** What the Report popup is open for (null = closed). */
+    val reportTarget: StateFlow<com.mediaviewer.model.ReportTarget?> = _reportTarget
+    private val _reportSubmitting = MutableStateFlow(false)
+    val reportSubmitting: StateFlow<Boolean> = _reportSubmitting
+
+    /** The post on screen's More → Report. */
+    fun openReportForCurrentPost() {
+        val item = currentItem.value ?: return
+        if (_appMode.value != AppMode.BLUESKY || item.postUri.isBlank() || item.postCid.isBlank()) return
+        _reportTarget.value = com.mediaviewer.model.ReportTarget(
+            author = item.author, postUri = item.postUri, postCid = item.postCid,
+            postThumbUrl = item.thumbUrl.ifBlank { item.mediaUrl.takeUnless { item.isVideo }.orEmpty() },
+            postText = item.text
+        )
+    }
+
+    /** A profile page's More → Report. */
+    fun openReportForProfile(author: AuthorInfo) {
+        if (author.did.isBlank()) return
+        _reportTarget.value = com.mediaviewer.model.ReportTarget(author = author, fromProfile = true)
+    }
+
+    fun dismissReport() {
+        if (_reportSubmitting.value) return
+        _reportTarget.value = null
+    }
+
+    fun submitReport(reason: com.mediaviewer.model.ReportReason, details: String) {
+        val target = _reportTarget.value ?: return
+        if (_reportSubmitting.value) return
+        _reportSubmitting.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            suspend fun send(): Result<Unit> =
+                if (target.postUri != null && target.postCid != null)
+                    bskyRepo.reportPost(bskyToken, target.postUri, target.postCid, reason, details)
+                else bskyRepo.reportAccount(bskyToken, target.author.did, reason, details)
+            var result = send()
+            if (result.isFailure && isAuthError(result.exceptionOrNull()?.message)) {
+                if (refreshBskyTokenIfPossible()) result = send()
+            }
+            _reportSubmitting.value = false
+            result.onSuccess {
+                _reportTarget.value = null
+                tapHaptic()
+                showToast("Report sent to Bluesky's moderators. Thank you!")
+            }.onFailure {
+                showToast("Couldn't send the report: ${it.message}")
+            }
+        }
     }
 
     // ── Quote repost (item 5) ──────────────────────────────────────────────────

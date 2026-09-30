@@ -121,6 +121,18 @@ class BlueskyApi(baseUrl: String = "https://bsky.social/", profile: HttpProfile 
         headers = listOf("Authorization" to token, "atproto-proxy" to proxy),
         body = json(request)
     )
+    // Reporting a post or account to Bluesky's own moderation team. The
+    // report goes through your PDS, proxied to Bluesky's moderation service
+    // (its labeler DID) — the same route the official app uses.
+    suspend fun createReport(
+        token: String,
+        body: kotlinx.serialization.json.JsonObject
+    ): Response<Unit> = call(
+        "POST",
+        "xrpc/com.atproto.moderation.createReport",
+        headers = listOf("Authorization" to token, "atproto-proxy" to "did:plc:ar7c4by46qjdydhdevvrndac#atproto_labeler"),
+        body = json(body)
+    )
     suspend fun createRecord(
         token: String,
         request: BskyCreateRecordRequest

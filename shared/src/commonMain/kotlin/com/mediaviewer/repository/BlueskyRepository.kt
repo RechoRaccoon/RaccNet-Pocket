@@ -300,6 +300,18 @@ class BlueskyRepository {
     // and so can't be resolved through getFeedGenerators.
     private data class PrefSlot(val isTimeline: Boolean, val uri: String)
 
+    /** The account's "Enable adult content" setting (app.bsky.actor.defs#
+     *  adultContentPref) — off unless it was turned on at bsky.app. */
+    suspend fun getAdultContentEnabled(token: String): Result<Boolean> = runCatching {
+        val resp = api.getPreferences("Bearer $token")
+        if (!resp.isSuccessful) error("Prefs HTTP ${resp.code()}")
+        val body = resp.body() ?: error("Prefs: empty body")
+        val pref = body.preferences.firstOrNull {
+            it.isJsonObject && it.asJsonObject.get("\$type")?.asString?.endsWith("adultContentPref") == true
+        }
+        pref?.asJsonObject?.get("enabled")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: false
+    }
+
     suspend fun getSavedFeeds(token: String, did: String): Result<List<BskyFeedInfo>> = runCatching {
         val slots = mutableListOf<PrefSlot>()
 
@@ -2037,6 +2049,35 @@ class BlueskyRepository {
             "createdAt" to com.mediaviewer.platform.nowIsoString()
         ))
 
+    // ── Reporting (Bluesky moderation) ──────────────────────────────────────
+
+    /** Reports a post ([postUri]/[postCid]) to Bluesky's moderators. */
+    suspend fun reportPost(token: String, postUri: String, postCid: String, reason: ReportReason, details: String): Result<Unit> =
+        createReport(token, reason, details, kotlinx.serialization.json.buildJsonObject {
+            put("\$type", kotlinx.serialization.json.JsonPrimitive("com.atproto.repo.strongRef"))
+            put("uri", kotlinx.serialization.json.JsonPrimitive(postUri))
+            put("cid", kotlinx.serialization.json.JsonPrimitive(postCid))
+        })
+
+    /** Reports an account to Bluesky's moderators. */
+    suspend fun reportAccount(token: String, targetDid: String, reason: ReportReason, details: String): Result<Unit> =
+        createReport(token, reason, details, kotlinx.serialization.json.buildJsonObject {
+            put("\$type", kotlinx.serialization.json.JsonPrimitive("com.atproto.admin.defs#repoRef"))
+            put("did", kotlinx.serialization.json.JsonPrimitive(targetDid))
+        })
+
+    private suspend fun createReport(
+        token: String, reason: ReportReason, details: String, subject: kotlinx.serialization.json.JsonObject
+    ): Result<Unit> = runCatching {
+        val body = kotlinx.serialization.json.buildJsonObject {
+            put("reasonType", kotlinx.serialization.json.JsonPrimitive(reason.lexicon))
+            if (details.isNotBlank()) put("reason", kotlinx.serialization.json.JsonPrimitive(details.trim().take(2000)))
+            put("subject", subject)
+        }
+        val resp = api.createReport("Bearer $token", body)
+        if (!resp.isSuccessful) error("Report failed (${resp.code()})")
+    }
+
     suspend fun unblockUser(token: String, did: String, blockUri: String): Result<Unit> =
         deleteRecord(token, did, "app.bsky.graph.block", blockUri.rkey())
 
@@ -2812,7 +2853,7 @@ class BlueskyRepository {
         // author.getDid(); skip just the malformed entry instead.
         val items = posts.flatMap { post ->
             runCatching {
-                parseFeedItem(BskyFeedItem(post = post)).map { media -> media.copy(isBookmarked = true) }
+                parseFeedItem(BskyFeedItem(post = post)).filterNot { com.mediaviewer.util.AdultContentPolicy.hides(it) }.map { media -> media.copy(isBookmarked = true) }
             }.getOrElse { emptyList() }
         }
         Pair(items, body.cursor)
@@ -3218,7 +3259,7 @@ class BlueskyRepository {
         runCatching { parseFeedItem(item) }.getOrDefault(emptyList()).let { list ->
             // Their posts still show; they're just flagged (see MediaItem.authorBlocksViewer).
             if (item.post.author.viewer?.blockedBy == true) list.map { it.copy(authorBlocksViewer = true) } else list
-        }
+        }.filterNot { com.mediaviewer.util.AdultContentPolicy.hides(it) }
 
     private fun parseFeedItem(item: BskyFeedItem): List<MediaItem> {
         val post   = item.post

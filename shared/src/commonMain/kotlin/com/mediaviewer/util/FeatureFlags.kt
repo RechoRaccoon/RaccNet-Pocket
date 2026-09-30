@@ -18,4 +18,9 @@ package com.mediaviewer.util
  */
 object FeatureFlags {
     const val LIVE_LINK_ENABLED: Boolean = false
+
+    /** e621 mode (login, Hot/Search/Favorites/Following). Android only: the
+     *  iOS build leaves it out entirely (App Store guideline 1.1.4). */
+    val E621_ENABLED: Boolean
+        get() = com.mediaviewer.platform.currentPlatform == com.mediaviewer.platform.PlatformKind.ANDROID
 }

@@ -643,7 +643,29 @@ internal fun SettingsPageContent(
         SectionHeader("App Functionality", tint)
 
         ToggleBubble("Hide Text Only Posts", hideTextOnlyPosts, onToggleHideTextOnlyPosts, liquidGlass, tint, backdrop)
-        ToggleBubble("I Hate Fun (Blur NSFW Content)", hateFunBlurNsfw, onToggleHateFunBlurNsfw, liquidGlass, tint, backdrop)
+        if (com.mediaviewer.util.AdultContentPolicy.appliesHere && bskyLoggedIn) {
+            // iOS: adult content follows the account's own Bluesky setting,
+            // which can only be changed on the Bluesky website (App Store
+            // rule) — shown here with a shortcut, never as an in-app switch.
+            val adultAllowed = com.mediaviewer.util.AdultContentPolicy.accountAllowsAdult
+            val adultContext = com.mediaviewer.ui.compat.LocalContext.current
+            SettingsBubble(liquidGlass, tint, backdrop) {
+                BubbleRow {
+                    RowLabel(
+                        "Adult Content: " + if (adultAllowed) "On" else "Off", Modifier.weight(1f),
+                        sub = "Follows your Bluesky account. Change it on the Bluesky website: Settings → Moderation → \"Enable adult content\", then refresh your feed."
+                    )
+                    PillButton("Open", { com.mediaviewer.ui.compat.openUrl(adultContext, "https://bsky.app/moderation") })
+                }
+                BubbleDivider()
+                BubbleRow {
+                    RowLabel("I Hate Fun (Blur NSFW Content)", Modifier.weight(1f))
+                    CompactSwitch(hateFunBlurNsfw, onToggleHateFunBlurNsfw)
+                }
+            }
+        } else {
+            ToggleBubble("I Hate Fun (Blur NSFW Content)", hateFunBlurNsfw, onToggleHateFunBlurNsfw, liquidGlass, tint, backdrop)
+        }
 
         if (bskyLoggedIn) {
             // Runs the follower scan from scratch — for picking up accounts
@@ -729,11 +751,13 @@ internal fun SettingsPageContent(
             extras = extras, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop
         )
 
-        E621AccountBubble(
-            e621LoggedIn = e621LoggedIn, e621Username = e621Username,
-            onLoginE621 = onLoginE621, onLogoutE621 = onLogoutE621,
-            liquidGlass = liquidGlass, tint = tint, backdrop = backdrop
-        )
+        if (com.mediaviewer.util.FeatureFlags.E621_ENABLED) {
+            E621AccountBubble(
+                e621LoggedIn = e621LoggedIn, e621Username = e621Username,
+                onLoginE621 = onLoginE621, onLogoutE621 = onLogoutE621,
+                liquidGlass = liquidGlass, tint = tint, backdrop = backdrop
+            )
+        }
 
         // ── Live Link widget feature ────────────────────────────────────
         // Save a Twitch and/or YouTube channel URL here, then "Create

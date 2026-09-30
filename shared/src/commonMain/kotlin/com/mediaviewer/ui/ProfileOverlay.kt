@@ -1,5 +1,19 @@
 package com.mediaviewer.ui
 
+import androidx.compose.foundation.interaction.MutableInteractionSource
+
+import androidx.compose.ui.zIndex
+
+import androidx.compose.foundation.layout.IntrinsicSize
+
+import androidx.compose.material.icons.filled.Menu
+
+import androidx.compose.ui.draw.alpha
+
+import androidx.compose.ui.unit.IntOffset
+
+import androidx.compose.ui.unit.IntSize
+
 import com.mediaviewer.ui.compat.coilContext
 
 import com.mediaviewer.resources.ic_bluesky_butterfly
@@ -450,6 +464,7 @@ fun ProfileOverlay(
     isBlocking: Boolean = false,
     /** Block / unblock this account (same as the timeline's Block). */
     onToggleBlock: (AuthorInfo) -> Unit = {},
+    onReportAccount: (AuthorInfo) -> Unit = {},
     /** The bar's QR code button: (author, banner URL). */
     onOpenQr: (AuthorInfo, String?) -> Unit = { _, _ -> },
     /** Title pages' Backlog/Remove button. */
@@ -927,6 +942,10 @@ fun ProfileOverlay(
         // bar). Hidden while loading (no profile yet to act on).
         // Also shown once loading has *failed* (no profile, not loading) so
         // the Refresh button is there exactly when it's needed most.
+        // The bar's "More" (Report / Block) — open state, and where the
+        // bar's pill sits so the stack can line up with its right edge.
+        var profileMoreOpen by remember(author.did) { mutableStateOf(false) }
+        var profilePillBounds by remember { mutableStateOf<Pair<Offset, IntSize>?>(null) }
         if (profile != null || !state.loadingProfile) {
             Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 8.dp)) {
                 ProfileInteractionBar(
@@ -956,7 +975,21 @@ fun ProfileOverlay(
                     showBlock = selfDid.isNotBlank() && author.did != selfDid,
                     isBlocking = isBlocking,
                     onQr = { onOpenQr(author, profile?.bannerUrl) },
-                    onBlock = { onToggleBlock(author) }
+                    moreOpen = profileMoreOpen,
+                    onToggleMore = { profileMoreOpen = !profileMoreOpen },
+                    onPillBounds = { origin, size -> profilePillBounds = origin to size }
+                )
+            }
+            val pill = profilePillBounds
+            if (profileMoreOpen && pill != null && selfDid.isNotBlank() && author.did != selfDid) {
+                ProfileMoreStack(
+                    anchorOriginRoot = pill.first, anchorSize = pill.second,
+                    liquidGlass = liquidGlass, tint = blended, backdrop = backdrop,
+                    items = listOf(
+                        GlassMenuItem("Report") { onReportAccount(author) },
+                        GlassMenuItem(if (isBlocking) "Unblock" else "Block") { onToggleBlock(author) }
+                    ),
+                    onDismissRequest = { profileMoreOpen = false }
                 )
             }
         }
@@ -1085,7 +1118,10 @@ private fun ProfileInteractionBar(
     showBlock: Boolean = false,
     isBlocking: Boolean = false,
     onQr: () -> Unit = {},
-    onBlock: () -> Unit = {}
+    /** "More" (where Block used to be): opens the Report / Block stack. */
+    moreOpen: Boolean = false,
+    onToggleMore: () -> Unit = {},
+    onPillBounds: (Offset, IntSize) -> Unit = { _, _ -> }
 ) {
     val shape = RoundedCornerShape(26.dp)
     val iconSize = 20.dp
@@ -1193,11 +1229,14 @@ private fun ProfileInteractionBar(
                 Icon(Icons.Filled.QrCode2, contentDescription = "Profile QR code", tint = Color.White, modifier = Modifier.size(iconSize))
             }
             if (showBlock) {
-                IconButton(onClick = { tap(); onBlock() }) {
+                // "More" — Report / Block, in the same stacked bubbles as a
+                // post's More menu. Red while you're blocking them, like the
+                // old Block button.
+                IconButton(onClick = { tap(); onToggleMore() }) {
                     Icon(
-                        Icons.Filled.Block,
-                        contentDescription = if (isBlocking) "Unblock" else "Block",
-                        tint = if (isBlocking) Color(0xFFFF6B6B) else Color.White,
+                        if (moreOpen) Icons.Default.Close else Icons.Default.Menu,
+                        contentDescription = if (moreOpen) "Close" else "More",
+                        tint = if (isBlocking && !moreOpen) Color(0xFFFF6B6B) else Color.White,
                         modifier = Modifier.size(iconSize)
                     )
                 }
@@ -1212,7 +1251,7 @@ private fun ProfileInteractionBar(
         .height(if (liquidGlass) 60.dp else 52.dp).fillMaxWidth()
     val pillModifier = Modifier.height(pillHeight)
     Box(modifier = barModifier, contentAlignment = Alignment.Center) {
-        Box {
+        Box(Modifier.onGloballyPositioned { onPillBounds(it.positionInRoot(), it.size) }) {
             if (liquidGlass) {
                 LiquidGlassSurface(modifier = pillModifier, shape = shape, tint = tint, backdrop = backdrop) { BarContent() }
             } else {
@@ -5317,5 +5356,71 @@ fun PostResultTile(
         }
         PostKindFilter.VERTICAL_VIDEOS ->
             ThumbBox(item, tint, RoundedCornerShape(10.dp), Modifier.fillMaxWidth().aspectRatio(9f / 16f), liquidGlass, onClick = onClick)
+    }
+}
+
+/** A profile's "More" stack (Report over Block): the same individually
+ *  separate glass pill bubbles as a post's More menu, right edge flush with
+ *  the interaction bar's pill and sitting just above it — drawn over the
+ *  audio visualizer. Closes with the bar's X (or after picking one). */
+@Composable
+private fun ProfileMoreStack(
+    anchorOriginRoot: Offset,
+    anchorSize: IntSize,
+    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
+    items: List<GlassMenuItem>,
+    onDismissRequest: () -> Unit
+) {
+    val tap = rememberHapticTap()
+    val density = LocalDensity.current
+    val bubbleHeightDp = 40.dp
+    val gapDp = 5.dp
+    val shape = RoundedCornerShape(26.dp)
+    var containerOrigin by remember { mutableStateOf<Offset?>(null) }
+    var measured by remember { mutableStateOf(IntSize.Zero) }
+    Box(Modifier.fillMaxSize().onGloballyPositioned { containerOrigin = it.positionInRoot() }) {
+        val origin = containerOrigin
+        if (origin != null) {
+            val gapPx = with(density) { gapDp.toPx() }
+            val right = anchorOriginRoot.x + anchorSize.width - origin.x
+            val bottom = anchorOriginRoot.y - gapPx - origin.y
+            Column(
+                modifier = Modifier
+                    .offset { IntOffset((right - measured.width).toInt(), (bottom - measured.height).toInt()) }
+                    .onSizeChanged { measured = it }
+                    .alpha(if (measured.width > 0) 1f else 0f)
+                    .width(IntrinsicSize.Max)
+                    .zIndex(6f)
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {},
+                verticalArrangement = Arrangement.spacedBy(gapDp),
+                horizontalAlignment = Alignment.End
+            ) {
+                items.forEach { item ->
+                    val bubbleModifier = Modifier
+                        .fillMaxWidth()
+                        .height(bubbleHeightDp)
+                        .clip(shape)
+                        .clickable { tap(); if (!item.keepOpen) onDismissRequest(); item.onClick() }
+                    val labelColor = if (item.destructive) Color(0xFFE0245E) else Color.White
+                    if (liquidGlass) {
+                        LiquidGlassSurface(modifier = bubbleModifier, shape = shape, tint = tint, backdrop = backdrop) {
+                            Text(
+                                item.label, color = labelColor, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                                textAlign = TextAlign.Center, maxLines = 1,
+                                modifier = Modifier.align(Alignment.Center).padding(horizontal = 14.dp)
+                            )
+                        }
+                    } else {
+                        Box(bubbleModifier.background(Color.Black.copy(alpha = 0.55f)), contentAlignment = Alignment.Center) {
+                            Text(
+                                item.label, color = labelColor, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                                textAlign = TextAlign.Center, maxLines = 1,
+                                modifier = Modifier.padding(horizontal = 14.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }

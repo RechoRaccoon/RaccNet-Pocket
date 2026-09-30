@@ -297,6 +297,7 @@ fun MainFeedScreen(
     onBlockAccount: () -> Unit,
     onDownloadGif: () -> Unit,
     // Item 4: "More" menu actions on the interaction bar.
+    onReportPost: () -> Unit = {},
     onShowMoreLikeThis: () -> Unit = {},
     onShowLessLikeThis: () -> Unit = {},
     onAddAccountToList: () -> Unit = {},
@@ -474,6 +475,7 @@ fun MainFeedScreen(
                     onSendPost        = onSendPost,
                     onQuoteRepost     = onQuoteRepost,
                     onBlockAccount    = onBlockAccount,
+                    onReportPost      = onReportPost,
                     onDownloadGif     = onDownloadGif,
                     onShowMoreLikeThis = onShowMoreLikeThis,
                     onShowLessLikeThis = onShowLessLikeThis,
@@ -886,6 +888,7 @@ private fun FeedView(
     onBlockAccount: () -> Unit,
     onDownloadGif: () -> Unit,
     // Item 4: "More" menu actions on the interaction bar.
+    onReportPost: () -> Unit = {},
     onShowMoreLikeThis: () -> Unit = {},
     onShowLessLikeThis: () -> Unit = {},
     onAddAccountToList: () -> Unit = {},
@@ -996,6 +999,7 @@ private fun FeedView(
                     onSendPost       = onSendPost,
                     onQuoteRepost    = onQuoteRepost,
                     onBlockAccount   = onBlockAccount,
+                    onReportPost     = onReportPost,
                     onDownloadGif    = onDownloadGif,
                     onShowMoreLikeThis = onShowMoreLikeThis,
                     onShowLessLikeThis = onShowLessLikeThis,
@@ -1045,6 +1049,7 @@ private fun PostContent(
     onSendPost: () -> Unit, onQuoteRepost: () -> Unit,
     onBlockAccount: () -> Unit, onDownloadGif: () -> Unit,
     // Item 4: "More" menu actions on the interaction bar.
+    onReportPost: () -> Unit = {},
     onShowMoreLikeThis: () -> Unit = {},
     onShowLessLikeThis: () -> Unit = {},
     onAddAccountToList: () -> Unit = {},
@@ -1891,6 +1896,7 @@ private fun PostContent(
                 onShowLessLikeThis = onShowLessLikeThis,
                 onAddAccountToList = onAddAccountToList,
                 onBlock = onBlockAccount,
+                onReport = onReportPost,
                 supportsFeedInteractions = supportsFeedInteractions,
                 isOwnPost = isOwnPost,
                 onDelete = onDeletePost
@@ -3057,6 +3063,7 @@ private fun MoreBubbleMenu(
     liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
     onShowMoreLikeThis: () -> Unit, onShowLessLikeThis: () -> Unit,
     onAddAccountToList: () -> Unit, onBlock: () -> Unit,
+    onReport: () -> Unit = {},
     supportsFeedInteractions: Boolean,
     isOwnPost: Boolean = false,
     onDelete: () -> Unit = {}
@@ -3076,6 +3083,7 @@ private fun MoreBubbleMenu(
             add(GlassMenuItem("Show less like this") { onShowLessLikeThis() })
         }
         add(GlassMenuItem("Add account to list") { onAddAccountToList() })
+        if (!isOwnPost) add(GlassMenuItem("Report") { onReport() })
         add(GlassMenuItem("Block") { onBlock() })
     }
     val density = LocalDensity.current

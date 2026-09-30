@@ -525,7 +525,7 @@ fun SettingsSheet(
                             otherAccounts = settingsExtras.otherBskyAccounts,
                             showSwitchAccountsRow = settingsExtras.showSwitchAccountsRow,
                             onSwitchAccount = settingsExtras.onSwitchBskyAccount,
-                            e621LoggedIn = e621LoggedIn, e621SearchTags = e621SearchTags,
+                            e621LoggedIn = e621LoggedIn && com.mediaviewer.util.FeatureFlags.E621_ENABLED, e621SearchTags = e621SearchTags,
                             onOpenE621Hot = { onSwitchMode(AppMode.E621); onSearchE621("order:hot"); onSwipeToFeed() },
                             onOpenE621Search = { tags -> onSwitchMode(AppMode.E621); onSearchE621(tags); onSwipeToFeed() },
                             onOpenE621Favorites = { onSwitchMode(AppMode.E621); onShowE621Favorites(); onSwipeToFeed() },

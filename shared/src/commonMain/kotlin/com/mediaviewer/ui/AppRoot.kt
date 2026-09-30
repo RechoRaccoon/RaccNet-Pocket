@@ -105,9 +105,13 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
     val e621Tags           by viewModel.e621SearchTags.collectAsState()
     val isLoading          by viewModel.isLoading.collectAsState()
     val bskyLoggedIn       by viewModel.bskyLoggedIn.collectAsState()
-    val e621LoggedIn       by viewModel.e621LoggedIn.collectAsState()
+    val e621LoggedInRaw    by viewModel.e621LoggedIn.collectAsState()
+    // iOS leaves e621 out entirely (see FeatureFlags.E621_ENABLED).
+    val e621LoggedIn = e621LoggedInRaw && com.mediaviewer.util.FeatureFlags.E621_ENABLED
     val errorMessage       by viewModel.errorMessage.collectAsState()
     val listPickerDid      by viewModel.listPickerTargetDid.collectAsState()
+    val reportTarget       by viewModel.reportTarget.collectAsState()
+    val reportSubmitting   by viewModel.reportSubmitting.collectAsState()
     val userLists          by viewModel.userLists.collectAsState()
     val userStarterPacks   by viewModel.userStarterPacks.collectAsState()
     val userListsLoading   by viewModel.userListsLoading.collectAsState()
@@ -718,6 +722,7 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
             onSendPost                = viewModel::openSendPopup,
             onQuoteRepost             = viewModel::openQuoteRepost,
             onBlockAccount            = viewModel::toggleBlockCurrentAuthor,
+            onReportPost              = viewModel::openReportForCurrentPost,
             onDeletePost              = viewModel::deleteCurrentPost,
             onDownloadGif             = viewModel::downloadCurrentItemAsGif,
             // Item 4: "More" menu on the interaction bar.
@@ -757,7 +762,7 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
             pinterestThreeColumns     = pinterestThreeColumns,
             onTogglePinterestThreeColumns = viewModel::setPinterestThreeColumns,
             // Share To / Quote Repost / Add To fade the post's own UI away.
-            popupOpen                 = sendPopupTarget != null || quoteRepostTarget != null || listPickerDid != null,
+            popupOpen                 = sendPopupTarget != null || quoteRepostTarget != null || listPickerDid != null || (reportTarget != null && reportTarget?.fromProfile != true),
             likeTagPhase              = likeTagPhase,
             likeTagPending            = likeTagPending,
             onPrefetchListMemberships = viewModel::prefetchListMemberships,
@@ -957,6 +962,7 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                     onBackdropChanged = { b, c -> profileBackdrop = b; profileTint = c },
                     isBlocking = blockVersion.let { com.mediaviewer.util.BlockedAccounts.isBlocking(currentProfileOverlay.author.did) },
                     onToggleBlock = viewModel::toggleBlockProfile,
+                    onReportAccount = viewModel::openReportForProfile,
                     onOpenQr = { author, banner -> qrTarget = author to banner },
                     titleBacklog = titleBacklog,
                     onCheckTitleBacklog = viewModel::checkTitleBacklog,
@@ -1112,6 +1118,21 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                 onCreate      = { kind, name, description, cover, done -> viewModel.createPickerList(kind, name, description, cover, done) },
                 onRename      = { uris, name, done -> viewModel.renamePickerEntry(uris, name, done) },
                 onDismiss     = { viewModel.dismissListPicker() }
+            )
+        }
+
+        // Report (post or account) — the same centered glass popup as Add
+        // To, in the reported post's (or profile's) own color.
+        com.mediaviewer.ui.FadingPopupHost(reportTarget, Modifier.zIndex(10f)) { target ->
+            val overProfile = target.fromProfile
+            com.mediaviewer.ui.ReportDialog(
+                target      = target,
+                submitting  = reportSubmitting,
+                liquidGlass = liquidGlass,
+                tint        = if (overProfile) profileTint else currentDominantColor,
+                backdrop    = if (overProfile) profileBackdrop else currentBackdrop,
+                onSubmit    = viewModel::submitReport,
+                onDismiss   = viewModel::dismissReport
             )
         }
 

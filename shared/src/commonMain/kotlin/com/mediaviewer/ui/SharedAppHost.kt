@@ -63,6 +63,7 @@ object SharedAppStartup {
         com.mediaviewer.repository.WikipediaRepository.init(context)
         ProfileColorStore.init(context)
         SelfProfileColors.init(context)
+        com.mediaviewer.util.AdultContentPolicy.init(context)
     }
 }
 
