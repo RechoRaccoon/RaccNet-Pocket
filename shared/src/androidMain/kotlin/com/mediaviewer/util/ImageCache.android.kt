@@ -1,10 +1,10 @@
 package com.mediaviewer.util
 
-import coil.Coil
+import coil3.SingletonImageLoader
 import com.mediaviewer.platform.PlatformContext
 
 actual fun removeFromImageCache(context: PlatformContext, urls: List<String>): Int {
-    val loader = Coil.imageLoader(context.applicationContext)
+    val loader = SingletonImageLoader.get(context.applicationContext)
     var removed = 0
     val disk = loader.diskCache
     for (u in urls) {

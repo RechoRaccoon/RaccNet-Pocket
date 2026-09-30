@@ -1,5 +1,7 @@
 package com.mediaviewer.tagging
 
+import coil3.request.allowHardware
+
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -345,10 +347,10 @@ class TaggingRepository(
     private suspend fun fetchBitmapForTagging(url: String): Pair<Bitmap, Boolean>? {
         if (url.isBlank()) return null
         try {
-            val loader = coil.Coil.imageLoader(appContext)
-            val request = coil.request.ImageRequest.Builder(appContext)
+            val loader = coil3.SingletonImageLoader.get(appContext)
+            val request = coil3.request.ImageRequest.Builder(appContext)
                 .data(url).size(896, 896).allowHardware(false).build()
-            val bmp = (loader.execute(request).drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap
+            val bmp = ((loader.execute(request) as? coil3.request.SuccessResult)?.image as? coil3.BitmapImage)?.bitmap
             if (bmp != null) return bmp to false
         } catch (_: Exception) { /* fall through to the direct fetch below */ }
         return fetchBytes(url)?.let { decodeBitmap(it) }?.let { it to true }

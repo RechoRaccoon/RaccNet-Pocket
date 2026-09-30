@@ -81,7 +81,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
 import com.mediaviewer.ui.theme.DimGray
 import com.mediaviewer.util.EmojiEntry
 import com.mediaviewer.util.EmojiFolder
@@ -89,9 +89,6 @@ import com.mediaviewer.util.EmojiStore
 import com.mediaviewer.util.rememberHapticTap
 import kotlinx.coroutines.launch
 
-/** Height of the panel while a tab is being renamed. The keyboard is up then,
- *  so the panel shrinks to just its tab row and rides on top of the keyboard. */
-internal val EmojiPanelCompactHeight = 60.dp
 
 /**
  * Textshot mode's emoji menu. It takes the keyboard's place (the composer
@@ -110,7 +107,7 @@ internal val EmojiPanelCompactHeight = 60.dp
  */
 @OptIn(ExperimentalComposeUiApi::class, ExperimentalFoundationApi::class)
 @Composable
-internal fun EmojiPanel(
+internal actual fun EmojiPanel(
     store: EmojiStore,
     height: Dp,
     compact: Boolean,
@@ -118,7 +115,7 @@ internal fun EmojiPanel(
     tint: Color,
     onPickEmoji: (EmojiEntry) -> Unit,
     onEditingChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()

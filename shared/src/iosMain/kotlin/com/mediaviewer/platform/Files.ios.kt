@@ -55,3 +55,11 @@ fun writeLocalFile(path: String, bytes: ByteArray): Boolean {
         fclose(f)
     }
 }
+
+/** True if [path] exists (posix access). */
+@OptIn(ExperimentalForeignApi::class)
+fun localFileExists(path: String): Boolean = platform.posix.access(path, platform.posix.F_OK) == 0
+
+/** Deletes [path] if it exists. */
+@OptIn(ExperimentalForeignApi::class)
+fun deleteLocalFile(path: String) { platform.posix.remove(path) }

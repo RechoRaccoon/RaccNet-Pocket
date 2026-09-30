@@ -2,10 +2,13 @@ package com.mediaviewer.util
 
 import android.app.ActivityManager
 import android.content.Context
-import coil.Coil
-import coil.ImageLoader
-import coil.disk.DiskCache
-import coil.memory.MemoryCache
+import coil3.ImageLoader
+import coil3.SingletonImageLoader
+import coil3.disk.DiskCache
+import coil3.disk.directory
+import coil3.memory.MemoryCache
+import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import coil3.request.allowRgb565
 import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
@@ -40,7 +43,7 @@ object ImageLoading {
         val app = context.applicationContext
         val am = app.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
         val lowRam = am?.isLowRamDevice == true
-        Coil.setImageLoader {
+        SingletonImageLoader.setSafe {
             val dispatcher = Dispatcher().apply {
                 maxRequests = 48
                 maxRequestsPerHost = 12
@@ -56,11 +59,12 @@ object ImageLoading {
                 .readTimeout(30, TimeUnit.SECONDS)
                 .build()
             ImageLoader.Builder(app)
-                .okHttpClient(client)
-                .respectCacheHeaders(false)
+                // Coil 3 ignores servers' Cache-Control by default (the
+                // equivalent of Coil 2's respectCacheHeaders(false)).
+                .components { add(OkHttpNetworkFetcherFactory(callFactory = { client })) }
                 .memoryCache {
-                    MemoryCache.Builder(app)
-                        .maxSizePercent(if (lowRam) 0.2 else 0.3)
+                    MemoryCache.Builder()
+                        .maxSizePercent(app, if (lowRam) 0.2 else 0.3)
                         .build()
                 }
                 .diskCache {
@@ -118,7 +122,7 @@ object ImageLoading {
 
     private fun wipe(app: Context) {
         install(app)
-        val loader = Coil.imageLoader(app)
+        val loader = SingletonImageLoader.get(app)
         runCatching { loader.memoryCache?.clear() }
         runCatching { loader.diskCache?.clear() }
     }

@@ -13,6 +13,7 @@ enum class PlatformFeature(val label: String) {
     GIF_EXPORT("Save as GIF"),
     CUSTOM_FONT("Custom font"),
     OPEN_BY_DEFAULT_LINKS("Open Bluesky links in Stellar"),
+    TRANSLATION("Translate post text"),
     APP_RESTART("Restart app");
 
     /** True where this feature works on the current platform. */

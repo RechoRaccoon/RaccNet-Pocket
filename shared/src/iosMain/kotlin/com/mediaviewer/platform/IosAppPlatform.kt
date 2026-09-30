@@ -29,7 +29,7 @@ class IosAppPlatform : AppPlatform {
     }
 
     override fun enqueueGifDownload(url: String, isVideo: Boolean, postId: String, blobDid: String?, blobCid: String?) {
-        toast("Saving as GIF isn't available on iOS yet")
+        toast("Saving as GIF is Android only")
     }
 
     override fun importCustomFont(uri: PlatformUri): FontImport =

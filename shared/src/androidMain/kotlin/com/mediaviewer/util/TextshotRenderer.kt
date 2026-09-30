@@ -48,7 +48,7 @@ object TextshotRenderer {
      *  a real edge-to-edge frame now, not a padded card). [TextshotEmojiImage]
      *  reads this same value so its rounded-corner inset stays correct no
      *  matter how this is tuned. */
-    const val PAD_FRACTION = 0.02f
+    const val PAD_FRACTION = com.mediaviewer.ui.TEXTSHOT_PAD_FRACTION
     private const val LINE_SPACING_MULT = 1.15f
     // Floor so pathologically long input never rounds to an invisible size.
     private const val MIN_TEXT_SIZE = 20f

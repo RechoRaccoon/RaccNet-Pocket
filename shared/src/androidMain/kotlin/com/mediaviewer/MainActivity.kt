@@ -215,6 +215,7 @@ class MainActivity : ComponentActivity() {
         })
     }
     override fun onCreate(savedInstanceState: Bundle?) {        super.onCreate(savedInstanceState)
+        com.mediaviewer.ui.compat.AndroidToastHost.appContext = applicationContext
         installCrashHandler(applicationContext)
         com.mediaviewer.util.CrashBreadcrumbs.init(applicationContext)
         com.mediaviewer.util.UiToggles.init(applicationContext)
@@ -277,7 +278,7 @@ class MainActivity : ComponentActivity() {
                 if (legacyFontPath != null) com.mediaviewer.util.FontStore.adoptLegacy(legacyFontPath, legacyFontName)
             }
             val selectedFont = com.mediaviewer.util.FontStore.selected
-            val customFontFamily = remember(selectedFont) { com.mediaviewer.util.FontStore.familyFor(selectedFont) }
+            val customFontFamily = com.mediaviewer.util.FontStore.familyFor(selectedFont)
             MediaViewerTheme(customFontFamily = customFontFamily) {
                 AppRoot(viewModel, pendingProfileLink = pendingProfileLink.value, onProfileLinkHandled = { pendingProfileLink.value = null })
             }

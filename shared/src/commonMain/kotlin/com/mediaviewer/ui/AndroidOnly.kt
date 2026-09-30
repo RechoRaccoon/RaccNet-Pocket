@@ -4,7 +4,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -73,7 +77,41 @@ fun PlatformFeatureGate(
                     }
                 }
         ) { content() }
-        AndroidOnlyTag(Modifier.align(tagAlignment).padding(4.dp))
+        // A badge straddling the control's top edge, clear of its switch.
+        AndroidOnlyTag(Modifier.align(tagAlignment).padding(end = 14.dp).offset(y = (-7).dp))
+    }
+}
+
+/**
+ * [PlatformFeatureGate] for a small control inside a row (a single button):
+ * where [feature] doesn't work, the control is grayed out and ignores taps,
+ * with the "Android only" tag just before it.
+ */
+@Composable
+fun PlatformFeatureInline(
+    feature: PlatformFeature,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    if (feature.isAvailable) {
+        Box(modifier) { content() }
+        return
+    }
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        AndroidOnlyTag()
+        Spacer(Modifier.width(6.dp))
+        Box(
+            Modifier
+                .grayedOut()
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            event.changes.forEach { it.consume() }
+                        }
+                    }
+                }
+        ) { content() }
     }
 }
 

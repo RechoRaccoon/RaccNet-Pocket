@@ -8,8 +8,8 @@ import com.mediaviewer.platform.TextshotImage
 
 import android.app.Application
 import android.widget.Toast
-import coil.imageLoader
-import coil.request.ImageRequest
+import coil3.SingletonImageLoader
+import coil3.request.ImageRequest
 import com.mediaviewer.model.LiveNowPlatform
 import com.mediaviewer.repository.BlueskyRepository
 import com.mediaviewer.repository.E621Repository
@@ -71,7 +71,7 @@ class AndroidAppPlatform(
     }
 
     override fun preloadImages(urls: List<String>) {
-        val loader = application.imageLoader
+        val loader = SingletonImageLoader.get(application)
         urls.forEach { url -> loader.enqueue(ImageRequest.Builder(application).data(url).build()) }
     }
 

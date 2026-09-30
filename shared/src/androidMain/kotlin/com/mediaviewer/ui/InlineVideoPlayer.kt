@@ -43,7 +43,7 @@ import kotlinx.coroutines.withContext
  * when the preview leaves the screen.
  */
 @Composable
-fun InlineVideoPlayer(uri: Uri, modifier: Modifier = Modifier) {
+actual fun InlineVideoPlayer(uri: Uri, modifier: Modifier) {
     val context = LocalContext.current
     var poster by remember(uri) { mutableStateOf<Bitmap?>(null) }
     var playing by remember(uri) { mutableStateOf(false) }

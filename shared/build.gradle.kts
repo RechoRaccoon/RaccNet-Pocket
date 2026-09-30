@@ -47,6 +47,11 @@ kotlin {
             implementation(compose.material3)
             implementation(compose.materialIconsExtended)
             implementation(compose.ui)
+            // Bundled resources (Audiowide font, Stellar logo) for both apps.
+            implementation(compose.components.resources)
+            // Coil 3: images on both platforms (Android: OkHttp underneath,
+            // iOS: Ktor/NSURLSession).
+            implementation("io.coil-kt.coil3:coil-compose:3.2.0")
 
             implementation("org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose:2.9.1")
             implementation("org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose:2.9.1")
@@ -62,6 +67,9 @@ kotlin {
             implementation("io.ktor:ktor-client-darwin:3.1.3")
             // Locks for the iOS ConcurrentHashMap / SharedPreferences stand-ins.
             implementation("org.jetbrains.kotlinx:atomicfu:0.27.0")
+            implementation("io.coil-kt.coil3:coil-network-ktor3:3.2.0")
+            // Compose Multiplatform's BackHandler (iOS back gesture).
+            implementation("org.jetbrains.compose.ui:ui-backhandler:1.8.2")
         }
         androidMain.dependencies {
             implementation(compose.preview)
@@ -78,8 +86,8 @@ kotlin {
             implementation("com.squareup.okhttp3:okhttp:4.12.0")
             implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
 
-            implementation("io.coil-kt:coil-compose:2.5.0")
-            implementation("io.coil-kt:coil-video:2.5.0")
+            implementation("io.coil-kt.coil3:coil-network-okhttp:3.2.0")
+            implementation("io.coil-kt.coil3:coil-video:3.2.0")
 
             implementation("androidx.media3:media3-exoplayer:1.8.0")
             implementation("androidx.media3:media3-exoplayer-hls:1.8.0")
@@ -173,4 +181,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+}
+
+compose.resources {
+    // Generated accessor class for composeResources/ (Res.font.audiowide, …).
+    packageOfResClass = "com.mediaviewer.resources"
+    publicResClass = true
+    generateResClass = always
 }
