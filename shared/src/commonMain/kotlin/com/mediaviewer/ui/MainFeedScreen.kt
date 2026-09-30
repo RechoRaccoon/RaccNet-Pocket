@@ -2314,15 +2314,19 @@ private fun TextOnlyPostCard(
     // card grows into the space between the author row and the bottom
     // bubbles, the text shrinks until it fits, and only if it still doesn't
     // fit at the smallest size does the card scroll.
-    BoxWithConstraints(
-        Modifier.fillMaxSize().padding(top = 104.dp, bottom = 176.dp),
-        contentAlignment = Alignment.Center
-    ) {
+    // Sized to fit between the author row (top) and the text + interaction
+    // bars (bottom), but centered on the screen itself — only nudged if
+    // centering would run it into either (same rule as multi-image grids).
+    val topClear = 104.dp
+    val bottomClear = 176.dp
+    BoxWithConstraints(Modifier.fillMaxSize()) {
         val density = LocalDensity.current
         val measurer = androidx.compose.ui.text.rememberTextMeasurer()
         val baseStyle = LocalTextStyle.current
         val cardWidth = maxWidth * 0.94f
-        val maxCardHeight = maxHeight.coerceAtLeast(160.dp)
+        val maxCardHeight = (maxHeight - topClear - bottomClear).coerceAtLeast(160.dp)
+        val topClearPx = with(density) { topClear.roundToPx() }
+        val bottomClearPx = with(density) { bottomClear.roundToPx() }
         val hPad = 18.dp
         val vPad = 26.dp
         val (fontSizeSp, fits) = remember(displayText, cardWidth, maxCardHeight, baseStyle) {
@@ -2346,6 +2350,16 @@ private fun TextOnlyPostCard(
         }
         LiquidGlassSurface(
             modifier = Modifier
+                .layout { measurable, constraints ->
+                    val placeable = measurable.measure(constraints.copy(minWidth = 0, minHeight = 0))
+                    val h = constraints.maxHeight
+                    val centered = (h - placeable.height) / 2
+                    val maxTop = (h - bottomClearPx - placeable.height).coerceAtLeast(topClearPx)
+                    val top = centered.coerceIn(topClearPx, maxTop)
+                    layout(constraints.maxWidth, h) {
+                        placeable.place((constraints.maxWidth - placeable.width) / 2, top)
+                    }
+                }
                 .width(cardWidth)
                 .heightIn(min = 160.dp, max = maxCardHeight)
                 .wrapContentHeight(),
