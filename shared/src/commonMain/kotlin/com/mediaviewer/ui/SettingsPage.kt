@@ -37,6 +37,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.material.icons.filled.DragIndicator
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.toArgb
@@ -101,8 +102,17 @@ data class SettingsExtras(
     val onLoadMoreHubList: (String) -> Unit = {},
     /** (list URI, list name, index) — a post tapped in a Hub list row. */
     val onOpenHubListPost: (String, String, Int) -> Unit = { _, _, _ -> },
+    /** Customize Hub → Add → Profiles: who the popup lists (your follows,
+     *  or the search results), searching, and the finished row. */
+    val hubProfileCandidates: List<com.mediaviewer.model.AuthorInfo> = emptyList(),
+    val hubProfileSearching: Boolean = false,
+    val onSearchHubProfiles: (String) -> Unit = {},
+    val onLoadMoreHubProfileSuggestions: () -> Unit = {},
+    /** (row name, the accounts picked) */
+    val onAddHubProfiles: (String, List<com.mediaviewer.model.AuthorInfo>) -> Unit = { _, _ -> },
     // ── Dev Tools ──
-    val onForceRefreshHub: () -> Unit = {}
+    val onForceRefreshHub: () -> Unit = {},
+    val onPreviewWelcome: () -> Unit = {}
 )
 
 // ── Shared building blocks ──────────────────────────────────────────────────
@@ -635,8 +645,44 @@ internal fun SettingsPageContent(
 
         // ── Customize Hub ───────────────────────────────────────────────
         if (bskyLoggedIn) {
-            SectionHeader("Customize Hub", tint)
-            CustomizeHubSection(extras = extras, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop)
+            // The arrow beside the title folds the whole section away.
+            val hubCollapsed = com.mediaviewer.util.UiToggles.customizeHubCollapsed
+            val hubArrowTap = rememberHapticTap()
+            val hubArrowTurn by androidx.compose.animation.core.animateFloatAsState(
+                if (hubCollapsed) -90f else 0f, label = "customizeHubArrow"
+            )
+            Row(
+                Modifier.fillMaxWidth().padding(top = 18.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Customize Hub", color = headerColorFor(tint),
+                    fontSize = 26.sp, lineHeight = 30.sp, fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.width(10.dp))
+                Box(
+                    Modifier.size(30.dp).clip(CircleShape).background(Color.White.copy(0.12f))
+                        .clickable {
+                            hubArrowTap()
+                            com.mediaviewer.util.UiToggles.updateCustomizeHubCollapsed(!hubCollapsed)
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        androidx.compose.material.icons.Icons.Default.KeyboardArrowDown,
+                        contentDescription = if (hubCollapsed) "Show Customize Hub" else "Hide Customize Hub",
+                        tint = Color.White,
+                        modifier = Modifier.size(22.dp).graphicsLayer { rotationZ = hubArrowTurn }
+                    )
+                }
+            }
+            AnimatedVisibility(
+                visible = !hubCollapsed,
+                enter = androidx.compose.animation.expandVertically() + androidx.compose.animation.fadeIn(),
+                exit = androidx.compose.animation.shrinkVertically() + androidx.compose.animation.fadeOut()
+            ) {
+                CustomizeHubSection(extras = extras, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop)
+            }
         }
 
         // ── App Functionality ───────────────────────────────────────────
@@ -1139,6 +1185,16 @@ internal fun SettingsPageContent(
                     PillButton("Refresh", extras.onForceRefreshHub, enabled = bskyLoggedIn)
                 }
                 BubbleDivider()
+                BubbleRow {
+                    RowLabel("Preview Welcome Popup", Modifier.weight(1f), sub = "Opens in the Hub; nothing is added until Continue.")
+                    PillButton("Open", extras.onPreviewWelcome, enabled = bskyLoggedIn)
+                }
+                BubbleDivider()
+                BubbleRow {
+                    RowLabel("Preview Support Popup", Modifier.weight(1f), sub = "The one shown on the 10th open.")
+                    PillButton("Open", { com.mediaviewer.util.UiToggles.devSupportPreview = true })
+                }
+                BubbleDivider()
                 val coverContext = com.mediaviewer.ui.compat.LocalContext.current
                 val coverScope = rememberCoroutineScope()
                 BubbleRow {
@@ -1469,13 +1525,16 @@ private fun FitToHeight(modifier: Modifier = Modifier, content: @Composable () -
 // ── Customize Hub ───────────────────────────────────────────────────────────
 
 /**
- * Settings → Customize Hub: one bubble per Hub row (Feeds, Launchpad,
- * Mutuals, Blogs, Reviews, Switch Accounts, then any added lists), each with
- * a grab handle on the left to drag it into a new place and an on/off switch
- * on the right. List rows also get an "Accounts"/"Posts" mode button and an
- * X to remove them (tap once to arm, again to remove — same as deleting a
- * post). The last bubble adds a list: one of yours, or "Other" to paste any
- * Bluesky list link. Everything is saved in [com.mediaviewer.util.HubLayout].
+ * Settings → Customize Hub: one bubble per Hub row (the default rows, then
+ * any added lists and profile rows), each with a grab handle on the left to
+ * drag it into a new place, an on/off switch, and an X to remove it (tap
+ * once to arm, again to remove — same as deleting a post). List and profile
+ * rows also get a "Profiles"/"Posts" mode button. The last bubble, "Add",
+ * puts rows in: "Default" (any default row that was removed — ones already
+ * in the Hub are greyed out), "Profiles" (pick accounts into a row that
+ * lives only in Stellar) and "List" (one of your Bluesky lists, or "Other"
+ * to paste any list link). Everything is saved in
+ * [com.mediaviewer.util.HubLayout].
  */
 @Composable
 private fun CustomizeHubSection(
@@ -1539,14 +1598,34 @@ private fun CustomizeHubSection(
             }
         }
 
-        // ── Add list to Hub ──
+        // ── Add: Default / Profiles / List ──
         var menuOpen by remember { mutableStateOf(false) }
+        var defaultMenuOpen by remember { mutableStateOf(false) }
+        var profilesPopupOpen by remember { mutableStateOf(false) }
         var urlPopupOpen by remember { mutableStateOf(false) }
         SettingsBubble(liquidGlass, tint, backdrop) {
             BubbleRow {
-                RowLabel("Add list to Hub", Modifier.weight(1f))
+                RowLabel("Add", Modifier.weight(1f))
                 Box {
-                    PillButton("Add", { extras.onEnsureUserLists(); menuOpen = true })
+                    PillButton("Default", { defaultMenuOpen = true })
+                    // Every default row, in the default order; the ones
+                    // already in the Hub are greyed out.
+                    DropdownMenu(expanded = defaultMenuOpen, onDismissRequest = { defaultMenuOpen = false }) {
+                        hub.defaultRowIds.forEach { id ->
+                            val added = rows.any { it.id == id }
+                            DropdownMenuItem(
+                                text = { Text(hub.BUILT_IN_LABELS[id] ?: id, color = if (added) DimGray else Color.Unspecified) },
+                                onClick = { defaultMenuOpen = false; hub.addDefault(id) },
+                                enabled = !added
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
+                PillButton("Profiles", { profilesPopupOpen = true })
+                Spacer(Modifier.width(8.dp))
+                Box {
+                    PillButton("List", { extras.onEnsureUserLists(); menuOpen = true })
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                         val lists = extras.userLists.filter { !it.purpose.contains("referencelist") }
                         if (lists.isEmpty()) {
@@ -1582,10 +1661,19 @@ private fun CustomizeHubSection(
                 onDismiss = { urlPopupOpen = false }
             )
         }
+        if (profilesPopupOpen) {
+            HubProfilesDialog(
+                candidates = extras.hubProfileCandidates, searching = extras.hubProfileSearching, tint = tint,
+                onSearch = extras.onSearchHubProfiles,
+                onLoadMoreSuggestions = extras.onLoadMoreHubProfileSuggestions,
+                onAdd = { name, members -> profilesPopupOpen = false; extras.onAddHubProfiles(name, members) },
+                onClose = { profilesPopupOpen = false }
+            )
+        }
     }
 }
 
-/** One row of Customize Hub: grab handle, name, (list: Accounts/Posts), on/off, (list: X). */
+/** One row of Customize Hub: grab handle, name, (list/profiles: Profiles/Posts), on/off, X. */
 @Composable
 private fun HubRowBubble(
     row: com.mediaviewer.util.HubLayout.Row,
@@ -1610,15 +1698,15 @@ private fun HubRowBubble(
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f).padding(end = 8.dp)
             )
-            if (row.isList) {
-                PillButton(if (row.showPosts) "Posts" else "Accounts", { hub.setShowPosts(row.id, !row.showPosts) })
+            if (row.hasMembers) {
+                PillButton(if (row.showPosts) "Posts" else "Profiles", { hub.setShowPosts(row.id, !row.showPosts) })
                 Spacer(Modifier.width(8.dp))
             }
             CompactSwitch(row.enabled) { hub.setEnabled(row.id, it) }
-            if (row.isList) {
-                Spacer(Modifier.width(8.dp))
-                RemoveHubListButton(onRemove = { hub.remove(row.id) })
-            }
+            // Every row can be taken out; default ones come back from
+            // Add → Default.
+            Spacer(Modifier.width(8.dp))
+            RemoveHubListButton(onRemove = { hub.remove(row.id) })
         }
     }
 }

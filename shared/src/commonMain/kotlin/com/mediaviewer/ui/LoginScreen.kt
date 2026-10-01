@@ -19,6 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AlternateEmail
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -126,20 +127,42 @@ fun LoginScreen(
                     onImeAction = { runCatching { passwordFocus.requestFocus() } }
                 )
                 Spacer(Modifier.height(10.dp))
+                // iOS: the system's secure-entry keyboard (KeyboardType.Password)
+                // misbehaves inside Compose on iOS (dropped/cleared characters,
+                // no Paste), so iOS uses a plain ASCII keyboard with autocorrect
+                // off — the dots still come from PasswordVisualTransformation —
+                // plus a Paste button. Android is unchanged.
+                val isIos = com.mediaviewer.platform.currentPlatform == com.mediaviewer.platform.PlatformKind.IOS
+                @Suppress("DEPRECATION")
+                val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
                 LoginField(
                     value = password, onValueChange = { password = it },
                     placeholder = "App password", icon = Icons.Default.Key,
-                    keyboardType = KeyboardType.Password, imeAction = ImeAction.Done,
+                    keyboardType = if (isIos) KeyboardType.Ascii else KeyboardType.Password, imeAction = ImeAction.Done,
                     onImeAction = { submit() },
                     password = !showPassword,
+                    noAutoCorrect = isIos,
                     modifier = Modifier.focusRequester(passwordFocus),
                     trailing = {
-                        Icon(
-                            if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                            contentDescription = if (showPassword) "Hide password" else "Show password",
-                            tint = Color.White.copy(alpha = 0.6f),
-                            modifier = Modifier.size(34.dp).clip(CircleShape).clickable { showPassword = !showPassword }.padding(8.dp)
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (isIos) {
+                                Icon(
+                                    Icons.Default.ContentPaste,
+                                    contentDescription = "Paste password",
+                                    tint = Color.White.copy(alpha = 0.6f),
+                                    modifier = Modifier.size(34.dp).clip(CircleShape).clickable {
+                                        val pasted = runCatching { clipboard.getText()?.text }.getOrNull()
+                                        if (!pasted.isNullOrEmpty()) { tap(); password = pasted.trim() }
+                                    }.padding(8.dp)
+                                )
+                            }
+                            Icon(
+                                if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                contentDescription = if (showPassword) "Hide password" else "Show password",
+                                tint = Color.White.copy(alpha = 0.6f),
+                                modifier = Modifier.size(34.dp).clip(CircleShape).clickable { showPassword = !showPassword }.padding(8.dp)
+                            )
+                        }
                     }
                 )
                 Spacer(Modifier.height(16.dp))
@@ -206,6 +229,7 @@ private fun LoginField(
     onImeAction: () -> Unit,
     modifier: Modifier = Modifier,
     password: Boolean = false,
+    noAutoCorrect: Boolean = false,
     trailing: (@Composable () -> Unit)? = null
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -217,7 +241,11 @@ private fun LoginField(
         textStyle = LocalTextStyle.current.copy(color = Color.White, fontSize = 14.sp),
         cursorBrush = SolidColor(LoginPink),
         visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
-        keyboardOptions = KeyboardOptions(
+        keyboardOptions = if (noAutoCorrect) KeyboardOptions(
+            capitalization = KeyboardCapitalization.None,
+            autoCorrectEnabled = false,
+            keyboardType = keyboardType, imeAction = imeAction
+        ) else KeyboardOptions(
             capitalization = KeyboardCapitalization.None,
             keyboardType = keyboardType, imeAction = imeAction
         ),

@@ -281,7 +281,11 @@ fun CommentsSheet(
                                 else -> items(displayedComments, key = { it.id }) { comment ->
                                     CommentRow(
                                         comment, appMode, liquidGlass, onLikeComment, onVoteComment,
-                                        onReplyToComment = { c -> replyTarget = c; commentText = "@${c.authorHandle} " },
+                                        // Replying is a real threaded reply to that comment (see
+                                        // MainViewModel.postComment) — no "@handle" is typed
+                                        // into the message; the bar above the field says
+                                        // who it's replying to.
+                                        onReplyToComment = { c -> replyTarget = c },
                                         onOpenThread = { c -> if (c.replies.isNotEmpty()) threadStack = stack + c },
                                         dominantColor = dominantColor, backdrop = backdrop,
                                         indented = parent != null
@@ -314,7 +318,6 @@ fun CommentsSheet(
                                 modifier = Modifier.size(16.dp).clickable {
                                     tap()
                                     replyTarget = null
-                                    if (commentText == "@${target.authorHandle} ") commentText = ""
                                 }
                             )
                         }

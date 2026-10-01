@@ -35,6 +35,7 @@ object UiToggles {
     private const val KEY_DEV_TOOLS_UNLOCKED = "dev_tools_unlocked"
     private const val KEY_DEV_FORCE_SCAN_BUBBLE = "dev_force_scan_bubble"
     private const val KEY_SCAN_BUBBLE_DISMISSED = "scan_bubble_dismissed"
+    private const val KEY_CUSTOMIZE_HUB_COLLAPSED = "customize_hub_collapsed"
 
     /** Settings → UI Customization → "Loading Animation". */
     enum class LoadingAnimation(val label: String) {
@@ -134,6 +135,25 @@ object UiToggles {
      *  without signing out. Not saved. */
     var devLoginPreview by mutableStateOf(false)
 
+    /** Dev Tools → "Preview Welcome Popup" / "Preview Support Popup": shows
+     *  that popup now, whatever has been seen before. Not saved. */
+    var devWelcomePreview by mutableStateOf(false)
+    var devSupportPreview by mutableStateOf(false)
+
+    /** Bumped to send the Hub straight to Settings → Support Stellar (a
+     *  profile's "Supporter" label); the Hub sets it back to 0. */
+    var supportPageRequest by mutableStateOf(0)
+
+    /** Settings → the arrow beside "Customize Hub": its rows are folded
+     *  away, leaving just the title. Remembered. */
+    var customizeHubCollapsed by mutableStateOf(false)
+        private set
+
+    fun updateCustomizeHubCollapsed(collapsed: Boolean) {
+        customizeHubCollapsed = collapsed
+        prefs?.edit()?.putBoolean(KEY_CUSTOMIZE_HUB_COLLAPSED, collapsed)?.apply()
+    }
+
     /** Whether any loading transition/screen plays at all. */
     val loadingScreens: Boolean get() = loadingAnimation != LoadingAnimation.NONE
 
@@ -155,6 +175,7 @@ object UiToggles {
         devToolsUnlocked = p.getBoolean(KEY_DEV_TOOLS_UNLOCKED, false)
         devForceScanBubble = p.getBoolean(KEY_DEV_FORCE_SCAN_BUBBLE, false)
         scanBubbleDismissed = p.getBoolean(KEY_SCAN_BUBBLE_DISMISSED, false)
+        customizeHubCollapsed = p.getBoolean(KEY_CUSTOMIZE_HUB_COLLAPSED, false)
         visualizerCallMode = p.getString(KEY_VISUALIZER_CALL_MODE, null)
             ?.let { name -> VisualizerCallMode.entries.firstOrNull { it.name == name } }
             ?: if (p.getBoolean(KEY_VISUALIZER_DURING_CALLS, false)) VisualizerCallMode.MUSIC_ONLY else VisualizerCallMode.PAUSE

@@ -212,6 +212,8 @@ fun MainFeedScreen(
     onEndLiveLink: () -> Unit = {},
     onMoveFeed: (Int, Int) -> Unit = { _, _ -> },
     onRemoveFeed: (String) -> Unit = {},
+    /** Explore mode pinched in (back to the profile a feed was opened from). */
+    onGridPinchIn: () -> Unit = {},
     availableFeeds: List<BskyFeedInfo>,
     selectedFeedUri: String?,
     authorFeedState: MainViewModel.AuthorFeedSavedState?,
@@ -677,7 +679,8 @@ fun MainFeedScreen(
                     roundedGridTiles = squareGridRounded,
                     reducedAnimations = reducedAnimations,
                     // Pulling down while already at the top opens the Hub.
-                    onSwipeDown     = { onSetScreen(ScreenState.SETTINGS) }
+                    onSwipeDown     = { onSetScreen(ScreenState.SETTINGS) },
+                    onPinchIn       = onGridPinchIn
                 )
             }
         }
@@ -1270,7 +1273,7 @@ private fun PostContent(
                         showingTranslated = true
                     )
                 )
-                haptic(context)
+                // (No haptic when a translation finishes any more.)
             }
             is com.mediaviewer.util.TranslationManager.Outcome.Skipped,
             is com.mediaviewer.util.TranslationManager.Outcome.Failure ->
@@ -3408,7 +3411,7 @@ private fun VideoPlayer(
  *  since those now render as their own bigger individual glass bubbles in
  *  the middle rather than sharing one bottom bar. */
 @Composable
-private fun VideoSeekBar(
+internal fun VideoSeekBar(
     liquidGlass: Boolean,
     dominantColor: Color,
     backdrop: GlassBackdrop?,
@@ -3538,7 +3541,7 @@ private fun VideoSeekBar(
 /** Play/pause + ±10s skip as three separate, bigger glass "bubble" buttons in
  *  the middle of the video, instead of sharing one bar with the seek bar. */
 @Composable
-private fun VideoTransportButtons(
+internal fun VideoTransportButtons(
     liquidGlass: Boolean,
     dominantColor: Color,
     backdrop: GlassBackdrop?,

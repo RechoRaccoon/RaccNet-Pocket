@@ -136,7 +136,9 @@ fun GridScreen(
     roundedGridTiles: Boolean = false,
     reducedAnimations: Boolean = false,
     /** Pulled down while already scrolled to the very top. */
-    onSwipeDown: () -> Unit = {}
+    onSwipeDown: () -> Unit = {},
+    /** Pinched in (fingers closing): leaves a feed opened from a profile. */
+    onPinchIn: () -> Unit = {}
 ) {
     val tap = rememberHapticTap()
     var localTags  by remember(e621SearchTags) { mutableStateOf(e621SearchTags) }
@@ -166,6 +168,7 @@ fun GridScreen(
     // once the grid is at the very top, pulling down a further ~88dp — or
     // a quick flick down of ~36dp — opens the Hub. One trigger per gesture.
     val latestOnSwipeDown by rememberUpdatedState(onSwipeDown)
+    val latestOnPinchIn by rememberUpdatedState(onPinchIn)
     val density = androidx.compose.ui.platform.LocalDensity.current
     val pullThresholdPx = with(density) { 88.dp.toPx() }
     val flickThresholdPx = with(density) { 36.dp.toPx() }
@@ -325,6 +328,10 @@ fun GridScreen(
                             if (dist > startDist * 1.4f) {
                                 exitFeedIndex = latestCurrentIndex
                                 onItemClick(latestCurrentIndex, -1)
+                                break
+                            }
+                            if (dist < startDist * 0.7f) {
+                                latestOnPinchIn()
                                 break
                             }
                         }

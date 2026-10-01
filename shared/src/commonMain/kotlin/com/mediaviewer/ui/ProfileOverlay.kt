@@ -165,6 +165,8 @@ private fun MainViewModel.ProfileTab.label(): String = when (this) {
     // preserves, plus the explicit sort in ProfileTabsRow's own doc
     // comment/call site.
     MainViewModel.ProfileTab.MUSIC_HISTORY -> "Music History"
+    // Always the far-right tab.
+    MainViewModel.ProfileTab.LISTS_FEEDS -> "Lists/Feeds"
 }
 
 // ─── Profile tabs sub-filter row ────────────────────────────────────────────
@@ -477,7 +479,21 @@ fun ProfileOverlay(
     /** Title pages' Backlog/Remove button. */
     titleBacklog: MainViewModel.TitleBacklogState? = null,
     onCheckTitleBacklog: (TitleSearchResult) -> Unit = {},
-    onToggleTitleBacklog: (TitleSearchResult) -> Unit = {}
+    onToggleTitleBacklog: (TitleSearchResult) -> Unit = {},
+    // ── Lists/Feeds tab ──
+    /** URIs of every feed/list already in your feeds list. */
+    savedFeedUris: Set<String> = emptySet(),
+    /** Busy/finished labels for the tab's row buttons, by entry URI. */
+    listActions: Map<String, String> = emptyMap(),
+    onSelectProfileListKind: (com.mediaviewer.model.ProfileListKind?) -> Unit = {},
+    /** Tapping a row: a feed opens in Explore, anything else lists its accounts. */
+    onOpenListEntry: (com.mediaviewer.model.ProfileListEntry) -> Unit = {},
+    /** The row's button: Add / Pin to Feeds / Follow All / Block All. */
+    onListEntryAction: (com.mediaviewer.model.ProfileListEntry) -> Unit = {},
+    /** An @handle in the bio was tapped. */
+    onOpenMention: (String) -> Unit = {},
+    /** The "Supporter" label was tapped: Settings' Support Stellar page. */
+    onOpenSupportPage: () -> Unit = {}
 ) {
     val author  = state.author
     val profile = state.profile
@@ -672,6 +688,10 @@ fun ProfileOverlay(
     LaunchedEffect(backdrop, blended) { onBackdropChanged(backdrop, blended) }
 
     var editingProfile by remember { mutableStateOf(false) }
+    // Lists/Feeds: the starter pack / moderation list waiting on a
+    // "Follow All" / "Block All" confirmation.
+    var pendingListAction by remember(author.did) { mutableStateOf<com.mediaviewer.model.ProfileListEntry?>(null) }
+    val isSupporter = com.mediaviewer.util.StellarSupporters.isSupporter(author.did)
     CompositionLocalProvider(LocalHateFunBlurNsfw provides hateFunBlurNsfw) {
     Box(Modifier.fillMaxSize()) {
     // Item 19: the whole page blurs behind the edit popup.
@@ -765,7 +785,10 @@ fun ProfileOverlay(
                     onToggleFollow = onToggleFollow,
                     onClose = onClose,
                     nowPlaying = state.nowPlaying,
-                    onEditProfile = { editingProfile = true }
+                    onEditProfile = { editingProfile = true },
+                    isSupporter = isSupporter,
+                    onOpenSupportPage = onOpenSupportPage,
+                    onOpenMention = onOpenMention
                 )
             }
 
@@ -879,6 +902,16 @@ fun ProfileOverlay(
                                     onSelect = onSelectMusicYear
                                 )
                             }
+                            MainViewModel.ProfileTab.LISTS_FEEDS -> {
+                                // "All", then one per kind (null = All).
+                                ProfileSubFilterRow<com.mediaviewer.model.ProfileListKind?>(
+                                    options = listOf<com.mediaviewer.model.ProfileListKind?>(null) + com.mediaviewer.model.ProfileListKind.entries,
+                                    selected = state.listKindFilter,
+                                    liquidGlass = liquidGlass, tint = blended,
+                                    labelOf = { it?.label ?: "All" },
+                                    onSelect = onSelectProfileListKind
+                                )
+                            }
                             else -> {}
                         }
                     } else {
@@ -932,7 +965,25 @@ fun ProfileOverlay(
                 onOpenReview = onOpenReview,
                 onOpenTitle = onOpenTitle,
                 gridModeFor = { filter -> gridModeFor(state.selectedTab, filter) },
-                roundedGridTiles = roundedGridTiles
+                roundedGridTiles = roundedGridTiles,
+                savedFeedUris = savedFeedUris,
+                listActions = listActions,
+                onOpenListEntry = { entry ->
+                    // A feed takes over the screen: remember where this was.
+                    if (entry.kind == com.mediaviewer.model.ProfileListKind.FEED) {
+                        onSaveScroll(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+                    }
+                    onOpenListEntry(entry)
+                },
+                onListEntryAction = { entry ->
+                    when (entry.kind) {
+                        // Following or blocking a whole list asks first.
+                        com.mediaviewer.model.ProfileListKind.STARTER_PACK -> pendingListAction = entry
+                        com.mediaviewer.model.ProfileListKind.MOD_LIST ->
+                            if (entry.blockUri == null) pendingListAction = entry else onListEntryAction(entry)
+                        else -> onListEntryAction(entry)
+                    }
+                }
             )
         }
         } // close the backdrop-recording Box (LazyColumn only) — see its own doc comment above
@@ -1101,6 +1152,23 @@ fun ProfileOverlay(
             )
         }
     }
+        // A Stellar supporter's profile opens with confetti.
+        if (isSupporter && !reducedAnimations) SupporterConfetti(playKey = author.did)
+        pendingListAction?.let { entry ->
+            val starter = entry.kind == com.mediaviewer.model.ProfileListKind.STARTER_PACK
+            val n = entry.itemCount
+            ConfirmPopup(
+                title = if (starter) "Follow All?" else "Block All?",
+                message = if (starter) "Follow ${if (n != null) "all $n accounts" else "every account"} in \"${entry.name}\"?"
+                else "Block ${if (n != null) "all $n accounts" else "every account"} on \"${entry.name}\"? You can undo this here at any time.",
+                confirmLabel = if (starter) "Follow All" else "Block All",
+                liquidGlass = liquidGlass, tint = blended, backdrop = backdrop,
+                onConfirm = { pendingListAction = null; onListEntryAction(entry) },
+                onDismiss = { pendingListAction = null },
+                preview = entry.avatarUrl,
+                destructive = !starter
+            )
+        }
         if (editingProfile) {
             EditProfileDialog(
                 author = author, profile = profile, tint = blended, liquidGlass = liquidGlass,
@@ -1344,7 +1412,10 @@ private fun ProfileHeaderSection(
     // Item 16: Rocksky "Listening to ..." bio line — see openProfile()'s
     // own doc comment on where this is fetched from.
     nowPlaying: RockskyTrack? = null,
-    onEditProfile: () -> Unit = {}
+    onEditProfile: () -> Unit = {},
+    isSupporter: Boolean = false,
+    onOpenSupportPage: () -> Unit = {},
+    onOpenMention: (String) -> Unit = {}
 ) {
     Column(Modifier.fillMaxWidth()) {
         // ── Banner ──
@@ -1453,7 +1524,7 @@ private fun ProfileHeaderSection(
         val bio = profile?.description.orEmpty()
         if (bio.isNotBlank()) {
             LinkableBioText(
-                text = bio, linkColor = linkColor,
+                text = bio, linkColor = linkColor, onOpenMention = onOpenMention,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)
             )
         } else if (loadingProfile) {
@@ -1466,7 +1537,7 @@ private fun ProfileHeaderSection(
 
         // ── Counts ──
         if (profile != null) {
-            Row(
+            ShrinkToFitRow(
                 // Feature request #2: matched to the bio's own top gap
                 // (bio's `vertical = 12.dp` padding) so the space below the
                 // counts row down to the tab strip reads the same as the
@@ -1474,12 +1545,13 @@ private fun ProfileHeaderSection(
                 // much larger gap this used to leave (4dp here + a 10dp
                 // spacer + the tab row's own top padding stacked on top of
                 // each other).
-                Modifier.fillMaxWidth().padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 0.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.Start)
+                Modifier.fillMaxWidth().padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 0.dp)
             ) {
                 CountStat(profile.postsCount, "Posts")
                 CountStat(profile.followersCount, "Followers")
                 CountStat(profile.followsCount, "Following")
+                // Stellar supporters: a shining "Supporter" after the stats.
+                if (isSupporter) SupporterBadge(onClick = onOpenSupportPage)
             }
             Spacer(Modifier.height(4.dp))
         }
@@ -1492,11 +1564,12 @@ private fun ProfileHeaderSection(
  *  open a link. Detection is regex-based since Bluesky's profile records
  *  don't carry rich-text facets for the bio the way posts do for their text. */
 @Composable
-private fun LinkableBioText(text: String, linkColor: Color, modifier: Modifier = Modifier) {
+private fun LinkableBioText(text: String, linkColor: Color, modifier: Modifier = Modifier, onOpenMention: (String) -> Unit = {}) {
     val uriHandler = LocalUriHandler.current
     val annotated = remember(text, linkColor) {
         buildAnnotatedString {
             append(text)
+            val linkRanges = mutableListOf<IntRange>()
             for (match in bioLinkRegex.findAll(text)) {
                 // Trim common trailing punctuation a link often gets caught up
                 // in mid-sentence ("check out guns.lol/foo." shouldn't include
@@ -1508,6 +1581,20 @@ private fun LinkableBioText(text: String, linkColor: Color, modifier: Modifier =
                 val url = if (raw.startsWith("http://") || raw.startsWith("https://")) raw else "https://$raw"
                 addStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline), match.range.first, end)
                 addStringAnnotation(tag = "URL", annotation = url, start = match.range.first, end = end)
+                linkRanges += match.range.first until end
+            }
+            // @handles (e.g. "@RechoRaccoon.bsky.social") open that profile
+            // in Stellar. Skipped inside links and e-mail addresses.
+            for (match in bioMentionRegex.findAll(text)) {
+                val start = match.range.first
+                if (start > 0 && (text[start - 1].isLetterOrDigit() || text[start - 1] in "._-/@")) continue
+                var end = match.range.last + 1
+                while (end > start && text[end - 1] in ".-") end--
+                val handle = text.substring(start + 1, end)
+                if (!handle.contains('.')) continue
+                if (linkRanges.any { start < it.last + 1 && end > it.first }) continue
+                addStyle(SpanStyle(color = linkColor, fontWeight = FontWeight.SemiBold), start, end)
+                addStringAnnotation(tag = "MENTION", annotation = handle.lowercase(), start = start, end = end)
             }
         }
     }
@@ -1520,6 +1607,10 @@ private fun LinkableBioText(text: String, linkColor: Color, modifier: Modifier =
             detectTapGestures { tapPos ->
                 val lr = layoutResult ?: return@detectTapGestures
                 val offset = lr.getOffsetForPosition(tapPos)
+                annotated.getStringAnnotations("MENTION", offset, offset).firstOrNull()?.let { ann ->
+                    onOpenMention(ann.item)
+                    return@detectTapGestures
+                }
                 annotated.getStringAnnotations("URL", offset, offset).firstOrNull()?.let { ann ->
                     runCatching { uriHandler.openUri(ann.item) }
                 }
@@ -1529,6 +1620,33 @@ private fun LinkableBioText(text: String, linkColor: Color, modifier: Modifier =
 }
 
 private val bioLinkRegex = Regex("""https?://\S+|www\.\S+""", RegexOption.IGNORE_CASE)
+private val bioMentionRegex = Regex("""@[A-Za-z0-9][A-Za-z0-9.-]*""")
+
+/** The profile stats row: lays its items out at their natural size and, if
+ *  they don't fit the width (long counts plus "Supporter"), scales the whole
+ *  row down just enough that they do. */
+@Composable
+private fun ShrinkToFitRow(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    androidx.compose.ui.layout.Layout(
+        content = {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.Start),
+                verticalAlignment = Alignment.CenterVertically
+            ) { content() }
+        },
+        modifier = modifier
+    ) { measurables, constraints ->
+        val placeable = measurables.first().measure(androidx.compose.ui.unit.Constraints())
+        val maxW = constraints.maxWidth
+        val s = if (placeable.width > maxW && placeable.width > 0) maxW.toFloat() / placeable.width else 1f
+        layout(maxW, (placeable.height * s).toInt()) {
+            placeable.placeWithLayer(0, 0) {
+                scaleX = s; scaleY = s
+                transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
+            }
+        }
+    }
+}
 
 /**
  * Positions the banner's overlay pieces:
@@ -1824,6 +1942,7 @@ private fun MainViewModel.ProfileTab.icon() = when (this) {
     MainViewModel.ProfileTab.BACKLOG -> Icons.Filled.StarBorder // unfilled star, per spec
     MainViewModel.ProfileTab.VODS    -> Icons.Filled.OndemandVideo
     MainViewModel.ProfileTab.MUSIC_HISTORY -> Icons.Filled.MusicNote
+    MainViewModel.ProfileTab.LISTS_FEEDS -> Icons.Filled.GridOn
 }
 private fun PostKindFilter.icon() = when (this) {
     PostKindFilter.ALL               -> Icons.Filled.Apps
@@ -1961,8 +2080,22 @@ private fun LazyListScope.profileResultsContent(
     gridModeFor: (PostKindFilter) -> Int = { 0 },
     // Fix (per feedback): "Rounded grid tiles" setting — forwarded to the
     // square grid (profileMediaGridRows) below.
-    roundedGridTiles: Boolean = false
+    roundedGridTiles: Boolean = false,
+    savedFeedUris: Set<String> = emptySet(),
+    listActions: Map<String, String> = emptyMap(),
+    onOpenListEntry: (com.mediaviewer.model.ProfileListEntry) -> Unit = {},
+    onListEntryAction: (com.mediaviewer.model.ProfileListEntry) -> Unit = {}
 ) {
+    // Lists/Feeds keeps its own state (not a ProfileTabState) and has its
+    // own loading/empty rows.
+    if (state.selectedTab == MainViewModel.ProfileTab.LISTS_FEEDS) {
+        profileListsRows(
+            state = state, liquidGlass = liquidGlass, tint = profileTint,
+            savedFeedUris = savedFeedUris, listActions = listActions,
+            onOpen = onOpenListEntry, onAction = onListEntryAction
+        )
+        return
+    }
     val tabState = state.tabStates[state.selectedTab]
 
     // Shared by both the Posts and Reposts/Likes branches below (feature
@@ -2093,6 +2226,7 @@ private fun LazyListScope.profileResultsContent(
             )
             }
         }
+        MainViewModel.ProfileTab.LISTS_FEEDS -> {} // handled above
     }
 
     val isEmpty = tabState != null &&
@@ -3865,21 +3999,9 @@ private fun BlogDetailOverlay(
             }
         }
 
-        // Back: a round button level with the camera-notch bubble, on the
-        // far left, lined up with the text's left edge.
-        // Same size as the camera-notch bubble, level with it.
-        val notchY = rememberNotchCenterY()
-        val backSize = rememberNotchBubbleSize()
-        RoundBackButton(
-            liquidGlass = liquidGlass, tint = bubbleTint, backdrop = backdrop, onClick = onClose,
-            size = backSize,
-            modifier = Modifier.align(Alignment.TopStart)
-                .padding(start = 20.dp)
-                .offset(y = (notchY - backSize / 2).coerceAtLeast(0.dp))
-        )
-
-        // ── Interaction bar (like the profile's) — your own blogs only,
-        // for Edit/Delete. ──
+        // ── Interaction bar (like the profile's), on every blog: Back is
+        // its first button on the left (it used to be a separate bubble in
+        // the top corner); your own blogs add Edit/Delete after it. ──
         val barShape = RoundedCornerShape(26.dp)
         val pillHeight = if (liquidGlass) 44.dp else 36.dp
         @Composable
@@ -3892,6 +4014,9 @@ private fun BlogDetailOverlay(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
+                BarIcon(onClick = onClose) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(21.dp))
+                }
                 if (isOwn) BarIcon(onClick = { onEdit(blog) }) {
                     Icon(Icons.Default.Edit, contentDescription = "Edit blog", tint = Color.White, modifier = Modifier.size(20.dp))
                 }
@@ -3900,7 +4025,7 @@ private fun BlogDetailOverlay(
                 }
             }
         }
-        if (isOwn) Box(
+        Box(
             Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.navBarSpace)
                 .height(if (liquidGlass) 60.dp else 52.dp).fillMaxWidth(),
             contentAlignment = Alignment.Center

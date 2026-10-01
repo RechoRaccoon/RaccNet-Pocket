@@ -180,8 +180,14 @@ val SPECIAL_FEED_NAMES = setOf("Saved Posts", "From Friends", "History")
 /** A Hub list row's posts opened as a feed ride on the same mechanism,
  *  marked by this prefix on the pseudo-author's handle. */
 const val HUB_LIST_FEED_HANDLE_PREFIX = "hublist:"
+/** A feed opened from a profile's Lists/Feeds tab (the rest of the handle
+ *  is the feed's URI): titled like Saved Posts, and leaving it goes back to
+ *  that profile instead of the Hub. */
+const val PROFILE_FEED_HANDLE_PREFIX = "profilefeed:"
 fun AuthorInfo.isSpecialFeed(): Boolean =
-    avatarUrl == null && (displayName in SPECIAL_FEED_NAMES || handle.startsWith(HUB_LIST_FEED_HANDLE_PREFIX))
+    avatarUrl == null && (displayName in SPECIAL_FEED_NAMES || handle.startsWith(HUB_LIST_FEED_HANDLE_PREFIX) ||
+        handle.startsWith(PROFILE_FEED_HANDLE_PREFIX))
+fun AuthorInfo.isProfileFeed(): Boolean = avatarUrl == null && handle.startsWith(PROFILE_FEED_HANDLE_PREFIX)
 
 @Serializable
 data class AuthorInfo(
@@ -709,8 +715,41 @@ data class BskyList(
     val purpose: String = "",
     val description: String? = null,
     val avatar: String? = null,
-    val itemCount: Int? = null
+    val itemCount: Int? = null,
+    /** How many accounts are on it (app.bsky.graph.defs#listView). */
+    val listItemCount: Int? = null,
+    /** The signed-in account's own relation to this list. */
+    val viewer: BskyListViewerState? = null
 )
+
+/** app.bsky.graph.defs#listViewerState: [blocked] is your listblock
+ *  record's URI when you're blocking everyone on a moderation list. */
+@Serializable
+data class BskyListViewerState(val muted: Boolean? = null, val blocked: String? = null)
+
+/** What a row in a profile's Lists/Feeds tab is. */
+enum class ProfileListKind(val label: String) {
+    FEED("Feeds"), LIST("Lists"), STARTER_PACK("Starter Packs"), MOD_LIST("Moderation Lists")
+}
+
+/** One feed / list / starter pack / moderation list on a profile's
+ *  Lists/Feeds tab. [listUri] is the list whose members it holds (itself
+ *  for a list; a starter pack's underlying list; null for a feed). */
+data class ProfileListEntry(
+    val kind: ProfileListKind,
+    val uri: String,
+    val name: String,
+    val description: String? = null,
+    val avatarUrl: String? = null,
+    val itemCount: Int? = null,
+    val listUri: String? = null,
+    /** Moderation lists: your listblock record, while you block it. */
+    val blockUri: String? = null
+)
+
+/** One account on a list, with the list item record that puts them there
+ *  (deleting that record takes them off the list). */
+data class ListMember(val author: AuthorInfo, val itemUri: String)
 
 // ── Bluesky Starter Packs ─────────────────────────────────────────────────────
 

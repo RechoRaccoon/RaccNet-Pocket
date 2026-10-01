@@ -26,6 +26,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material3.Text
@@ -198,6 +199,26 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
     val datasetExportState     by viewModel.datasetExportState.collectAsState()
     // Customize Hub: each Hub list row's loaded members/posts.
     val hubLists               by viewModel.hubLists.collectAsState()
+    // Customize Hub → Add → Profiles.
+    val hubProfileCandidates   by viewModel.hubProfileCandidates.collectAsState()
+    val hubProfileSearching    by viewModel.hubProfileSearching.collectAsState()
+    // Profiles' Lists/Feeds tab.
+    val savedFeedUris = remember(availableFeeds) { availableFeeds.mapTo(HashSet()) { it.uri } }
+    val listActions            by viewModel.listActions.collectAsState()
+    val listMembersState       by viewModel.listMembers.collectAsState()
+    // Welcome → tutorial popups, and the Support popup of the tenth open.
+    val welcomeState           by viewModel.welcome.collectAsState()
+    val tutorialOpen           by viewModel.tutorialOpen.collectAsState()
+    val tutorialVideo          by viewModel.tutorialVideo.collectAsState()
+    var supportPopupOpen by remember { mutableStateOf(false) }
+    val onboardingShown = welcomeState != null || tutorialOpen || supportPopupOpen
+    // 0–1: how blurred (and dimmed) the app is behind those popups. Read
+    // only while drawing, so animating it doesn't recompose this page.
+    val onboardingBlur = androidx.compose.animation.core.animateFloatAsState(
+        if (onboardingShown) 1f else 0f,
+        androidx.compose.animation.core.tween(520, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+        label = "onboardingBlur"
+    )
     val titleBacklog           by viewModel.titleBacklog.collectAsState()
     // Settings → UI Customization → loading screens on/off (see UiToggles).
     val loadingScreens = com.mediaviewer.util.UiToggles.loadingScreens
@@ -530,6 +551,20 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
         com.mediaviewer.ui.LocalHateFunBlurNsfw provides hateFunBlurNsfw
     ) {
     Box(Modifier.fillMaxSize().recordLastTap(pixelController.shatter)) {
+    // Everything in the app sits in this inner box, which blurs while a
+    // welcome/tutorial/support popup is up (the popups are drawn after it).
+    // (The layer only exists while a popup is up or fading, so the app is
+    // drawn exactly as before the rest of the time.)
+    val onboardingBlurActive by remember { androidx.compose.runtime.derivedStateOf { onboardingBlur.value > 0.01f } }
+    Box(Modifier.fillMaxSize().then(
+        if (onboardingBlurActive || onboardingShown) Modifier.graphicsLayer {
+            val amount = onboardingBlur.value
+            renderEffect = if (amount > 0.01f) {
+                val r = 26.dp.toPx() * amount
+                androidx.compose.ui.graphics.BlurEffect(r, r, androidx.compose.ui.graphics.TileMode.Clamp)
+            } else null
+        } else Modifier
+    )) {
         // Feature request #8: lifted out of MainFeedScreen so a multi-image
         // grid tile in ProfileOverlay's Pinterest/All layout can seed which
         // image within a post's group the pager should open on, before
@@ -598,6 +633,7 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
             onEndLiveLink             = viewModel::endLiveLink,
             onMoveFeed                = viewModel::moveFeed,
             onRemoveFeed              = viewModel::removeFeed,
+            onGridPinchIn             = viewModel::pinchInFromGrid,
             availableFeeds            = availableFeeds,
             selectedFeedUri           = selectedFeed,
             authorFeedState           = authorFeedState,
@@ -653,6 +689,12 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                 hubLists = hubLists,
                 onLoadHubList = { uri -> viewModel.loadHubListIfNeeded(uri) },
                 onLoadMoreHubList = viewModel::loadMoreHubList,
+                hubProfileCandidates = hubProfileCandidates,
+                hubProfileSearching = hubProfileSearching,
+                onSearchHubProfiles = viewModel::searchHubProfiles,
+                onLoadMoreHubProfileSuggestions = viewModel::loadMoreHubProfileSuggestions,
+                onAddHubProfiles = viewModel::addHubProfilesRow,
+                onPreviewWelcome = { com.mediaviewer.util.UiToggles.devWelcomePreview = true },
                 onOpenHubListPost = viewModel::openHubListPost,
                 onForceRefreshHub = viewModel::forceRefreshHub
             ),
@@ -925,6 +967,26 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                     roundedGridTiles     = squareGridRounded,
                     selfDid           = bskyDid,
                     onClose           = viewModel::closeProfile,
+                    savedFeedUris     = savedFeedUris,
+                    listActions       = listActions,
+                    onSelectProfileListKind = viewModel::selectProfileListKind,
+                    onOpenListEntry   = { entry ->
+                        if (entry.kind == com.mediaviewer.model.ProfileListKind.FEED) viewModel.openProfileFeed(entry)
+                        else viewModel.openListMembers(entry)
+                    },
+                    onListEntryAction = { entry ->
+                        when (entry.kind) {
+                            com.mediaviewer.model.ProfileListKind.FEED -> viewModel.addFeedFromProfile(entry)
+                            com.mediaviewer.model.ProfileListKind.LIST -> viewModel.pinListAsFeed(entry.uri, entry.name, entry.avatarUrl)
+                            com.mediaviewer.model.ProfileListKind.STARTER_PACK -> viewModel.followAllInList(entry)
+                            com.mediaviewer.model.ProfileListKind.MOD_LIST -> viewModel.toggleBlockList(entry)
+                        }
+                    },
+                    onOpenMention     = { handle -> viewModel.openProfileFromLink(handle) },
+                    onOpenSupportPage = {
+                        com.mediaviewer.util.UiToggles.supportPageRequest++
+                        viewModel.closeAllProfilesForSettings()
+                    },
                     onSelectTab       = viewModel::selectProfileTab,
                     onLoadMore        = viewModel::loadMoreProfileTab,
                     onToggleFollow    = viewModel::toggleProfileFollow,
@@ -1047,6 +1109,17 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
             )
         }
 
+        // A profile's Lists/Feeds tab → tap a list: everyone on it.
+        listMembersState?.let { members ->
+            com.mediaviewer.ui.ListMembersDialog(
+                state = members,
+                tint = if (profileOverlay?.hidden == false) profileTint else selfProfileTint,
+                onOpenProfile = viewModel::openProfileFromListMembers,
+                onRemove = viewModel::removeListMember,
+                onClose = viewModel::closeListMembers
+            )
+        }
+
         // Settings → Data and Privacy → Blocked Accounts.
         val blockedAccountsOpen by viewModel.blockedAccountsOpen.collectAsState()
         if (blockedAccountsOpen) {
@@ -1123,6 +1196,8 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                 onToggle      = { listUri, additionalUri -> viewModel.toggleListMembership(listUri, additionalUri) },
                 onCreate      = { kind, name, description, cover, done -> viewModel.createPickerList(kind, name, description, cover, done) },
                 onRename      = { uris, name, done -> viewModel.renamePickerEntry(uris, name, done) },
+                onDelete      = { uris, done -> viewModel.deletePickerEntry(uris, done) },
+                onSetCover    = { listUri, image, done -> viewModel.setPickerListCover(listUri, image, done) },
                 onDismiss     = { viewModel.dismissListPicker() }
             )
         }
@@ -1273,6 +1348,52 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
         // Space: the old page fading into a drifting starfield + logo.
         com.mediaviewer.ui.SpaceOverlay(controller = pixelController.space, modifier = Modifier.fillMaxSize().zIndex(13f))
 
+    } // the blurred app content
+
+        // ── Welcome → tutorial, and the Support popup ──
+        val hubShowing = appInitialized && bskyLoggedIn && screenState == ScreenState.SETTINGS &&
+            profileOverlay == null && pixelController.phase == PixelPhase.HIDDEN
+        // The welcome popup: once per account, the first time the Hub shows
+        // (Dev Tools can ask for it again).
+        val devWelcome = com.mediaviewer.util.UiToggles.devWelcomePreview
+        LaunchedEffect(hubShowing, bskyDid, devWelcome) {
+            if (hubShowing && (devWelcome || com.mediaviewer.util.Onboarding.needsWelcome(bskyDid))) {
+                // A beat, so the Hub is seen arriving first.
+                if (!devWelcome) kotlinx.coroutines.delay(600)
+                viewModel.openWelcome()
+            }
+        }
+        // The Support popup: on the tenth open, once the Hub is up and the
+        // welcome flow isn't.
+        val supportDue = com.mediaviewer.util.Onboarding.supportPopupDue
+        val devSupport = com.mediaviewer.util.UiToggles.devSupportPreview
+        LaunchedEffect(hubShowing, supportDue, devSupport, welcomeState != null, tutorialOpen) {
+            if (devSupport) supportPopupOpen = true
+            else if (hubShowing && supportDue && welcomeState == null && !tutorialOpen &&
+                !com.mediaviewer.util.Onboarding.needsWelcome(bskyDid)
+            ) {
+                kotlinx.coroutines.delay(900)
+                supportPopupOpen = true
+            }
+        }
+        com.mediaviewer.ui.OnboardingPopupHost(
+            welcome = welcomeState,
+            tutorialOpen = tutorialOpen,
+            tutorialVideo = tutorialVideo,
+            supportOpen = supportPopupOpen,
+            openCount = com.mediaviewer.util.Onboarding.openCount,
+            blur = onboardingBlur,
+            tint = selfProfileTint,
+            liquidGlass = liquidGlass,
+            onContinue = viewModel::applyWelcome,
+            onFinishTutorial = viewModel::closeTutorial,
+            onCloseSupport = {
+                supportPopupOpen = false
+                com.mediaviewer.util.UiToggles.devSupportPreview = false
+                com.mediaviewer.util.Onboarding.markSupportPopupShown()
+            },
+            modifier = Modifier.zIndex(20f)
+        )
     }
     }
 

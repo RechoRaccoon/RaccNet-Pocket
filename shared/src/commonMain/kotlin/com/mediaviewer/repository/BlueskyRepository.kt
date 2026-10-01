@@ -298,7 +298,7 @@ class BlueskyRepository {
     // list can be reassembled in the order the user actually arranged them —
     // including the "Following" timeline, which isn't a feed generator at all
     // and so can't be resolved through getFeedGenerators.
-    private data class PrefSlot(val isTimeline: Boolean, val uri: String)
+    private data class PrefSlot(val isTimeline: Boolean, val uri: String, val isList: Boolean = false)
 
     /** The account's "Enable adult content" setting (app.bsky.actor.defs#
      *  adultContentPref) — off unless it was turned on at bsky.app. */
@@ -342,8 +342,12 @@ class BlueskyRepository {
                             if (v.startsWith("at://")) slots.add(PrefSlot(isTimeline = false, uri = v))
                         }
                         "timeline" -> slots.add(PrefSlot(isTimeline = true, uri = FOLLOWING_FEED_URI))
-                        // "list" (a pinned List shown as a feed) isn't a feed generator
-                        // either; left unhandled for now rather than mis-resolved.
+                        // "list": a List pinned as a feed (Bluesky's own app
+                        // does this too). Not a feed generator — its name and
+                        // cover come from the list itself, see below.
+                        "list" -> itemObj.get("value")?.asString?.let { v ->
+                            if (v.startsWith("at://")) slots.add(PrefSlot(isTimeline = false, uri = v, isList = true))
+                        }
                     }
                 }
             } else {
@@ -361,8 +365,15 @@ class BlueskyRepository {
             }
         }
 
-        val feedUris = slots.filter { !it.isTimeline }.map { it.uri }.distinct()
+        val feedUris = slots.filter { !it.isTimeline && !it.isList }.map { it.uri }.distinct()
         val infoByUri = mutableMapOf<String, BskyFeedInfo>()
+        // Lists pinned as feeds: name + cover straight from each list.
+        val listUris = slots.filter { it.isList }.map { it.uri }.distinct()
+        if (listUris.isNotEmpty()) {
+            coroutineScope {
+                listUris.map { uri -> async { uri to runCatching { getListInfo(token, uri).getOrNull() }.getOrNull() } }.awaitAll()
+            }.forEach { (uri, info) -> if (info != null) infoByUri[uri] = info }
+        }
         if (feedUris.isNotEmpty()) {
             feedUris.chunked(25).forEach { batch ->
                 val batchResult = runCatching { api.getFeedGenerators("Bearer $token", batch) }
@@ -1760,8 +1771,20 @@ class BlueskyRepository {
             )
         }
 
+        // When the post on screen is itself a reply, a comment on it must
+        // carry the ORIGINAL thread's root (not this post) or it lands in
+        // the wrong thread — remembered here for replyToPost's callers.
+        body.thread.post?.record?.reply?.root?.takeIf { it.uri.isNotBlank() && it.cid.isNotBlank() }?.let { root ->
+            threadRoots = (threadRoots + (uri to root)).let { m -> if (m.size > 60) m.entries.drop(m.size - 60).associate { it.key to it.value } else m }
+        }
         (body.thread.replies ?: emptyList()).mapNotNull { toCommentItem(it) }
     }
+
+    /** Thread roots of posts that are themselves replies (see getPostThread). */
+    private var threadRoots: Map<String, BskyRef> = emptyMap()
+    /** The root of the thread [postUri] belongs to, if it's a reply whose
+     *  thread has been loaded; null when the post is its own root. */
+    fun threadRootOf(postUri: String): BskyRef? = threadRoots[postUri]
 
     // ── Search (item 7) ──────────────────────────────────────────────────────
     // Note: Lists have no search endpoint in Bluesky's public API — only
@@ -1835,7 +1858,7 @@ class BlueskyRepository {
      *  appends into (or creates) the savedFeedsPrefV2 entry, and writes the
      *  whole array back. See getSavedFeeds above for the matching read-side
      *  parsing this mirrors. */
-    suspend fun addSavedFeed(token: String, feedUri: String): Result<Unit> = runCatching {
+    suspend fun addSavedFeed(token: String, feedUri: String, type: String = "feed", pinned: Boolean = false): Result<Unit> = runCatching {
         val getResp = api.getPreferences("Bearer $token")
         val body = getResp.body() ?: error("Prefs ${getResp.code()}")
         val preferences = body.preferences.toMutableList()
@@ -1844,10 +1867,12 @@ class BlueskyRepository {
             it.isJsonObject && it.asJsonObject.get("\$type")?.asString?.endsWith("savedFeedsPrefV2") == true
         }
 
+        // [type] "feed" (a feed generator) or "list" (a List pinned as a
+        // feed — the same savedFeed type Bluesky's own app writes).
         val newItem = com.mediaviewer.json.JsonObject().apply {
-            addProperty("type", "feed")
+            addProperty("type", type)
             addProperty("value", feedUri)
-            addProperty("pinned", false)
+            addProperty("pinned", pinned)
             addProperty("id", com.mediaviewer.platform.randomUuidString())
         }
 
@@ -1894,7 +1919,7 @@ class BlueskyRepository {
                 val o = e.asJsonObject
                 return when (o.get("type")?.asString) {
                     "timeline" -> FOLLOWING_FEED_URI
-                    "feed" -> o.get("value")?.asString
+                    "feed", "list" -> o.get("value")?.asString
                     else -> null
                 }
             }
@@ -2707,6 +2732,202 @@ class BlueskyRepository {
         val name = runCatching { body.getAsJsonObject("list")?.get("name")?.asString }.getOrNull() ?: "List"
         val canonical = runCatching { body.getAsJsonObject("list")?.get("uri")?.asString }.getOrNull() ?: atUri
         canonical to name
+    }
+
+    // ── Lists as feeds, and the profile Lists/Feeds tab ─────────────────────
+
+    /** A list's name and cover as a feed entry (a list pinned as a feed). */
+    suspend fun getListInfo(token: String, listUri: String): Result<BskyFeedInfo> = runCatching {
+        val resp = if (token.isNotBlank()) api.getList("Bearer $token", listUri, 1, null) else publicAppView.getList(null, listUri, 1, null)
+        val list = resp.body()?.getAsJsonObject("list") ?: error("GetList ${resp.code()}")
+        BskyFeedInfo(
+            uri = list.get("uri")?.takeIf { !it.isJsonNull }?.asString ?: listUri,
+            displayName = list.get("name")?.takeIf { !it.isJsonNull }?.asString?.ifBlank { null } ?: "List",
+            avatarUrl = list.get("avatar")?.takeIf { !it.isJsonNull }?.asString
+        )
+    }
+
+    /**
+     * A list as a feed: its members' own ORIGINAL posts only — no reposts,
+     * no replies — newest first (the order Bluesky's list feed already
+     * comes in). A raw page can be mostly reposts/replies, so this keeps
+     * reading (up to 5 pages) until there's a useful batch to show.
+     */
+    suspend fun getListFeedOriginals(token: String, myDid: String, listUri: String, cursor: String? = null)
+        : Result<Pair<List<MediaItem>, String?>> = runCatching {
+        var c = cursor
+        val out = ArrayList<MediaItem>()
+        var pages = 0
+        while (true) {
+            val cur = c
+            val resp = viaAppView(token, myDid, "app.bsky.feed.getListFeed") { a, auth -> a.getListFeed(auth, listUri, 100, cur) }
+            if (!resp.isSuccessful) error("ListFeed ${resp.code()}: ${errorBodyText(resp)}")
+            val body = resp.body() ?: error("ListFeed ${resp.code()}")
+            out += hubListOriginalPosts(body.feed)
+            pages++
+            c = body.cursor?.takeIf { it.isNotBlank() && it != cur }
+            if (c == null || out.size >= 12 || pages >= 5) break
+        }
+        Pair(out.distinctBy { it.postUri }, c)
+    }
+
+    /** Every account on a list (public AppView, no sign-in needed) — the
+     *  Stellar Supporters check on app start. */
+    suspend fun getPublicListMemberDids(listUri: String, max: Int = 5000): Result<Set<String>> = runCatching {
+        val out = LinkedHashSet<String>()
+        var cursor: String? = null
+        do {
+            val c = cursor
+            val resp = publicAppView.getList(null, listUri, 100, c)
+            if (!resp.isSuccessful) error("GetList ${resp.code()}")
+            val body = resp.body() ?: break
+            body.getAsJsonArray("items")?.forEach { el ->
+                runCatching { el.asJsonObject.getAsJsonObject("subject")?.get("did")?.asString }.getOrNull()?.let { out += it }
+            }
+            cursor = body.get("cursor")?.takeIf { !it.isJsonNull }?.asString?.takeIf { it.isNotBlank() && it != c }
+        } while (cursor != null && out.size < max)
+        out
+    }
+
+    /** A list's members, each with the list item record that puts them on
+     *  it (the popup opened from a profile's Lists/Feeds tab). */
+    suspend fun getListMembers(token: String, myDid: String, listUri: String, max: Int = 1000): Result<List<ListMember>> = runCatching {
+        val out = ArrayList<ListMember>()
+        var cursor: String? = null
+        do {
+            val c = cursor
+            val resp = viaAppView(token, myDid, "app.bsky.graph.getList") { a, auth -> a.getList(auth, listUri, 100, c) }
+            if (!resp.isSuccessful) error("GetList ${resp.code()}: ${errorBodyText(resp)}")
+            val body = resp.body() ?: break
+            body.getAsJsonArray("items")?.forEach { el ->
+                val item = runCatching { el.asJsonObject }.getOrNull() ?: return@forEach
+                val subj = runCatching { item.getAsJsonObject("subject") }.getOrNull() ?: return@forEach
+                val did = subj.get("did")?.takeIf { !it.isJsonNull }?.asString ?: return@forEach
+                val handle = subj.get("handle")?.takeIf { !it.isJsonNull }?.asString ?: did
+                val following = runCatching { subj.getAsJsonObject("viewer")?.get("following")?.takeIf { !it.isJsonNull }?.asString }.getOrNull()
+                out += ListMember(
+                    author = AuthorInfo(
+                        did = did, handle = handle,
+                        displayName = subj.get("displayName")?.takeIf { !it.isJsonNull }?.asString?.ifBlank { null } ?: handle,
+                        avatarUrl = subj.get("avatar")?.takeIf { !it.isJsonNull }?.asString,
+                        followingUri = following, isFollowing = following != null
+                    ),
+                    itemUri = item.get("uri")?.takeIf { !it.isJsonNull }?.asString.orEmpty()
+                )
+            }
+            cursor = body.get("cursor")?.takeIf { !it.isJsonNull }?.asString?.takeIf { it.isNotBlank() && it != c }
+        } while (cursor != null && out.size < max)
+        out.distinctBy { it.author.did }
+    }
+
+    /** Everything on a profile's Lists/Feeds tab: the feeds they made, their
+     *  lists and moderation lists, and their starter packs. */
+    suspend fun getProfileLists(token: String, did: String): Result<List<ProfileListEntry>> = runCatching {
+        coroutineScope {
+            val feedsJob = async { runCatching { api.getActorFeeds("Bearer $token", did, 100) }.getOrNull() }
+            val listsJob = async { runCatching { api.getLists("Bearer $token", did, 100) }.getOrNull() }
+            val packsJob = async { runCatching { api.getActorStarterPacks("Bearer $token", did, 100) }.getOrNull() }
+            val feedsResp = feedsJob.await(); val listsResp = listsJob.await(); val packsResp = packsJob.await()
+            if (feedsResp?.isSuccessful != true && listsResp?.isSuccessful != true && packsResp?.isSuccessful != true) {
+                error("Couldn't load lists (${listsResp?.code() ?: feedsResp?.code() ?: 0})")
+            }
+            val out = ArrayList<ProfileListEntry>()
+            feedsResp?.body()?.feeds?.forEach { f ->
+                out += ProfileListEntry(ProfileListKind.FEED, f.uri, f.displayName.ifBlank { "Feed" }, f.description, f.avatar)
+            }
+            val lists = listsResp?.body()?.lists ?: emptyList()
+            lists.filter { !it.purpose.contains("modlist") && !it.purpose.contains("referencelist") }.forEach { l ->
+                out += ProfileListEntry(
+                    ProfileListKind.LIST, l.uri, l.name.ifBlank { "List" }, l.description, l.avatar,
+                    itemCount = l.listItemCount ?: l.itemCount, listUri = l.uri
+                )
+            }
+            packsResp?.body()?.starterPacks?.forEach { p ->
+                val rec = p.record ?: return@forEach
+                out += ProfileListEntry(
+                    ProfileListKind.STARTER_PACK, p.uri, rec.name.ifBlank { "Starter Pack" }, rec.description, null,
+                    itemCount = p.listItemCount, listUri = rec.list.takeIf { it.isNotBlank() }
+                )
+            }
+            lists.filter { it.purpose.contains("modlist") }.forEach { l ->
+                out += ProfileListEntry(
+                    ProfileListKind.MOD_LIST, l.uri, l.name.ifBlank { "Moderation List" }, l.description, l.avatar,
+                    itemCount = l.listItemCount ?: l.itemCount, listUri = l.uri, blockUri = l.viewer?.blocked
+                )
+            }
+            out
+        }
+    }
+
+    /** "Block All" on a moderation list: Bluesky's list block — everyone on
+     *  the list (now and later) is blocked until it's taken back off.
+     *  Returns the block record's URI. */
+    suspend fun blockList(token: String, did: String, listUri: String): Result<String> =
+        createRecord(token, did, "app.bsky.graph.listblock", mapOf(
+            "\$type" to "app.bsky.graph.listblock",
+            "subject" to listUri,
+            "createdAt" to com.mediaviewer.platform.nowIsoString()
+        ))
+
+    suspend fun unblockList(token: String, did: String, listBlockUri: String): Result<Unit> =
+        deleteRecord(token, did, "app.bsky.graph.listblock", listBlockUri.rkey())
+
+    /** Deletes one of your own records by its at:// URI (a list, a starter
+     *  pack, …). */
+    suspend fun deleteOwnRecord(token: String, did: String, recordUri: String): Result<Unit> =
+        deleteRecord(token, did, recordUri.collection(), recordUri.rkey())
+
+    /** After deleting one of your lists: clears out the list items that
+     *  pointed at it (they'd otherwise stay behind in your repo). Best
+     *  effort — stops quietly on any error. */
+    suspend fun deleteListItemsOf(token: String, did: String, listUri: String) {
+        runCatching {
+            var cursor: String? = null
+            var pages = 0
+            do {
+                val resp = api.listRecords("Bearer $token", did, "app.bsky.graph.listitem", 100, cursor)
+                val body = resp.body() ?: break
+                for (rec in body.records) {
+                    val list = runCatching { rec.value?.asJsonObject?.get("list")?.asString }.getOrNull()
+                    if (list == listUri) deleteRecord(token, did, "app.bsky.graph.listitem", rec.uri.rkey())
+                }
+                cursor = body.cursor?.takeIf { it.isNotBlank() }
+                pages++
+            } while (cursor != null && pages < 30)
+        }
+    }
+
+    /** Add To → double-tap a list's cover: uploads [imageUri] and sets it as
+     *  that list's cover (everything else in the record is kept). Returns
+     *  nothing — the new cover's CDN URL only exists once Bluesky has
+     *  re-indexed the list, so callers reload their lists afterwards. */
+    suspend fun setListCover(
+        token: String, did: String, context: com.mediaviewer.platform.PlatformContext,
+        listUri: String, imageUri: com.mediaviewer.platform.PlatformUri
+    ): Result<Unit> = runCatching {
+        val collection = listUri.collection()
+        val rkey = listUri.rkey()
+        val existing = api.getRecord("Bearer $token", did, collection, rkey)
+        val obj = existing.body()?.value?.takeIf { it.isJsonObject }?.asJsonObject ?: error("Couldn't read the list (${existing.code()})")
+        val record = LinkedHashMap<String, Any>()
+        obj.entrySet().forEach { (k, v) -> record[k] = v }
+        val up = uploadImageBlob(token, context, imageUri).getOrThrow()
+        record["avatar"] = blobJson(up.blob)
+        val resp = api.putRecord("Bearer $token", BskyPutRecordRequest(did, collection, rkey, record))
+        if (!resp.isSuccessful) error("Saving the cover failed (${resp.code()})")
+    }
+
+    /** A profile's did, avatar and whether you follow them — by handle or
+     *  did (the welcome popup's suggested accounts). */
+    suspend fun getProfileBasics(token: String, actor: String): Result<AuthorInfo> = runCatching {
+        val resp = api.getProfileDetailed("Bearer $token", actor)
+        val body = resp.body() ?: error("Profile ${resp.code()}")
+        AuthorInfo(
+            did = body.did, handle = body.handle,
+            displayName = body.displayName?.takeIf { it.isNotBlank() } ?: body.handle,
+            avatarUrl = body.avatar,
+            followingUri = body.viewer?.following, isFollowing = body.viewer?.following != null
+        )
     }
 
     /** Add To → rename: changes the `name` of one of your own list /

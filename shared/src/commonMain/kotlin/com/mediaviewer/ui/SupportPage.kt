@@ -34,6 +34,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.AttachMoney
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.LocalCafe
 import androidx.compose.material.icons.filled.Payments
@@ -137,7 +138,15 @@ internal fun SupportPageContent(liquidGlass: Boolean, tint: Color) {
             textAlign = TextAlign.Center, modifier = Modifier.widthIn(max = 360.dp)
         )
 
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(10.dp))
+        Text(
+            SUPPORTER_PERK_TEXT,
+            color = lerp(Color(0xFFFF4FA1), Color.White, 0.35f), fontSize = 13.sp, lineHeight = 19.sp,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center, modifier = Modifier.widthIn(max = 360.dp)
+        )
+
+        Spacer(Modifier.height(20.dp))
         Column(Modifier.widthIn(max = 460.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             supportMethods.forEach { SupportCard(it, liquidGlass, tint) }
         }
@@ -214,3 +223,79 @@ private fun SupportCard(method: SupportMethod, liquidGlass: Boolean, tint: Color
 /** fillMaxSize inside the fixed-size icon tile (a plain Modifier, so this
  *  file doesn't depend on being inside a BoxScope helper). */
 private fun Modifier.matchParentSizeCompat(): Modifier = this.fillMaxSize()
+
+/** What supporting gets you — shown on the Support page and in the popup. */
+internal const val SUPPORTER_PERK_TEXT =
+    "\$4.99 or more will give you Stellar supporter features for a month!! Just make sure to include your Stellar/Bluesky handle in the note :3"
+
+/**
+ * The inside of the "Support Stellar" popup (shown once, on the tenth time
+ * Stellar is opened): an X at the top left, how many times the app has been
+ * opened, and the same three ways to chip in as the Support page — compact,
+ * each one tappable.
+ */
+@Composable
+internal fun SupportPopupContent(openCount: Int, tint: Color, onClose: () -> Unit) {
+    val uriHandler = LocalUriHandler.current
+    val tap = rememberHapticTap()
+    Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 14.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(34.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.10f))
+                    .clickable { tap(); onClose() },
+                contentAlignment = Alignment.Center
+            ) { Icon(androidx.compose.material.icons.Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(18.dp)) }
+            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Favorite, contentDescription = null, tint = Color(0xFFFF4FA1), modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Support Stellar", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.size(34.dp))
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "You've opened Stellar $openCount times!! If you're enjoying my app, please consider supporting me through any of these platforms.",
+            color = Color.White.copy(alpha = 0.9f), fontSize = 13.sp, lineHeight = 18.sp,
+            textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            SUPPORTER_PERK_TEXT,
+            color = lerp(Color(0xFFFF4FA1), Color.White, 0.35f), fontSize = 12.sp, lineHeight = 17.sp, fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
+        )
+        Spacer(Modifier.height(12.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            supportMethods.forEach { method ->
+                val shape = RoundedCornerShape(16.dp)
+                val panel = lerp(Color(0xFF101014), lerp(tint, method.accent, 0.6f), 0.16f)
+                Row(
+                    Modifier.fillMaxWidth().clip(shape)
+                        .background(Brush.horizontalGradient(listOf(method.accent.copy(alpha = 0.30f), panel.copy(alpha = 0.85f), panel.copy(alpha = 0.85f))))
+                        .border(1.dp, Brush.linearGradient(listOf(method.accent.copy(alpha = 0.9f), Color.White.copy(alpha = 0.18f), tint.copy(alpha = 0.5f))), shape)
+                        .clickable { tap(); runCatching { uriHandler.openUri(method.url) } }
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).background(method.accent),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(method.fallback, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                        AsyncImage(
+                            model = "https://www.google.com/s2/favicons?domain=${method.domain}&sz=128",
+                            contentDescription = method.name, contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp))
+                        )
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(method.name, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                        Text(method.handle, color = lerp(method.accent, Color.White, 0.45f), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                    }
+                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "Open ${method.name}", tint = Color.White.copy(alpha = 0.85f), modifier = Modifier.size(16.dp))
+                }
+            }
+        }
+    }
+}

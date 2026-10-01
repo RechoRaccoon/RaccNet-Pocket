@@ -1,7 +1,14 @@
 package com.mediaviewer.worker
 
 fun urlToDownloadInfo(url: String, postId: String, isVideo: Boolean = false): Triple<String, String, String> {
-    val rawExt = url.substringAfterLast('.', "jpg").lowercase().substringBefore('?')
+    // Bluesky CDN URLs end in ".../<cid>@jpeg" with no real extension (the
+    // last '.' is in the host name), so fall back to the "@format" suffix.
+    val lastSegment = url.substringBefore('?').substringAfterLast('/')
+    val rawExt = when {
+        '@' in lastSegment -> lastSegment.substringAfterLast('@').lowercase().let { if (it == "jpeg") "jpg" else it }
+        '.' in lastSegment -> lastSegment.substringAfterLast('.').lowercase()
+        else -> "jpg"
+    }.takeIf { it.isNotEmpty() && it.length <= 5 && it.all(Char::isLetterOrDigit) } ?: "jpg"
     // When the caller already knows this is a video (e.g. a Bluesky HLS
     // playlist URL that doesn't end in .mp4), don't trust the URL's
     // extension — force a real video mimetype/extension so it saves as a

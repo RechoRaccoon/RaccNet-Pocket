@@ -12,9 +12,14 @@ import com.mediaviewer.json.JsonParser
 
 /**
  * Settings → Customize Hub: which rows the Hub shows, in what order, plus any
- * Bluesky lists added as their own rows. Stored in the "hub_layout"
- * SharedPreferences (included in Settings → Export/Import App Data — see
- * AppBackup.SHARED_PREFS) and readable anywhere as Compose state.
+ * rows added on top of the defaults — Bluesky lists, and "Profiles" rows
+ * (a hand-picked set of accounts that lives only on this device). Stored in
+ * the "hub_layout" SharedPreferences (included in Settings → Export/Import
+ * App Data — see AppBackup.SHARED_PREFS) and readable anywhere as Compose
+ * state.
+ *
+ * Every row can be removed, the default ones included; Customize Hub's
+ * Add → Default puts a removed default row back (see [addDefault]).
  *
  * Saved per signed-in account: each account's layout lives under its own
  * key ("rows_json@<did>"), and [setAccount] (called whenever the signed-in
@@ -30,8 +35,12 @@ object HubLayout {
     const val LIVESTREAMS = "live"
     const val BLOGS = "blogs"
     const val REVIEWS = "reviews"
+    /** "Stellar's Supporters": a default row backed by the Stellar
+     *  Supporters list, in Posts mode unless switched to Profiles. */
+    const val SUPPORTERS = "supporters"
     const val SWITCH_ACCOUNTS = "switch"
     private const val LIST_PREFIX = "list:"
+    private const val PROFILES_PREFIX = "profiles:"
 
     private const val PREFS = "hub_layout"
     /** The old, shared (pre per-account) layout. */
@@ -39,19 +48,35 @@ object HubLayout {
     private const val KEY_ACTIVE_DID = "active_did"
     private const val KEY_LEGACY_CLAIMED = "legacy_claimed"
     private fun keyFor(did: String) = "$KEY_ROWS@" + did.ifBlank { "signed_out" }
+    /** Default rows the account has removed (so they aren't put back). */
+    private fun removedKeyFor(did: String) = "removed_defaults@" + did.ifBlank { "signed_out" }
+
+    /** One account in a Profiles row (kept on-device with the row). */
+    data class Profile(val did: String, val handle: String, val displayName: String, val avatarUrl: String?)
 
     /** One Hub row. Built-in rows only use [id] and [enabled]; a list row
      *  also carries its list's [listUri], [name] and whether it shows the
-     *  members' latest posts ([showPosts]) or just their icons. */
+     *  members' latest posts ([showPosts]) or just their icons; a Profiles
+     *  row carries its [profiles] instead of a list. */
     data class Row(
         val id: String,
         val enabled: Boolean = true,
         val listUri: String? = null,
         val name: String = "",
-        val showPosts: Boolean = false
+        val showPosts: Boolean = false,
+        val profiles: List<Profile> = emptyList()
     ) {
+        /** One of the default rows (Add → Default). */
+        val isBuiltIn: Boolean get() = BUILT_IN_LABELS.containsKey(id)
+        /** Backed by a Bluesky list (Stellar's Supporters included). */
         val isList: Boolean get() = listUri != null
-        val label: String get() = if (isList) name.ifBlank { "List" } else BUILT_IN_LABELS[id] ?: id
+        /** A local, private set of accounts. */
+        val isProfiles: Boolean get() = id.startsWith(PROFILES_PREFIX)
+        /** Has members and their posts: gets the Profiles/Posts button. */
+        val hasMembers: Boolean get() = isList || isProfiles
+        /** What its loaded content is stored under (MainViewModel.hubLists). */
+        val contentKey: String get() = listUri ?: id
+        val label: String get() = BUILT_IN_LABELS[id] ?: name.ifBlank { if (isProfiles) "Profiles" else "List" }
     }
 
     val BUILT_IN_LABELS = linkedMapOf(
@@ -61,10 +86,18 @@ object HubLayout {
         LIVESTREAMS to "Livestreams",
         BLOGS to "Blogs",
         REVIEWS to "Reviews",
+        SUPPORTERS to "Stellar's Supporters",
         SWITCH_ACCOUNTS to "Switch Accounts"
     )
 
-    private fun defaultRows(): List<Row> = BUILT_IN_LABELS.keys.map { Row(it) }
+    /** The default rows, in their default order (Add → Default's list). */
+    val defaultRowIds: List<String> get() = BUILT_IN_LABELS.keys.toList()
+
+    private fun defaultRow(id: String): Row =
+        if (id == SUPPORTERS) Row(id, listUri = StellarOfficial.SUPPORTERS_LIST_URI, name = "Stellar's Supporters", showPosts = true)
+        else Row(id)
+
+    private fun defaultRows(): List<Row> = BUILT_IN_LABELS.keys.map { defaultRow(it) }
 
     var rows by mutableStateOf(defaultRows())
         private set
@@ -72,12 +105,14 @@ object HubLayout {
     private var prefs: SharedPreferences? = null
     /** Whose layout [rows] currently is. */
     private var accountDid: String = ""
+    private var removedDefaults: Set<String> = emptySet()
 
     fun init(context: PlatformContext) {
         if (prefs != null) return
         val p = context.sharedPreferences(PREFS)
         prefs = p
         accountDid = p.getString(KEY_ACTIVE_DID, null) ?: ""
+        removedDefaults = readRemoved(p, accountDid)
         rows = normalize(parse(readFor(p, accountDid)))
     }
 
@@ -87,8 +122,12 @@ object HubLayout {
         if (did == accountDid && p.contains(keyFor(did))) return
         accountDid = did
         p.edit().putString(KEY_ACTIVE_DID, did).commit()
+        removedDefaults = readRemoved(p, did)
         rows = normalize(parse(readFor(p, did)))
     }
+
+    private fun readRemoved(p: SharedPreferences, did: String): Set<String> =
+        p.getString(removedKeyFor(did), null)?.split(',')?.filter { it.isNotBlank() }?.toSet() ?: emptySet()
 
     /** [did]'s saved layout, claiming the old shared one for the first
      *  signed-in account that asks (so an existing setup isn't lost). */
@@ -134,23 +173,51 @@ object HubLayout {
         return true
     }
 
+    /** Adds a Profiles row (accounts picked in Customize Hub → Add →
+     *  Profiles) at the bottom. Private and on-device: no Bluesky list is
+     *  made. Returns the new row's id. */
+    fun addProfiles(name: String, profiles: List<Profile>): String {
+        val id = PROFILES_PREFIX + com.mediaviewer.platform.randomUuidString()
+        update(rows + Row(id = id, name = name.trim().ifBlank { "Profiles" }, profiles = profiles.distinctBy { it.did }))
+        return id
+    }
+
     /** Keeps a list row's name in step with the list's real name (it was
      *  renamed in Add To or in another app). The row itself — its place,
-     *  on/off and Posts/Accounts choice — is untouched. */
+     *  on/off and Posts/Profiles choice — is untouched. */
     fun renameList(uri: String, name: String) {
         val id = listId(uri)
         if (name.isBlank() || rows.none { it.id == id && it.name != name }) return
         update(rows.map { if (it.id == id) it.copy(name = name) else it })
     }
 
+    /** Removes a row. A default row can be added back from Add → Default. */
     fun remove(id: String) {
-        if (BUILT_IN_LABELS.containsKey(id)) return
+        if (rows.none { it.id == id }) return
+        if (BUILT_IN_LABELS.containsKey(id)) {
+            removedDefaults = removedDefaults + id
+            saveRemoved()
+        }
         update(rows.filterNot { it.id == id })
+    }
+
+    /** Add → Default: puts a removed default row back, where it sits in the
+     *  default order (right after the nearest default row before it). */
+    fun addDefault(id: String) {
+        if (!BUILT_IN_LABELS.containsKey(id) || rows.any { it.id == id }) return
+        removedDefaults = removedDefaults - id
+        saveRemoved()
+        update(rows)
+    }
+
+    private fun saveRemoved() {
+        prefs?.edit()?.putString(removedKeyFor(accountDid), removedDefaults.joinToString(","))?.apply()
     }
 
     /** Re-reads the saved layout (after an App Data import). */
     fun reload() {
         val p = prefs ?: return
+        removedDefaults = readRemoved(p, accountDid)
         rows = normalize(parse(readFor(p, accountDid)))
     }
 
@@ -159,24 +226,29 @@ object HubLayout {
         prefs?.edit()?.putString(keyFor(accountDid), serialize(rows))?.apply()
     }
 
-    /** Every built-in row exactly once (new ones appended), no duplicate lists. */
+    /** Every default row exactly once (new ones added in, removed ones left
+     *  out), no duplicate lists. */
     private fun normalize(input: List<Row>): List<Row> {
         val seen = HashSet<String>()
         val out = ArrayList<Row>()
         for (r in input) {
             if (!seen.add(r.id)) continue
-            if (!r.isList && !BUILT_IN_LABELS.containsKey(r.id)) continue
-            out += r
+            val builtIn = BUILT_IN_LABELS.containsKey(r.id)
+            if (!builtIn && !r.isList && !r.isProfiles) continue
+            if (builtIn && r.id in removedDefaults) continue
+            // Stellar's Supporters always points at the real list.
+            out += if (r.id == SUPPORTERS) r.copy(listUri = StellarOfficial.SUPPORTERS_LIST_URI, name = "Stellar's Supporters") else r
         }
-        // A built-in row that's new since the layout was saved goes right
-        // after the one before it in the default order (e.g. Livestreams
-        // after Mutuals), not at the very bottom.
+        // A default row that's new since the layout was saved (or was just
+        // added back) goes right after the one before it in the default
+        // order (e.g. Stellar's Supporters after Reviews), not at the very
+        // bottom.
         val defaults = BUILT_IN_LABELS.keys.toList()
         for ((i, id) in defaults.withIndex()) {
-            if (id in seen) continue
+            if (id in seen || id in removedDefaults) continue
             val prev = defaults.subList(0, i).lastOrNull { p -> out.any { it.id == p } }
             val at = if (prev == null) 0 else out.indexOfFirst { it.id == prev } + 1
-            out.add(at, Row(id))
+            out.add(at, defaultRow(id))
             seen += id
         }
         return out
@@ -188,10 +260,22 @@ object HubLayout {
             val o = JsonObject()
             o.addProperty("id", r.id)
             o.addProperty("enabled", r.enabled)
-            if (r.listUri != null) {
-                o.addProperty("listUri", r.listUri)
+            if (r.listUri != null) o.addProperty("listUri", r.listUri)
+            if (r.hasMembers) {
                 o.addProperty("name", r.name)
                 o.addProperty("showPosts", r.showPosts)
+            }
+            if (r.isProfiles) {
+                val ps = JsonArray()
+                for (p in r.profiles) {
+                    val po = JsonObject()
+                    po.addProperty("did", p.did)
+                    po.addProperty("handle", p.handle)
+                    po.addProperty("displayName", p.displayName)
+                    if (p.avatarUrl != null) po.addProperty("avatarUrl", p.avatarUrl)
+                    ps.add(po)
+                }
+                o.add("profiles", ps)
             }
             arr.add(o)
         }
@@ -204,12 +288,26 @@ object HubLayout {
             JsonParser.parseString(json).asJsonArray.mapNotNull { el ->
                 val o = el.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
                 val id = o.get("id")?.asString ?: return@mapNotNull null
+                val profiles = runCatching {
+                    o.get("profiles")?.takeIf { it.isJsonArray }?.asJsonArray?.mapNotNull member@{ pe ->
+                        val po = pe.takeIf { it.isJsonObject }?.asJsonObject ?: return@member null
+                        val did = po.get("did")?.takeIf { !it.isJsonNull }?.asString ?: return@member null
+                        val handle = po.get("handle")?.takeIf { !it.isJsonNull }?.asString ?: did
+                        Profile(
+                            did = did, handle = handle,
+                            displayName = po.get("displayName")?.takeIf { !it.isJsonNull }?.asString?.ifBlank { null } ?: handle,
+                            avatarUrl = po.get("avatarUrl")?.takeIf { !it.isJsonNull }?.asString
+                        )
+                    }
+                }.getOrNull() ?: emptyList()
                 Row(
                     id = id,
                     enabled = o.get("enabled")?.asBoolean ?: true,
                     listUri = o.get("listUri")?.takeIf { !it.isJsonNull }?.asString,
                     name = o.get("name")?.takeIf { !it.isJsonNull }?.asString ?: "",
-                    showPosts = o.get("showPosts")?.asBoolean ?: false
+                    // Stellar's Supporters starts out in Posts mode.
+                    showPosts = o.get("showPosts")?.asBoolean ?: (id == SUPPORTERS),
+                    profiles = profiles
                 )
             }
         }.getOrElse { defaultRows() }

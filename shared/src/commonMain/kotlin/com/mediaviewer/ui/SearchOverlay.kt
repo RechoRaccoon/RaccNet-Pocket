@@ -37,6 +37,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.graphics.graphicsLayer
+import kotlinx.coroutines.launch
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
@@ -105,7 +107,27 @@ fun SearchOverlay(
     onLoadMorePosts: () -> Unit = {},
     onClose: () -> Unit
 ) {
-    com.mediaviewer.ui.compat.BackHandler(onBack = onClose)
+    // The bar "splits": the page opens looking exactly like the Hub's search
+    // bar (field + round search button), then the field's left end separates
+    // into a round back button — mirroring the search button on the right.
+    // Closing plays it backwards, so the bar is whole again as the Hub
+    // reappears.
+    val split = remember { androidx.compose.animation.core.Animatable(0f) }
+    val splitScope = rememberCoroutineScope()
+    var closing by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        split.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.62f, stiffness = 420f))
+    }
+    val closeWithMerge: () -> Unit = {
+        if (!closing) {
+            closing = true
+            splitScope.launch {
+                split.animateTo(0f, androidx.compose.animation.core.tween(150))
+                onClose()
+            }
+        }
+    }
+    com.mediaviewer.ui.compat.BackHandler(onBack = closeWithMerge)
     val focusRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
     // If the Tagged tab disappears while it's selected (its dataset was just
@@ -210,8 +232,23 @@ fun SearchOverlay(
             // they're two separately-positioned elements.
             // Same size, spacing and position as the Hub's search bar (the
             // back button lives up in the camera row instead, see below).
+            Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp).height(44.dp)) {
+                val p = split.value
+                // Back: a round bubble the same size as the search button on
+                // the right, sliding out of the field's left end.
+                RoundBackButton(
+                    liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop, onClick = closeWithMerge,
+                    size = 44.dp,
+                    modifier = Modifier.align(Alignment.CenterStart).graphicsLayer {
+                        val a = p.coerceIn(0f, 1f)
+                        alpha = a
+                        val sc = 0.55f + 0.45f * p
+                        scaleX = sc; scaleY = sc
+                        translationX = (1f - a) * 26.dp.toPx()
+                    }
+                )
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                Modifier.fillMaxSize().padding(start = 52.dp * p.coerceAtLeast(0f)),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -223,12 +260,13 @@ fun SearchOverlay(
                 @Composable
                 fun SearchFieldContent() {
                     val haptic = LocalHapticFeedback.current
+                    // Same icon size, text size and padding as the Hub's bar.
                     Row(
-                        Modifier.fillMaxSize().padding(horizontal = 14.dp),
+                        Modifier.fillMaxSize().padding(horizontal = 16.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(Icons.Default.Search, contentDescription = null, tint = DimGray, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.Search, contentDescription = null, tint = DimGray, modifier = Modifier.size(16.dp))
                         // Item 2: the Liked tab's text field routes through
                         // its own live-text-only/submit-on-search callbacks
                         // instead of onQueryChange, so typing doesn't
@@ -249,31 +287,27 @@ fun SearchOverlay(
                         )
                     }
                 }
-                // Item 4: no longer a translucent LiquidGlassSurface — an
-                // opaque mask instead, so once the suggestions panel below
-                // is showing, this field visually continues into it as one
-                // solid shape instead of the old semi-transparent field
-                // sitting oddly above an opaque dropdown.
+                // The field is the very same glass bubble as the Hub's search
+                // bar (no dimmed/opaque look). Only while the tag suggestions
+                // are open does it switch to the opaque panel, so the field
+                // and the dropdown under it read as one solid shape and the
+                // suggestions never turn see-through.
                 //
-                // Bug fix: barBottomLeft/barWidthPx are now measured from
-                // this field Box itself, not the outer Row above. The Row
-                // also contains the close bubble (30.dp) plus the 10.dp
-                // spacedBy gap before this field starts, so measuring the
-                // Row gave the suggestions panel below the *bar's* left
-                // edge/width instead of the *field's* — the panel rendered
-                // ~40dp too far left (starting under the close bubble) and
-                // too wide by the same amount. Tracking the field's own
-                // position/size lines the panel's edges up with the field
-                // that visually "grows into" it.
-                Box(
-                    Modifier.weight(1f).height(44.dp)
-                        .onGloballyPositioned {
-                            val pos = it.positionInRoot()
-                            barBottomLeft = Offset(pos.x, pos.y + it.size.height)
-                            barWidthPx = it.size.width
-                        }
-                        .opaqueMaskPanel(backdrop = searchBackdrop, tint = profileTint, shape = fieldShape)
-                ) { SearchFieldContent() }
+                // barBottomLeft/barWidthPx are measured from this field
+                // itself, so the suggestions panel lines up with it.
+                val fieldModifier = Modifier.weight(1f).height(44.dp)
+                    .onGloballyPositioned {
+                        val pos = it.positionInRoot()
+                        barBottomLeft = Offset(pos.x, pos.y + it.size.height)
+                        barWidthPx = it.size.width
+                    }
+                if (showSuggestions) {
+                    Box(fieldModifier.opaqueMaskPanel(backdrop = searchBackdrop, tint = profileTint, shape = fieldShape)) { SearchFieldContent() }
+                } else if (liquidGlass) {
+                    LiquidGlassSurface(fieldModifier, shape = fieldShape, tint = profileTint, backdrop = searchBackdrop) { SearchFieldContent() }
+                } else {
+                    Box(fieldModifier.clip(fieldShape).background(Color.White.copy(0.06f))) { SearchFieldContent() }
+                }
                 // Round search button on the right — same as the Hub's.
                 val searchTap = rememberHapticTap()
                 @Composable
@@ -287,6 +321,7 @@ fun SearchOverlay(
                 } else {
                     Box(Modifier.size(44.dp).clip(CircleShape).background(Color.White.copy(0.06f))) { SearchCircleContent() }
                 }
+            }
             }
 
             Spacer(Modifier.height(10.dp))
@@ -433,17 +468,7 @@ fun SearchOverlay(
             )
         }
 
-        // Back: a round button level with the camera-notch bubble, its left
-        // edge lined up with the search bar's (this page's 16dp margin).
-        val notchY = rememberNotchCenterY()
-        val backSize = rememberNotchBubbleSize()
-        RoundBackButton(
-            liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop, onClick = onClose,
-            size = backSize,
-            modifier = Modifier.align(Alignment.TopStart)
-                .padding(start = 16.dp)
-                .offset(y = (notchY - backSize / 2).coerceAtLeast(0.dp))
-        )
+        // (The back button is part of the search bar now — see the top.)
 
         // Item 4: the suggestions panel — a later sibling of the Column
         // above (so it draws on top of the filter row and results grid,
@@ -760,14 +785,14 @@ private fun BasicTextFieldWithPlaceholder(
         androidx.compose.foundation.text.BasicTextField(
             value = value, onValueChange = onValueChange,
             singleLine = true,
-            textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 15.sp),
+            textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 13.sp),
             cursorBrush = androidx.compose.ui.graphics.SolidColor(Color.White),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
             keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { onSearch() }),
             modifier = Modifier.fillMaxWidth().focusRequester(focusRequester)
         )
         if (value.isEmpty()) {
-            Text(placeholder, color = DimGray, fontSize = 15.sp)
+            Text(placeholder, color = DimGray, fontSize = 13.sp)
         }
     }
 }

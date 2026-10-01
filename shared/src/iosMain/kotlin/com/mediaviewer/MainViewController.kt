@@ -17,6 +17,7 @@ fun MainViewController(): UIViewController {
     IosCrashLog.install()
     IosImageLoading.install()
     IosNativePickers.install()
+    IosAudioSession.install()
     val crash = IosCrashLog.read()
     return ComposeUIViewController {
         SharedAppHost(
@@ -25,6 +26,24 @@ fun MainViewController(): UIViewController {
             crashLog = crash,
             onCrashLogDismissed = { IosCrashLog.clear() }
         )
+    }
+}
+
+/**
+ * Video sound. The default iOS audio session ("solo ambient") is silenced
+ * by the ring/silent switch, which is why feed videos played with no sound
+ * on the first device test. "Playback" is what video apps use: sound plays
+ * even with the switch on silent, like Android. Only the category is set
+ * here, so opening Stellar doesn't stop music — AVPlayer activates the
+ * session itself when a video actually starts playing.
+ */
+@OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+private object IosAudioSession {
+    fun install() {
+        runCatching {
+            platform.AVFAudio.AVAudioSession.sharedInstance()
+                .setCategory(platform.AVFAudio.AVAudioSessionCategoryPlayback, error = null)
+        }
     }
 }
 

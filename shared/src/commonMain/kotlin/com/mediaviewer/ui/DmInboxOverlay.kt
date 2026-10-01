@@ -483,6 +483,21 @@ private fun DmThreadView(
     // Tapping a reply's quote scrolls to (and briefly lights up) the original.
     var highlightId by remember { mutableStateOf<String?>(null) }
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    // Opening the keyboard moves the whole conversation up with the message
+    // field (the messages that were just above the field stay just above it)
+    // instead of only the field riding up over the chat. The field's bottom
+    // padding grows by exactly the keyboard's height, and the list scrolls by
+    // the same amount, frame by frame as the keyboard animates.
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val keyboardInsets = WindowInsets.ime.union(WindowInsets.navBarSpace)
+    LaunchedEffect(listState, keyboardInsets, density) {
+        var last = keyboardInsets.getBottom(density)
+        snapshotFlow { keyboardInsets.getBottom(density) }.collect { now ->
+            val delta = now - last
+            last = now
+            if (delta != 0) listState.dispatchRawDelta(delta.toFloat())
+        }
+    }
 
     Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize()) {

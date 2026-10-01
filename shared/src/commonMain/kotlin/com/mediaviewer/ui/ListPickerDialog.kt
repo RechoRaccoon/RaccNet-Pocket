@@ -101,6 +101,10 @@ fun ListPickerDialog(
     onCreate: (String, String, String, com.mediaviewer.platform.PlatformUri?, (String?) -> Unit) -> Unit = { _, _, _, _, _ -> },
     /** Double-tap a name to rename: (records to rename, new name, onDone(error or null)). */
     onRename: (List<String>, String, (String?) -> Unit) -> Unit = { _, _, done -> done(null) },
+    /** Press and hold an entry, then confirm: (records to delete, onDone(error or null)). */
+    onDelete: (List<String>, (String?) -> Unit) -> Unit = { _, done -> done(null) },
+    /** Double-tap a list's cover and pick a picture: (list URI, picture, onDone(error or null)). */
+    onSetCover: (String, com.mediaviewer.platform.PlatformUri, (String?) -> Unit) -> Unit = { _, _, done -> done(null) },
     onDismiss: () -> Unit
 ) {
     var activeTab by remember(initialTab) {
@@ -109,6 +113,23 @@ fun ListPickerDialog(
     // Non-null while the "Create new …" form is showing.
     var creatingKind by remember { mutableStateOf<PickerTab?>(null) }
     val tint = dominantColor
+    // Press and hold → "Delete this list?" (the app's usual confirm popup).
+    var deleteTarget by remember { mutableStateOf<PickerEntry?>(null) }
+    var deleting by remember { mutableStateOf(false) }
+    // Double-tap a cover → the photo picker → that list's new cover. Only
+    // normal lists have an editable cover; on the Both tab it's the LIST's
+    // cover that changes (Both shows the list's cover).
+    var coverTargetUri by remember { mutableStateOf<String?>(null) }
+    var coverBusyUri by remember { mutableStateOf<String?>(null) }
+    val coverPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val listUri = coverTargetUri
+        coverTargetUri = null
+        if (uri != null && listUri != null) {
+            coverBusyUri = listUri
+            onSetCover(listUri, uri) { coverBusyUri = null }
+        }
+    }
+    val pickerView = com.mediaviewer.ui.compat.rememberPlatformView()
 
     fun switchTab(tab: PickerTab) {
         activeTab = tab
@@ -155,8 +176,9 @@ fun ListPickerDialog(
         }
     }
 
-    BackHandler(onBack = { if (creatingKind != null) creatingKind = null else onDismiss() })
+    BackHandler(enabled = deleteTarget == null, onBack = { if (creatingKind != null) creatingKind = null else onDismiss() })
 
+    Box(Modifier.fillMaxSize()) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -235,12 +257,23 @@ fun ListPickerDialog(
                                         }
                                     }
                                     items(entries, key = { it.key }) { entry ->
+                                        val coverEditable = entry.kind == PickerTab.LISTS || entry.kind == PickerTab.BOTH
                                         EntryRow(
                                             entry = entry, tint = tint,
                                             isMember = memberships.containsKey(entry.listUri),
                                             busy = entry.listUri in busy,
                                             onToggle = { onToggle(entry.listUri, entry.additionalUri) },
-                                            onRename = { name, done -> onRename(entry.renameUris, name, done) }
+                                            onRename = { name, done -> onRename(entry.renameUris, name, done) },
+                                            onLongPress = {
+                                                pickerView.performHapticFeedback(com.mediaviewer.ui.compat.HapticFeedbackConstants.LONG_PRESS)
+                                                deleteTarget = entry
+                                            },
+                                            coverBusy = coverBusyUri == entry.listUri,
+                                            onChangeCover = if (coverEditable) ({
+                                                pickerView.performHapticFeedback(com.mediaviewer.ui.compat.HapticFeedbackConstants.CONTEXT_CLICK)
+                                                coverTargetUri = entry.listUri
+                                                coverPicker.launch("image/*")
+                                            }) else null
                                         )
                                     }
                                     item(key = "create_${activeTab.key}") {
@@ -254,6 +287,27 @@ fun ListPickerDialog(
             }
         }
     }
+        deleteTarget?.let { target ->
+            ConfirmPopup(
+                title = when (target.kind) {
+                    PickerTab.LISTS -> "Delete this list?"
+                    PickerTab.STARTER_PACKS -> "Delete this starter pack?"
+                    PickerTab.BOTH -> "Delete this list and starter pack?"
+                    PickerTab.MODLISTS -> "Delete this moderation list?"
+                },
+                message = "\"${target.name}\" will be deleted for good.",
+                confirmLabel = "Delete",
+                liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                preview = target.avatarUrl,
+                busy = deleting,
+                onConfirm = {
+                    deleting = true
+                    onDelete(target.renameUris) { deleting = false; deleteTarget = null }
+                },
+                onDismiss = { if (!deleting) deleteTarget = null }
+            )
+        }
+    }
 }
 
 // ─── Rows ───────────────────────────────────────────────────────────────────
@@ -264,7 +318,13 @@ private val RowShape = RoundedCornerShape(12.dp)
 @Composable
 private fun EntryRow(
     entry: PickerEntry, tint: Color, isMember: Boolean, busy: Boolean, onToggle: () -> Unit,
-    onRename: (String, (String?) -> Unit) -> Unit = { _, done -> done(null) }
+    onRename: (String, (String?) -> Unit) -> Unit = { _, done -> done(null) },
+    /** Press and hold (the cover or the name): ask to delete it. */
+    onLongPress: () -> Unit = {},
+    /** The new cover is uploading. */
+    coverBusy: Boolean = false,
+    /** Double-tap the cover: pick a new one. Null = this kind has no editable cover. */
+    onChangeCover: (() -> Unit)? = null
 ) {
     // Double-tap the name to edit it; the keyboard's Enter saves.
     var editing by remember(entry.key) { mutableStateOf(false) }
@@ -292,10 +352,18 @@ private fun EntryRow(
     ) {
         // Cover (or an icon for its kind), on the same dim backing as the name.
         Box(
-            Modifier.size(RowHeight).clip(RowShape).background(Color.Black.copy(alpha = 0.32f)),
+            Modifier.size(RowHeight).clip(RowShape).background(Color.Black.copy(alpha = 0.32f))
+                .pointerInput(entry.key, onChangeCover != null) {
+                    detectTapGestures(
+                        onDoubleTap = if (onChangeCover != null) ({ _ -> onChangeCover() }) else null,
+                        onLongPress = { onLongPress() }
+                    )
+                },
             contentAlignment = Alignment.Center
         ) {
-            if (entry.avatarUrl != null) {
+            if (coverBusy) {
+                CircularProgressIndicator(Modifier.size(16.dp), color = Color.White, strokeWidth = 1.5.dp)
+            } else if (entry.avatarUrl != null) {
                 AsyncImage(model = entry.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize().clip(RowShape))
             } else {
@@ -314,10 +382,13 @@ private fun EntryRow(
                 .then(
                     if (editing) Modifier.border(1.dp, lerp(tint, Color.White, 0.4f).copy(alpha = 0.8f), RowShape)
                     else Modifier.pointerInput(entry.key) {
-                        detectTapGestures(onDoubleTap = {
-                            draft = androidx.compose.ui.text.input.TextFieldValue(entry.name, androidx.compose.ui.text.TextRange(entry.name.length))
-                            editing = true
-                        })
+                        detectTapGestures(
+                            onDoubleTap = {
+                                draft = androidx.compose.ui.text.input.TextFieldValue(entry.name, androidx.compose.ui.text.TextRange(entry.name.length))
+                                editing = true
+                            },
+                            onLongPress = { onLongPress() }
+                        )
                     }
                 )
                 .padding(horizontal = 12.dp),

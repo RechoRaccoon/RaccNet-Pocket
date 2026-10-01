@@ -36,6 +36,8 @@ class VrmSettingsStore(context: Context) {
 
     companion object {
         const val UPPER_BODY = "upper_body"
+        /** Hand tracking (HandLandmarker) on/off — off for classic VTubing. */
+        const val HAND_TRACKING = "hand_tracking"
         const val FULL_BODY = "full_body"
         const val FOLLOW_HEAD = "follow_head"
         const val SMOOTHING = "smoothing"          // 0..10

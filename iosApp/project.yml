@@ -37,5 +37,5 @@ targets:
         "FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]": "$(inherited) $(SRCROOT)/../shared/build/bin/iosSimulatorArm64/releaseFramework"
         # The system frameworks the Kotlin code uses (video, web embeds,
         # photo picker, file types).
-        OTHER_LDFLAGS: "$(inherited) -framework Shared -framework AVFoundation -framework AVKit -framework CoreMedia -framework WebKit -framework Photos -framework PhotosUI -framework UniformTypeIdentifiers"
+        OTHER_LDFLAGS: "$(inherited) -framework Shared -framework AVFoundation -framework AVFAudio -framework AVKit -framework CoreMedia -framework WebKit -framework Photos -framework PhotosUI -framework UniformTypeIdentifiers"
         "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64

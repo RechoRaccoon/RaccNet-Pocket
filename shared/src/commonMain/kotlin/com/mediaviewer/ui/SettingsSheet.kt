@@ -341,6 +341,16 @@ fun SettingsSheet(
     }
     // Back from the Settings page returns to the Hub.
     com.mediaviewer.ui.compat.BackHandler(enabled = hubPage == HubPage.SETTINGS) { goToHubPage(HubPage.MAIN) }
+    // A profile's "Supporter" label (and anything else that asks): jump
+    // straight to Settings → Support Stellar.
+    val supportPageRequest = com.mediaviewer.util.UiToggles.supportPageRequest
+    LaunchedEffect(supportPageRequest) {
+        if (supportPageRequest > 0) {
+            goToHubPage(HubPage.SETTINGS)
+            settingsTab = SettingsTab.SUPPORT
+            com.mediaviewer.util.UiToggles.supportPageRequest = 0
+        }
+    }
     // Item 14: the Hub is one page now (Settings/AT Protocol/e621 chips are
     // gone — e621's own navigation folded into this page, its login moved
     // to Settings, see AtProtocolPageContent/SettingsPageContent), so
@@ -912,6 +922,9 @@ private fun AtProtocolPageContent(
         // specifically the mutual-follow set (see loadDmRecipients), and
         // "Friends" was ambiguous/confusing next to the "From Friends" grid
         // button above, which is a different, broader concept.
+        // No mutuals at all (once loading has finished): no Mutuals row —
+        // not an empty header over a blank strip.
+        if (!dmConversationsLoading && dmConversations.none { !it.isGroup }) return
         Spacer(Modifier.height(14.dp))
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
@@ -1237,14 +1250,16 @@ private fun AtProtocolPageContent(
                 }
                 com.mediaviewer.util.HubLayout.SWITCH_ACCOUNTS -> SwitchAccountsSection()
                 else -> {
-                    val uri = row.listUri
-                    if (uri != null) {
+                    // A Bluesky list, Stellar's Supporters, or a Profiles row
+                    // (accounts kept on this device) — all the same section.
+                    if (row.hasMembers) {
+                        val key = row.contentKey
                         HubListSection(
-                            row = row, state = hubLists[uri], liquidGlass = liquidGlass, tint = dominantColor,
-                            onLoad = { onLoadHubList(uri) },
-                            onLoadMore = { onLoadMoreHubList(uri) },
+                            row = row, state = hubLists[key], liquidGlass = liquidGlass, tint = dominantColor,
+                            onLoad = { onLoadHubList(key) },
+                            onLoadMore = { onLoadMoreHubList(key) },
                             onOpenProfile = onOpenProfile,
-                            onOpenPost = { index -> onOpenHubListPost(uri, row.label, index) }
+                            onOpenPost = { index -> onOpenHubListPost(key, row.label, index) }
                         )
                     }
                 }
@@ -1475,7 +1490,7 @@ private fun ReviewsBlogsScanIntroBubble(
     }
 }
 
-/** Customize Hub → a Bluesky list as its own Hub row. "Accounts" mode: the
+/** Customize Hub → a Bluesky list (or a Profiles row) as its own Hub row. "Profiles" mode: the
  *  members' icons (like Mutuals), whoever posted most recently first.
  *  "Posts" mode: the members' latest original posts, each with a little
  *  bubble above saying whose it is, all the same height as the Blogs cards.
@@ -1491,10 +1506,10 @@ private fun HubListSection(
     onOpenPost: (Int) -> Unit,
     onLoadMore: () -> Unit = {}
 ) {
-    LaunchedEffect(row.listUri) { onLoad() }
+    LaunchedEffect(row.contentKey, row.profiles) { onLoad() }
     // A failed load (e.g. the list was just renamed and Bluesky was still
     // re-indexing it) retries by itself instead of staying broken.
-    LaunchedEffect(row.listUri, state?.failed, state?.loadedAt) {
+    LaunchedEffect(row.contentKey, state?.failed, state?.loadedAt) {
         if (state?.failed == true) {
             kotlinx.coroutines.delay(20_000)
             onLoad()
@@ -1566,7 +1581,7 @@ private fun HubListSection(
         val posts = state?.posts ?: emptyList()
         // Nothing to show yet but more to read (e.g. the row was just
         // switched to Posts): start reading without waiting for a scroll.
-        LaunchedEffect(row.listUri, posts.isEmpty(), state?.loading, state?.loadingMore, state?.hasMore) {
+        LaunchedEffect(row.contentKey, posts.isEmpty(), state?.loading, state?.loadingMore, state?.hasMore) {
             if (state != null && !state.loading && !state.loadingMore && posts.isEmpty() && state.hasMore) onLoadMore()
         }
         if (loading || (posts.isEmpty() && state?.loadingMore == true)) {

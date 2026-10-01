@@ -189,6 +189,10 @@ actual fun VrmModeScreen(
     val store = remember { com.mediaviewer.util.VrmSettingsStore(context) }
     val K = com.mediaviewer.util.VrmSettingsStore
     var trackUpperBody by remember { mutableStateOf(store.bool(K.UPPER_BODY, false)) }
+    // Hand tracking can be switched off for classic (head-only) VTubing:
+    // the hand landmarker then gets no frames at all and the arms rest.
+    var handTracking by remember { mutableStateOf(store.bool(K.HAND_TRACKING, true)) }
+    androidx.compose.runtime.LaunchedEffect(handTracking) { store.put(K.HAND_TRACKING, handTracking) }
     var trackFullBody by remember { mutableStateOf(store.bool(K.FULL_BODY, false)) }
     // Video-call / filter framing: the avatar's head sits where yours is in
     // the (mirrored) camera frame instead of being locked to the centre.
@@ -703,7 +707,8 @@ actual fun VrmModeScreen(
             manualEyes = manualEyes,
             eyeClosed = eyeClosed,
             vrmData = parsedVrmData,
-            armsNeedHands = armsNeedHands
+            armsNeedHands = armsNeedHands,
+            handTracking = handTracking
         )
     }
     // Keeps derived tracking (and which trackers the camera feeds) current
@@ -732,6 +737,7 @@ actual fun VrmModeScreen(
         if (liquidGlass && !performanceMode) GlassBackdrop(backdropLayer) { backdropOrigin } else null
     }
 
+    androidx.compose.runtime.CompositionLocalProvider(LocalVrmSolidButtons provides performanceMode) {
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (hasCameraPermission) {
             // Headless — see VrmCameraTracking's doc comment for why this
@@ -748,6 +754,7 @@ actual fun VrmModeScreen(
                     handHelper = handHelper,
                     poseHelper = poseHelper,
                     poseMode = { pipeline.poseMode },
+                    handsEnabled = { pipeline.handTrackingOn },
                     gate = trackerGate,
                     faceNeedsRebuild = { now -> pipeline.shouldRebuildFace(now) },
                     frameIntervalMs = if (fastTracking) 33L else 66L,
@@ -966,6 +973,7 @@ actual fun VrmModeScreen(
                 tint = tint,
                 backdrop = backdrop,
                 ui = VrmSettingsUi(
+                    handTracking = handTracking, onToggleHandTracking = { handTracking = it },
                     trackUpperBody = trackUpperBody, onToggleUpperBody = { trackUpperBody = it },
                     trackFullBody = trackFullBody, onToggleFullBody = { trackFullBody = it },
                     followHead = followHead, onToggleFollowHead = { followHead = it },
@@ -1011,6 +1019,7 @@ actual fun VrmModeScreen(
             )
         }
     }
+    }
 }
 
 /** VRM mode's camera input — deliberately **not visual**: this used to
@@ -1043,6 +1052,8 @@ private fun VrmCameraTracking(
     poseHelper: PoseLandmarkerHelper?,
     /** Read on the analyzer thread per frame — see VrmTrackingPipeline.poseMode. */
     poseMode: () -> Int,
+    /** Read on the analyzer thread per frame: false = hand tracking off. */
+    handsEnabled: () -> Boolean = { true },
     gate: TrackerGate,
     /** Analyzer thread, per frame: true when the face landmarker has fallen
      *  behind and should be swapped for a fresh one (see
@@ -1063,6 +1074,7 @@ private fun VrmCameraTracking(
     val intervalMs = remember { java.util.concurrent.atomic.AtomicLong(frameIntervalMs) }
     androidx.compose.runtime.SideEffect { intervalMs.set(frameIntervalMs) }
     val currentPoseMode by androidx.compose.runtime.rememberUpdatedState(poseMode)
+    val currentHandsEnabled by androidx.compose.runtime.rememberUpdatedState(handsEnabled)
     val lastPoseMs = remember { java.util.concurrent.atomic.AtomicLong(0L) }
     val frameBitmaps = remember { FrameBitmaps() }
     val analysisHolder = remember { arrayOfNulls<ImageAnalysis>(1) }
@@ -1159,7 +1171,7 @@ private fun VrmCameraTracking(
                     if (faceHelper.rebuild()) gate.reset(TrackerGate.FACE)
                 }
                 if (faceHelper != null && gate.tryAcquire(TrackerGate.FACE, nowMs)) faceHelper.detectAsync(mpImage, 0, nowMs)
-                if (handHelper != null && gate.tryAcquire(TrackerGate.HAND, nowMs)) handHelper.detectAsync(mpImage, 0, nowMs)
+                if (handHelper != null && currentHandsEnabled() && gate.tryAcquire(TrackerGate.HAND, nowMs)) handHelper.detectAsync(mpImage, 0, nowMs)
                 // Pose: every frame while it's in use (Upper Body, or standing
                 // in for a hidden face), a couple of times a second while the
                 // head fallback just needs to stay locked on (see poseMode).
@@ -1726,6 +1738,7 @@ private fun VrmDebugReadout(
 
 /** Everything the VRM settings sheet shows and changes. */
 private class VrmSettingsUi(
+    val handTracking: Boolean, val onToggleHandTracking: (Boolean) -> Unit,
     val trackUpperBody: Boolean, val onToggleUpperBody: (Boolean) -> Unit,
     val trackFullBody: Boolean, val onToggleFullBody: (Boolean) -> Unit,
     val followHead: Boolean, val onToggleFollowHead: (Boolean) -> Unit,
@@ -1759,9 +1772,16 @@ private class VrmSettingsUi(
     val onPickAvatar: () -> Unit
 )
 
-/** The settings sheet wears the user's profile color ([tint]) like the rest
- *  of VRM mode: tinted glass (or a tint-darkened panel), tinted switches,
- *  sliders and links. */
+/** The four tabs of the VRM settings popup. */
+private enum class VrmSettingsTab(val label: String) { TRACKING("Tracking"), AVATAR("Avatar"), DISPLAY("Display"), EXTRAS("Audio & Web") }
+
+/**
+ * VRM settings: a compact popup in the user's profile color ([tint]) with
+ * four tabs — Tracking, Avatar, Display, Audio & Web. On/off settings are
+ * small two-per-row tiles; sliders and choices are single compact rows.
+ * The panel keeps one height across tabs (each tab scrolls on its own if
+ * it ever needs to), so switching tabs never makes the popup jump.
+ */
 @Composable
 private fun VrmSettingsSheet(
     liquidGlass: Boolean,
@@ -1771,9 +1791,9 @@ private fun VrmSettingsSheet(
     onDismiss: () -> Unit
 ) {
     val tap = rememberHapticTap()
+    var tab by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(VrmSettingsTab.TRACKING) }
     var partsExpanded by remember { mutableStateOf(false) }
-    val dim = Color.White.copy(alpha = 0.6f)
-    // Flat mode: the tint mixed into near-black, so it reads as "your color".
+    val dim = Color.White.copy(alpha = 0.55f)
     val flatPanel = androidx.compose.ui.graphics.lerp(Color(0xFF121212), tint, 0.22f)
     Box(
         Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f))
@@ -1784,162 +1804,246 @@ private fun VrmSettingsSheet(
             .imePadding(),
         contentAlignment = Alignment.Center
     ) {
-    VrmGlassPanel(
-        liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, flatColor = flatPanel,
-        modifier = Modifier.padding(horizontal = 20.dp).widthIn(max = 420.dp).fillMaxWidth()
-    ) {
-    Box(
-        Modifier
-            .heightIn(max = 600.dp)
-            .verticalScroll(androidx.compose.foundation.rememberScrollState())
-            .padding(18.dp)
-    ) {
-        androidx.compose.foundation.layout.Column {
-            Text("VRM Settings", color = Color.White, fontSize = 16.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "Face and hand tracking are always on. Body tracking is heavier — turn on only what you need.",
-                color = dim, fontSize = 12.sp
-            )
-
-            VrmSettingsSection("Tracking", tint)
-            VrmSettingsToggleRow("Upper Body", ui.trackUpperBody, tint) { ui.onToggleUpperBody(it); if (!it) ui.onToggleFullBody(false) }
-            VrmSettingsToggleRow("Full Body", ui.trackFullBody, tint, enabled = ui.trackUpperBody) { ui.onToggleFullBody(it) }
-            VrmSettingsToggleRow("Arms need hands", ui.armsNeedHands, tint, enabled = ui.trackUpperBody,
-                hint = "For close-ups: an arm only follows the body tracker while its hand is tracked too. Otherwise it rests at your side.") { ui.onToggleArmsNeedHands(it) }
-            VrmSettingsToggleRow("Hand IK (experimental)", ui.armIk, tint,
-                hint = "Your tracked hands place the avatar's arms, even with body tracking off.") { ui.onToggleArmIk(it) }
-            VrmSettingsToggleRow("Head fallback", ui.headFallback, tint,
-                hint = "When your face is hidden (hair, hands), the body tracker keeps your head placed and turned.") { ui.onToggleHeadFallback(it) }
-            VrmSettingsToggleRow("Fast tracking (30 fps)", ui.fastTracking, tint,
-                hint = "Keeps up with quick movements. Uses more battery and warms the phone.") { ui.onToggleFastTracking(it) }
-            VrmSettingsToggleRow("Performance mode", ui.performanceMode, tint,
-                hint = "Plain tinted buttons instead of glass that blurs the avatar. Frees up the GPU for tracking — useful with another app open or while streaming.") { ui.onTogglePerformanceMode(it) }
-            VrmSettingsChoiceRow(
-                label = "Frame rate cap", options = FRAME_RATE_CAPS, selected = ui.frameRateCap, tint = tint,
-                optionLabel = { "$it" },
-                hint = "Lower caps save battery and heat and leave more room for tracking, another app or a stream."
-            ) { ui.onFrameRateCap(it) }
-            VrmSettingsSlider(
-                label = "Smoothing", valueText = if (ui.smoothing == 0) "off" else ui.smoothing.toString(),
-                value = ui.smoothing.toFloat(), range = 0f..10f, steps = 9, tint = tint,
-                hint = "0 = raw and instant, 10 = smoothest. Fast moves stay responsive at any setting."
-            ) { ui.onSmoothing(kotlin.math.round(it).toInt()) }
-
-            VrmSettingsSection("Avatar", tint)
-            VrmSettingsToggleRow("Follow my head", ui.followHead, tint) { ui.onToggleFollowHead(it) }
-            VrmSettingsToggleRow("Physics (hair, ears, tails)", ui.springBones, tint,
-                hint = "The avatar's spring bones, if it has any.") { ui.onToggleSpringBones(it) }
-            VrmSettingsToggleRow("Manual eyes", ui.manualEyes, tint,
-                hint = "Ignores blinking; set how open the eyes are below.") { ui.onToggleManualEyes(it) }
-            if (ui.manualEyes) {
-                VrmSettingsSlider(
-                    label = "Eyes", valueText = when {
-                        ui.eyeClosed <= 0.02f -> "open"
-                        ui.eyeClosed >= 0.98f -> "closed"
-                        else -> "${((1f - ui.eyeClosed) * 100).toInt()}% open"
-                    },
-                    value = ui.eyeClosed, range = 0f..1f, steps = 0, tint = tint,
-                    startLabel = "Open", endLabel = "Closed"
-                ) { ui.onEyeClosed(it) }
-            }
-            // Avatar parts: every mesh piece (clothes, hair, accessories …)
-            // can be hidden. Collapsed to one row; tap to list them.
-            if (ui.avatarParts.isNotEmpty()) {
-                Row(
-                    Modifier.fillMaxWidth().padding(vertical = 10.dp).clickable { tap(); partsExpanded = !partsExpanded },
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Avatar parts", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                    val shown = ui.avatarParts.count { it.id !in ui.hiddenParts }
-                    Text("$shown/${ui.avatarParts.size} shown  ${if (partsExpanded) "▴" else "▾"}", color = dim, fontSize = 12.sp)
+        VrmGlassPanel(
+            liquidGlass = liquidGlass, tint = tint, backdrop = backdrop, flatColor = flatPanel,
+            modifier = Modifier.padding(horizontal = 16.dp).widthIn(max = 440.dp).fillMaxWidth()
+        ) {
+            Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 16.dp)) {
+                // Header: title + close.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Settings, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "VRM Settings", color = Color.White, fontSize = 16.sp,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, modifier = Modifier.weight(1f)
+                    )
+                    Box(
+                        Modifier.size(30.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.1f))
+                            .clickable { tap(); onDismiss() },
+                        contentAlignment = Alignment.Center
+                    ) { Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(16.dp)) }
                 }
-                if (partsExpanded) {
-                    androidx.compose.foundation.layout.Column(Modifier.fillMaxWidth().padding(start = 12.dp)) {
-                        for (part in ui.avatarParts) {
-                            VrmSettingsToggleRow(part.label, part.id !in ui.hiddenParts, tint) { ui.onSetPartVisible(part.id, it) }
+                Spacer(Modifier.height(12.dp))
+                // Tabs: a segmented pill; the selected tab is filled with your color.
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color.White.copy(alpha = 0.08f)).padding(3.dp)
+                ) {
+                    VrmSettingsTab.values().forEach { t ->
+                        val selected = t == tab
+                        val bg by androidx.compose.animation.animateColorAsState(
+                            if (selected) androidx.compose.ui.graphics.lerp(tint, Color.Black, 0.12f) else Color.Transparent,
+                            label = "vrmTab"
+                        )
+                        Box(
+                            Modifier.weight(1f).height(32.dp).clip(RoundedCornerShape(11.dp)).background(bg)
+                                .clickable { if (!selected) { tap(); tab = t } },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                t.label, color = if (selected) Color.White else Color.White.copy(alpha = 0.6f),
+                                fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                                maxLines = 1, softWrap = false
+                            )
                         }
                     }
-                    if (ui.hiddenParts.isNotEmpty()) {
-                        Text(
-                            "Show all", color = tint, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
-                            modifier = Modifier.padding(start = 12.dp, top = 4.dp, bottom = 4.dp).clickable { tap(); ui.onShowAllParts() }
-                        )
+                }
+                Spacer(Modifier.height(12.dp))
+                Box(
+                    Modifier.fillMaxWidth().heightIn(min = 260.dp, max = 430.dp)
+                        .verticalScroll(androidx.compose.foundation.rememberScrollState())
+                ) {
+                    Column(Modifier.fillMaxWidth()) {
+                        when (tab) {
+                            VrmSettingsTab.TRACKING -> {
+                                VrmTileGrid(tint, listOf(
+                                    VrmTile("Hands", ui.handTracking) { ui.onToggleHandTracking(it) },
+                                    VrmTile("Upper body", ui.trackUpperBody) { ui.onToggleUpperBody(it); if (!it) ui.onToggleFullBody(false) },
+                                    VrmTile("Full body", ui.trackFullBody, enabled = ui.trackUpperBody) { ui.onToggleFullBody(it) },
+                                    VrmTile("Hand IK", ui.armIk, enabled = ui.handTracking) { ui.onToggleArmIk(it) },
+                                    VrmTile("Arms need hands", ui.armsNeedHands, enabled = ui.trackUpperBody && ui.handTracking) { ui.onToggleArmsNeedHands(it) },
+                                    VrmTile("Head fallback", ui.headFallback) { ui.onToggleHeadFallback(it) },
+                                    VrmTile("Fast (30 fps)", ui.fastTracking) { ui.onToggleFastTracking(it) }
+                                ))
+                                Spacer(Modifier.height(6.dp))
+                                VrmSettingsSlider(
+                                    label = "Smoothing", valueText = if (ui.smoothing == 0) "Off" else ui.smoothing.toString(),
+                                    value = ui.smoothing.toFloat(), range = 0f..10f, steps = 9, tint = tint
+                                ) { ui.onSmoothing(kotlin.math.round(it).toInt()) }
+                                Text(
+                                    if (ui.handTracking) "Face is always tracked." else "Hands off — head-only VTubing.",
+                                    color = dim, fontSize = 11.sp, modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                            VrmSettingsTab.AVATAR -> {
+                                VrmTileGrid(tint, listOf(
+                                    VrmTile("Follow my head", ui.followHead) { ui.onToggleFollowHead(it) },
+                                    VrmTile("Physics", ui.springBones) { ui.onToggleSpringBones(it) },
+                                    VrmTile("Manual eyes", ui.manualEyes) { ui.onToggleManualEyes(it) }
+                                ))
+                                if (!ui.followHead) {
+                                    Text(
+                                        "Drag to orbit · two fingers to move · pinch to zoom",
+                                        color = dim, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp)
+                                    )
+                                }
+                                if (ui.manualEyes) {
+                                    Spacer(Modifier.height(4.dp))
+                                    VrmSettingsSlider(
+                                        label = "Eyes", valueText = when {
+                                            ui.eyeClosed <= 0.02f -> "Open"
+                                            ui.eyeClosed >= 0.98f -> "Closed"
+                                            else -> "${((1f - ui.eyeClosed) * 100).toInt()}% open"
+                                        },
+                                        value = ui.eyeClosed, range = 0f..1f, steps = 0, tint = tint
+                                    ) { ui.onEyeClosed(it) }
+                                }
+                                Spacer(Modifier.height(6.dp))
+                                VrmActionRow(
+                                    label = if (ui.hasAvatar) "Change avatar" else "Choose avatar",
+                                    value = ".vrm", tint = tint
+                                ) { ui.onPickAvatar() }
+                                VrmActionRow(label = "Reset camera", value = "View", tint = tint) { ui.onResetCamera() }
+                                // Avatar parts: every mesh piece (clothes, hair,
+                                // accessories …) can be hidden.
+                                if (ui.avatarParts.isNotEmpty()) {
+                                    val shown = ui.avatarParts.count { it.id !in ui.hiddenParts }
+                                    VrmActionRow(
+                                        label = "Avatar parts",
+                                        value = "$shown/${ui.avatarParts.size}  ${if (partsExpanded) "▴" else "▾"}",
+                                        tint = tint
+                                    ) { partsExpanded = !partsExpanded }
+                                    if (partsExpanded) {
+                                        VrmTileGrid(tint, ui.avatarParts.map { part ->
+                                            VrmTile(part.label, part.id !in ui.hiddenParts) { ui.onSetPartVisible(part.id, it) }
+                                        })
+                                        if (ui.hiddenParts.isNotEmpty()) {
+                                            Text(
+                                                "Show all", color = androidx.compose.ui.graphics.lerp(tint, Color.White, 0.35f), fontSize = 12.sp,
+                                                fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                                                modifier = Modifier.padding(top = 6.dp).clip(RoundedCornerShape(8.dp))
+                                                    .clickable { tap(); ui.onShowAllParts() }.padding(horizontal = 6.dp, vertical = 4.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            VrmSettingsTab.DISPLAY -> {
+                                VrmTileGrid(tint, listOf(
+                                    VrmTile("Performance", ui.performanceMode) { ui.onTogglePerformanceMode(it) },
+                                    VrmTile("Full bright", ui.fullBright) { ui.onToggleFullBright(it) },
+                                    VrmTile("Tracking preview", ui.showPreview) { ui.onTogglePreview(it) },
+                                    VrmTile("Debug info", ui.showDebug) { ui.onToggleDebug(it) }
+                                ))
+                                Spacer(Modifier.height(6.dp))
+                                VrmSettingsChoiceRow(
+                                    label = "Frame rate", options = FRAME_RATE_CAPS, selected = ui.frameRateCap, tint = tint,
+                                    optionLabel = { "$it" }
+                                ) { ui.onFrameRateCap(it) }
+                                if (!ui.fullBright) {
+                                    VrmSettingsSlider(
+                                        label = "Brightness", valueText = if (ui.lightLevel == 5) "Default" else "${ui.lightLevel}",
+                                        value = ui.lightLevel.toFloat(), range = 0f..10f, steps = 9, tint = tint
+                                    ) { ui.onLightLevel(kotlin.math.round(it).toInt()) }
+                                }
+                                VrmBackgroundColorRow(ui.backgroundColor, tint) { ui.onBackgroundColor(it) }
+                            }
+                            VrmSettingsTab.EXTRAS -> {
+                                VrmSettingsSlider(
+                                    label = "Voice pitch",
+                                    valueText = when {
+                                        ui.voicePitch == 0 -> "Natural"
+                                        ui.voicePitch > 0 -> "+${ui.voicePitch}"
+                                        else -> "${ui.voicePitch}"
+                                    },
+                                    value = ui.voicePitch.toFloat(), range = -8f..8f, steps = 15, tint = tint,
+                                    startLabel = "Deeper", endLabel = "Higher"
+                                ) { ui.onVoicePitch(kotlin.math.round(it).toInt()) }
+                                Spacer(Modifier.height(8.dp))
+                                VrmBrowserOverlaySettings(
+                                    enabled = ui.overlaysEnabled,
+                                    onToggleEnabled = ui.onToggleOverlays,
+                                    overlays = ui.browserOverlays,
+                                    tint = tint,
+                                    onAdd = ui.onAddOverlay,
+                                    onUpdate = ui.onUpdateOverlay,
+                                    onRemove = ui.onRemoveOverlay,
+                                    // Compact: the label and switch only.
+                                    toggleRow = { label, checked, _, onToggle -> VrmSettingsToggleRow(label, checked, tint, onToggle = onToggle) }
+                                )
+                            }
+                        }
                     }
                 }
             }
-            // Item 8, step 5 — no bundled default avatar, so the only way to
-            // get anything on screen is picking one's own file. "*/*" because
-            // .vrm has no registered MIME type; VrmParser rejects non-VRM picks.
-            Row(
-                Modifier.fillMaxWidth().padding(vertical = 10.dp).clickable { tap(); ui.onPickAvatar() },
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    if (ui.hasAvatar) "Change VRM avatar…" else "Choose VRM avatar…",
-                    color = tint, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f)
-                )
-            }
-
-            VrmSettingsSection("Display", tint)
-            VrmSettingsToggleRow("Full bright", ui.fullBright, tint,
-                hint = "No lighting or shadows — every texture shown at full brightness.") { ui.onToggleFullBright(it) }
-            if (!ui.fullBright) {
-                VrmSettingsSlider(
-                    label = "Brightness", valueText = if (ui.lightLevel == 5) "default" else "${ui.lightLevel}",
-                    value = ui.lightLevel.toFloat(), range = 0f..10f, steps = 9, tint = tint,
-                    hint = "How strongly the lights hit the avatar's face and body."
-                ) { ui.onLightLevel(kotlin.math.round(it).toInt()) }
-            }
-            VrmBackgroundColorRow(ui.backgroundColor, tint) { ui.onBackgroundColor(it) }
-            Row(
-                Modifier.fillMaxWidth().padding(vertical = 10.dp).clickable { tap(); ui.onResetCamera() },
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                androidx.compose.foundation.layout.Column(Modifier.weight(1f)) {
-                    Text("Reset camera", color = tint, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
-                    Text("Undo any spinning or zooming of the view.", color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp)
-                }
-            }
-            VrmSettingsToggleRow("Tracking preview", ui.showPreview, tint) { ui.onTogglePreview(it) }
-            VrmSettingsToggleRow("Debug info", ui.showDebug, tint) { ui.onToggleDebug(it) }
-
-            VrmSettingsSection("Voice", tint)
-            VrmSettingsSlider(
-                label = "Voice pitch",
-                valueText = when {
-                    ui.voicePitch == 0 -> "natural"
-                    ui.voicePitch > 0 -> "+${ui.voicePitch} higher"
-                    else -> "${ui.voicePitch} deeper"
-                },
-                value = ui.voicePitch.toFloat(), range = -8f..8f, steps = 15, tint = tint,
-                startLabel = "Deeper", endLabel = "Higher",
-                hint = "For recordings and streams. Takes effect on the next recording; live streams change instantly."
-            ) { ui.onVoicePitch(kotlin.math.round(it).toInt()) }
-
-            VrmSettingsSection("Overlays", tint)
-            VrmBrowserOverlaySettings(
-                enabled = ui.overlaysEnabled,
-                onToggleEnabled = ui.onToggleOverlays,
-                overlays = ui.browserOverlays,
-                tint = tint,
-                onAdd = ui.onAddOverlay,
-                onUpdate = ui.onUpdateOverlay,
-                onRemove = ui.onRemoveOverlay,
-                toggleRow = { label, checked, hint, onToggle -> VrmSettingsToggleRow(label, checked, tint, hint = hint, onToggle = onToggle) }
-            )
         }
     }
-    }
+}
+
+/** One on/off tile in [VrmTileGrid]. */
+private class VrmTile(val label: String, val checked: Boolean, val enabled: Boolean = true, val onToggle: (Boolean) -> Unit)
+
+/** On/off settings as small tiles, two per row: the label and a mini
+ *  switch; a tile that's on is tinted with your color. */
+@Composable
+private fun VrmTileGrid(tint: Color, tiles: List<VrmTile>) {
+    val tap = rememberHapticTap()
+    Column(verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)) {
+        tiles.chunked(2).forEach { pair ->
+            Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)) {
+                pair.forEach { t ->
+                    val on = t.checked && t.enabled
+                    val shape = RoundedCornerShape(14.dp)
+                    val bg by androidx.compose.animation.animateColorAsState(
+                        if (on) androidx.compose.ui.graphics.lerp(tint, Color.Black, 0.45f).copy(alpha = 0.85f) else Color.White.copy(alpha = 0.06f),
+                        label = "vrmTileBg"
+                    )
+                    Row(
+                        Modifier.weight(1f).height(44.dp).clip(shape).background(bg)
+                            .border(1.dp, if (on) tint.copy(alpha = 0.8f) else Color.White.copy(alpha = 0.1f), shape)
+                            .clickable(enabled = t.enabled) { tap(); t.onToggle(!t.checked) }
+                            .padding(start = 12.dp, end = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            t.label, color = Color.White.copy(alpha = if (t.enabled) 1f else 0.35f),
+                            fontSize = 12.5.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+                            maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        VrmMiniSwitch(on, tint, t.enabled)
+                    }
+                }
+                if (pair.size == 1) Spacer(Modifier.weight(1f))
+            }
+        }
     }
 }
 
 @Composable
-private fun VrmSettingsSection(title: String, tint: Color) {
-    Spacer(Modifier.height(14.dp))
-    Text(title.uppercase(), color = tint, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, letterSpacing = 1.sp)
-    Spacer(Modifier.height(2.dp))
+private fun VrmMiniSwitch(checked: Boolean, tint: Color, enabled: Boolean = true) {
+    val knob by androidx.compose.animation.core.animateDpAsState(if (checked) 14.dp else 0.dp, label = "vrmKnob")
+    Box(
+        Modifier.width(32.dp).height(18.dp).clip(RoundedCornerShape(9.dp))
+            .background(if (checked && enabled) androidx.compose.ui.graphics.lerp(tint, Color.White, 0.15f) else Color.White.copy(alpha = 0.18f))
+    ) {
+        Box(Modifier.padding(start = 2.dp + knob, top = 2.dp).size(14.dp).clip(CircleShape).background(Color.White.copy(alpha = if (enabled) 1f else 0.5f)))
+    }
+}
+
+/** A tappable single-line row: label on the left, a value/hint on the right. */
+@Composable
+private fun VrmActionRow(label: String, value: String, tint: Color, onClick: () -> Unit) {
+    val tap = rememberHapticTap()
+    Row(
+        Modifier.fillMaxWidth().padding(top = 8.dp).height(42.dp).clip(RoundedCornerShape(14.dp))
+            .background(Color.White.copy(alpha = 0.06f))
+            .clickable { tap(); onClick() }
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, color = Color.White, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium, modifier = Modifier.weight(1f))
+        Text(value, color = androidx.compose.ui.graphics.lerp(tint, Color.White, 0.4f), fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+    }
 }
 
 @Composable
@@ -1948,22 +2052,16 @@ private fun VrmSettingsToggleRow(
 ) {
     val tap = rememberHapticTap()
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 8.dp)
+        Modifier.fillMaxWidth().padding(vertical = 6.dp)
             .clickable(enabled = enabled) { tap(); onToggle(!checked) },
         verticalAlignment = Alignment.CenterVertically
     ) {
-        androidx.compose.foundation.layout.Column(Modifier.weight(1f)) {
-            Text(label, color = if (enabled) Color.White else Color.White.copy(alpha = 0.35f), fontSize = 14.sp)
+        Column(Modifier.weight(1f)) {
+            Text(label, color = if (enabled) Color.White else Color.White.copy(alpha = 0.35f), fontSize = 13.sp)
             if (hint != null) Text(hint, color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp)
         }
         Spacer(Modifier.width(10.dp))
-        Box(
-            Modifier.width(44.dp).height(26.dp).clip(RoundedCornerShape(13.dp))
-                .background(if (checked && enabled) tint else Color.White.copy(0.15f)),
-            contentAlignment = if (checked) Alignment.CenterEnd else Alignment.CenterStart
-        ) {
-            Box(Modifier.padding(3.dp).size(20.dp).clip(CircleShape).background(Color.White))
-        }
+        VrmMiniSwitch(checked, tint, enabled)
     }
 }
 
@@ -1977,16 +2075,16 @@ private fun <T> VrmSettingsChoiceRow(
     hint: String? = null, onSelect: (T) -> Unit
 ) {
     val tap = rememberHapticTap()
-    androidx.compose.foundation.layout.Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(label, color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Text(label, color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
             Row(
-                Modifier.clip(RoundedCornerShape(13.dp)).background(Color.White.copy(alpha = 0.12f)).padding(2.dp)
+                Modifier.clip(RoundedCornerShape(12.dp)).background(Color.White.copy(alpha = 0.1f)).padding(2.dp)
             ) {
                 options.forEach { option ->
                     val isSelected = option == selected
                     Box(
-                        Modifier.height(26.dp).clip(RoundedCornerShape(11.dp))
+                        Modifier.height(26.dp).clip(RoundedCornerShape(10.dp))
                             .background(if (isSelected) tint else Color.Transparent)
                             .clickable { if (!isSelected) { tap(); onSelect(option) } }
                             .padding(horizontal = 11.dp),
@@ -2009,27 +2107,29 @@ private fun VrmSettingsSlider(
     label: String, valueText: String, value: Float, range: ClosedFloatingPointRange<Float>, steps: Int, tint: Color,
     hint: String? = null, startLabel: String? = null, endLabel: String? = null, onChange: (Float) -> Unit
 ) {
-    androidx.compose.foundation.layout.Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+    Column(Modifier.fillMaxWidth().padding(top = 4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(label, color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
-            Text(valueText, color = tint, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+            Text(label, color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+            Text(valueText, color = androidx.compose.ui.graphics.lerp(tint, Color.White, 0.4f), fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
         }
         androidx.compose.material3.Slider(
             value = value, onValueChange = onChange, valueRange = range, steps = steps,
+            modifier = Modifier.height(32.dp),
             colors = androidx.compose.material3.SliderDefaults.colors(
-                thumbColor = tint, activeTrackColor = tint, inactiveTrackColor = Color.White.copy(alpha = 0.18f),
+                thumbColor = Color.White, activeTrackColor = tint, inactiveTrackColor = Color.White.copy(alpha = 0.18f),
                 activeTickColor = Color.White.copy(alpha = 0.5f), inactiveTickColor = Color.White.copy(alpha = 0.3f)
             )
         )
         if (startLabel != null || endLabel != null) {
             Row {
-                Text(startLabel ?: "", color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp, modifier = Modifier.weight(1f))
-                Text(endLabel ?: "", color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp)
+                Text(startLabel ?: "", color = Color.White.copy(alpha = 0.45f), fontSize = 10.sp, modifier = Modifier.weight(1f))
+                Text(endLabel ?: "", color = Color.White.copy(alpha = 0.45f), fontSize = 10.sp)
             }
         }
         if (hint != null) Text(hint, color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp)
     }
 }
+
 
 // BlazePose / hand topology — just the connections worth drawing.
 private val HAND_CONNECTIONS = intArrayOf(
@@ -2116,6 +2216,10 @@ private fun TrackingPreview(
     }
 }
 
+/** VRM performance mode: buttons and panels are drawn solid (no live blur
+ *  of the avatar behind them). Provided by VrmModeScreen. */
+internal val LocalVrmSolidButtons = androidx.compose.runtime.compositionLocalOf { false }
+
 /** Stream clock: m:ss, then h:mm:ss — it just keeps counting. */
 internal fun formatLiveClock(totalSeconds: Long): String {
     val s = totalSeconds.coerceAtLeast(0)
@@ -2143,7 +2247,23 @@ internal fun VrmGlassBubble(
     val base = modifier.size(size).clip(CircleShape)
     val ring = if (border != null) Modifier.border(3.dp, border, CircleShape) else Modifier
     val click = Modifier.clickable(enabled = enabled, onClick = onClick)
-    if (liquidGlass) {
+    if (LocalVrmSolidButtons.current) {
+        // Performance mode: no live blur — a solid fill in a deeper shade of
+        // your profile color, with a lighter rim, instead of see-through glass.
+        Box(
+            base.background(
+                androidx.compose.ui.graphics.Brush.verticalGradient(
+                    listOf(
+                        androidx.compose.ui.graphics.lerp(tint, Color.Black, 0.18f),
+                        androidx.compose.ui.graphics.lerp(tint, Color.Black, 0.42f)
+                    )
+                )
+            )
+                .border(1.dp, androidx.compose.ui.graphics.lerp(tint, Color.White, 0.4f).copy(alpha = 0.75f), CircleShape)
+                .then(ring).then(click),
+            contentAlignment = Alignment.Center, content = content
+        )
+    } else if (liquidGlass) {
         LiquidGlassSurface(
             modifier = base.then(ring).then(click),
             shape = CircleShape,
@@ -2173,7 +2293,7 @@ private fun VrmGlassPanel(
         interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
         indication = null
     ) {}
-    if (liquidGlass) {
+    if (liquidGlass && !LocalVrmSolidButtons.current) {
         LiquidGlassSurface(modifier = modifier.then(swallow), shape = shape, tint = tint, backdrop = backdrop) {
             // The page behind is dimmed, but the blurred crop isn't — this
             // keeps the panel's text as readable as the old flat sheet.
@@ -2601,6 +2721,9 @@ private class VrmTrackingPipeline : VrmFrameHook {
     private var headFallback = true
     private var armIk = false
     private var armsNeedHands = false
+    /** Hand tracking setting; read by the camera analyzer every frame. */
+    @Volatile var handTrackingOn = true
+        private set
     /** When each avatar-side hand was last tracked (main thread). */
     private val handSeenMs = HashMap<String, Long>()
     private var manualEyes = false
@@ -2613,9 +2736,12 @@ private class VrmTrackingPipeline : VrmFrameHook {
 
     fun sync(
         trackUpperBody: Boolean, trackFullBody: Boolean, headFallback: Boolean, armIk: Boolean,
-        manualEyes: Boolean, eyeClosed: Float, vrmData: VrmData?, armsNeedHands: Boolean = false
+        manualEyes: Boolean, eyeClosed: Float, vrmData: VrmData?, armsNeedHands: Boolean = false,
+        handTracking: Boolean = true
     ) {
         this.armsNeedHands = armsNeedHands
+        if (handTracking != handTrackingOn) settingsChanged = true
+        handTrackingOn = handTracking
         if (manualEyes != this.manualEyes || eyeClosed != this.eyeClosed || vrmData !== this.vrmData) expressionsDirty = true
         if (trackUpperBody != this.trackUpperBody || headFallback != this.headFallback) settingsChanged = true
         this.trackUpperBody = trackUpperBody
@@ -2727,7 +2853,7 @@ private class VrmTrackingPipeline : VrmFrameHook {
             body = if (trackUpperBody) smoothedBodyWorldLandmarks(p, poseFilters) else emptyMap()
         }
         if (handNew || poseNew || settingsNew) {
-            hands = avatarHands(h, if (trackUpperBody) p else null, f, w, ht, handFilters)
+            hands = avatarHands(if (handTrackingOn) h else null, if (trackUpperBody) p else null, f, w, ht, handFilters)
             if (handNew) {
                 val now = SystemClock.uptimeMillis()
                 for (side in hands.keys) handSeenMs[side] = now
@@ -2786,7 +2912,7 @@ private class VrmTrackingPipeline : VrmFrameHook {
             // shoulder/elbow/wrist while that side's hand is (or was just —
             // a short grace so a flickering hand doesn't drop the arm) being
             // tracked; otherwise it rests at the avatar's side.
-            val armBodySides = if (armsNeedHands && trackUpperBody) {
+            val armBodySides = if (armsNeedHands && trackUpperBody && handTrackingOn) {
                 val now = SystemClock.uptimeMillis()
                 handSeenMs.filterValues { now - it <= HAND_GRACE_MS }.keys
             } else null

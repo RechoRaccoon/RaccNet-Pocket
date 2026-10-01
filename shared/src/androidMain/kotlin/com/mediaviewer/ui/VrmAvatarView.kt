@@ -4,7 +4,11 @@ import android.util.Log
 import android.view.Choreographer
 import android.view.TextureView
 import android.view.View
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -132,6 +136,11 @@ fun VrmAvatarView(
     var loadError by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
     var userYawDegrees by remember { mutableStateOf(0f) }
+    // Free camera (Follow my head off): one finger orbits (spin + tilt),
+    // two fingers pan the model around the screen, pinch zooms.
+    var userPitchDegrees by remember { mutableStateOf(0f) }
+    var userPanX by remember { mutableStateOf(0f) }
+    var userPanY by remember { mutableStateOf(0f) }
     var zoom by remember { mutableStateOf(DEFAULT_ZOOM) }
     val currentOnRetarget by rememberUpdatedState(onRetargetTargetReady)
     val currentOnTextures by rememberUpdatedState(onTexturesApplied)
@@ -141,7 +150,9 @@ fun VrmAvatarView(
     val followingNow by rememberUpdatedState(followTracking)
     // "Follow my head" places the model itself, so manual spinning is off
     // while it's on — and any earlier spin is undone when it turns on.
-    LaunchedEffect(followTracking) { if (followTracking) userYawDegrees = 0f }
+    LaunchedEffect(followTracking) {
+        if (followTracking) { userYawDegrees = 0f; userPitchDegrees = 0f; userPanX = 0f; userPanY = 0f }
+    }
     // Bumped per load so hidden parts are re-applied to a fresh model.
     var loadGeneration by remember { mutableStateOf(0) }
 
@@ -149,6 +160,9 @@ fun VrmAvatarView(
     LaunchedEffect(cameraResetKey) {
         if (cameraResetKey != 0) {
             userYawDegrees = 0f
+            userPitchDegrees = 0f
+            userPanX = 0f
+            userPanY = 0f
             zoom = DEFAULT_ZOOM
         }
     }
@@ -191,6 +205,9 @@ fun VrmAvatarView(
     SideEffect {
         session?.let { s ->
             s.userYawDegrees = userYawDegrees
+            s.userPitchDegrees = userPitchDegrees
+            s.userPanX = userPanX
+            s.userPanY = userPanY
             s.zoom = zoom
             s.frameHook = frameHook
             s.followTracking = followTracking
@@ -282,10 +299,29 @@ fun VrmAvatarView(
             Modifier
                 .fillMaxSize()
                 .pointerInput(Unit) {
-                    detectTransformGestures { _, pan, gestureZoom, _ ->
-                        if (!followingNow) userYawDegrees += pan.x * DRAG_DEGREES_PER_PX
-                        if (gestureZoom != 1f) {
-                            zoom = (zoom * gestureZoom).coerceIn(MIN_ZOOM, MAX_ZOOM)
+                    // One finger: orbit (spin + tilt). Two fingers: pan, and
+                    // pinch to zoom. Orbit/pan only with Follow my head off
+                    // (follow places the model itself); pinch works in both.
+                    // Once a second finger has touched down, lifting it again
+                    // doesn't turn the rest of that gesture into a spin.
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        var multiTouch = false
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val pressed = event.changes.count { it.pressed }
+                            if (pressed == 0) break
+                            val pan = event.calculatePan()
+                            if (pressed >= 2) {
+                                multiTouch = true
+                                val gestureZoom = event.calculateZoom()
+                                if (gestureZoom != 1f) zoom = (zoom * gestureZoom).coerceIn(MIN_ZOOM, MAX_ZOOM)
+                                if (!followingNow) { userPanX += pan.x; userPanY += pan.y }
+                            } else if (!multiTouch && !followingNow) {
+                                userYawDegrees += pan.x * DRAG_DEGREES_PER_PX
+                                userPitchDegrees = (userPitchDegrees + pan.y * DRAG_DEGREES_PER_PX).coerceIn(-MAX_PITCH_DEGREES, MAX_PITCH_DEGREES)
+                            }
+                            event.changes.forEach { if (it.positionChanged()) it.consume() }
                         }
                     }
                 }
@@ -311,6 +347,8 @@ fun VrmAvatarView(
 }
 
 private const val DRAG_DEGREES_PER_PX = 0.25f
+/** Free camera: how far the model can be tilted towards / away from you. */
+private const val MAX_PITCH_DEGREES = 80f
 private const val DEFAULT_ZOOM = 1.7f
 private const val MIN_ZOOM = 0.6f
 private const val MAX_ZOOM = 5f
@@ -509,6 +547,10 @@ internal class ViewerSession {
     // Written by the composable (SideEffect), read by the frame loop.
     var frameHook: VrmFrameHook? = null
     var userYawDegrees = 0f
+    var userPitchDegrees = 0f
+    /** Two-finger pan, in screen pixels (converted at the model's depth). */
+    var userPanX = 0f
+    var userPanY = 0f
     var zoom = DEFAULT_ZOOM
     var framing: AvatarFraming? = null
     var followTracking = true
@@ -906,6 +948,28 @@ private fun ViewerSession.updateRootTransform(viewer: ModelViewer, dt: Float) {
     var targetT = floatArrayOf(0f, ZOOM_FOCUS_Y * (1f / zoom - zoom), 0f)
     if (followTracking) {
         solveFollow(viewer, yaw)?.let { (t, s) -> targetT = t; targetS = s }
+    } else if (userPanX != 0f || userPanY != 0f) {
+        // Two-finger pan: screen pixels -> world units at the model's depth,
+        // so the model moves exactly under your fingers.
+        val view = viewer.camera.getViewMatrix(FloatArray(16))
+        val proj = viewer.camera.getProjectionMatrix(DoubleArray(16))
+        val vh = viewer.view.viewport.height.toFloat()
+        val p11 = proj[5].toFloat()
+        if (vh > 0f && kotlin.math.abs(p11) > 1e-6f) {
+            val cc = UNIT_CUBE_CENTER
+            val q = transformPoint(view, cc[0] + targetT[0], cc[1] + targetT[1], cc[2] + targetT[2])
+            val depth = -q[2]
+            if (depth > 1e-3f) {
+                val k = 2f * depth / (p11 * vh)
+                val dx = userPanX * k
+                val dy = -userPanY * k
+                targetT = floatArrayOf(
+                    targetT[0] + view[0] * dx + view[1] * dy,
+                    targetT[1] + view[4] * dx + view[5] * dy,
+                    targetT[2] + view[8] * dx + view[9] * dy
+                )
+            }
+        }
     }
 
     if (snapFraming) {
@@ -925,6 +989,12 @@ private fun ViewerSession.updateRootTransform(viewer: ModelViewer, dt: Float) {
     val yawMatrix = Quaternion(0f, sin(half).toFloat(), 0f, cos(half).toFloat()).toColumnMajorMatrix()
     var m = multiplyColumnMajor4x4(translationMatrix(-c[0], -c[1], -c[2]), base)
     m = multiplyColumnMajor4x4(yawMatrix, m)
+    // Free-camera tilt (always 0 while following the head).
+    val pitch = if (followTracking) 0f else userPitchDegrees
+    if (pitch != 0f) {
+        val halfPitch = Math.toRadians(pitch.toDouble()) / 2.0
+        m = multiplyColumnMajor4x4(Quaternion(sin(halfPitch).toFloat(), 0f, 0f, cos(halfPitch).toFloat()).toColumnMajorMatrix(), m)
+    }
     m = multiplyColumnMajor4x4(scaleMatrix(appliedS), m)
     m = multiplyColumnMajor4x4(translationMatrix(c[0] + appliedT[0], c[1] + appliedT[1], c[2] + appliedT[2]), m)
     tm.setTransform(instance, m)

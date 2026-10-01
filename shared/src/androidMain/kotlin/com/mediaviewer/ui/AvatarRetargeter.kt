@@ -158,6 +158,9 @@ object AvatarRetargeter {
     /** Typical adult shoulder→wrist length (m): maps your hand's reach
      *  onto the avatar's own arm length. */
     private const val USER_ARM_M = 0.58f
+    /** Hand IK: how far (metres, in the user's own scale) the tracked hand
+     *  targets are moved towards the camera. */
+    private const val IK_HAND_FORWARD_M = 0.14f
 
     /** Share of the head turn taken by the neck (when the rig has one). */
     private const val NECK_SHARE = 0.4f
@@ -300,7 +303,13 @@ object AvatarRetargeter {
         for (side in SIDES) {
             val tracked = frame.hands[side]
             val hand = tracked?.points?.takeIf { it.size >= 21 }?.map { modelPoint(it, flip) }
-            val offset = if (frame.armIk) tracked?.offsetFromEyes?.let { modelPoint(it, flip) } else null
+            // Hand IK: the hands are pulled a little towards the camera, so
+            // they sit in front of the avatar instead of sinking into its
+            // chest (and into each other) — the depth estimate from palm
+            // size reads hands as further back than they really are.
+            val offset = if (frame.armIk) tracked?.offsetFromEyes?.let { o ->
+                modelPoint(floatArrayOf(o[0], o[1], o[2] - IK_HAND_FORWARD_M), flip)
+            } else null
             val bodyAllowed = frame.armBodySides?.contains(side) ?: true
             val noBody: (Int) -> FloatArray? = { _ -> null }
             driveArm(ctx, side, if (bodyAllowed) ::point else noBody, hand, offset, frame.armIk)
