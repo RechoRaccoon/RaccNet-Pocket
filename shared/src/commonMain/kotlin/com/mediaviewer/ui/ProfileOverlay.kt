@@ -1604,11 +1604,16 @@ private fun LinkableBioText(
             var end = match.range.last + 1
             while (end > start && text[end - 1] in ".,;:!?)]}\"'") end--
             if (end <= start) continue
-            val raw = text.substring(start, end)
+            var raw = text.substring(start, end)
             // A bsky.app profile (or post) link reads as the account's tag
-            // and opens in Stellar instead of the browser.
-            val profile = bioProfileLinkRegex.matchEntire(raw)
+            // and opens in Stellar instead of the browser. An account link
+            // is exactly the account and nothing more: it stops at the end
+            // of the handle (right after ".bsky.social" when it has one),
+            // whatever is typed straight after it.
+            val profile = bioProfileLinkRegex.find(raw)?.takeIf { it.range.first == 0 }
             if (profile != null) {
+                end = start + profile.range.last + 1
+                raw = text.substring(start, end)
                 val actor = profile.groupValues[1]
                 val rkey = profile.groupValues[2]
                 // A link by DID shows the account's handle once it's known.
@@ -1630,6 +1635,9 @@ private fun LinkableBioText(
             if (start > 0 && (text[start - 1].isLetterOrDigit() || text[start - 1] in "._-/@")) continue
             var end = match.range.last + 1
             while (end > start && text[end - 1] in ".-") end--
+            // Same rule for a typed tag: it ends right after ".bsky.social".
+            val social = text.substring(start, end).indexOf(".bsky.social", ignoreCase = true)
+            if (social >= 0) end = start + social + ".bsky.social".length
             val handle = text.substring(start + 1, end)
             if (!handle.contains('.')) continue
             if (pieces.any { start < it.end && end > it.start }) continue
@@ -1676,10 +1684,14 @@ private fun LinkableBioText(
     )
 }
 
-private val bioLinkRegex = Regex("""https?://\S+|www\.\S+|bsky\.app/profile/\S+""", RegexOption.IGNORE_CASE)
+// A link ends at the first character that can't be part of a URL — so a
+// symbol or emoji typed straight after it (".social𖤐") is left out.
+private const val URL_CHARS = """[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+"""
+private val bioLinkRegex = Regex("https?://$URL_CHARS|www\\.$URL_CHARS|bsky\\.app/profile/$URL_CHARS", RegexOption.IGNORE_CASE)
 private val bioMentionRegex = Regex("""@[A-Za-z0-9][A-Za-z0-9.-]*""")
 private val bioProfileLinkRegex = Regex(
-    """(?:https?://)?(?:www\.)?bsky\.app/profile/([^\s/?#]+)(?:/post/([^\s/?#]+))?/?(?:[?#]\S*)?""", RegexOption.IGNORE_CASE
+    """(?:https?://)?(?:www\.)?bsky\.app/profile/(did:[a-z0-9]+:[A-Za-z0-9._:%-]+|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*?\.bsky\.social|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)(?:/post/([A-Za-z0-9]+))?""",
+    RegexOption.IGNORE_CASE
 )
 
 /** The profile stats row: lays its items out at their natural size and, if

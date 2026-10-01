@@ -1921,7 +1921,7 @@ private fun VrmSettingsSheet(
                                     label = if (ui.hasAvatar) "Change avatar" else "Choose avatar",
                                     value = ".vrm", tint = tint
                                 ) { ui.onPickAvatar() }
-                                VrmActionRow(label = "Reset camera", value = "View", tint = tint) { ui.onResetCamera() }
+                                VrmActionRow(label = "Reset camera", value = "Reset", tint = tint) { ui.onResetCamera() }
                                 // Avatar parts: every mesh piece (clothes, hair,
                                 // accessories …) can be hidden.
                                 if (ui.avatarParts.isNotEmpty()) {
