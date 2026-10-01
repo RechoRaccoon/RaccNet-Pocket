@@ -2179,6 +2179,21 @@ class MainViewModel(
         }
     }
 
+    /** Unfollowing someone also drops them from the Reviews/Blogs
+     *  subscription lists: their cards leave the Hub's rows straight away,
+     *  then both rows are reloaded. */
+    private suspend fun unsubscribeOnUnfollow(did: String) {
+        val hadReviews = did in _subscribedReviewDids.value
+        val hadBlogs = did in _subscribedBlogDids.value
+        if (!hadReviews && !hadBlogs) return
+        if (hadReviews) prefs.toggleSubscribedReviewDid(did)
+        if (hadBlogs) prefs.toggleSubscribedBlogDid(did)
+        _friendsReviews.value = _friendsReviews.value.filterNot { it.author.did == did }
+        _friendsBlogs.value = _friendsBlogs.value.filterNot { it.author.did == did }
+        reviewsBlogsLoaded = false
+        loadFriendsReviewsIfNeeded(force = true)
+    }
+
     /** Blogs-tab equivalent of [toggleReviewSubscription]. */
     fun toggleBlogSubscription(author: AuthorInfo) {
         viewModelScope.launch(Dispatchers.IO) {
@@ -4751,11 +4766,12 @@ _bskyDid.value          = session.did
 
         viewModelScope.launch(Dispatchers.IO) {
             if (!willFollow) {
-                bskyRepo.unfollowUser(bskyToken, _bskyDid.value, author.followingUri ?: return@launch)
+                val unfollowed = bskyRepo.unfollowUser(bskyToken, _bskyDid.value, author.followingUri ?: return@launch)
                     .onFailure {
                         val cur2 = _profileOverlay.value ?: return@onFailure
                         _profileOverlay.value = cur2.copy(author = author, profile = cur2.profile?.copy(author = author))
                     }
+                if (unfollowed.isSuccess) unsubscribeOnUnfollow(author.did)
             } else {
                 bskyRepo.followUser(bskyToken, _bskyDid.value, author.did)
                     .onSuccess { uri ->
@@ -6099,8 +6115,9 @@ _bskyDid.value          = session.did
         if (author.isFollowing) {
             updateCurrentItemAuthor { it.copy(isFollowing = false, followingUri = null) }
             viewModelScope.launch(Dispatchers.IO) {
-                bskyRepo.unfollowUser(bskyToken, _bskyDid.value, author.followingUri ?: return@launch)
+                val unfollowed = bskyRepo.unfollowUser(bskyToken, _bskyDid.value, author.followingUri ?: return@launch)
                     .onFailure { updateCurrentItemAuthor { it.copy(isFollowing = true, followingUri = author.followingUri) } }
+                if (unfollowed.isSuccess) unsubscribeOnUnfollow(author.did)
             }
         } else {
             updateCurrentItemAuthor { it.copy(isFollowing = true) }
