@@ -355,7 +355,8 @@ class MainViewModel(
     // different ways. Per the feature request they're now a single POSTS
     // tab with a sub-filter row (All/Images/Text Posts/Horizontal Videos/
     // Vertical Videos) — see ProfileOverlay's PostKindFilter.
-    // LISTS_FEEDS ("Lists/Feeds") is always the last tab: the account's
+    // LISTS_FEEDS ("Lists/Feeds") is always the last tab, shown only when
+    // the account has any (probed on open, like Blogs/Vods): the account's
     // feeds, lists, starter packs and moderation lists (see loadProfileLists).
     enum class ProfileTab { POSTS, VODS, REPOSTS, LIKES, BLOGS, REVIEWS, BACKLOG, MUSIC_HISTORY, LISTS_FEEDS }
 
@@ -407,6 +408,7 @@ class MainViewModel(
         val reviews: List<PopfeedReview> = emptyList(),
         val backlog: List<PopfeedBacklogItem> = emptyList(),
         val vods: List<StreamplaceVideoView> = emptyList(),
+        val lists: List<ProfileListEntry> = emptyList(),
         // Fix (per feedback): which sub-filter pills had content, per tab —
         // tab name -> sub-filter names that matched at least one loaded
         // item (same predicates the UI's subtab strips use). Lets the
@@ -483,6 +485,7 @@ class MainViewModel(
                     reviews = state.tabStates[ProfileTab.REVIEWS]?.reviews ?: emptyList(),
                     backlog = state.tabStates[ProfileTab.BACKLOG]?.backlog ?: emptyList(),
                     vods = state.tabStates[ProfileTab.VODS]?.vods?.take(PROFILE_TAB_CACHE_ITEM_LIMIT) ?: emptyList(),
+                    lists = state.lists.entries.take(200),
                     // Fix (per feedback): remember which sub-filter pills
                     // had content, using the exact same predicates the
                     // UI's subtab strips use — merged over the previously
@@ -553,7 +556,7 @@ class MainViewModel(
         // Blogs/Reviews/Backlog are added to this set only once probing
         // confirms the account actually has Leaflet/Popfeed content — see
         // openProfile().
-        val availableTabs: Set<ProfileTab> = setOf(ProfileTab.POSTS, ProfileTab.REPOSTS, ProfileTab.LIKES, ProfileTab.LISTS_FEEDS),
+        val availableTabs: Set<ProfileTab> = setOf(ProfileTab.POSTS, ProfileTab.REPOSTS, ProfileTab.LIKES),
         val tabStates: Map<ProfileTab, ProfileTabState> = emptyMap(),
         // Lists/Feeds tab: its content, and which sub-tab is picked
         // (null = "All").
@@ -3777,7 +3780,7 @@ _bskyDid.value          = session.did
         // exactly as if nothing were cached, and will replace/correct
         // anything shown here once they resolve.
         val cached = cachedProfileTabsFor(author.did)
-        val seededAvailableTabs = setOf(ProfileTab.POSTS, ProfileTab.REPOSTS, ProfileTab.LIKES, ProfileTab.LISTS_FEEDS) +
+        val seededAvailableTabs = setOf(ProfileTab.POSTS, ProfileTab.REPOSTS, ProfileTab.LIKES) +
             (cached?.availableTabs?.mapNotNull { name -> runCatching { ProfileTab.valueOf(name) }.getOrNull() } ?: emptyList())
         val seededTabStates = buildMap {
             if (cached != null) {
@@ -3794,6 +3797,8 @@ _bskyDid.value          = session.did
             author = author, selectedTab = initialTab, parent = parent, openReview = review, openBlog = blog,
             openTitle = title, openTitlePreselectedReview = preselectedReview,
             availableTabs = seededAvailableTabs, tabStates = seededTabStates,
+            // Lists/Feeds from the cache too (refreshed by its probe).
+            lists = if (cached != null && cached.lists.isNotEmpty()) ProfileListsState(loaded = true, entries = cached.lists) else ProfileListsState(),
             // Fix (per feedback): seed the sub-filter memory from the
             // on-disk cache so subtab strips render instantly.
             seededSubtabs = cached?.subtabs?.mapNotNull { (tabName, subNames) ->
@@ -3916,6 +3921,9 @@ _bskyDid.value          = session.did
             _profileOverlay.value = updated
             persistProfileTabCache(updated)
         }
+        // Lists/Feeds: its tab only exists when the account has any; the
+        // cached ones (if any) show meanwhile.
+        loadProfileLists(force = true)
         // Item 16/7: Rocksky "Music History" tab, only shown once we actually
         // find any scrobbles — most accounts won't have Rocksky connected,
         // and that's a normal empty result, not an error. Paged the same
@@ -7268,10 +7276,21 @@ _bskyDid.value          = session.did
                 result = bskyRepo.getProfileLists(bskyToken, did)
             }
             val now = _profileOverlay.value?.takeIf { it.author.did == did } ?: return@launch
-            _profileOverlay.value = result.fold(
-                onSuccess = { entries -> now.copy(lists = ProfileListsState(loaded = true, entries = entries)) },
-                onFailure = { now.copy(lists = now.lists.copy(loading = false, loaded = true, failed = true)) }
+            val updated = result.fold(
+                onSuccess = { entries ->
+                    // The tab comes and goes with its content, like Blogs/Vods.
+                    val tabs = if (entries.isEmpty()) now.availableTabs - ProfileTab.LISTS_FEEDS else now.availableTabs + ProfileTab.LISTS_FEEDS
+                    now.copy(
+                        lists = ProfileListsState(loaded = true, entries = entries),
+                        availableTabs = tabs,
+                        selectedTab = if (now.selectedTab == ProfileTab.LISTS_FEEDS && entries.isEmpty()) ProfileTab.POSTS else now.selectedTab
+                    )
+                },
+                // Couldn't check: whatever was cached stays.
+                onFailure = { now.copy(lists = now.lists.copy(loading = false, loaded = true, failed = now.lists.entries.isEmpty())) }
             )
+            _profileOverlay.value = updated
+            if (result.isSuccess) persistProfileTabCache(updated)
         }
     }
 

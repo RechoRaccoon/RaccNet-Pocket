@@ -735,6 +735,7 @@ enum class ProfileListKind(val label: String) {
 /** One feed / list / starter pack / moderation list on a profile's
  *  Lists/Feeds tab. [listUri] is the list whose members it holds (itself
  *  for a list; a starter pack's underlying list; null for a feed). */
+@Serializable
 data class ProfileListEntry(
     val kind: ProfileListKind,
     val uri: String,
