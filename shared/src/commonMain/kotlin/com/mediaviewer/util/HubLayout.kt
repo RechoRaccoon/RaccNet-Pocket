@@ -35,7 +35,7 @@ object HubLayout {
     const val LIVESTREAMS = "live"
     const val BLOGS = "blogs"
     const val REVIEWS = "reviews"
-    /** "Stellar's Supporters": a default row backed by the Stellar
+    /** "Stellar Supporters": a default row backed by the Stellar
      *  Supporters list, in Posts mode unless switched to Profiles. */
     const val SUPPORTERS = "supporters"
     const val SWITCH_ACCOUNTS = "switch"
@@ -68,7 +68,7 @@ object HubLayout {
     ) {
         /** One of the default rows (Add → Default). */
         val isBuiltIn: Boolean get() = BUILT_IN_LABELS.containsKey(id)
-        /** Backed by a Bluesky list (Stellar's Supporters included). */
+        /** Backed by a Bluesky list (Stellar Supporters included). */
         val isList: Boolean get() = listUri != null
         /** A local, private set of accounts. */
         val isProfiles: Boolean get() = id.startsWith(PROFILES_PREFIX)
@@ -86,7 +86,7 @@ object HubLayout {
         LIVESTREAMS to "Livestreams",
         BLOGS to "Blogs",
         REVIEWS to "Reviews",
-        SUPPORTERS to "Stellar's Supporters",
+        SUPPORTERS to "Stellar Supporters",
         SWITCH_ACCOUNTS to "Switch Accounts"
     )
 
@@ -94,7 +94,7 @@ object HubLayout {
     val defaultRowIds: List<String> get() = BUILT_IN_LABELS.keys.toList()
 
     private fun defaultRow(id: String): Row =
-        if (id == SUPPORTERS) Row(id, listUri = StellarOfficial.SUPPORTERS_LIST_URI, name = "Stellar's Supporters", showPosts = true)
+        if (id == SUPPORTERS) Row(id, listUri = StellarOfficial.SUPPORTERS_LIST_URI, name = "Stellar Supporters", showPosts = true)
         else Row(id)
 
     private fun defaultRows(): List<Row> = BUILT_IN_LABELS.keys.map { defaultRow(it) }
@@ -182,6 +182,15 @@ object HubLayout {
         return id
     }
 
+    /** Customize Hub → a Profiles row's edit button: its new name and
+     *  accounts. Its place, on/off and Posts/Profiles choice are kept. */
+    fun updateProfiles(id: String, name: String, profiles: List<Profile>) {
+        if (rows.none { it.id == id && it.isProfiles }) return
+        update(rows.map {
+            if (it.id == id) it.copy(name = name.trim().ifBlank { it.name }, profiles = profiles.distinctBy { p -> p.did }) else it
+        })
+    }
+
     /** Keeps a list row's name in step with the list's real name (it was
      *  renamed in Add To or in another app). The row itself — its place,
      *  on/off and Posts/Profiles choice — is untouched. */
@@ -236,12 +245,12 @@ object HubLayout {
             val builtIn = BUILT_IN_LABELS.containsKey(r.id)
             if (!builtIn && !r.isList && !r.isProfiles) continue
             if (builtIn && r.id in removedDefaults) continue
-            // Stellar's Supporters always points at the real list.
-            out += if (r.id == SUPPORTERS) r.copy(listUri = StellarOfficial.SUPPORTERS_LIST_URI, name = "Stellar's Supporters") else r
+            // Stellar Supporters always points at the real list.
+            out += if (r.id == SUPPORTERS) r.copy(listUri = StellarOfficial.SUPPORTERS_LIST_URI, name = "Stellar Supporters") else r
         }
         // A default row that's new since the layout was saved (or was just
         // added back) goes right after the one before it in the default
-        // order (e.g. Stellar's Supporters after Reviews), not at the very
+        // order (e.g. Stellar Supporters after Reviews), not at the very
         // bottom.
         val defaults = BUILT_IN_LABELS.keys.toList()
         for ((i, id) in defaults.withIndex()) {
@@ -305,7 +314,7 @@ object HubLayout {
                     enabled = o.get("enabled")?.asBoolean ?: true,
                     listUri = o.get("listUri")?.takeIf { !it.isJsonNull }?.asString,
                     name = o.get("name")?.takeIf { !it.isJsonNull }?.asString ?: "",
-                    // Stellar's Supporters starts out in Posts mode.
+                    // Stellar Supporters starts out in Posts mode.
                     showPosts = o.get("showPosts")?.asBoolean ?: (id == SUPPORTERS),
                     profiles = profiles
                 )

@@ -308,7 +308,9 @@ private fun WelcomeRow(
         // Same compact switch as the Settings page's rows.
         Box(Modifier.size(width = 36.dp, height = 22.dp), contentAlignment = Alignment.Center) {
             Switch(
-                checked = on, onCheckedChange = { tap(); onToggle(it) }, enabled = enabled,
+                // Stays as it is (not greyed/blacked out) while Continue is
+                // working; taps are just ignored then.
+                checked = on, onCheckedChange = { if (enabled) { tap(); onToggle(it) } },
                 modifier = Modifier.scale(0.7f),
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = Color.White, checkedTrackColor = lerp(tint, Color.White, 0.25f),

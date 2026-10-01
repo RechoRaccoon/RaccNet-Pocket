@@ -493,7 +493,11 @@ fun ProfileOverlay(
     /** An @handle in the bio was tapped. */
     onOpenMention: (String) -> Unit = {},
     /** The "Supporter" label was tapped: Settings' Support Stellar page. */
-    onOpenSupportPage: () -> Unit = {}
+    onOpenSupportPage: () -> Unit = {},
+    /** Looks up the handle for a DID in a bio's bsky.app link. */
+    onResolveActor: suspend (String) -> String? = { null },
+    /** The loading screen over this profile has completely finished. */
+    loadingScreenDone: Boolean = true
 ) {
     val author  = state.author
     val profile = state.profile
@@ -788,7 +792,8 @@ fun ProfileOverlay(
                     onEditProfile = { editingProfile = true },
                     isSupporter = isSupporter,
                     onOpenSupportPage = onOpenSupportPage,
-                    onOpenMention = onOpenMention
+                    onOpenMention = onOpenMention,
+                    onResolveActor = onResolveActor
                 )
             }
 
@@ -1153,7 +1158,14 @@ fun ProfileOverlay(
         }
     }
         // A Stellar supporter's profile opens with confetti.
-        if (isSupporter && !reducedAnimations) SupporterConfetti(playKey = author.did)
+        // (Only once the loading screen is completely gone and the page is
+        // actually showing.)
+        var confettiStarted by remember(author.did) { mutableStateOf(false) }
+        if (isSupporter && !reducedAnimations && loadingScreenDone && !state.hidden && !state.loadingProfile) {
+            LaunchedEffect(author.did) { confettiStarted = true }
+        }
+        // Stays composed once started, so it plays once per visit.
+        if (confettiStarted) SupporterConfetti(playKey = author.did)
         pendingListAction?.let { entry ->
             val starter = entry.kind == com.mediaviewer.model.ProfileListKind.STARTER_PACK
             val n = entry.itemCount
@@ -1415,7 +1427,8 @@ private fun ProfileHeaderSection(
     onEditProfile: () -> Unit = {},
     isSupporter: Boolean = false,
     onOpenSupportPage: () -> Unit = {},
-    onOpenMention: (String) -> Unit = {}
+    onOpenMention: (String) -> Unit = {},
+    onResolveActor: suspend (String) -> String? = { null }
 ) {
     Column(Modifier.fillMaxWidth()) {
         // ── Banner ──
@@ -1524,7 +1537,7 @@ private fun ProfileHeaderSection(
         val bio = profile?.description.orEmpty()
         if (bio.isNotBlank()) {
             LinkableBioText(
-                text = bio, linkColor = linkColor, onOpenMention = onOpenMention,
+                text = bio, linkColor = linkColor, onOpenMention = onOpenMention, onResolveActor = onResolveActor,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)
             )
         } else if (loadingProfile) {
@@ -1564,38 +1577,82 @@ private fun ProfileHeaderSection(
  *  open a link. Detection is regex-based since Bluesky's profile records
  *  don't carry rich-text facets for the bio the way posts do for their text. */
 @Composable
-private fun LinkableBioText(text: String, linkColor: Color, modifier: Modifier = Modifier, onOpenMention: (String) -> Unit = {}) {
+private fun LinkableBioText(
+    text: String, linkColor: Color, modifier: Modifier = Modifier, onOpenMention: (String) -> Unit = {},
+    /** DID → handle (null if it can't be found). */
+    onResolveActor: suspend (String) -> String? = { null }
+) {
     val uriHandler = LocalUriHandler.current
-    val annotated = remember(text, linkColor) {
+    // Handles for bsky.app/profile/did:… links in the bio, looked up once.
+    val resolved = remember(text) { androidx.compose.runtime.mutableStateMapOf<String, String>() }
+    LaunchedEffect(text) {
+        bioLinkRegex.findAll(text)
+            .mapNotNull { bioProfileLinkRegex.find(it.value)?.groupValues?.get(1) }
+            .filter { it.startsWith("did:") }.distinct().toList()
+            .forEach { did -> runCatching { onResolveActor(did) }.getOrNull()?.let { resolved[did] = it } }
+    }
+    val resolvedSnapshot = resolved.toMap()
+    val annotated = remember(text, linkColor, resolvedSnapshot) {
+        // Every tappable piece, in order: (start, end, what's shown, tag, target).
+        class Piece(val start: Int, val end: Int, val shown: String, val tag: String, val target: String)
+        val pieces = ArrayList<Piece>()
+        for (match in bioLinkRegex.findAll(text)) {
+            // Trim common trailing punctuation a link often gets caught up
+            // in mid-sentence ("check out guns.lol/foo." shouldn't include
+            // the period).
+            val start = match.range.first
+            var end = match.range.last + 1
+            while (end > start && text[end - 1] in ".,;:!?)]}\"'") end--
+            if (end <= start) continue
+            val raw = text.substring(start, end)
+            // A bsky.app profile (or post) link reads as the account's tag
+            // and opens in Stellar instead of the browser.
+            val profile = bioProfileLinkRegex.matchEntire(raw)
+            if (profile != null) {
+                val actor = profile.groupValues[1]
+                val rkey = profile.groupValues[2]
+                // A link by DID shows the account's handle once it's known.
+                val shown = when {
+                    rkey.isNotEmpty() -> raw
+                    actor.startsWith("did:") -> resolved[actor]?.let { "@$it" } ?: raw
+                    else -> "@$actor"
+                }
+                pieces += Piece(start, end, shown, "MENTION", if (rkey.isEmpty()) actor else "$actor|$rkey")
+                continue
+            }
+            val url = if (raw.startsWith("http://", ignoreCase = true) || raw.startsWith("https://", ignoreCase = true)) raw else "https://$raw"
+            pieces += Piece(start, end, raw, "URL", url)
+        }
+        // @handles (e.g. "@RechoRaccoon.bsky.social") open that profile in
+        // Stellar. Skipped inside links and e-mail addresses.
+        for (match in bioMentionRegex.findAll(text)) {
+            val start = match.range.first
+            if (start > 0 && (text[start - 1].isLetterOrDigit() || text[start - 1] in "._-/@")) continue
+            var end = match.range.last + 1
+            while (end > start && text[end - 1] in ".-") end--
+            val handle = text.substring(start + 1, end)
+            if (!handle.contains('.')) continue
+            if (pieces.any { start < it.end && end > it.start }) continue
+            pieces += Piece(start, end, text.substring(start, end), "MENTION", handle.lowercase())
+        }
+        pieces.sortBy { it.start }
         buildAnnotatedString {
-            append(text)
-            val linkRanges = mutableListOf<IntRange>()
-            for (match in bioLinkRegex.findAll(text)) {
-                // Trim common trailing punctuation a link often gets caught up
-                // in mid-sentence ("check out guns.lol/foo." shouldn't include
-                // the period), without touching the plain-text append above.
-                var end = match.range.last + 1
-                while (end > match.range.first && text[end - 1] in ".,;:!?)]}\"'") end--
-                if (end <= match.range.first) continue
-                val raw = text.substring(match.range.first, end)
-                val url = if (raw.startsWith("http://") || raw.startsWith("https://")) raw else "https://$raw"
-                addStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline), match.range.first, end)
-                addStringAnnotation(tag = "URL", annotation = url, start = match.range.first, end = end)
-                linkRanges += match.range.first until end
+            var at = 0
+            for (piece in pieces) {
+                if (piece.start < at) continue
+                append(text.substring(at, piece.start))
+                val from = length
+                append(piece.shown)
+                // Links are underlined; tags are bold, in the profile's color.
+                addStyle(
+                    if (piece.tag == "URL") SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)
+                    else SpanStyle(color = linkColor, fontWeight = FontWeight.SemiBold),
+                    from, length
+                )
+                addStringAnnotation(tag = piece.tag, annotation = piece.target, start = from, end = length)
+                at = piece.end
             }
-            // @handles (e.g. "@RechoRaccoon.bsky.social") open that profile
-            // in Stellar. Skipped inside links and e-mail addresses.
-            for (match in bioMentionRegex.findAll(text)) {
-                val start = match.range.first
-                if (start > 0 && (text[start - 1].isLetterOrDigit() || text[start - 1] in "._-/@")) continue
-                var end = match.range.last + 1
-                while (end > start && text[end - 1] in ".-") end--
-                val handle = text.substring(start + 1, end)
-                if (!handle.contains('.')) continue
-                if (linkRanges.any { start < it.last + 1 && end > it.first }) continue
-                addStyle(SpanStyle(color = linkColor, fontWeight = FontWeight.SemiBold), start, end)
-                addStringAnnotation(tag = "MENTION", annotation = handle.lowercase(), start = start, end = end)
-            }
+            append(text.substring(at))
         }
     }
     var layoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
@@ -1619,8 +1676,11 @@ private fun LinkableBioText(text: String, linkColor: Color, modifier: Modifier =
     )
 }
 
-private val bioLinkRegex = Regex("""https?://\S+|www\.\S+""", RegexOption.IGNORE_CASE)
+private val bioLinkRegex = Regex("""https?://\S+|www\.\S+|bsky\.app/profile/\S+""", RegexOption.IGNORE_CASE)
 private val bioMentionRegex = Regex("""@[A-Za-z0-9][A-Za-z0-9.-]*""")
+private val bioProfileLinkRegex = Regex(
+    """(?:https?://)?(?:www\.)?bsky\.app/profile/([^\s/?#]+)(?:/post/([^\s/?#]+))?/?(?:[?#]\S*)?""", RegexOption.IGNORE_CASE
+)
 
 /** The profile stats row: lays its items out at their natural size and, if
  *  they don't fit the width (long counts plus "Supporter"), scales the whole

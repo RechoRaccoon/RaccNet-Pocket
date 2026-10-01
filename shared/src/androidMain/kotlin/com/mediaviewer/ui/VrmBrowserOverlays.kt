@@ -131,6 +131,90 @@ class BrowserOverlayRegistry {
     val webViews = HashMap<String, WebView>()
     val bounds = HashMap<String, Rect>()
 
+    // ── Hardware snapshots ──
+    // A page is drawn the same way it is drawn on screen — by the GPU, into
+    // an offscreen surface — and read back from there. (Drawing a WebView
+    // into a plain bitmap uses its software renderer, which leaves complex
+    // pages blank: the capture went white after navigating.)
+    private class Grabber(val reader: android.media.ImageReader) {
+        val pool = arrayOfNulls<Bitmap>(3)
+        var next = 0
+        /** When the frame now waiting in [reader] was drawn (uptime ms). */
+        var drawnAt = 0L
+    }
+    private val grabbers = HashMap<String, Grabber>()
+    private val lastGood = HashMap<String, Bitmap>()
+    private var hardwareBroken = false
+
+    private fun hardwareSnapshot(id: String, view: WebView): Bitmap? {
+        if (hardwareBroken) return null
+        val w = view.width
+        val h = view.height
+        return try {
+            val existing = grabbers[id]
+            val g: Grabber = if (existing != null && existing.reader.width == w && existing.reader.height == h) existing else {
+                existing?.reader?.close()
+                lastGood.remove(id)
+                Grabber(android.media.ImageReader.newInstance(w, h, android.graphics.PixelFormat.RGBA_8888, 2)).also { grabbers[id] = it }
+            }
+            // Read back the frame drawn on the previous call (drawing is
+            // finished by the render thread a moment after it's posted)…
+            var out: Bitmap? = null
+            val now = android.os.SystemClock.uptimeMillis()
+            // An old waiting frame (snapshots weren't running) is thrown away.
+            val waitingIsFresh = now - g.drawnAt <= 500L
+            g.drawnAt = now
+            if (!waitingIsFresh) { g.reader.acquireLatestImage()?.close(); lastGood.remove(id) }
+            else g.reader.acquireLatestImage()?.use { image ->
+                val plane = image.planes[0]
+                val rowStride = plane.rowStride
+                val buffer = plane.buffer
+                val slot = g.next
+                g.next = (slot + 1) % g.pool.size
+                val bmp = g.pool[slot]?.takeIf { !it.isRecycled && it.width == w && it.height == h }
+                    ?: Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { g.pool[slot] = it }
+                if (rowStride == w * 4) {
+                    buffer.rewind()
+                    bmp.copyPixelsFromBuffer(buffer)
+                } else {
+                    // Padded rows: copy through a stride-wide bitmap.
+                    val wide = Bitmap.createBitmap(rowStride / 4, h, Bitmap.Config.ARGB_8888)
+                    buffer.rewind()
+                    wide.copyPixelsFromBuffer(buffer)
+                    android.graphics.Canvas(bmp).apply {
+                        drawColor(0, android.graphics.PorterDuff.Mode.CLEAR)
+                        drawBitmap(wide, 0f, 0f, null)
+                    }
+                    wide.recycle()
+                }
+                out = bmp
+            }
+            // …and draw the next one.
+            val surface = g.reader.surface
+            val canvas = surface.lockHardwareCanvas()
+            try {
+                canvas.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR)
+                view.draw(canvas)
+            } finally {
+                surface.unlockCanvasAndPost(canvas)
+            }
+            out?.let { lastGood[id] = it }
+            out
+        } catch (e: Throwable) {
+            android.util.Log.e("VrmOverlays", "Hardware overlay snapshot failed; using software snapshots", e)
+            hardwareBroken = true
+            lastGood.clear()
+            null
+        }
+    }
+
+    /** Frees the snapshot surfaces (leaving the page). */
+    fun release() {
+        grabbers.values.forEach { g -> runCatching { g.reader.close() } }
+        grabbers.clear()
+        lastGood.clear()
+    }
+
     /** Snapshots every overlay in [ids] that has a laid-out WebView. */
     fun snapshot(ids: Collection<String>, rootW: Int, rootH: Int): List<CaptureOverlay> {
         if (rootW <= 0 || rootH <= 0) return emptyList()
@@ -139,7 +223,7 @@ class BrowserOverlayRegistry {
             val view = webViews[id] ?: continue
             val r = bounds[id] ?: continue
             if (view.width <= 0 || view.height <= 0) continue
-            val bmp = runCatching {
+            val bmp = hardwareSnapshot(id, view) ?: lastGood[id] ?: runCatching {
                 Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888).also { view.draw(android.graphics.Canvas(it)) }
             }.getOrNull() ?: continue
             out.add(CaptureOverlay(bmp, r.left / rootW, r.top / rootH, r.right / rootW, r.bottom / rootH))
@@ -178,7 +262,9 @@ fun VrmBrowserOverlays(
     onChange: (BrowserOverlaySpec) -> Unit,
     onRemove: (String) -> Unit,
     modifier: Modifier = Modifier,
-    hidden: Boolean = false
+    hidden: Boolean = false,
+    /** False while recording/streaming: parked pages keep running. */
+    pauseWhenHidden: Boolean = true
 ) {
     BoxWithConstraints(modifier.fillMaxSize()) {
         val density = LocalDensity.current
@@ -186,7 +272,7 @@ fun VrmBrowserOverlays(
         val rootH = with(density) { maxHeight.toPx() }
         for (spec in overlays) {
             androidx.compose.runtime.key(spec.id) {
-                BrowserOverlayWindow(spec, tint, rootW, rootH, registry, onChange, onRemove, hidden)
+                BrowserOverlayWindow(spec, tint, rootW, rootH, registry, onChange, onRemove, hidden, pauseWhenHidden)
             }
         }
     }
@@ -221,7 +307,8 @@ private fun BrowserOverlayWindow(
     registry: BrowserOverlayRegistry,
     onChange: (BrowserOverlaySpec) -> Unit,
     onRemove: (String) -> Unit,
-    hidden: Boolean
+    hidden: Boolean,
+    pauseWhenHidden: Boolean = true
 ) {
     val density = LocalDensity.current
     val tap = com.mediaviewer.util.rememberHapticTap()
@@ -495,9 +582,9 @@ private fun BrowserOverlayWindow(
         }
     }
     // Parked off-screen: pause the page (timers, animations, media).
-    androidx.compose.runtime.LaunchedEffect(hidden) {
+    androidx.compose.runtime.LaunchedEffect(hidden, pauseWhenHidden) {
         val web = registry.webViews[spec.id] ?: return@LaunchedEffect
-        runCatching { if (hidden) web.onPause() else web.onResume() }
+        runCatching { if (hidden && pauseWhenHidden) web.onPause() else web.onResume() }
     }
     DisposableEffect(spec.id) {
         onDispose {

@@ -694,7 +694,8 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                 onSearchHubProfiles = viewModel::searchHubProfiles,
                 onLoadMoreHubProfileSuggestions = viewModel::loadMoreHubProfileSuggestions,
                 onAddHubProfiles = viewModel::addHubProfilesRow,
-                onPreviewWelcome = { com.mediaviewer.util.UiToggles.devWelcomePreview = true },
+                onEditHubProfiles = viewModel::editHubProfilesRow,
+                onPreviewWelcome = viewModel::openWelcome,
                 onOpenHubListPost = viewModel::openHubListPost,
                 onForceRefreshHub = viewModel::forceRefreshHub
             ),
@@ -917,6 +918,13 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                 onOpenAccount      = { author -> viewModel.closeSearch(); viewModel.openProfile(author) },
                 onLoadMorePosts    = viewModel::loadMoreSearchPosts,
                 onAddFeed          = viewModel::addSavedFeedFromSearch,
+                savedFeedUris      = savedFeedUris,
+                listActions        = listActions,
+                onListEntryAction  = { entry ->
+                    if (entry.kind == com.mediaviewer.model.ProfileListKind.FEED) viewModel.addFeedFromProfile(entry)
+                    else viewModel.followAllInList(entry)
+                },
+                onOpenListEntry    = viewModel::openListMembers,
                 onClose            = viewModel::closeSearch
             )
         }
@@ -982,7 +990,12 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                             com.mediaviewer.model.ProfileListKind.MOD_LIST -> viewModel.toggleBlockList(entry)
                         }
                     },
-                    onOpenMention     = { handle -> viewModel.openProfileFromLink(handle) },
+                    // "handle" or "handle|post id" (a bsky.app link in the bio).
+                    onOpenMention     = { target ->
+                        viewModel.openProfileFromLink(target.substringBefore('|'), target.substringAfter('|', "").ifBlank { null })
+                    },
+                    onResolveActor    = { did -> viewModel.profileCard(did)?.handle },
+                    loadingScreenDone = pixelController.phase == PixelPhase.HIDDEN,
                     onOpenSupportPage = {
                         com.mediaviewer.util.UiToggles.supportPageRequest++
                         viewModel.closeAllProfilesForSettings()
@@ -1116,7 +1129,9 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                 tint = if (profileOverlay?.hidden == false) profileTint else selfProfileTint,
                 onOpenProfile = viewModel::openProfileFromListMembers,
                 onRemove = viewModel::removeListMember,
-                onClose = viewModel::closeListMembers
+                onClose = viewModel::closeListMembers,
+                liquidGlass = liquidGlass,
+                onDelete = viewModel::deleteOpenList
             )
         }
 
@@ -1352,7 +1367,7 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
 
         // ── Welcome → tutorial, and the Support popup ──
         val hubShowing = appInitialized && bskyLoggedIn && screenState == ScreenState.SETTINGS &&
-            profileOverlay == null && pixelController.phase == PixelPhase.HIDDEN
+            profileOverlay?.hidden != false && pixelController.phase == PixelPhase.HIDDEN
         // The welcome popup: once per account, the first time the Hub shows
         // (Dev Tools can ask for it again).
         val devWelcome = com.mediaviewer.util.UiToggles.devWelcomePreview

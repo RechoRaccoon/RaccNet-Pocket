@@ -1250,7 +1250,7 @@ private fun AtProtocolPageContent(
                 }
                 com.mediaviewer.util.HubLayout.SWITCH_ACCOUNTS -> SwitchAccountsSection()
                 else -> {
-                    // A Bluesky list, Stellar's Supporters, or a Profiles row
+                    // A Bluesky list, Stellar Supporters, or a Profiles row
                     // (accounts kept on this device) — all the same section.
                     if (row.hasMembers) {
                         val key = row.contentKey

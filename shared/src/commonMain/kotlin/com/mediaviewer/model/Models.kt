@@ -1429,7 +1429,9 @@ data class SearchStarterPackResult(
     val name: String,
     val description: String?,
     val creator: AuthorInfo,
-    val joinedCount: Int
+    val joinedCount: Int,
+    /** The list behind the pack (its accounts). */
+    val listUri: String? = null
 )
 
 /** Search page's Feeds filter (see BlueskyApi.searchFeedGenerators) — a

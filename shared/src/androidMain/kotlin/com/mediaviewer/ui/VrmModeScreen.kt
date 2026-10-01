@@ -71,6 +71,7 @@ import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
@@ -291,11 +292,17 @@ actual fun VrmModeScreen(
     androidx.compose.runtime.SideEffect {
         liveStreamer.micMuted = micMuted
         liveStreamer.pitchSemitones = voicePitch.toFloat()
+        // A recording in progress follows the slider too.
+        captureController.setRecordingPitch(voicePitch.toFloat())
     }
     val appContext = context.applicationContext
     // Browser overlays that should appear in captures/streams.
     val captureOverlayIds = if (overlaysEnabled) browserOverlays.filter { it.inCapture }.map { it.id } else emptyList()
+    // Any overlay may be switched to "In captures" while recording or live,
+    // so captures are set up for overlays whenever there are any.
+    val overlaysCapturable = browserOverlays.isNotEmpty()
     val rootView = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { overlayRegistry.release() } }
     fun refreshCaptureOverlays() {
         captureController.overlays = if (captureOverlayIds.isEmpty()) emptyList()
             else overlayRegistry.snapshot(captureOverlayIds, rootView.width, rootView.height)
@@ -324,7 +331,7 @@ actual fun VrmModeScreen(
     }
     fun beginRecording(withAudio: Boolean) {
         refreshCaptureOverlays()
-        if (captureController.startRecording(context, withAudio, voicePitch.toFloat(), captureOverlayIds.isNotEmpty())) {
+        if (captureController.startRecording(context, withAudio, voicePitch.toFloat(), overlaysCapturable)) {
             recording = true
             recordingStartMs = android.os.SystemClock.elapsedRealtime()
             recordingElapsedS = 0
@@ -350,7 +357,7 @@ actual fun VrmModeScreen(
             }
             val surface = liveStreamer.inputSurface
             refreshCaptureOverlays()
-            if (surface == null || !captureController.startStreamOutput(surface, cfg.width, cfg.height, cfg.fps, captureOverlayIds.isNotEmpty())) {
+            if (surface == null || !captureController.startStreamOutput(surface, cfg.width, cfg.height, cfg.fps, overlaysCapturable)) {
                 withContext(Dispatchers.IO) { liveStreamer.stop() }
                 liveState = com.mediaviewer.stream.LiveStreamer.State.IDLE
                 captureError = "Couldn't start streaming the avatar"
@@ -411,8 +418,10 @@ actual fun VrmModeScreen(
     androidx.compose.runtime.LaunchedEffect(recording, isLive, captureOverlayIds) {
         while ((recording || isLive) && captureOverlayIds.isNotEmpty()) {
             refreshCaptureOverlays()
-            kotlinx.coroutines.delay(250)
+            kotlinx.coroutines.delay(100)
         }
+        // None shown in captures (any more): take them out straight away.
+        refreshCaptureOverlays()
     }
     // Never let the screen sleep mid-stream.
     val hostView = androidx.compose.ui.platform.LocalView.current
@@ -938,7 +947,10 @@ actual fun VrmModeScreen(
                 onRemove = { id -> browserOverlays = browserOverlays.filterNot { it.id == id } },
                 // Separate windows sit above everything: park them while one
                 // of this page's own popups is open.
-                hidden = settingsOpen || liveDialogOpen || endLiveConfirmOpen
+                hidden = settingsOpen || liveDialogOpen || endLiveConfirmOpen,
+                // Mid-recording/stream the pages keep running behind a popup,
+                // so what's captured doesn't freeze.
+                pauseWhenHidden = !(recording || isLive)
             )
         }
 
@@ -1826,7 +1838,8 @@ private fun VrmSettingsSheet(
                 Spacer(Modifier.height(12.dp))
                 // Tabs: a segmented pill; the selected tab is filled with your color.
                 Row(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color.White.copy(alpha = 0.08f)).padding(3.dp)
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color.White.copy(alpha = 0.08f)).padding(3.dp),
+                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween
                 ) {
                     VrmSettingsTab.values().forEach { t ->
                         val selected = t == tab
@@ -1834,15 +1847,19 @@ private fun VrmSettingsSheet(
                             if (selected) androidx.compose.ui.graphics.lerp(tint, Color.Black, 0.12f) else Color.Transparent,
                             label = "vrmTab"
                         )
+                        // Each tab is as wide as its own label plus the same
+                        // room either side, so short and long labels get
+                        // even spacing; what's left over goes between tabs.
                         Box(
-                            Modifier.weight(1f).height(32.dp).clip(RoundedCornerShape(11.dp)).background(bg)
+                            Modifier.height(32.dp).clip(RoundedCornerShape(11.dp)).background(bg)
                                 .clickable { if (!selected) { tap(); tab = t } },
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 t.label, color = if (selected) Color.White else Color.White.copy(alpha = 0.6f),
                                 fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
-                                maxLines = 1, softWrap = false
+                                maxLines = 1, softWrap = false,
+                                modifier = Modifier.padding(horizontal = 7.dp)
                             )
                         }
                     }
@@ -1878,7 +1895,9 @@ private fun VrmSettingsSheet(
                                 VrmTileGrid(tint, listOf(
                                     VrmTile("Follow my head", ui.followHead) { ui.onToggleFollowHead(it) },
                                     VrmTile("Physics", ui.springBones) { ui.onToggleSpringBones(it) },
-                                    VrmTile("Manual eyes", ui.manualEyes) { ui.onToggleManualEyes(it) }
+                                    VrmTile("Manual eyes", ui.manualEyes) { ui.onToggleManualEyes(it) },
+                                    // Shading: flat, unlit colors.
+                                    VrmTile("Full bright", ui.fullBright) { ui.onToggleFullBright(it) }
                                 ))
                                 if (!ui.followHead) {
                                     Text(
@@ -1930,7 +1949,6 @@ private fun VrmSettingsSheet(
                             VrmSettingsTab.DISPLAY -> {
                                 VrmTileGrid(tint, listOf(
                                     VrmTile("Performance", ui.performanceMode) { ui.onTogglePerformanceMode(it) },
-                                    VrmTile("Full bright", ui.fullBright) { ui.onToggleFullBright(it) },
                                     VrmTile("Tracking preview", ui.showPreview) { ui.onTogglePreview(it) },
                                     VrmTile("Debug info", ui.showDebug) { ui.onToggleDebug(it) }
                                 ))
@@ -2389,7 +2407,18 @@ internal fun VrmLiveDialog(
             modifier = Modifier.padding(horizontal = 28.dp).widthIn(max = 380.dp).fillMaxWidth()
         ) {
             Column(Modifier.padding(18.dp)) {
-                Text("Go Live", color = Color.White, fontSize = 17.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Go Live", color = Color.White, fontSize = 17.sp,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, modifier = Modifier.weight(1f)
+                    )
+                    // The same close button as VRM Settings.
+                    Box(
+                        Modifier.size(30.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.1f))
+                            .clickable { tap(); onDismiss() },
+                        contentAlignment = Alignment.Center
+                    ) { Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(16.dp)) }
+                }
                 Spacer(Modifier.height(2.dp))
                 Text(
                     "Stream your avatar to YouTube, Twitch, Kick or any RTMP server. Copy both from your platform's stream settings.",
@@ -2932,53 +2961,48 @@ private class VrmTrackingPipeline : VrmFrameHook {
     }
 }
 
-/** Background swatches: the default (your profile color) plus a few
- *  handy flat colors — green/blue screen for keying, black, white … */
+/** Background color: a button that opens the full color wheel (with a hex
+ *  code field), and a reset back to the default — your profile color. */
 @Composable
 private fun VrmBackgroundColorRow(current: Int, tint: Color, onPick: (Int) -> Unit) {
     val tap = rememberHapticTap()
-    val presets = listOf(
-        0xFF00B140.toInt(), 0xFF0047BB.toInt(), 0xFF000000.toInt(), 0xFFFFFFFF.toInt(),
-        0xFF808080.toInt(), 0xFFFF00FF.toInt(), 0xFFF6C6D8.toInt(), 0xFF9AD0F5.toInt(), 0xFFB9D7A8.toInt()
-    )
-    androidx.compose.foundation.layout.Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Background", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+    var pickerOpen by remember { mutableStateOf(false) }
+    val shown = if (current == 0) tint else Color(current)
+    Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("Background", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+        val pill = RoundedCornerShape(10.dp)
+        Row(
+            Modifier.clip(pill).background(Color.White.copy(alpha = 0.1f))
+                .clickable { tap(); pickerOpen = true }
+                .padding(start = 6.dp, end = 10.dp, top = 5.dp, bottom = 5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(Modifier.size(20.dp).clip(CircleShape).background(shown).border(1.dp, Color.White.copy(0.6f), CircleShape))
+            Spacer(Modifier.width(7.dp))
             Text(
-                if (current == 0) "Default" else "Reset to default",
-                color = if (current == 0) Color.White.copy(0.5f) else tint, fontSize = 13.sp,
-                fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
-                modifier = Modifier.clickable(enabled = current != 0) { tap(); onPick(0) }
+                if (current == 0) "Pick color" else "#%06X".format(current and 0xFFFFFF),
+                color = Color.White, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
             )
         }
-        Spacer(Modifier.height(8.dp))
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(androidx.compose.foundation.rememberScrollState()),
-            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)
+        Spacer(Modifier.width(8.dp))
+        Box(
+            Modifier.clip(pill).background(Color.White.copy(alpha = if (current != 0) 0.1f else 0.05f))
+                .clickable(enabled = current != 0) { tap(); onPick(0) }
+                .padding(horizontal = 10.dp, vertical = 7.dp)
         ) {
-            // Default swatch: your profile color.
-            val swatches = listOf(0) + presets
-            for (c in swatches) {
-                val selected = c == current
-                Box(
-                    Modifier.size(28.dp).clip(CircleShape)
-                        .background(if (c == 0) tint else Color(c))
-                        .border(if (selected) 2.5.dp else 1.dp, if (selected) Color.White else Color.White.copy(0.3f), CircleShape)
-                        .clickable { tap(); onPick(c) },
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (c == 0) Text("↺", color = Color.White, fontSize = 12.sp)
-                }
-            }
+            Text(
+                "Reset", color = if (current != 0) Color.White else Color.White.copy(0.4f), fontSize = 13.sp,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
+            )
         }
-        Spacer(Modifier.height(8.dp))
-        // Any color: hue slider (full saturation, medium brightness).
-        val hsv = FloatArray(3)
-        android.graphics.Color.colorToHSV(if (current == 0) android.graphics.Color.GRAY else current, hsv)
-        VrmSettingsSlider(
-            label = "Custom hue", valueText = "${hsv[0].toInt()}°",
-            value = hsv[0], range = 0f..359f, steps = 0, tint = tint
-        ) { h -> onPick(android.graphics.Color.HSVToColor(floatArrayOf(h, 0.65f, 0.85f))) }
+    }
+    if (pickerOpen) {
+        ColorWheelDialog(
+            initial = shown, title = "Background color",
+            onDismiss = { pickerOpen = false },
+            // Fully opaque; 0 is kept for "default".
+            onPick = { c -> pickerOpen = false; onPick(c.toArgb() or 0xFF000000.toInt()) }
+        )
     }
 }
 

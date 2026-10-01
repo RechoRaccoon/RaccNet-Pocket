@@ -7413,6 +7413,23 @@ _bskyDid.value          = session.did
 
     fun closeListMembers() { _listMembers.value = null }
 
+    /** The members popup's delete button (your own lists, starter packs
+     *  and moderation lists): deletes the one that's open. */
+    fun deleteOpenList(onDone: (String?) -> Unit) {
+        val cur = _listMembers.value
+        if (cur == null || !cur.isOwn) { onDone(null); return }
+        val entry = cur.entry
+        deletePickerEntry(listOfNotNull(entry.uri, entry.listUri)) { error ->
+            if (error == null) {
+                if (_listMembers.value?.entry?.uri == entry.uri) _listMembers.value = null
+                _profileOverlay.value?.let { o ->
+                    _profileOverlay.value = o.copy(lists = o.lists.copy(entries = o.lists.entries.filterNot { it.uri == entry.uri }))
+                }
+            }
+            onDone(error)
+        }
+    }
+
     /** The X beside an account in one of your own lists: takes them off it. */
     fun removeListMember(member: ListMember) {
         val cur = _listMembers.value ?: return
@@ -7688,6 +7705,16 @@ _bskyDid.value          = session.did
         showToast("Added \"${name.trim().ifBlank { "Profiles" }}\" to the Hub")
     }
 
+    /** Customize Hub → a Profiles row's edit button → Save. */
+    fun editHubProfilesRow(id: String, name: String, members: List<AuthorInfo>) {
+        if (members.isEmpty()) return
+        tapHaptic()
+        com.mediaviewer.util.HubLayout.updateProfiles(
+            id, name, members.map { com.mediaviewer.util.HubLayout.Profile(it.did, it.handle, it.displayName, it.avatarUrl) }
+        )
+        loadHubListIfNeeded(id, force = true)
+    }
+
     // ── Stellar Supporters ───────────────────────────────────────────────
 
     /** Re-reads the Stellar Supporters list (every app start). */
@@ -7794,11 +7821,15 @@ _bskyDid.value          = session.did
                 var feedsChanged = false
                 // One preferences write at a time (they're read-modify-write).
                 feedPrefsMutex.withLock {
-                    if (welcomeFeedForYou in selected && _availableFeeds.value.none { it.uri == official.FOR_YOU_FEED_URI }) {
-                        bskyRepo.addSavedFeed(bskyToken, official.FOR_YOU_FEED_URI).onSuccess { feedsChanged = true }
-                    }
+                    // Both go to the top of the feeds list: For You first, then
+                    // Stellar Supporters (so Supporters is put in first).
                     if (welcomeFeedSupporters in selected && _availableFeeds.value.none { it.uri == official.SUPPORTERS_LIST_URI }) {
-                        bskyRepo.addSavedFeed(bskyToken, official.SUPPORTERS_LIST_URI, type = "list", pinned = true).onSuccess { feedsChanged = true }
+                        bskyRepo.addSavedFeed(bskyToken, official.SUPPORTERS_LIST_URI, type = "list", pinned = true, atFront = true)
+                            .onSuccess { feedsChanged = true }
+                    }
+                    if (welcomeFeedForYou in selected && _availableFeeds.value.none { it.uri == official.FOR_YOU_FEED_URI }) {
+                        bskyRepo.addSavedFeed(bskyToken, official.FOR_YOU_FEED_URI, pinned = true, atFront = true)
+                            .onSuccess { feedsChanged = true }
                     }
                 }
                 suspend fun follow(actor: String) {

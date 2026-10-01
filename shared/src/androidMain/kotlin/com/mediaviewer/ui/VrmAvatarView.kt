@@ -148,10 +148,12 @@ fun VrmAvatarView(
     val currentOnParts by rememberUpdatedState(onPartsReady)
     // Read inside the gesture handler, which is set up once.
     val followingNow by rememberUpdatedState(followTracking)
+    // Bumped by the resets below; read in composition so they reach the renderer.
+    var resetTick by remember { mutableStateOf(0) }
     // "Follow my head" places the model itself, so manual spinning is off
     // while it's on — and any earlier spin is undone when it turns on.
     LaunchedEffect(followTracking) {
-        if (followTracking) { userYawDegrees = 0f; userPitchDegrees = 0f; userPanX = 0f; userPanY = 0f }
+        if (followTracking) { userYawDegrees = 0f; userPitchDegrees = 0f; userPanX = 0f; userPanY = 0f; resetTick++ }
     }
     // Bumped per load so hidden parts are re-applied to a fresh model.
     var loadGeneration by remember { mutableStateOf(0) }
@@ -164,9 +166,22 @@ fun VrmAvatarView(
             userPanX = 0f
             userPanY = 0f
             zoom = DEFAULT_ZOOM
+            resetTick++
         }
     }
     SideEffect { captureController?.session = session }
+    // The free camera goes straight to the renderer as the fingers move (a
+    // gesture alone doesn't recompose this view, so it can't wait for the
+    // SideEffect below).
+    fun pushCamera() {
+        session?.let { s ->
+            s.userYawDegrees = userYawDegrees
+            s.userPitchDegrees = userPitchDegrees
+            s.userPanX = userPanX
+            s.userPanY = userPanY
+            s.zoom = zoom
+        }
+    }
 
     LaunchedEffect(session, vrmBytes, fullBright) {
         val s = session ?: return@LaunchedEffect
@@ -202,6 +217,7 @@ fun VrmAvatarView(
     }
 
     // Plain field writes on the main thread; the frame loop reads them.
+    @Suppress("UNUSED_VARIABLE") val resetSeen = resetTick
     SideEffect {
         session?.let { s ->
             s.userYawDegrees = userYawDegrees
@@ -321,6 +337,7 @@ fun VrmAvatarView(
                                 userYawDegrees += pan.x * DRAG_DEGREES_PER_PX
                                 userPitchDegrees = (userPitchDegrees + pan.y * DRAG_DEGREES_PER_PX).coerceIn(-MAX_PITCH_DEGREES, MAX_PITCH_DEGREES)
                             }
+                            pushCamera()
                             event.changes.forEach { if (it.positionChanged()) it.consume() }
                         }
                     }
@@ -1454,7 +1471,9 @@ class VrmCaptureController {
         }
         // A changed voice pitch: MediaRecorder records the video silent and
         // the mic goes through PitchedAudioRecorder, joined on stop.
-        val pitched = withAudio && kotlin.math.abs(pitchSemitones) >= 0.05f
+        // (Always that way with a mic, even at natural pitch, so the pitch
+        // can be changed while the recording is running.)
+        val pitched = withAudio
         val (recorder, file) = (if (withAudio && !pitched) build(true) else null) ?: build(false) ?: return false
         var compositor: OverlayCompositor? = null
         var audio: com.mediaviewer.stream.PitchedAudioRecorder? = null
@@ -1481,6 +1500,11 @@ class VrmCaptureController {
             file.delete()
             false
         }
+    }
+
+    /** Voice pitch for the recording in progress (no-op otherwise). */
+    fun setRecordingPitch(semitones: Float) {
+        session?.recording?.pitched?.let { if (it.semitones != semitones) it.semitones = semitones }
     }
 
     /** Starts rendering into a live-stream encoder's input [surface]. */

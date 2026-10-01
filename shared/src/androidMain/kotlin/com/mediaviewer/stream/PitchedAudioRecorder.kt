@@ -32,6 +32,10 @@ class PitchedAudioRecorder(private val file: File, semitones: Float) {
     private var muxerStarted = false
     private var thread: Thread? = null
     @Volatile var muted = false
+    /** The pitch, changeable while recording (applies from the next block). */
+    var semitones: Float
+        get() = shifter.semitones
+        set(value) { shifter.semitones = value }
 
     @SuppressLint("MissingPermission")
     fun start(): Boolean = try {

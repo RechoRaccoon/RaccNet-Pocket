@@ -104,6 +104,15 @@ fun SearchOverlay(
     onOpenPost: (Int) -> Unit,
     onOpenAccount: (AuthorInfo) -> Unit,
     onAddFeed: (com.mediaviewer.model.SearchFeedResult) -> Unit = {},
+    // Feeds / Starter Packs share the profile pages' Lists/Feeds rows.
+    /** URIs of every feed already in your feeds list. */
+    savedFeedUris: Set<String> = emptySet(),
+    /** Busy/finished labels for the rows' buttons, by URI. */
+    listActions: Map<String, String> = emptyMap(),
+    /** A feed's "Add" / a starter pack's "Follow All" (after its confirm). */
+    onListEntryAction: (com.mediaviewer.model.ProfileListEntry) -> Unit = {},
+    /** A starter pack tapped: everyone in it. */
+    onOpenListEntry: (com.mediaviewer.model.ProfileListEntry) -> Unit = {},
     onLoadMorePosts: () -> Unit = {},
     onClose: () -> Unit
 ) {
@@ -142,6 +151,8 @@ fun SearchOverlay(
     // Item 8: same profile-color pattern as the Hub/DM inbox — falls back
     // to the shared neutral tint when there's no avatar yet.
     val profileTint = rememberSelfTint(selfAvatarUrl, NeutralGlassTint)
+    // The starter pack waiting on its "Follow All?" confirmation.
+    var pendingFollowAll by remember { mutableStateOf<com.mediaviewer.model.ProfileListEntry?>(null) }
 
     // Bug fix/roadmap: the search bar, its buttons, and the filter row now
     // float directly over this page's own background gradient — sampling it
@@ -403,7 +414,24 @@ fun SearchOverlay(
                         if (state.feeds.isEmpty()) EmptyResultsText() else {
                             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp)) {
                                 items(state.feeds, key = { it.uri }) { feed ->
-                                    FeedResultRow(feed = feed, liquidGlass = liquidGlass, onAdd = { onAddFeed(feed) })
+                                    val entry = remember(feed) {
+                                        com.mediaviewer.model.ProfileListEntry(
+                                            kind = com.mediaviewer.model.ProfileListKind.FEED, uri = feed.uri,
+                                            name = feed.displayName.ifBlank { "Feed" },
+                                            description = listOfNotNull(
+                                                feed.creatorHandle.takeIf { it.isNotBlank() }?.let { "by @$it" },
+                                                feed.description?.takeIf { it.isNotBlank() }
+                                            ).joinToString(" · ").ifBlank { null },
+                                            avatarUrl = feed.avatarUrl
+                                        )
+                                    }
+                                    val saved = feed.uri in savedFeedUris
+                                    ProfileListRow(
+                                        entry = entry, liquidGlass = liquidGlass, tint = profileTint,
+                                        label = if (saved) "Added" else "Add", busy = false, done = saved,
+                                        onOpen = null,
+                                        onAction = { onListEntryAction(entry) }
+                                    )
                                 }
                             }
                         }
@@ -446,7 +474,27 @@ fun SearchOverlay(
                         if (state.starterPacks.isEmpty()) EmptyResultsText() else {
                             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp)) {
                                 items(state.starterPacks, key = { it.uri }) { pack ->
-                                    StarterPackResultRow(pack = pack, liquidGlass = liquidGlass)
+                                    val entry = remember(pack) {
+                                        com.mediaviewer.model.ProfileListEntry(
+                                            kind = com.mediaviewer.model.ProfileListKind.STARTER_PACK, uri = pack.uri,
+                                            name = pack.name.ifBlank { "Starter Pack" },
+                                            description = listOfNotNull(
+                                                "by @${pack.creator.handle}", "${pack.joinedCount} joined",
+                                                pack.description?.takeIf { it.isNotBlank() }
+                                            ).joinToString(" · "),
+                                            avatarUrl = pack.creator.avatarUrl, listUri = pack.listUri
+                                        )
+                                    }
+                                    val action = listActions[pack.uri]
+                                    ProfileListRow(
+                                        entry = entry, liquidGlass = liquidGlass, tint = profileTint,
+                                        label = action ?: "Follow All",
+                                        busy = action != null && action != "Followed",
+                                        done = action == "Followed" || pack.listUri == null,
+                                        onOpen = if (pack.listUri != null) ({ onOpenListEntry(entry) }) else null,
+                                        // Following a whole pack asks first.
+                                        onAction = { pendingFollowAll = entry }
+                                    )
                                 }
                             }
                         }
@@ -504,6 +552,18 @@ fun SearchOverlay(
             }
         }
 
+        pendingFollowAll?.let { entry ->
+            ConfirmPopup(
+                title = "Follow All?",
+                message = "Follow every account in \"${entry.name}\"?",
+                confirmLabel = "Follow All",
+                liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop,
+                onConfirm = { pendingFollowAll = null; onListEntryAction(entry) },
+                onDismiss = { pendingFollowAll = null },
+                preview = entry.avatarUrl,
+                destructive = false
+            )
+        }
     }
 }
 
@@ -650,67 +710,6 @@ private fun RecentAccountSearchesList(liquidGlass: Boolean, backdrop: GlassBackd
                 onClick = { onOpen(author) },
                 onRemove = { com.mediaviewer.util.RecentAccountSearches.remove(author.did) }
             )
-        }
-    }
-}
-
-@Composable
-private fun StarterPackResultRow(pack: SearchStarterPackResult, liquidGlass: Boolean) {
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Box(Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).background(Color.White.copy(0.1f)), contentAlignment = Alignment.Center) {
-            Icon(Icons.Default.Group, contentDescription = null, tint = DimGray, modifier = Modifier.size(22.dp))
-        }
-        Column(Modifier.weight(1f)) {
-            Text(pack.name, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("by @${pack.creator.handle} · ${pack.joinedCount} joined", color = DimGray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (!pack.description.isNullOrBlank()) {
-                Text(pack.description, color = Color.White.copy(0.7f), fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
-            }
-        }
-    }
-}
-
-/** Search page's Feeds filter — a discoverable feed generator with an "Add"
- *  button (writes it to the user's saved feeds, see MainViewModel.
- *  addSavedFeedFromSearch) instead of a click-to-open row, since these
- *  aren't things you "view", you subscribe to them. */
-@Composable
-private fun FeedResultRow(feed: SearchFeedResult, liquidGlass: Boolean, onAdd: () -> Unit) {
-    val tap = rememberHapticTap()
-    var added by remember(feed.uri) { mutableStateOf(false) }
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Box(Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).background(Color.White.copy(0.1f)), contentAlignment = Alignment.Center) {
-            if (feed.avatarUrl != null) {
-                AsyncImage(model = feed.avatarUrl, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-            } else {
-                Icon(Icons.Default.RssFeed, contentDescription = null, tint = DimGray, modifier = Modifier.size(20.dp))
-            }
-        }
-        Column(Modifier.weight(1f)) {
-            Text(feed.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (feed.creatorHandle.isNotBlank()) {
-                Text("by @${feed.creatorHandle}", color = DimGray, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            if (!feed.description.isNullOrBlank()) {
-                Text(feed.description, color = Color.White.copy(0.7f), fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
-            }
-        }
-        val pillShape = RoundedCornerShape(14.dp)
-        Box(
-            Modifier
-                .then(if (liquidGlass) Modifier.glassPanel(true, shape = pillShape) else Modifier.clip(pillShape).background(Color.White.copy(0.1f)))
-                .clickable(enabled = !added) { tap(); added = true; onAdd() }
-                .padding(horizontal = 12.dp, vertical = 6.dp)
-        ) {
-            Text(if (added) "Added" else "Add", color = if (added) VoteGreen else Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
         }
     }
 }

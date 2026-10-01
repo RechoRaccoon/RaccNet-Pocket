@@ -81,12 +81,16 @@ fun HubProfilesDialog(
     onSearch: (String) -> Unit,
     onLoadMoreSuggestions: () -> Unit,
     onAdd: (String, List<AuthorInfo>) -> Unit,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    /** Editing an existing row: its name and accounts to start from. */
+    initialName: String = "",
+    initialSelected: List<AuthorInfo> = emptyList(),
+    editing: Boolean = false
 ) {
     val tap = rememberHapticTap()
-    val selected = remember { mutableStateListOf<AuthorInfo>() }
+    val selected = remember { mutableStateListOf<AuthorInfo>().apply { addAll(initialSelected) } }
     var query by remember { mutableStateOf("") }
-    var name by remember { mutableStateOf("") }
+    var name by remember { mutableStateOf(initialName) }
     LaunchedEffect(Unit) { onSearch("") }
 
     Dialog(onDismissRequest = onClose, properties = com.mediaviewer.ui.compat.edgeToEdgeDialogProperties()) {
@@ -113,7 +117,7 @@ fun HubProfilesDialog(
                         contentAlignment = Alignment.Center
                     ) { Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(19.dp)) }
                     Text(
-                        "Add profiles", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
+                        if (editing) "Edit profiles" else "Add profiles", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
                         textAlign = TextAlign.Center, modifier = Modifier.weight(1f)
                     )
                     // How many are picked so far.
@@ -276,7 +280,7 @@ fun HubProfilesDialog(
                             .clickable(enabled = canAdd) { submit() },
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("Add to hub", color = if (canAdd) Color.White else DimGray, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        Text(if (editing) "Save" else "Add to hub", color = if (canAdd) Color.White else DimGray, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }

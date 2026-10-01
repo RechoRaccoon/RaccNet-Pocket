@@ -1829,7 +1829,8 @@ class BlueskyRepository {
                     name = sp.record?.name ?: "Starter Pack",
                     description = sp.record?.description,
                     creator = AuthorInfo(did = sp.creator.did, handle = sp.creator.handle, displayName = sp.creator.displayName ?: sp.creator.handle, avatarUrl = sp.creator.avatar),
-                    joinedCount = sp.joinedAllTimeCount
+                    joinedCount = sp.joinedAllTimeCount,
+                    listUri = sp.record?.list?.takeIf { it.isNotBlank() }
                 )
             }.getOrNull()
         }
@@ -1858,7 +1859,11 @@ class BlueskyRepository {
      *  appends into (or creates) the savedFeedsPrefV2 entry, and writes the
      *  whole array back. See getSavedFeeds above for the matching read-side
      *  parsing this mirrors. */
-    suspend fun addSavedFeed(token: String, feedUri: String, type: String = "feed", pinned: Boolean = false): Result<Unit> = runCatching {
+    suspend fun addSavedFeed(
+        token: String, feedUri: String, type: String = "feed", pinned: Boolean = false,
+        /** Put it first in the feeds list instead of last. */
+        atFront: Boolean = false
+    ): Result<Unit> = runCatching {
         val getResp = api.getPreferences("Bearer $token")
         val body = getResp.body() ?: error("Prefs ${getResp.code()}")
         val preferences = body.preferences.toMutableList()
@@ -1881,7 +1886,14 @@ class BlueskyRepository {
             val items = v2Obj.getAsJsonArray("items") ?: com.mediaviewer.json.JsonArray().also { v2Obj.add("items", it) }
             // Don't add a duplicate if it's somehow already saved.
             val alreadySaved = items.any { it.isJsonObject && it.asJsonObject.get("value")?.asString == feedUri }
-            if (!alreadySaved) items.add(newItem)
+            if (!alreadySaved) {
+                if (atFront) {
+                    val reordered = com.mediaviewer.json.JsonArray()
+                    reordered.add(newItem)
+                    items.forEach { reordered.add(it) }
+                    v2Obj.add("items", reordered)
+                } else items.add(newItem)
+            }
         } else {
             val newPref = com.mediaviewer.json.JsonObject().apply {
                 addProperty("\$type", "app.bsky.actor.defs#savedFeedsPrefV2")

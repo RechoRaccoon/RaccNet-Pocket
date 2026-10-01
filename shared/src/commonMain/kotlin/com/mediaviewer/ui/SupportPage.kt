@@ -226,7 +226,7 @@ private fun Modifier.matchParentSizeCompat(): Modifier = this.fillMaxSize()
 
 /** What supporting gets you — shown on the Support page and in the popup. */
 internal const val SUPPORTER_PERK_TEXT =
-    "\$4.99 or more will give you Stellar supporter features for a month!! Just make sure to include your Stellar/Bluesky handle in the note :3"
+    "\$4.99 or more will give you Stellar supporter benefits for a month!! Just make sure to include your Stellar/Bluesky handle in the note :3"
 
 /**
  * The inside of the "Support Stellar" popup (shown once, on the tenth time

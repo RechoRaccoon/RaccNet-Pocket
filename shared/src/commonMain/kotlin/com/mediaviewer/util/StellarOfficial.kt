@@ -72,11 +72,18 @@ object StellarSupporters {
  * has had its turn, and which accounts have already seen the welcome popup.
  */
 object Onboarding {
-    /** The Support Stellar popup appears on this open. */
-    const val SUPPORT_POPUP_OPEN = 10
+    /** The Support Stellar popup appears on the 10th open, the 25th, the
+     *  50th, and every 25 opens after that. Returns the latest of those
+     *  that [opens] has reached (0 before the first). */
+    fun supportMilestone(opens: Int): Int = when {
+        opens < 10 -> 0
+        opens < 25 -> 10
+        else -> opens / 25 * 25
+    }
 
     private const val KEY_OPENS = "open_count"
     private const val KEY_SUPPORT_SHOWN = "support_popup_shown"
+    private const val KEY_SUPPORT_MILESTONE = "support_popup_milestone"
     private const val KEY_SKIP_NEXT = "skip_next_open"
     private const val KEY_WELCOMED = "welcomed_dids"
 
@@ -110,7 +117,9 @@ object Onboarding {
             }
         }
         openCount = opens
-        supportPopupDue = opens >= SUPPORT_POPUP_OPEN && !p.getBoolean(KEY_SUPPORT_SHOWN, false)
+        // (The earlier one-time flag counts as having seen the 10th-open one.)
+        val seen = maxOf(p.getInt(KEY_SUPPORT_MILESTONE, 0), if (p.getBoolean(KEY_SUPPORT_SHOWN, false)) 10 else 0)
+        supportPopupDue = supportMilestone(opens) > seen
     }
 
     /** Call right before the app restarts itself. */
@@ -120,7 +129,7 @@ object Onboarding {
 
     fun markSupportPopupShown() {
         supportPopupDue = false
-        prefs?.edit()?.putBoolean(KEY_SUPPORT_SHOWN, true)?.apply()
+        prefs?.edit()?.putBoolean(KEY_SUPPORT_SHOWN, true)?.putInt(KEY_SUPPORT_MILESTONE, supportMilestone(openCount))?.apply()
     }
 
     /** Whether [did] still has to see the welcome popup. */

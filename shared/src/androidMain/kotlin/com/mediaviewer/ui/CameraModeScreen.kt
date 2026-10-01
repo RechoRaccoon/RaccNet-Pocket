@@ -100,6 +100,7 @@ actual fun CameraModeScreen(
     var browserOverlays by remember { mutableStateOf(BrowserOverlayStore.load(store)) }
     LaunchedEffect(browserOverlays) { BrowserOverlayStore.save(store, browserOverlays) }
     val overlayRegistry = remember { BrowserOverlayRegistry() }
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { overlayRegistry.release() } }
 
     val renderer = remember { CameraGlRenderer() }
     var textureView by remember { mutableStateOf<TextureView?>(null) }
@@ -336,7 +337,7 @@ actual fun CameraModeScreen(
     LaunchedEffect(recording, isLive, captureOverlayIds) {
         while ((recording || isLive) && captureOverlayIds.isNotEmpty()) {
             refreshCaptureOverlays()
-            kotlinx.coroutines.delay(250)
+            kotlinx.coroutines.delay(100)
         }
     }
     LaunchedEffect(captureError) {

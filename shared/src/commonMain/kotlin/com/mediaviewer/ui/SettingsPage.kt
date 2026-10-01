@@ -37,6 +37,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.material.icons.filled.DragIndicator
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -110,6 +111,8 @@ data class SettingsExtras(
     val onLoadMoreHubProfileSuggestions: () -> Unit = {},
     /** (row name, the accounts picked) */
     val onAddHubProfiles: (String, List<com.mediaviewer.model.AuthorInfo>) -> Unit = { _, _ -> },
+    /** (row id, new name, its accounts) — a Profiles row's edit button. */
+    val onEditHubProfiles: (String, String, List<com.mediaviewer.model.AuthorInfo>) -> Unit = { _, _, _ -> },
     // ── Dev Tools ──
     val onForceRefreshHub: () -> Unit = {},
     val onPreviewWelcome: () -> Unit = {}
@@ -1191,7 +1194,7 @@ internal fun SettingsPageContent(
                 }
                 BubbleDivider()
                 BubbleRow {
-                    RowLabel("Preview Support Popup", Modifier.weight(1f), sub = "The one shown on the 10th open.")
+                    RowLabel("Preview Support Popup", Modifier.weight(1f), sub = "The one shown on the 10th, 25th, 50th… open.")
                     PillButton("Open", { com.mediaviewer.util.UiToggles.devSupportPreview = true })
                 }
                 BubbleDivider()
@@ -1550,6 +1553,8 @@ private fun CustomizeHubSection(
     val heights = remember { mutableStateMapOf<String, Int>() }
 
     fun buzz() { runCatching { view.performHapticFeedback(com.mediaviewer.ui.compat.HapticFeedbackConstants.CLOCK_TICK) } }
+    // The Profiles row whose edit button was pressed.
+    var editingProfilesRow by remember { mutableStateOf<com.mediaviewer.util.HubLayout.Row?>(null) }
 
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         rows.forEach { row ->
@@ -1593,7 +1598,10 @@ private fun CustomizeHubSection(
                             }
                         )
                     }
-                    HubRowBubble(row = row, handle = handle, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop)
+                    HubRowBubble(
+                        row = row, handle = handle, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
+                        onEdit = if (row.isProfiles) ({ editingProfilesRow = row }) else null
+                    )
                 }
             }
         }
@@ -1661,6 +1669,18 @@ private fun CustomizeHubSection(
                 onDismiss = { urlPopupOpen = false }
             )
         }
+        editingProfilesRow?.let { row ->
+            HubProfilesDialog(
+                candidates = extras.hubProfileCandidates, searching = extras.hubProfileSearching, tint = tint,
+                onSearch = extras.onSearchHubProfiles,
+                onLoadMoreSuggestions = extras.onLoadMoreHubProfileSuggestions,
+                onAdd = { name, members -> editingProfilesRow = null; extras.onEditHubProfiles(row.id, name, members) },
+                onClose = { editingProfilesRow = null },
+                initialName = row.name,
+                initialSelected = row.profiles.map { com.mediaviewer.model.AuthorInfo(it.did, it.handle, it.displayName, it.avatarUrl) },
+                editing = true
+            )
+        }
         if (profilesPopupOpen) {
             HubProfilesDialog(
                 candidates = extras.hubProfileCandidates, searching = extras.hubProfileSearching, tint = tint,
@@ -1678,9 +1698,12 @@ private fun CustomizeHubSection(
 private fun HubRowBubble(
     row: com.mediaviewer.util.HubLayout.Row,
     handle: Modifier,
-    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?
+    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
+    /** Profiles rows: reopen the picker to add/remove accounts or rename. */
+    onEdit: (() -> Unit)? = null
 ) {
     val hub = com.mediaviewer.util.HubLayout
+    val editTap = rememberHapticTap()
     SettingsBubble(liquidGlass, tint, backdrop) {
         BubbleRow {
             Box(
@@ -1698,6 +1721,17 @@ private fun HubRowBubble(
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f).padding(end = 8.dp)
             )
+            if (onEdit != null) {
+                // The same pen as editing your own profile, as a grey circle.
+                Box(
+                    Modifier.size(28.dp).clip(CircleShape).background(Color.White.copy(0.12f))
+                        .clickable { editTap(); onEdit() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(androidx.compose.material.icons.Icons.Default.Edit, contentDescription = "Edit", tint = Color.White, modifier = Modifier.size(15.dp))
+                }
+                Spacer(Modifier.width(8.dp))
+            }
             if (row.hasMembers) {
                 PillButton(if (row.showPosts) "Posts" else "Profiles", { hub.setShowPosts(row.id, !row.showPosts) })
                 Spacer(Modifier.width(8.dp))

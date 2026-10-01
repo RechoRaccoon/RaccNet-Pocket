@@ -31,6 +31,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -155,14 +156,15 @@ internal fun LazyListScope.profileListsRows(
 }
 
 @Composable
-private fun ProfileListRow(
+internal fun ProfileListRow(
     entry: ProfileListEntry,
     liquidGlass: Boolean,
     tint: Color,
     label: String,
     busy: Boolean,
     done: Boolean,
-    onOpen: () -> Unit,
+    /** Null: the row itself isn't tappable (only its button is). */
+    onOpen: (() -> Unit)?,
     onAction: () -> Unit
 ) {
     val tap = rememberHapticTap()
@@ -171,7 +173,7 @@ private fun ProfileListRow(
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
             .glassPanel(liquidGlass, tint = tint.copy(alpha = 0.45f), shape = shape)
-            .clickable { tap(); onOpen() }
+            .then(if (onOpen != null) Modifier.clickable { tap(); onOpen() } else Modifier)
             .padding(start = 8.dp, end = 10.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -234,9 +236,14 @@ fun ListMembersDialog(
     tint: Color,
     onOpenProfile: (AuthorInfo) -> Unit,
     onRemove: (ListMember) -> Unit,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    liquidGlass: Boolean = false,
+    /** Your own list: delete it (calls back with an error, or null). */
+    onDelete: ((String?) -> Unit) -> Unit = { it(null) }
 ) {
     val tap = rememberHapticTap()
+    var confirmingDelete by remember { mutableStateOf(false) }
+    var deleting by remember { mutableStateOf(false) }
     Dialog(onDismissRequest = onClose, properties = com.mediaviewer.ui.compat.edgeToEdgeDialogProperties()) {
         com.mediaviewer.ui.compat.DialogBlurBehind(radius = 48, dimAmount = 0.45f)
         BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -264,7 +271,13 @@ fun ListMembersDialog(
                         textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f).padding(horizontal = 6.dp)
                     )
-                    Spacer(Modifier.size(38.dp))
+                    // Your own: delete, mirroring the close button.
+                    if (state.isOwn) Box(
+                        Modifier.size(38.dp).clip(CircleShape).background(Color(0xFFB3261E).copy(alpha = 0.35f))
+                            .clickable { tap(); confirmingDelete = true },
+                        contentAlignment = Alignment.Center
+                    ) { Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFFF8A80), modifier = Modifier.size(19.dp)) }
+                    else Spacer(Modifier.size(38.dp))
                 }
                 Box(Modifier.fillMaxWidth().height(0.5.dp).background(Color.White.copy(alpha = 0.08f)))
                 if (state.members.isNotEmpty()) {
@@ -320,6 +333,26 @@ fun ListMembersDialog(
                         }
                     }
                 }
+            }
+            if (confirmingDelete) {
+                val what = when (state.entry.kind) {
+                    ProfileListKind.STARTER_PACK -> "starter pack"
+                    ProfileListKind.MOD_LIST -> "moderation list"
+                    else -> "list"
+                }
+                ConfirmPopup(
+                    title = "Delete this $what?",
+                    message = "\"${state.entry.name}\" will be deleted for good.",
+                    confirmLabel = "Delete",
+                    liquidGlass = liquidGlass, tint = tint, backdrop = null,
+                    onConfirm = {
+                        deleting = true
+                        onDelete { error -> deleting = false; if (error != null) confirmingDelete = false }
+                    },
+                    onDismiss = { confirmingDelete = false },
+                    preview = state.entry.avatarUrl,
+                    busy = deleting
+                )
             }
         }
     }
