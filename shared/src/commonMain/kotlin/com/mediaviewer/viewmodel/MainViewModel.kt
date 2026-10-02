@@ -7881,9 +7881,11 @@ _bskyDid.value          = session.did
                 com.mediaviewer.util.Onboarding.markWelcomed(me)
                 com.mediaviewer.util.UiToggles.devWelcomePreview = false
                 _welcome.value = null
-                _tutorialOpen.value = true
+                // Tutorial popup next — or, while it's switched off, straight
+                // to the Hub.
+                _tutorialOpen.value = com.mediaviewer.util.StellarOfficial.TUTORIAL_ENABLED
             }
-            loadTutorialVideo()
+            if (com.mediaviewer.util.StellarOfficial.TUTORIAL_ENABLED) loadTutorialVideo()
         }
     }
 

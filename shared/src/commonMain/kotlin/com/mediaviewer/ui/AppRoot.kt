@@ -1382,13 +1382,16 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
         // welcome flow isn't.
         val supportDue = com.mediaviewer.util.Onboarding.supportPopupDue
         val devSupport = com.mediaviewer.util.UiToggles.devSupportPreview
-        LaunchedEffect(hubShowing, supportDue, devSupport, welcomeState != null, tutorialOpen) {
+        // Never for someone on the Stellar Supporters list.
+        val isSupporter = com.mediaviewer.util.StellarSupporters.isSupporter(bskyDid)
+        LaunchedEffect(hubShowing, supportDue, devSupport, welcomeState != null, tutorialOpen, isSupporter) {
             if (devSupport) supportPopupOpen = true
-            else if (hubShowing && supportDue && welcomeState == null && !tutorialOpen &&
+            else if (hubShowing && supportDue && !isSupporter && welcomeState == null && !tutorialOpen &&
                 !com.mediaviewer.util.Onboarding.needsWelcome(bskyDid)
             ) {
-                kotlinx.coroutines.delay(900)
-                supportPopupOpen = true
+                // (Long enough for this open's re-read of the list to land.)
+                kotlinx.coroutines.delay(2500)
+                if (!com.mediaviewer.util.StellarSupporters.isSupporter(bskyDid)) supportPopupOpen = true
             }
         }
         com.mediaviewer.ui.OnboardingPopupHost(

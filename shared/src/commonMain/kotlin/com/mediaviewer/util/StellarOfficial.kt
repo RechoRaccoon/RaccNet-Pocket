@@ -34,6 +34,14 @@ object StellarOfficial {
      */
     const val TUTORIAL_POST_URL = ""
 
+    /**
+     * The "Stellar Tutorial" popup after the welcome popup. Off: "Continue"
+     * goes straight to the Hub (the popup fades as the Hub comes back into
+     * focus). Set to true to bring the tutorial popup back — all of its
+     * code is still in place.
+     */
+    const val TUTORIAL_ENABLED = false
+
     /** True for a list (not feed generator) at:// URI. */
     fun isListUri(uri: String?): Boolean = uri != null && uri.contains("/app.bsky.graph.list/")
 }
