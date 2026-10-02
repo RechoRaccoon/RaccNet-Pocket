@@ -117,7 +117,7 @@ data class LocalFeed(
 
 @Serializable
 data class DmStreak(
-    /** Days in a row both people messaged (0 until it reaches 3). */
+    /** Days in a row both people messaged. */
     val count: Int = 0,
     /** Raw run of days, even below 3. */
     val run: Int = 0,

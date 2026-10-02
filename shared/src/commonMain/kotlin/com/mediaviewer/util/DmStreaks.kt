@@ -6,7 +6,7 @@ import com.mediaviewer.platform.currentTimeMillis
 /**
  * DM streaks, worked out entirely on this device from the chat's own
  * messages: a day counts when BOTH people sent at least one message (in the
- * phone's own time zone); three days in a row starts a streak, shown as 3.
+ * phone's own time zone); the streak counts from the first such day (1, 2, 3…).
  * Nothing is uploaded, and nothing extra is requested just to show it — the
  * number in the chat list is whatever was last worked out, and tapping the
  * flame re-counts from the chat's history.
@@ -69,11 +69,11 @@ object DmStreaks {
         return if (streak.lastDay >= today - 1) streak.count else 0
     }
 
-    /** Saves [count] for [convoId] (a streak shows from 3 days). */
+    /** Saves [count] for [convoId] (shown from the first day). */
     fun save(convoId: String, count: Count) {
         LocalData.setDmStreak(
             convoId,
-            DmStreak(count = if (count.run >= 3) count.run else 0, run = count.run, lastDay = count.lastDay, checkedAt = currentTimeMillis())
+            DmStreak(count = count.run, run = count.run, lastDay = count.lastDay, checkedAt = currentTimeMillis())
         )
     }
 
@@ -89,10 +89,10 @@ object DmStreaks {
         val saved = LocalData.dmStreak(convoId)
         val savedLive = saved.lastDay >= dayOf(currentTimeMillis(), zoneOffsetMs()) - 1
         if (c.settled || !hasOlder || !savedLive || c.run >= saved.run) save(convoId, c)
-        else if (c.lastDay > saved.lastDay && saved.count > 0) {
+        else if (c.lastDay > saved.lastDay && saved.run > 0) {
             // The run continues past what's loaded: it grew by the new days.
             val grown = saved.run + (c.lastDay - saved.lastDay).toInt()
-            LocalData.setDmStreak(convoId, saved.copy(count = if (grown >= 3) grown else 0, run = grown, lastDay = c.lastDay, checkedAt = currentTimeMillis()))
+            LocalData.setDmStreak(convoId, saved.copy(count = grown, run = grown, lastDay = c.lastDay, checkedAt = currentTimeMillis()))
         }
     }
 }
