@@ -28,19 +28,25 @@ jobs:
       - name: Build release APK
         run: gradle :androidApp:assembleRelease --stacktrace
 
-      # Stellar's own signing key (CN=Stellar, alias "stellar"). The
-      # applicationId is rechoraccoon.stellar, so this installs as its own
-      # app alongside/in place of the old RaccNet Lite package.
-      - name: Sign APK with committed keystore
+      # Release signing key comes from GitHub Actions secrets
+      # (STELLAR_KEYSTORE_B64, STELLAR_KEYSTORE_PASSWORD, STELLAR_KEY_ALIAS).
+      # Never commit a keystore or password to the repo.
+      - name: Sign APK with release key
+        env:
+          KEYSTORE_B64: ${{ secrets.STELLAR_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.STELLAR_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.STELLAR_KEY_ALIAS }}
         run: |
+          echo "$KEYSTORE_B64" | base64 -d > /tmp/stellar-release.p12
           BUILD_TOOLS=$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)
           $ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner sign \
-            --ks stellar-release.jks \
-            --ks-key-alias stellar \
-            --ks-pass pass:Stellar2026 \
-            --key-pass pass:Stellar2026 \
+            --ks /tmp/stellar-release.p12 \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass pass:"$KEYSTORE_PASSWORD" \
+            --key-pass pass:"$KEYSTORE_PASSWORD" \
             --out androidApp/build/outputs/apk/release/Stellar.apk \
             androidApp/build/outputs/apk/release/androidApp-release-unsigned.apk
+          rm -f /tmp/stellar-release.p12
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
