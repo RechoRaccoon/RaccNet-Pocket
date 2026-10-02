@@ -3347,23 +3347,13 @@ class BlueskyRepository {
     }
     }
 
-    /** A poll: the "Q. / A. / B." text, plus a small generated picture whose
-     *  alt text ("A poll asking …") is how Stellar recognises it. */
+    /** A poll: plain text any app can read — "Poll:" on the first line,
+     *  then "Q. …" and one "A. …" line per answer. Stellar recognises that
+     *  shape and draws tappable answers. */
     suspend fun createPollPost(
         token: String, did: String, question: String, options: List<String>, selfLabels: List<String> = emptyList()
-    ): Result<BskyRef> = withContext(Dispatchers.IO) {
-        runCatching {
-            val bytes = com.mediaviewer.util.PollImage.png(options.size)
-            val resp = api.uploadBlob("Bearer $token", "image/png", bytes.toRequestBody("image/png".toMediaType()))
-            val blob = resp.body()?.blob ?: error("uploadBlob ${resp.code()}: ${resp.errorBody()?.string()}")
-            createPost(
-                token, did, com.mediaviewer.ui.PollFormat.postText(question, options),
-                listOf(UploadedImage(blob, com.mediaviewer.util.PollImage.WIDTH, com.mediaviewer.util.PollImage.HEIGHT)),
-                imageAlts = listOf(com.mediaviewer.ui.PollFormat.altText(question, options)),
-                selfLabels = selfLabels
-            ).getOrElse { throw it }
-        }
-    }
+    ): Result<BskyRef> =
+        createPost(token, did, com.mediaviewer.ui.PollFormat.postText(question, options), selfLabels = selfLabels)
 
     /**
      * Edits one of your own posts in place: the same record (same rkey) is
@@ -3464,9 +3454,21 @@ class BlueskyRepository {
             record["stellarEditHistory"] = history.takeLast(30)
             record["stellarEditedAt"] = now
 
-            val resp = api.putRecord("Bearer $token", BskyPutRecordRequest(did, "app.bsky.feed.post", rkey, record))
-            val body = resp.body() ?: error("Editing the post failed (${resp.code()}): ${resp.errorBody()?.string()?.take(160)}")
-            BskyRef(body.uri, body.cid)
+            // Bluesky's AppView ignores an in-place update (putRecord) of a
+            // post — the record changes but every app keeps showing the old
+            // one. So the edit is written as "delete + create the same
+            // record key" in ONE atomic commit: the post keeps its exact
+            // link (same URI) and createdAt, and the AppView indexes the new
+            // version like a fresh post at that address.
+            val resp = api.applyWrites("Bearer $token", BskyApplyWritesRequest(did, listOf(
+                mapOf("\$type" to "com.atproto.repo.applyWrites#delete", "collection" to "app.bsky.feed.post", "rkey" to rkey),
+                mapOf("\$type" to "com.atproto.repo.applyWrites#create", "collection" to "app.bsky.feed.post", "rkey" to rkey, "value" to record)
+            )))
+            if (!resp.isSuccessful) error("Editing the post failed (${resp.code()}): ${resp.errorBody()?.string()?.take(160)}")
+            val newCid = runCatching {
+                resp.body()?.getAsJsonArray("results")?.mapNotNull { r -> runCatching { r.asJsonObject.get("cid")?.asString }.getOrNull() }?.lastOrNull()
+            }.getOrNull().orEmpty()
+            BskyRef(postUri, newCid)
         }
     }
 
@@ -3753,7 +3755,9 @@ class BlueskyRepository {
                     author = author, likeUri = post.viewer?.like, repostUri = post.viewer?.repost,
                     isLiked = post.viewer?.like != null, isReposted = post.viewer?.repost != null,
                     likeCount = post.likeCount ?: 0, replyCount = post.replyCount ?: 0,
-                    repostCount = post.repostCount ?: 0, text = text, labels = nsfwLabels
+                    repostCount = post.repostCount ?: 0, text = text, labels = nsfwLabels,
+                    // A Stellar poll: "Poll:" then Q. / A. / B. lines.
+                    isPoll = com.mediaviewer.ui.PollFormat.parse(text) != null
                 )
             )
 
@@ -3820,26 +3824,7 @@ class BlueskyRepository {
                     if (images.isEmpty()) textOnlyItem() else {
                         val first = images.first()
                         val firstAlt = first.alt
-                        if (images.size == 1 && firstAlt != null && firstAlt.startsWith(com.mediaviewer.ui.PollFormat.ALT_PREFIX) &&
-                            com.mediaviewer.ui.PollFormat.parse(text) != null
-                        ) {
-                            // A Stellar poll: on the wire it's the "Q. / A. /
-                            // B." text plus one small picture whose alt text
-                            // starts with "A poll asking". Shown as a text
-                            // post (Explore, profiles) with tappable answers
-                            // in the timeline.
-                            listOf(
-                                MediaItem(
-                                    id = post.cid, mediaUrl = "", thumbUrl = "", isVideo = false,
-                                    postUri = post.uri, postCid = post.cid, feedContext = item.feedContext,
-                                    author = author, likeUri = post.viewer?.like, repostUri = post.viewer?.repost,
-                                    isLiked = post.viewer?.like != null, isReposted = post.viewer?.repost != null,
-                                    likeCount = post.likeCount ?: 0, replyCount = post.replyCount ?: 0,
-                                    repostCount = post.repostCount ?: 0,
-                                    text = text, labels = nsfwLabels, isPoll = true
-                                )
-                            )
-                        } else if (images.size == 1 && firstAlt != null && firstAlt.startsWith(TEXTSHOT_ALT_PREFIX)) {
+                        if (images.size == 1 && firstAlt != null && firstAlt.startsWith(TEXTSHOT_ALT_PREFIX)) {
                             // Item 10: on the wire, a Textshot post is just a
                             // single image whose alt text is tagged with
                             // TEXTSHOT_ALT_PREFIX (see createTextshotPost).

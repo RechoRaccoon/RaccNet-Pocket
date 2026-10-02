@@ -511,6 +511,13 @@ data class BskyCreateRecordRequest(
 @Serializable
 data class BskyCreateRecordResponse(val uri: String = "", val cid: String = "")
 
+/** com.atproto.repo.applyWrites: several record writes in one commit. */
+@Serializable
+data class BskyApplyWritesRequest(
+    val repo: String = "",
+    @Serializable(with = com.mediaviewer.json.AnyMapListSerializer::class) val writes: List<Map<String, Any>> = emptyList()
+)
+
 // ── Compose Post (upload flow) ──────────────────────────────────────────────
 
 @Serializable

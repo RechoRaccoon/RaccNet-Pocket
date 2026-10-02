@@ -154,6 +154,16 @@ class BlueskyApi(baseUrl: String = "https://bsky.social/", profile: HttpProfile 
         headers = listOf("Authorization" to token),
         body = json(request)
     )
+    /** Several writes as one commit (editing a post: delete + create). */
+    suspend fun applyWrites(
+        token: String,
+        request: BskyApplyWritesRequest
+    ): Response<com.mediaviewer.json.JsonObject> = call(
+        "POST",
+        "xrpc/com.atproto.repo.applyWrites",
+        headers = listOf("Authorization" to token),
+        body = json(request)
+    )
     // ── Compose Post (upload flow) ──────────────────────────────────────────
     // Raw-bytes blob upload — used for both images and (through
     // BlueskyRepository's own video.bsky.app client below) video. Content-

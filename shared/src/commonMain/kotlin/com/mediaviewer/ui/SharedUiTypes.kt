@@ -81,34 +81,25 @@ object ComposerSeed {
     var editPost by androidx.compose.runtime.mutableStateOf<EditPostTarget?>(null)
 }
 
-/** Poll posts: the text Stellar posts ("Q. …" then "A. …", "B. …") and the
- *  alt text other Stellar clients recognise a poll by. */
+/** Poll posts are plain text: "Poll:" on the first line, then "Q. …" and
+ *  one lettered line per answer ("A. …", "B. …"). That shape is how Stellar
+ *  recognises a poll. */
 object PollFormat {
-    const val ALT_PREFIX = "A poll asking "
+    const val HEADER = "Poll:"
     const val MAX_OPTIONS = 6
 
     fun letter(index: Int): String = ('A' + index).toString()
 
     fun postText(question: String, options: List<String>): String =
-        (listOf("Q. " + question.trim()) + options.mapIndexed { i, o -> letter(i) + ". " + o.trim() }).joinToString("\n")
-
-    fun altText(question: String, options: List<String>): String {
-        val quoted = options.map { "\"" + it.trim() + "\"" }
-        val list = when (quoted.size) {
-            0 -> ""
-            1 -> quoted[0]
-            2 -> quoted[0] + " and " + quoted[1]
-            else -> quoted.dropLast(1).joinToString(", ") + ", and " + quoted.last()
-        }
-        return ALT_PREFIX + "\"" + question.trim() + "\". The options are " + list
-    }
+        (listOf(HEADER, "Q. " + question.trim()) + options.mapIndexed { i, o -> letter(i) + ". " + o.trim() }).joinToString("\n")
 
     /** The question and answers back out of a poll post's text. */
     fun parse(text: String): Pair<String, List<String>>? {
         val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
-        val q = lines.firstOrNull()?.takeIf { it.startsWith("Q. ") || it.startsWith("Q.") } ?: return null
+        if (lines.size < 4 || !lines[0].equals(HEADER, ignoreCase = true)) return null
+        val q = lines[1].takeIf { it.startsWith("Q.") } ?: return null
         val options = ArrayList<String>()
-        for (line in lines.drop(1)) {
+        for (line in lines.drop(2)) {
             val expected = letter(options.size) + "."
             if (!line.startsWith(expected)) break
             options += line.removePrefix(expected).trim()

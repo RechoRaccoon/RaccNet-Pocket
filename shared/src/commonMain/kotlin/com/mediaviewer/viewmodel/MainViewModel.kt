@@ -1600,7 +1600,7 @@ class MainViewModel(
             // An edit: the post on screen updates in place; nothing to open.
             val edited = draft.editingPost
             if (edited != null) {
-                val newCid = (result.getOrNull() as? BskyRef)?.cid
+                val newCid = (result.getOrNull() as? BskyRef)?.cid?.takeIf { it.isNotBlank() }
                 val newText = draft.posts.firstOrNull()?.text.orEmpty()
                 withContext(Dispatchers.Main) {
                     applyEditedPostLocally(edited, newText, newCid)
