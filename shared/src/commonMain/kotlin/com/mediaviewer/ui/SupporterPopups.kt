@@ -82,9 +82,9 @@ private fun isoToText(iso: String): String {
 /** Tapping a post's "Edited" status: the current version on top, then
  *  every earlier version, newest first. */
 @Composable
-fun EditHistoryPopup(item: MediaItem, liquidGlass: Boolean, tint: Color, onClose: () -> Unit) {
+fun EditHistoryPopup(item: MediaItem, liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, onClose: () -> Unit) {
     val versions: List<PostEditVersion> = remember(item) { (item.editHistory ?: emptyList()).reversed() }
-    LocalPopup(title = "Edit History", liquidGlass = liquidGlass, tint = tint, onClose = onClose) {
+    LocalPopup(title = "Edit History", liquidGlass = liquidGlass, tint = tint, onClose = onClose, backdrop = backdrop) {
         Column(
             Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -158,7 +158,7 @@ internal fun FolderCover(folder: BookmarkFolder?, tint: Color, modifier: Modifie
  * one with a name and a cover. Folders live only on this device.
  */
 @Composable
-fun BookmarkFolderPopup(item: MediaItem, liquidGlass: Boolean, tint: Color, onClose: () -> Unit) {
+fun BookmarkFolderPopup(item: MediaItem, liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, onClose: () -> Unit) {
     val context = LocalContext.current
     val tap = rememberHapticTap()
     val scope = rememberCoroutineScope()
@@ -175,7 +175,7 @@ fun BookmarkFolderPopup(item: MediaItem, liquidGlass: Boolean, tint: Color, onCl
     }
     val thumb = item.thumbUrl.ifBlank { item.mediaUrl }
 
-    LocalPopup(title = "Add To", liquidGlass = liquidGlass, tint = tint, onClose = onClose, subtitle = "Folders") {
+    LocalPopup(title = "Add To", liquidGlass = liquidGlass, tint = tint, onClose = onClose, subtitle = "Folders", backdrop = backdrop) {
         Column(
             Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -281,7 +281,7 @@ fun BookmarkFolderPopup(item: MediaItem, liquidGlass: Boolean, tint: Color, onCl
 /** A private note about a profile (More → the note icon). Kept only on
  *  this device; shown above the bio on that profile. */
 @Composable
-fun ProfileNotePopup(author: AuthorInfo, liquidGlass: Boolean, tint: Color, onClose: () -> Unit) {
+fun ProfileNotePopup(author: AuthorInfo, liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?, onClose: () -> Unit) {
     val existing = remember(author.did) { LocalData.profileNote(author.did) }
     var text by remember(author.did) { mutableStateOf(existing) }
     val label = when {
@@ -289,7 +289,7 @@ fun ProfileNotePopup(author: AuthorInfo, liquidGlass: Boolean, tint: Color, onCl
         text.isBlank() -> "Remove Note"
         else -> "Save"
     }
-    LocalPopup(title = "Profile Note", liquidGlass = liquidGlass, tint = tint, onClose = onClose) {
+    LocalPopup(title = "Profile Note", liquidGlass = liquidGlass, tint = tint, onClose = onClose, backdrop = backdrop) {
         Text(
             "Only you can see this. It stays on this device.",
             color = Color.White.copy(alpha = 0.65f), fontSize = 12.sp, textAlign = TextAlign.Center,
@@ -326,6 +326,7 @@ fun FeedBuilderPopup(
     myLists: List<BskyList>,
     liquidGlass: Boolean,
     tint: Color,
+    backdrop: GlassBackdrop?,
     onLoadLists: () -> Unit,
     onResolveList: (String, (LocalFeedSource?, String?) -> Unit) -> Unit,
     onResolveAccount: (String, (LocalFeedSource?, String?) -> Unit) -> Unit,
@@ -367,7 +368,7 @@ fun FeedBuilderPopup(
         }
     }
 
-    LocalPopup(title = "Feed Builder", liquidGlass = liquidGlass, tint = tint, onClose = onClose, maxHeight = 620.dp) {
+    LocalPopup(title = "Feed Builder", liquidGlass = liquidGlass, tint = tint, onClose = onClose, maxHeight = 620.dp, backdrop = backdrop) {
         Column(
             Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(8.dp)

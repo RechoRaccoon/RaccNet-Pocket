@@ -21,6 +21,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.Font
@@ -582,16 +583,22 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
     // drawn exactly as before the rest of the time.)
     val onboardingBlurActive by remember { androidx.compose.runtime.derivedStateOf { onboardingBlur.value > 0.01f } }
     // The supporter popups (Feed Builder, folders, notes, edit history, pin
-    // a chat, sharing a feed) blur the app behind them the same way.
+    // a chat, sharing a feed) are glass like "Add To": the popup itself
+    // blurs what's behind it. They are drawn outside this box, and while one
+    // is up the whole app page is recorded here as their live backdrop
+    // (only then — nothing extra is drawn the rest of the time).
     val feedShareOpen = sendPopupTarget?.id?.startsWith(com.mediaviewer.viewmodel.MainViewModel.PROFILE_SHARE_PREFIX + "feed:") == true
     val localPopupShown = (com.mediaviewer.ui.LocalOverlays.popupOpen || feedShareOpen) && liquidGlass
-    val localBlur = androidx.compose.animation.core.animateFloatAsState(
-        if (localPopupShown) 0.7f else 0f, androidx.compose.animation.core.tween(220), label = "localPopupBlur"
-    )
-    val localBlurActive by remember { androidx.compose.runtime.derivedStateOf { localBlur.value > 0.01f } }
+    val appLayer = androidx.compose.ui.graphics.rememberGraphicsLayer()
+    val appBackdrop = remember(appLayer) { GlassBackdrop(appLayer) { androidx.compose.ui.geometry.Offset.Zero } }
     Box(Modifier.fillMaxSize().then(
-        if (onboardingBlurActive || onboardingShown || localBlurActive || localPopupShown) Modifier.graphicsLayer {
-            val amount = maxOf(onboardingBlur.value, localBlur.value)
+        if (localPopupShown) Modifier.drawWithContent {
+            appLayer.record { this@drawWithContent.drawContent() }
+            drawContent()
+        } else Modifier
+    ).then(
+        if (onboardingBlurActive || onboardingShown) Modifier.graphicsLayer {
+            val amount = onboardingBlur.value
             renderEffect = if (amount > 0.01f) {
                 val r = 26.dp.toPx() * amount
                 androidx.compose.ui.graphics.BlurEffect(r, r, androidx.compose.ui.graphics.TileMode.Clamp)
@@ -1411,6 +1418,7 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
             tint = selfProfileTint,
             postTint = if (screenState == ScreenState.FEED) currentDominantColor else selfProfileTint,
             savedFeedUris = savedFeedUris,
+            backdrop = if (liquidGlass) appBackdrop else null,
             hubShowing = screenState == ScreenState.SETTINGS && profileOverlay?.hidden != false
         )
 
@@ -1425,7 +1433,7 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                 sending         = sendPopupSending,
                 liquidGlass     = liquidGlass,
                 dominantColor   = selfProfileTint,
-                backdrop        = null,
+                backdrop        = if (liquidGlass) appBackdrop else null,
                 onToggleSelect  = viewModel::toggleSendRecipient,
                 onSend          = viewModel::sendToSelectedRecipients,
                 onDismiss       = viewModel::dismissSendPopup

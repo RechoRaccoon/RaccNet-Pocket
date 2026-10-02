@@ -124,7 +124,7 @@ fun LocalPopup(
     Box(
         modifier.fillMaxSize()
             .graphicsLayer { alpha = appear.value.coerceIn(0f, 1f) }
-            .background(Color.Black.copy(alpha = 0.5f))
+            .background(Color.Black.copy(alpha = 0.3f))
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClose)
             .imePadding()
             .padding(horizontal = 14.dp, vertical = 40.dp),

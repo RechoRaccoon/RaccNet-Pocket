@@ -45,6 +45,8 @@ fun LocalOverlayHost(
     /** The color of the post on screen (popups about that post wear it). */
     postTint: Color,
     savedFeedUris: Set<String>,
+    /** The app page behind the popups, recorded live: their glass blurs it. */
+    backdrop: GlassBackdrop?,
     hubShowing: Boolean
 ) {
     val folderId by viewModel.bookmarkFolderId.collectAsState()
@@ -97,17 +99,17 @@ fun LocalOverlayHost(
 
     // ── Popups ──
     FadingPopupHost(LocalOverlays.editHistoryFor, Modifier.zIndex(10.6f)) { item ->
-        EditHistoryPopup(item, liquidGlass, postTint, onClose = { LocalOverlays.editHistoryFor = null })
+        EditHistoryPopup(item, liquidGlass, postTint, backdrop, onClose = { LocalOverlays.editHistoryFor = null })
     }
     FadingPopupHost(LocalOverlays.bookmarkFolderFor, Modifier.zIndex(10.6f)) { item ->
-        BookmarkFolderPopup(item, liquidGlass, postTint, onClose = { LocalOverlays.bookmarkFolderFor = null })
+        BookmarkFolderPopup(item, liquidGlass, postTint, backdrop, onClose = { LocalOverlays.bookmarkFolderFor = null })
     }
     FadingPopupHost(LocalOverlays.profileNoteFor, Modifier.zIndex(10.6f)) { author ->
-        ProfileNotePopup(author, liquidGlass, tint, onClose = { LocalOverlays.profileNoteFor = null })
+        ProfileNotePopup(author, liquidGlass, tint, backdrop, onClose = { LocalOverlays.profileNoteFor = null })
     }
     FadingPopupHost(LocalOverlays.feedBuilder, Modifier.zIndex(10.6f)) { feed ->
         FeedBuilderPopup(
-            initial = feed, myLists = myLists, liquidGlass = liquidGlass, tint = tint,
+            initial = feed, myLists = myLists, liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
             onLoadLists = viewModel::loadListsForBuilder,
             onResolveList = viewModel::resolveListForBuilder,
             onResolveAccount = viewModel::resolveAccountForBuilder,
@@ -126,7 +128,7 @@ fun LocalOverlayHost(
             message = if (isPinned) "\"${convo.member.displayName}\" goes back to the regular list."
                 else "\"${convo.member.displayName}\" stays at the top of your DMs, under Pinned.",
             confirmLabel = if (isPinned) "Unpin" else "Pin",
-            liquidGlass = liquidGlass, tint = tint, backdrop = null,
+            liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
             onConfirm = { LocalData.setDmPinned(convo.convoId, !isPinned); LocalOverlays.pinDmFor = null },
             onDismiss = { LocalOverlays.pinDmFor = null },
             preview = convo.member.avatarUrl,

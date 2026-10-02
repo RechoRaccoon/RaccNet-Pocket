@@ -316,11 +316,14 @@ private fun <T> ProfileSubFilterRow(
     // Fix 9: the shared light tap, via the shared helper.
     val tap = rememberHapticTap()
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp),
+        Modifier.fillMaxWidth().padding(vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Row(
-            Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+            // The side padding is inside the scrolling row (like the main
+            // tabs), so chips scroll right to the screen's edges instead of
+            // being cut off short of them.
+            Modifier.weight(1f).horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             options.forEach { option ->
@@ -347,6 +350,7 @@ private fun <T> ProfileSubFilterRow(
         if (trailing != null) {
             Spacer(Modifier.width(8.dp))
             trailing()
+            Spacer(Modifier.width(12.dp))
         }
     }
 }
