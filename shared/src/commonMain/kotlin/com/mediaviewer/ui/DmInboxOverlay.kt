@@ -41,6 +41,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -211,6 +213,8 @@ fun DmInboxOverlay(
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text("@${thread.convo.member.handle}", color = DimGray, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
+                    // The streak with this person (tap to re-count it).
+                    DmStreakBadge(thread.convo.convoId, fontSize = 14)
                     // Start a group chat with this person.
                     Box(
                         Modifier.size(32.dp)
@@ -299,8 +303,25 @@ private fun DmConversationPicker(
     // Only accounts we actually have history with — a mutual with no convo yet
     // has nothing to show in a linear-history view.
     val withHistory = remember(conversations) { conversations.filter { it.convoId.isNotBlank() } }
+    // The chat being pinned/unpinned (press and hold), awaiting its confirmation.
+    var pinTarget by remember { mutableStateOf<DmConversation?>(null) }
 
     Box(Modifier.fillMaxSize()) {
+        pinTarget?.let { convo ->
+            val isPinned = com.mediaviewer.util.LocalData.isDmPinned(convo.convoId)
+            ConfirmPopup(
+                title = if (isPinned) "Unpin this chat?" else "Pin this chat?",
+                message = if (isPinned) "\"${convo.member.displayName}\" goes back to the regular list."
+                    else "\"${convo.member.displayName}\" stays at the top of your DMs, under Pinned.",
+                confirmLabel = if (isPinned) "Unpin" else "Pin",
+                liquidGlass = liquidGlass, tint = tint, backdrop = null,
+                onConfirm = { com.mediaviewer.util.LocalData.setDmPinned(convo.convoId, !isPinned); pinTarget = null },
+                onDismiss = { pinTarget = null },
+                preview = convo.member.avatarUrl,
+                destructive = false,
+                modifier = Modifier.zIndex(5f)
+            )
+        }
         when {
             loading && withHistory.isEmpty() -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -313,9 +334,27 @@ private fun DmConversationPicker(
                 }
             }
             else -> {
+                // Pinned chats (supporters) sit in their own section on top,
+                // newest activity first; everything else follows as before.
+                val pins = com.mediaviewer.util.LocalData.pinnedDms
+                val showPins = com.mediaviewer.util.Supporter.active
+                val pinned = remember(withHistory, pins, showPins) {
+                    if (!showPins) emptyList() else withHistory.filter { it.convoId in pins }.sortedByDescending { it.lastActivityAt }
+                }
+                val unpinned = remember(withHistory, pinned) { if (pinned.isEmpty()) withHistory else withHistory - pinned.toSet() }
                 LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(withHistory, key = { it.convoId }) { convo ->
-                        DmConvoRow(convo, liquidGlass, tint, onClick = { tap(); onSelectConvo(convo) })
+                    if (pinned.isNotEmpty()) {
+                        item(key = "pinned_header") { DmSectionTitle("Pinned") }
+                        items(pinned, key = { it.convoId }) { convo ->
+                            DmConvoRow(convo, liquidGlass, tint, onClick = { tap(); onSelectConvo(convo) }, onLongClick = { pinTarget = convo })
+                        }
+                        item(key = "unpinned_header") { DmSectionTitle("Unpinned") }
+                    }
+                    items(unpinned, key = { it.convoId }) { convo ->
+                        DmConvoRow(convo, liquidGlass, tint, onClick = { tap(); onSelectConvo(convo) }, onLongClick = {
+                            // Pinning is a supporter benefit.
+                            if (com.mediaviewer.util.Supporter.active) pinTarget = convo else com.mediaviewer.util.Supporter.openPage()
+                        })
                     }
                     // Room for the + button.
                     item(key = "fab_space") { Spacer(Modifier.height(80.dp)) }
@@ -331,7 +370,8 @@ private fun DmConversationPicker(
  * newest message/activity, and "(x) unread" when there's anything new.
  */
 @Composable
-private fun DmConvoRow(convo: DmConversation, liquidGlass: Boolean, selfTint: Color, onClick: () -> Unit) {
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+private fun DmConvoRow(convo: DmConversation, liquidGlass: Boolean, selfTint: Color, onClick: () -> Unit, onLongClick: () -> Unit = {}) {
     val rowTint = if (convo.isGroup || convo.member.did.isBlank()) selfTint
         else rememberAuthorProfileTint(convo.member.did, convo.member.avatarUrl)
     val unread = convo.unreadCount
@@ -343,7 +383,7 @@ private fun DmConvoRow(convo: DmConversation, liquidGlass: Boolean, selfTint: Co
                 else Modifier.clip(shape).background(androidx.compose.ui.graphics.lerp(Color(0xFF16161B), rowTint, 0.18f))
             )
             .then(if (unread > 0) Modifier.border(1.2.dp, rowTint.copy(alpha = 0.9f), shape) else Modifier)
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -351,6 +391,7 @@ private fun DmConvoRow(convo: DmConversation, liquidGlass: Boolean, selfTint: Co
         DmConvoAvatar(convo, 44.dp)
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     convo.member.displayName, color = Color.White, fontSize = 14.sp,
                     fontWeight = if (unread > 0) FontWeight.Bold else FontWeight.SemiBold,
@@ -363,10 +404,14 @@ private fun DmConvoRow(convo: DmConversation, liquidGlass: Boolean, selfTint: Co
                         maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false)
                     )
                 }
+                }
+                // The streak, at the top right of the chat (1:1 chats).
+                if (!convo.isGroup) DmStreakBadge(convo.convoId, fontSize = 12)
             }
             Spacer(Modifier.height(2.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                val preview = (sharedProfileActor(convo.lastMessageText)?.let { (_, rest) -> rest.ifBlank { "Shared a profile" } } ?: convo.lastMessageText).ifBlank {
+                val preview = (sharedFeedLink(convo.lastMessageText)?.let { it.rest.ifBlank { if (it.kind == "lists") "Shared a list" else "Shared a feed" } }
+                    ?: sharedProfileActor(convo.lastMessageText)?.let { (_, rest) -> rest.ifBlank { "Shared a profile" } } ?: convo.lastMessageText).ifBlank {
                     if (convo.isGroup) "${maxOf(convo.memberCount, convo.groupMembers.size + 1)} members" else ""
                 }
                 Text(
@@ -475,6 +520,29 @@ private fun DmThreadView(
         onSendReply(text.trim(), replyTarget?.id)
         text = ""
         replyTarget = null
+    }
+
+    // ── Message effects ("happy birthday" → confetti, …) ──
+    // The newest message that sets one off plays once, the first time this
+    // device sees it (so it plays for both people — each when they open the
+    // chat); tapping such a message plays it again.
+    var effectPlay by remember(thread.convo.convoId) { mutableStateOf<Pair<DmEffect, Int>?>(null) }
+    val effectCounter = remember { intArrayOf(0) }
+    LaunchedEffect(thread.convo.convoId, thread.messages.lastOrNull()?.id, thread.loading) {
+        if (thread.loading) return@LaunchedEffect
+        val fresh = thread.messages.filter {
+            !it.isSystem && !it.isDeleted && dmEffectFor(it.text) != null && !com.mediaviewer.util.LocalData.dmEffectPlayed(it.id)
+        }
+        val newest = fresh.lastOrNull() ?: return@LaunchedEffect
+        com.mediaviewer.util.LocalData.markDmEffectsPlayed(fresh.map { it.id })
+        dmEffectFor(newest.text)?.let { effectPlay = it to ++effectCounter[0] }
+    }
+    // ── Streak ── kept current from the messages already on screen (no
+    // extra requests); 1:1 chats only.
+    LaunchedEffect(thread.convo.convoId, thread.messages.size, thread.loading) {
+        if (!isGroup && !thread.loading && myDid.isNotBlank()) {
+            com.mediaviewer.util.DmStreaks.noteLoaded(thread.convo.convoId, thread.messages, myDid, hasOlder = thread.cursor != null)
+        }
     }
 
     // Long press: the emoji reaction picker, anchored to the pressed bubble.
@@ -607,6 +675,7 @@ private fun DmThreadView(
                                 replyTint = msg.replyTo?.let { r -> tintOf(r) } ?: Color.White,
                                 highlighted = highlightId == msg.id,
                                 onReply = { startReply(msg) },
+                                onTap = { dmEffectFor(msg.text)?.let { effectPlay = it to ++effectCounter[0] } },
                                 onLongPress = { bounds -> picker = msg to bounds },
                                 onToggleReaction = { emoji -> onToggleReaction(msg.id, emoji) },
                                 onJumpToReply = { id ->
@@ -714,6 +783,9 @@ private fun DmThreadView(
         }
     }
 
+    // The effect plays over the whole chat; touches pass through it.
+    effectPlay?.let { (kind, key) -> DmEffectLayer(kind, key, Modifier.matchParentSize()) }
+
     // ── Reaction picker (long press) ──
     val current = picker
     if (current != null) {
@@ -779,6 +851,7 @@ private fun DmBubble(
     replyTint: Color = Color.White,
     highlighted: Boolean = false,
     onReply: () -> Unit = {},
+    onTap: () -> Unit = {},
     onLongPress: (androidx.compose.ui.geometry.Rect) -> Unit = {},
     onToggleReaction: (String) -> Unit = {},
     onJumpToReply: (String) -> Unit = {},
@@ -871,7 +944,8 @@ private fun DmBubble(
                 .combinedClickable(
                     interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                     indication = null,
-                    onClick = {},
+                    // (A message with an effect replays it when tapped.)
+                    onClick = onTap,
                     // (combinedClickable gives the long-press haptic itself.)
                     onLongClick = { bubbleBounds[0]?.let(onLongPress) }
                 )
@@ -906,10 +980,18 @@ private fun DmBubble(
             }
             // A shared profile (Stellar/Bluesky send its bsky.app link): the
             // link itself is replaced by a small profile card below.
-            val sharedProfile = remember(msg.text) { sharedProfileActor(msg.text) }
-            val shownText = if (sharedProfile != null) sharedProfile.second else msg.text
+            // A shared feed or list (its bsky.app link, sent by dragging a
+            // feed onto the Hub's DMs button): the text typed with it on top,
+            // then the feed as a row like a profile's Lists/Feeds tab.
+            val sharedFeed = remember(msg.text) { sharedFeedLink(msg.text) }
+            val sharedProfile = remember(msg.text) { if (sharedFeed != null) null else sharedProfileActor(msg.text) }
+            val shownText = sharedFeed?.rest ?: if (sharedProfile != null) sharedProfile.second else msg.text
             if (shownText.isNotBlank()) {
                 Text(shownText, color = Color.White, fontSize = 14.sp, lineHeight = 18.sp)
+            }
+            if (sharedFeed != null) {
+                if (shownText.isNotBlank()) Spacer(Modifier.height(8.dp))
+                SharedFeedCard(sharedFeed, liquidGlass, tint)
             }
             if (sharedProfile != null) {
                 if (shownText.isNotBlank()) Spacer(Modifier.height(8.dp))
@@ -1332,6 +1414,112 @@ private fun SharedProfileCard(actor: String) {
         Text(
             "@" + (a?.handle ?: actor), color = Color.White.copy(0.65f), fontSize = 11.sp,
             maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        )
+    }
+}
+
+
+// ── Sections, streaks, shared feeds ─────────────────────────────────────
+
+/** "Pinned" / "Unpinned": a left-aligned title over each part of the DM list. */
+@Composable
+private fun DmSectionTitle(text: String) {
+    Text(
+        text, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.fillMaxWidth().padding(start = 6.dp, top = 2.dp)
+    )
+}
+
+/**
+ * A chat's streak: the fire emoji with the number to its right. Shown from
+ * what was last worked out on this device (instant — nothing is requested
+ * to draw it), greyed out at 0. Tapping it re-counts from the chat's own
+ * history and saves the result.
+ */
+@Composable
+internal fun DmStreakBadge(convoId: String, fontSize: Int, modifier: Modifier = Modifier) {
+    if (convoId.isBlank()) return
+    val tap = rememberHapticTap()
+    val streak = com.mediaviewer.util.LocalData.dmStreak(convoId)
+    val shown = com.mediaviewer.util.DmStreaks.shown(streak)
+    var scanning by remember(convoId) { mutableStateOf(false) }
+    val active = shown > 0
+    Row(
+        modifier.clip(RoundedCornerShape(10.dp))
+            .clickable(enabled = !scanning) {
+                tap()
+                val scan = LocalOverlays.scanDmStreak
+                if (scan != null) { scanning = true; scan(convoId) { scanning = false } }
+            }
+            .padding(horizontal = 4.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            "\uD83D\uDD25", fontSize = fontSize.sp,
+            // Greyscale while there's no streak.
+            modifier = Modifier.graphicsLayer { alpha = if (scanning) 0.5f else 1f }
+                .then(if (active) Modifier else Modifier.grayedOutEmoji())
+        )
+        Spacer(Modifier.width(2.dp))
+        Text(
+            shown.toString(), color = if (active) Color(0xFFFFB25C) else Color.White.copy(alpha = 0.4f),
+            fontSize = fontSize.sp, fontWeight = FontWeight.Bold, maxLines = 1
+        )
+    }
+}
+
+/** Draws its content in greyscale (and a little dimmer). */
+private fun Modifier.grayedOutEmoji(): Modifier = this.drawWithContent {
+    val paint = androidx.compose.ui.graphics.Paint().apply {
+        colorFilter = androidx.compose.ui.graphics.ColorFilter.colorMatrix(androidx.compose.ui.graphics.ColorMatrix().apply { setToSaturation(0f) })
+        alpha = 0.55f
+    }
+    drawIntoCanvas { canvas ->
+        canvas.saveLayer(androidx.compose.ui.geometry.Rect(0f, 0f, size.width, size.height), paint)
+        drawContent()
+        canvas.restore()
+    }
+}
+
+/** A feed or list link found in a message. */
+internal class SharedFeedLink(val actor: String, val kind: String, val rkey: String, val rest: String)
+
+private val feedLinkRegex = Regex("""https?://(?:www\.)?bsky\.app/profile/([^/\s?#]+)/(feed|lists)/([^/\s?#]+)/?""")
+
+/** If [text] shares a feed or list — a bsky.app/profile/…/feed/… or
+ *  …/lists/… link — returns it with the rest of the text. */
+internal fun sharedFeedLink(text: String): SharedFeedLink? {
+    val m = feedLinkRegex.findAll(text).lastOrNull() ?: return null
+    val rest = (text.substring(0, m.range.first) + text.substring(m.range.last + 1)).trim()
+    return SharedFeedLink(m.groupValues[1], m.groupValues[2], m.groupValues[3], rest)
+}
+
+/** A shared feed inside a DM bubble: the same row as a profile's Lists /
+ *  Feeds tab — tap it to open the feed (in front of the DMs), or "Add" to
+ *  put it straight into your feeds. */
+@Composable
+private fun SharedFeedCard(link: SharedFeedLink, liquidGlass: Boolean, tint: Color) {
+    var entry by remember(link.actor, link.kind, link.rkey) { mutableStateOf<com.mediaviewer.model.ProfileListEntry?>(null) }
+    var failed by remember(link.actor, link.kind, link.rkey) { mutableStateOf(false) }
+    LaunchedEffect(link.actor, link.kind, link.rkey) {
+        val found = runCatching { LocalOverlays.resolveFeedCard?.invoke(link.actor, link.kind, link.rkey) }.getOrNull()
+        if (found != null) entry = found else failed = true
+    }
+    val e = entry
+    if (e == null) {
+        Text(
+            if (failed) "A shared ${if (link.kind == "lists") "list" else "feed"} (couldn't load it)" else "Loading shared ${if (link.kind == "lists") "list" else "feed"}…",
+            color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp
+        )
+        return
+    }
+    val saved = e.uri in LocalOverlays.savedFeedUris
+    Box(Modifier.widthIn(min = 240.dp)) {
+        ProfileListRow(
+            entry = e, liquidGlass = liquidGlass, tint = tint,
+            label = if (saved) "Added" else "Add", busy = false, done = saved,
+            onOpen = { LocalOverlays.openSharedFeed?.invoke(e) },
+            onAction = { LocalOverlays.addSharedFeed?.invoke(e) }
         )
     }
 }

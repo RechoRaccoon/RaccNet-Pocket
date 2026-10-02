@@ -11,6 +11,10 @@ actual object MediaBridge {
 
     actual fun mimeTypeOf(context: PlatformContext, uri: PlatformUri): String? =
         context.contentResolver.getType(uri)
+            // Files Stellar keeps itself (drafts, notes): file:// has no
+            // provider to ask, so go by the extension.
+            ?: uri.lastPathSegment?.substringAfterLast('.', "")?.lowercase()?.takeIf { it.isNotEmpty() }
+                ?.let { android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(it) }
 
     actual fun imageSize(bytes: ByteArray): Pair<Int, Int> {
         val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }

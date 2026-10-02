@@ -51,8 +51,70 @@ data class ComposePostDraft(
     // Applied to every post the draft produces (all posts of a thread).
     val selfLabels: List<String> = emptyList(),
     // Item 12: ComposeMode.BLOG — the whole blog (title, description, rows).
-    val blog: com.mediaviewer.model.BlogDraft? = null
+    val blog: com.mediaviewer.model.BlogDraft? = null,
+    /** Editing an existing post (More → Edit): the post record is rewritten
+     *  in place instead of a new one being created. */
+    val editingPost: EditPostTarget? = null,
+    /** A poll (ComposeMode.SINGLE): the answers, in A, B, C… order; the
+     *  question is posts[0].text. Empty = not a poll. */
+    val pollOptions: List<String> = emptyList(),
+    /** The saved draft this was loaded from (deleted once it's posted). */
+    val fromDraftId: String? = null
 )
+
+/** A post of your own opened in the composer to be edited. */
+data class EditPostTarget(
+    val postUri: String,
+    val text: String,
+    /** The post's current pictures (full-size URLs), in order. */
+    val imageUrls: List<String> = emptyList(),
+    val labels: List<String> = emptyList(),
+    /** False for posts whose attachment isn't a set of pictures (a video,
+     *  a quote, a link card): only the text and labels can change. */
+    val imagesEditable: Boolean = true
+)
+
+/** What the composer should open with (set just before it opens). */
+object ComposerSeed {
+    var editPost by androidx.compose.runtime.mutableStateOf<EditPostTarget?>(null)
+}
+
+/** Poll posts: the text Stellar posts ("Q. …" then "A. …", "B. …") and the
+ *  alt text other Stellar clients recognise a poll by. */
+object PollFormat {
+    const val ALT_PREFIX = "A poll asking "
+    const val MAX_OPTIONS = 6
+
+    fun letter(index: Int): String = ('A' + index).toString()
+
+    fun postText(question: String, options: List<String>): String =
+        (listOf("Q. " + question.trim()) + options.mapIndexed { i, o -> letter(i) + ". " + o.trim() }).joinToString("\n")
+
+    fun altText(question: String, options: List<String>): String {
+        val quoted = options.map { "\"" + it.trim() + "\"" }
+        val list = when (quoted.size) {
+            0 -> ""
+            1 -> quoted[0]
+            2 -> quoted[0] + " and " + quoted[1]
+            else -> quoted.dropLast(1).joinToString(", ") + ", and " + quoted.last()
+        }
+        return ALT_PREFIX + "\"" + question.trim() + "\". The options are " + list
+    }
+
+    /** The question and answers back out of a poll post's text. */
+    fun parse(text: String): Pair<String, List<String>>? {
+        val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        val q = lines.firstOrNull()?.takeIf { it.startsWith("Q. ") || it.startsWith("Q.") } ?: return null
+        val options = ArrayList<String>()
+        for (line in lines.drop(1)) {
+            val expected = letter(options.size) + "."
+            if (!line.startsWith(expected)) break
+            options += line.removePrefix(expected).trim()
+        }
+        if (options.size < 2) return null
+        return q.removePrefix("Q.").trim() to options
+    }
+}
 
 
 enum class PostKindFilter { ALL, IMAGES, TEXT_POSTS, HORIZONTAL_VIDEOS, VERTICAL_VIDEOS }

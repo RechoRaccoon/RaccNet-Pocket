@@ -9,6 +9,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import com.mediaviewer.ui.compat.navBarSpace
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -114,6 +115,9 @@ fun SearchOverlay(
     /** A starter pack tapped: everyone in it. */
     onOpenListEntry: (com.mediaviewer.model.ProfileListEntry) -> Unit = {},
     onLoadMorePosts: () -> Unit = {},
+    /** Bluesky's Trending list (supporters: shown on the Posts tab before a search). */
+    trendingTopics: List<com.mediaviewer.repository.BlueskyRepository.TrendingTopic> = emptyList(),
+    onLoadTrending: () -> Unit = {},
     onClose: () -> Unit
 ) {
     // The bar "splits": the page opens looking exactly like the Hub's search
@@ -189,10 +193,25 @@ fun SearchOverlay(
     var postsKind by remember { mutableStateOf(PostKindFilter.ALL) }
     var taggedKind by remember { mutableStateOf(PostKindFilter.ALL) }
     val isPosts = state.filter == MainViewModel.SearchFilter.POSTS
+    // ── Web Browser tab (supporters) ──
+    val isWeb = state.filter == MainViewModel.SearchFilter.WEB
+    val supporter = com.mediaviewer.util.Supporter.active
+    var webQuery by remember { mutableStateOf("") }
+    val webFocus = androidx.compose.ui.platform.LocalFocusManager.current
+    // Trending Searches (supporters): loaded when the Posts tab is showing.
+    LaunchedEffect(isPosts, supporter) { if (isPosts && supporter) onLoadTrending() }
+    // A lapsed supporter doesn't stay on the browser tab.
+    LaunchedEffect(isWeb, supporter) { if (isWeb && !supporter) onSelectFilter(MainViewModel.SearchFilter.ACCOUNTS) }
     val kindForTab = if (isLiked) taggedKind else postsKind
     val gridScreen = if (isLiked) "search_tagged" else "search_posts"
     val submitSearch: () -> Unit = {
         when {
+            isWeb -> {
+                // The address bar: a web address opens as is; anything else
+                // is searched with the engine picked in Supporter Settings.
+                BrowserHome.state.load(com.mediaviewer.util.LocalData.searchEngine.urlFor(webQuery))
+                webFocus.clearFocus()
+            }
             isE621Filter -> onE621SearchSubmit()
             isLiked -> onLikedSearchSubmit()
             else -> onQueryChange(state.query)
@@ -285,10 +304,10 @@ fun SearchOverlay(
                         // onLikedQueryTextChange/onLikedSearchSubmit's doc
                         // comments on MainViewModel.
                         BasicTextFieldWithPlaceholder(
-                            value = state.query,
-                            onValueChange = if (isTagInputFilter) onLikedQueryTextChange else onQueryChange,
+                            value = if (isWeb) webQuery else state.query,
+                            onValueChange = if (isWeb) ({ webQuery = it }) else if (isTagInputFilter) onLikedQueryTextChange else onQueryChange,
                             // Item 1: just "Search" — no app-name text needed.
-                            placeholder = "Search", focusRequester = focusRequester,
+                            placeholder = if (isWeb) "Search the web or type an address" else "Search", focusRequester = focusRequester,
                             // Item 8: haptic tap when the keyboard's search
                             // action actually submits a query.
                             onSearch = {
@@ -353,7 +372,14 @@ fun SearchOverlay(
             HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
             ProfileStyleTabRow(
                 labels = tabs.map { it.label() }, selectedIndex = tabs.indexOf(state.filter),
-                liquidGlass = liquidGlass, tint = profileTint, onSelect = { onSelectFilter(tabs[it]) }
+                liquidGlass = liquidGlass, tint = profileTint,
+                // Web Browser is a supporter benefit: pink for everyone else,
+                // and tapping it opens the Support page.
+                lockedIndex = if (supporter) -1 else tabs.indexOf(MainViewModel.SearchFilter.WEB),
+                onSelect = {
+                    if (tabs[it] == MainViewModel.SearchFilter.WEB && !supporter) com.mediaviewer.util.Supporter.openPage()
+                    else onSelectFilter(tabs[it])
+                }
             )
             HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
             // Content-type sub-tabs — Posts and Tagged only.
@@ -366,6 +392,24 @@ fun SearchOverlay(
             // ── Results ──────────────────────────────────────────────────
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when {
+                    // Web Browser: a live page filling the space between the
+                    // tabs and the interaction bar.
+                    isWeb -> {
+                        val home = BrowserHome.state
+                        LaunchedEffect(home.url) { com.mediaviewer.util.LocalData.browserLastUrl = home.url }
+                        Box(
+                            Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.navBarSpace)
+                                .padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 64.dp)
+                                .clip(RoundedCornerShape(16.dp)).background(Color.Black)
+                        ) {
+                            if (supporter) PlatformBrowserView(home, Modifier.fillMaxSize())
+                        }
+                    }
+                    // Posts tab before searching (supporters): Bluesky's own
+                    // Trending list; tap one to search it.
+                    isPosts && state.query.isBlank() && supporter && trendingTopics.isNotEmpty() -> {
+                        TrendingSearchesList(trendingTopics, liquidGlass, profileTint, searchBackdrop) { topic -> onQueryChange(topic.query) }
+                    }
                     // Bug fix: this used to sit below the generic
                     // `!state.hasSearched` fallback branch, which intercepts
                     // first when the Liked tab is opened fresh (hasSearched
@@ -504,7 +548,14 @@ fun SearchOverlay(
         }
 
         // Profile-style interaction bar, trimmed to Refresh + Grid layout.
-        if (!isE621Filter && !(isLiked && !hasTaggedDataset)) {
+        if (isWeb) {
+            // Previous Page · Next Page · Refresh · Popout.
+            BrowserInteractionBar(
+                state = BrowserHome.state, liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop,
+                onPopout = { LocalOverlays.popOut(BrowserHome.state.url) },
+                modifier = Modifier.align(Alignment.BottomCenter)
+            )
+        } else if (!isE621Filter && !(isLiked && !hasTaggedDataset)) {
             ResultsInteractionBar(
                 liquidGlass = liquidGlass, tint = profileTint, backdrop = searchBackdrop,
                 refreshing = state.loading, animateRefresh = true,
@@ -581,6 +632,55 @@ private fun MainViewModel.SearchFilter.label(): String = when (this) {
     MainViewModel.SearchFilter.FEEDS         -> "Feeds"
     MainViewModel.SearchFilter.STARTER_PACKS -> "Starter Packs"
     MainViewModel.SearchFilter.E621          -> "e621"
+    MainViewModel.SearchFilter.WEB           -> "Web Browser"
+}
+
+/** Posts tab, before a search (supporters): Bluesky's Trending list, titled
+ *  like the People tab's "Recent Searches". Tapping a topic searches it. */
+@Composable
+private fun TrendingSearchesList(
+    topics: List<com.mediaviewer.repository.BlueskyRepository.TrendingTopic>,
+    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
+    onPick: (com.mediaviewer.repository.BlueskyRepository.TrendingTopic) -> Unit
+) {
+    val tap = rememberHapticTap()
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 96.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        item(key = "trending_header") {
+            Text(
+                "Trending Searches", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.fillMaxWidth().padding(start = 6.dp, bottom = 4.dp)
+            )
+        }
+        items(topics.size, key = { "trend_" + it }) { i ->
+            val topic = topics[i]
+            val shape = RoundedCornerShape(22.dp)
+            val m = Modifier.fillMaxWidth().clip(shape).clickable { tap(); onPick(topic) }
+            val row: @Composable () -> Unit = {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "${i + 1}.", color = androidx.compose.ui.graphics.lerp(tint, Color.White, 0.55f), fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold, modifier = Modifier.width(30.dp)
+                    )
+                    Column(Modifier.weight(1f)) {
+                        Text(topic.title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (topic.detail.isNotBlank()) Text(
+                            topic.detail, color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Icon(Icons.Default.Search, contentDescription = null, tint = Color.White.copy(alpha = 0.5f), modifier = Modifier.size(16.dp))
+                }
+            }
+            if (liquidGlass) LiquidGlassSurface(m, shape = shape, tint = tint, backdrop = backdrop) { row() }
+            else Box(m.background(Color.White.copy(0.06f))) { row() }
+        }
+    }
 }
 
 @Composable

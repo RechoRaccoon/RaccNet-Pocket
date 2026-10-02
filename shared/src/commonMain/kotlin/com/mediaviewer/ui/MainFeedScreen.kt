@@ -654,7 +654,10 @@ fun MainFeedScreen(
                     items           = mediaItems,
                     currentIndex    = currentIndex,
                     appMode         = appMode,
-                    availableFeeds  = availableFeeds,
+                    // Feeds built on this device follow the saved ones.
+                    availableFeeds  = availableFeeds + com.mediaviewer.util.LocalData.localFeeds.map {
+                        BskyFeedInfo(uri = it.uri, displayName = it.name.ifBlank { "My Feed" })
+                    },
                     selectedFeedUri = selectedFeedUri,
                     authorFeedState = authorFeedState,
                     e621SearchTags  = e621SearchTags,
@@ -1538,7 +1541,10 @@ private fun PostContent(
             if (item.isTextOnly) {
                 // Big Update #3: text-only posts get a liquid-glass card shaped
                 // like a piece of media, centered where an image would sit.
-                TextOnlyPostCard(
+                if (item.isPoll && PollFormat.parse(item.text) != null) {
+                    // A Stellar poll: tappable answers with live percentages.
+                    PollCard(item, dominantColor, liquidGlass)
+                } else TextOnlyPostCard(
                     item.text, dominantColor, translationState, onToggleTranslationView,
                     emojiImageUrl = item.textshotImageUrl, emojiAspectRatio = item.aspectRatio
                 )
@@ -1800,7 +1806,9 @@ private fun PostContent(
                         blockedByAuthor = authorBlocksViewer,
                         liquidGlass = liquidGlass, tint = dominantColor, backdrop = glassBackdrop,
                         reducedAnimations = reducedAnimations,
-                        onToggleTranslationView = onToggleTranslationView
+                        onToggleTranslationView = onToggleTranslationView,
+                        edited = !item.editedAt.isNullOrBlank(),
+                        onOpenEditHistory = { LocalOverlays.editHistoryFor = item }
                     )
                 }
             }
@@ -1835,7 +1843,7 @@ private fun PostContent(
             ) {
                 // The visualizer takes up no layout space at all (drawn upward
                 // from a zero-height slot), so turning it on never moves anything.
-                if (com.mediaviewer.util.UiToggles.audioVisualizer) {
+                if ((com.mediaviewer.util.UiToggles.audioVisualizer && !com.mediaviewer.util.LocalData.batterySaverActive)) {
                     val barsColor = if (liquidGlass) dominantColor else rememberDominantColor(glassBackdropUrl)
                     AudioVisualizerBars(
                         color = barsColor,
@@ -1858,8 +1866,26 @@ private fun PostContent(
                     item.isTextOnly -> item.captionText.orEmpty()
                     else -> item.text
                 }
-                val bubbleText = if (!item.isTextOnly && translationState?.status == TranslationStatus.DONE && translationState.showingTranslated && originalBubbleText.isNotBlank())
+                val postBubbleText = if (!item.isTextOnly && translationState?.status == TranslationStatus.DONE && translationState.showingTranslated && originalBubbleText.isNotBlank())
                     translationState!!.translatedText else originalBubbleText
+                // Bookmark folders (supporters): right after a post is saved,
+                // its text bubble reads "Tap to Add Saved Post to Folder" for
+                // a few seconds (collapsing first if it was expanded), then
+                // goes back to the post's text.
+                var folderPrompt by remember(item.id) { mutableStateOf(false) }
+                var wasBookmarked by remember(item.id) { mutableStateOf(item.isBookmarked) }
+                LaunchedEffect(item.isBookmarked) {
+                    val justSaved = item.isBookmarked && !wasBookmarked
+                    wasBookmarked = item.isBookmarked
+                    if (!item.isBookmarked) folderPrompt = false
+                    else if (justSaved && appMode == AppMode.BLUESKY && com.mediaviewer.util.Supporter.active && item.postUri.isNotBlank()) {
+                        textBubbleExpanded = false
+                        folderPrompt = true
+                        kotlinx.coroutines.delay(4500)
+                        folderPrompt = false
+                    }
+                }
+                val bubbleText = if (folderPrompt) "Tap to Add Saved Post to Folder" else postBubbleText
                 AnimatedContent(
                     targetState = viewerShowing,
                     transitionSpec = {
@@ -1887,7 +1913,12 @@ private fun PostContent(
                         PostTextBubble(
                             text = bubbleText,
                             expanded = textBubbleExpanded,
-                            onToggle = { textBubbleExpanded = !textBubbleExpanded },
+                            onToggle = {
+                                if (folderPrompt) {
+                                    folderPrompt = false
+                                    LocalOverlays.bookmarkFolderFor = item
+                                } else textBubbleExpanded = !textBubbleExpanded
+                            },
                             liquidGlass = liquidGlass, tint = dominantColor, backdrop = glassBackdrop,
                             reducedAnimations = reducedAnimations,
                             onHorizontalSwipe = handleHorizontalSwipe,
@@ -2558,8 +2589,15 @@ private fun PostTextBubble(
         // cross-fade.
         Layout(
             content = {
-                Text(text, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(text, style = style)
+                // Cross-fades when the text itself changes (the "Tap to Add
+                // Saved Post to Folder" prompt and back) — the bubble keeps
+                // its shape.
+                Crossfade(text, animationSpec = tween(260), label = "bubbleTextOne") { t ->
+                    Text(t, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Crossfade(text, animationSpec = tween(260), label = "bubbleTextFull") { t ->
+                    Text(t, style = style)
+                }
             },
             modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)
         ) { measurables, constraints ->
@@ -2613,13 +2651,24 @@ private fun PostStatusRow(
     blockedByAuthor: Boolean,
     liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
     reducedAnimations: Boolean,
-    onToggleTranslationView: () -> Unit
+    onToggleTranslationView: () -> Unit,
+    /** The post was edited in Stellar: an "Edited" bubble that opens its
+     *  version history. */
+    edited: Boolean = false,
+    onOpenEditHistory: () -> Unit = {}
 ) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.Top
     ) {
+        AnimatedStatus(if (edited) "edited" else null, reducedAnimations) {
+            StatusPill(
+                label = "Edited", spinning = false, liquidGlass = liquidGlass,
+                tint = tint, backdrop = backdrop, onClick = onOpenEditHistory,
+                modifier = Modifier.padding(bottom = 4.dp)
+            )
+        }
         AnimatedStatus(if (blockedByAuthor) "blocked" else null, reducedAnimations) {
             StatusPill(
                 label = "This user has you blocked", spinning = false, liquidGlass = liquidGlass,
@@ -3198,8 +3247,18 @@ private fun MoreBubbleMenu(
     // open), the second deletes.
     var confirmDelete by remember { mutableStateOf(false) }
     LaunchedEffect(visible) { if (!visible) confirmDelete = false }
+    val supporter = com.mediaviewer.util.Supporter.active
     val actions = buildList {
         if (isOwnPost) {
+            // Edit (supporters): the same pen as editing your own profile.
+            // Everyone else sees it in the supporter pink; tapping it opens
+            // the Support page.
+            add(BubbleAction(
+                "Edit",
+                iconContent = { m, c ->
+                    Icon(Icons.Default.Edit, contentDescription = "Edit", tint = c, modifier = m.supporterShine(!supporter))
+                }
+            ) { if (supporter) LocalOverlays.onEditCurrentPost?.invoke() else com.mediaviewer.util.Supporter.openPage() })
             add(BubbleAction(
                 if (confirmDelete) "Tap again to delete" else "Delete",
                 icon = if (confirmDelete) Icons.Default.DeleteForever else Icons.Default.Delete,

@@ -102,6 +102,7 @@ import com.mediaviewer.util.EmojiEntry
 import com.mediaviewer.util.EmojiStore
 import com.mediaviewer.util.rememberHapticTap
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
@@ -257,7 +258,19 @@ fun ComposePostScreen(
     // Item 12: composer-local "Mark as Spoiler" toggle for Review mode —
     // see ComposePostDraft.reviewContainsSpoilers.
     var reviewContainsSpoilers by remember { mutableStateOf(false) }
-    var singleText by remember { mutableStateOf(TextFieldValue("")) }
+    // More → Edit on one of your own posts: the composer opens filled in
+    // with that post, and "Post" becomes "Edit".
+    val editPost = remember { ComposerSeed.editPost }
+    var singleText by remember { mutableStateOf(TextFieldValue(editPost?.text ?: "")) }
+    // ── Polls (supporters): a question plus lettered answers ──
+    var pollOn by remember { mutableStateOf(false) }
+    var pollOptions by remember { mutableStateOf(listOf(TextFieldValue(""), TextFieldValue(""))) }
+    // ── Drafts (supporters) ──
+    var draftsOpen by remember { mutableStateOf(false) }
+    var confirmDraft by remember { mutableStateOf(false) }
+    var loadedDraftId by remember { mutableStateOf<String?>(null) }
+    var savingDraft by remember { mutableStateOf(false) }
+    val draftScope = androidx.compose.runtime.rememberCoroutineScope()
     // Textshot mode's separate post text (see ComposePostDraft.textshotPostText).
     var textshotPostText by remember { mutableStateOf(TextFieldValue("")) }
     var textshotPostFocused by remember { mutableStateOf(false) }
@@ -266,7 +279,12 @@ fun ComposePostScreen(
     var confirmRemoval by remember { mutableStateOf<RemovalRequest?>(null) }
     // Item 8: pre-seeded straight from the camera-notch button's "Camera"
     // action, if that's how this composer was opened.
-    var images by remember { mutableStateOf(initialImageUri?.let { listOf(it) } ?: emptyList()) }
+    var images by remember {
+        mutableStateOf(
+            editPost?.imageUrls?.map { com.mediaviewer.platform.LocalPlatform.parseUri(it) }
+                ?: initialImageUri?.let { listOf(it) } ?: emptyList()
+        )
+    }
     var videoUri by remember { mutableStateOf(initialVideoUri) }
     var videoThumbUri by remember { mutableStateOf<Uri?>(null) }
     var videoAspect by remember { mutableStateOf(16f / 9f) }
@@ -343,8 +361,8 @@ fun ComposePostScreen(
     var autoFormat by remember { mutableStateOf(true) }
     // Bluesky self-labels: at most one of the three Adult Content options,
     // plus an independent Graphic Media toggle.
-    var adultLabel by remember { mutableStateOf(editBlog?.second?.let { l -> AdultContentLabel.values().firstOrNull { it.value in l } }) }
-    var graphicMedia by remember { mutableStateOf(editBlog?.second?.contains(GRAPHIC_MEDIA_LABEL) == true) }
+    var adultLabel by remember { mutableStateOf((editBlog?.second ?: editPost?.labels)?.let { l -> AdultContentLabel.values().firstOrNull { it.value in l } }) }
+    var graphicMedia by remember { mutableStateOf((editBlog?.second ?: editPost?.labels)?.contains(GRAPHIC_MEDIA_LABEL) == true) }
     var labelsOpen by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
 
@@ -731,7 +749,8 @@ fun ComposePostScreen(
         // Item 10: "the character indicator shouldn't have a limit" — same
         // unlimited treatment as Textshot above.
         ComposeMode.REVIEW -> singleText.text.length to Int.MAX_VALUE
-        ComposeMode.SINGLE -> singleText.text.length to POST_CHAR_LIMIT
+        ComposeMode.SINGLE -> if (pollOn) PollFormat.postText(singleText.text, pollOptions.map { it.text }).length to POST_CHAR_LIMIT
+            else singleText.text.length to POST_CHAR_LIMIT
         ComposeMode.BLOG -> when (blogSelected) {
             -2 -> blogTitle.text.length to 300
             -1 -> blogDescription.text.length to 3000
@@ -748,7 +767,10 @@ fun ComposePostScreen(
         // the written review itself is optional — matches the spec ("pick
         // a rating and optionally type out a review").
         ComposeMode.REVIEW -> reviewTarget != null && reviewRating > 0
-        ComposeMode.SINGLE -> singleText.text.isNotBlank() && singleText.text.length <= POST_CHAR_LIMIT
+        ComposeMode.SINGLE -> if (pollOn) {
+            singleText.text.isNotBlank() && pollOptions.all { it.text.isNotBlank() } &&
+                PollFormat.postText(singleText.text, pollOptions.map { it.text }).length <= POST_CHAR_LIMIT
+        } else (singleText.text.isNotBlank() || (editPost != null && images.isNotEmpty())) && singleText.text.length <= POST_CHAR_LIMIT
         ComposeMode.BLOG -> blogTitle.text.isNotBlank() && blogTitle.text.length <= 300 &&
             blogRows.any { it.kind == com.mediaviewer.model.BlogRowKind.IMAGE || it.text.text.isNotBlank() }
     }
@@ -782,7 +804,9 @@ fun ComposePostScreen(
             )
             ComposeMode.SINGLE -> ComposePostDraft(
                 mode = ComposeMode.SINGLE,
-                posts = listOf(ThreadPostDraft(text = singleText.text, images = images, video = null))
+                posts = listOf(ThreadPostDraft(text = singleText.text, images = if (pollOn) emptyList() else images, video = null)),
+                editingPost = editPost,
+                pollOptions = if (pollOn) pollOptions.map { it.text.trim() } else emptyList()
             )
             ComposeMode.BLOG -> ComposePostDraft(
                 mode = ComposeMode.BLOG,
@@ -802,7 +826,8 @@ fun ComposePostScreen(
         }
         val selfLabels = listOfNotNull(adultLabel?.value, if (graphicMedia) GRAPHIC_MEDIA_LABEL else null)
         // Reviews are Popfeed records, not Bluesky posts — labels don't apply.
-        onSubmit(if (mode == ComposeMode.REVIEW || selfLabels.isEmpty()) draft else draft.copy(selfLabels = selfLabels))
+        val labelled = if (mode == ComposeMode.REVIEW || selfLabels.isEmpty()) draft else draft.copy(selfLabels = selfLabels)
+        onSubmit(if (loadedDraftId != null) labelled.copy(fromDraftId = loadedDraftId) else labelled)
         focusManager.clearFocus()
     }
 
@@ -816,6 +841,8 @@ fun ComposePostScreen(
         mode == ComposeMode.THREAD -> "Thread"
         mode == ComposeMode.TEXTSHOT -> "Textshot"
         isBlogMode -> "Blog"
+        editPost != null -> "Editing Post"
+        pollOn -> "Poll"
         images.isNotEmpty() -> "Media Post"
         singleText.text.isNotBlank() -> "Text Post"
         else -> "New Post"
@@ -899,7 +926,7 @@ fun ComposePostScreen(
                     )
                     PostButton(
                         enabled = canPost && !submitting, submitting = submitting,
-                        label = if (editBlog != null && mode == ComposeMode.BLOG) "Save" else "Post",
+                        label = if (editBlog != null && mode == ComposeMode.BLOG) "Save" else if (editPost != null) "Edit" else "Post",
                         liquidGlass = liquidGlass, tint = dominantColor,
                         modifier = Modifier.align(Alignment.CenterEnd), onClick = ::handlePost
                     )
@@ -1147,18 +1174,51 @@ fun ComposePostScreen(
                                 // doesn't interrupt typing; it's only
                                 // handled when the person actually taps
                                 // "+" (see startThreadFromSingle).
-                                if (!isBlogMode && newVal.text.length > POST_CHAR_LIMIT) {
+                                if (editPost != null || pollOn) {
+                                    // An edit or a poll stays one post.
+                                    singleText = if (pollOn && newVal.text.contains('\n')) newVal.copy(text = newVal.text.replace("\n", " ")) else newVal
+                                } else if (!isBlogMode && newVal.text.length > POST_CHAR_LIMIT) {
                                     switchToTextshot(keepValue = newVal)
                                     refocusTick++
                                 } else {
                                     singleText = newVal
                                 }
                             },
-                            placeholder = "What's on your mind?",
+                            placeholder = if (pollOn) "Q. Ask a question…" else "What's on your mind?",
                             onFocus = { activeThreadIndex = 0 },
                             focusRequester = singleFocusRequester
                         )
-                        if (images.isNotEmpty()) {
+                        if (pollOn) {
+                            // One row per answer: "A.", "B.", … The divider's
+                            // X removes an answer (two always stay).
+                            pollOptions.forEachIndexed { index, option ->
+                                if (index >= 2) {
+                                    ThreadPostDivider(tint = dominantColor, onRemove = {
+                                        pollOptions = pollOptions.toMutableList().also { if (index < it.size) it.removeAt(index) }
+                                    })
+                                } else {
+                                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = Color.White.copy(alpha = 0.12f))
+                                }
+                                Row(verticalAlignment = Alignment.Top) {
+                                    Text(
+                                        PollFormat.letter(index) + ".", color = Color.White.copy(alpha = 0.85f),
+                                        fontSize = 16.sp, fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(top = 2.dp, end = 8.dp)
+                                    )
+                                    Box(Modifier.weight(1f)) {
+                                        GrowingTextField(
+                                            value = option,
+                                            onValueChange = { v ->
+                                                val clean = if (v.text.contains('\n')) v.copy(text = v.text.replace("\n", " ")) else v
+                                                pollOptions = pollOptions.toMutableList().also { if (index < it.size) it[index] = clean }
+                                            },
+                                            placeholder = "Answer " + PollFormat.letter(index)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        if (images.isNotEmpty() && !pollOn) {
                             Spacer(Modifier.height(10.dp))
                             ImageGrid(
                                 images = images,
@@ -1314,6 +1374,32 @@ fun ComposePostScreen(
                                 }
                             }
                         }
+                        // Drafts (supporters): with nothing written yet it
+                        // opens the saved drafts; with a post in progress it
+                        // offers to save that post as a draft.
+                        val draftable = editPost == null && mode != ComposeMode.BLOG && mode != ComposeMode.REVIEW
+                        if (draftable) {
+                            val draftTap = rememberHapticTap()
+                            val supporter = com.mediaviewer.util.Supporter.active
+                            Text(
+                                "Drafts",
+                                color = Color.White.copy(alpha = 0.85f),
+                                fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        draftTap()
+                                        if (!supporter) com.mediaviewer.util.Supporter.openPage()
+                                        else {
+                                            focusManager.clearFocus()
+                                            if (statusLabel == "New Post") draftsOpen = true else confirmDraft = true
+                                        }
+                                    }
+                                    .padding(horizontal = 6.dp)
+                                    .supporterShine(!supporter)
+                            )
+                            Spacer(Modifier.weight(1f))
+                        }
                         val (used, limit) = activeBudget
                         val overLimit = used > limit
                         Text(
@@ -1337,7 +1423,8 @@ fun ComposePostScreen(
                             GlassCircleButton(
                                 icon = Icons.Default.Image, contentDescription = if (mode == ComposeMode.BLOG) "Add image" else "Attach image or video",
                                 liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop, size = 40.dp,
-                                enabled = mode != ComposeMode.TEXTSHOT && mode != ComposeMode.REVIEW &&
+                                enabled = mode != ComposeMode.TEXTSHOT && mode != ComposeMode.REVIEW && !pollOn &&
+                                    (editPost == null || editPost.imagesEditable) &&
                                     (mode != ComposeMode.THREAD || threadPosts.getOrNull(activeThreadIndex)?.let { it.video == null && it.images.size < MAX_IMAGES } != false),
                                 onClick = {
                                     if (mode == ComposeMode.BLOG) {
@@ -1357,20 +1444,36 @@ fun ComposePostScreen(
                                 label = "Blog",
                                 liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
                                 // Editing an existing blog stays a blog.
-                                enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW && editBlog == null,
+                                enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW && editBlog == null && editPost == null && !pollOn,
                                 selected = mode == ComposeMode.BLOG,
                                 onClick = { if (mode == ComposeMode.BLOG) disableBlogMode() else enableBlogMode() }
                             )
                             TextToggleButton(
                                 label = "Textshot",
                                 liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
-                                enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW && mode != ComposeMode.BLOG,
+                                enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW && mode != ComposeMode.BLOG && editPost == null && !pollOn,
                                 selected = mode == ComposeMode.TEXTSHOT,
                                 onClick = {
                                     if (mode == ComposeMode.TEXTSHOT) {
                                         disableTextshot()
                                     } else {
                                         switchToTextshot()
+                                    }
+                                }
+                            )
+                            // Poll (supporters): a question and lettered
+                            // answers, posted as plain text any app can read.
+                            TextToggleButton(
+                                label = "Poll",
+                                liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
+                                enabled = mode == ComposeMode.SINGLE && !isBlogMode && editPost == null,
+                                selected = pollOn,
+                                locked = !com.mediaviewer.util.Supporter.active,
+                                onClick = {
+                                    if (!com.mediaviewer.util.Supporter.active) com.mediaviewer.util.Supporter.openPage()
+                                    else {
+                                        pollOn = !pollOn
+                                        if (pollOn && singleText.text.contains('\n')) singleText = TextFieldValue(singleText.text.replace("\n", " "))
                                     }
                                 }
                             )
@@ -1445,9 +1548,12 @@ fun ComposePostScreen(
                             GlassCircleButton(
                                 icon = Icons.Default.Add, contentDescription = "Add post to thread",
                                 liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop, size = 36.dp,
-                                enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW,
+                                enabled = mode != ComposeMode.VIDEO && mode != ComposeMode.REVIEW && editPost == null &&
+                                    (!pollOn || pollOptions.size < PollFormat.MAX_OPTIONS),
                                 onClick = {
-                                    if (mode == ComposeMode.THREAD) addThreadPost() else startThreadFromSingle()
+                                    // In a poll the "+" adds another answer row.
+                                    if (pollOn) pollOptions = pollOptions + TextFieldValue("")
+                                    else if (mode == ComposeMode.THREAD) addThreadPost() else startThreadFromSingle()
                                 }
                             )
                         }
@@ -1478,6 +1584,117 @@ fun ComposePostScreen(
                 request = request, liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
                 onConfirm = { confirmRemoval = null; request.onConfirm() },
                 onDismiss = { confirmRemoval = null }
+            )
+        }
+
+        // ── Drafts ──
+        fun currentDraftEntry(): com.mediaviewer.util.PostDraftEntry {
+            fun keep(uri: Uri): String? = com.mediaviewer.platform.LocalPlatform.importMedia(context, uri, "drafts")?.toString()
+            val base = com.mediaviewer.util.PostDraftEntry(
+                id = loadedDraftId ?: "",
+                adultLabel = adultLabel?.value, graphicMedia = graphicMedia
+            )
+            return when {
+                mode == ComposeMode.VIDEO -> base.copy(
+                    mode = "VIDEO", videoTitle = videoTitle.text, videoDescription = videoDescription.text,
+                    videoUri = videoUri?.let { keep(it) }, videoThumbUri = videoThumbUri?.let { keep(it) }
+                )
+                mode == ComposeMode.THREAD -> base.copy(
+                    mode = "THREAD",
+                    posts = threadPosts.map { p ->
+                        com.mediaviewer.util.DraftThreadPost(p.text.text, p.images.mapNotNull { keep(it) }, p.video?.let { keep(it) })
+                    }
+                )
+                mode == ComposeMode.TEXTSHOT -> base.copy(
+                    mode = "TEXTSHOT", posts = listOf(com.mediaviewer.util.DraftThreadPost(singleText.text)),
+                    textshotPostText = textshotPostText.text
+                )
+                pollOn -> base.copy(
+                    mode = "POLL", posts = listOf(com.mediaviewer.util.DraftThreadPost(singleText.text)),
+                    pollOptions = pollOptions.map { it.text }
+                )
+                else -> base.copy(
+                    mode = "SINGLE",
+                    posts = listOf(com.mediaviewer.util.DraftThreadPost(singleText.text, images.mapNotNull { keep(it) }))
+                )
+            }
+        }
+        fun loadDraft(d: com.mediaviewer.util.PostDraftEntry) {
+            fun uri(text: String): Uri = com.mediaviewer.platform.LocalPlatform.parseUri(text)
+            loadedDraftId = d.id
+            adultLabel = AdultContentLabel.values().firstOrNull { it.value == d.adultLabel }
+            graphicMedia = d.graphicMedia
+            pollOn = false
+            images = emptyList()
+            videoUri = null
+            videoThumbUri = null
+            val first = d.posts.firstOrNull()
+            when (d.mode) {
+                "VIDEO" -> {
+                    videoTitle = TextFieldValue(d.videoTitle)
+                    videoDescription = TextFieldValue(d.videoDescription)
+                    videoUri = d.videoUri?.let { uri(it) }
+                    videoThumbUri = d.videoThumbUri?.let { uri(it) }
+                    mode = if (videoUri != null) ComposeMode.VIDEO else ComposeMode.SINGLE
+                    if (videoUri == null) singleText = TextFieldValue(listOf(d.videoTitle, d.videoDescription).filter { it.isNotBlank() }.joinToString("\n"))
+                }
+                "THREAD" -> {
+                    threadPosts = d.posts.map { p ->
+                        ThreadPostState(TextFieldValue(p.text), p.images.map { uri(it) }, p.video?.let { uri(it) })
+                    }.ifEmpty { listOf(ThreadPostState(TextFieldValue(""))) }
+                    activeThreadIndex = 0
+                    // Kept exactly as it was saved (no re-flowing).
+                    autoFormat = false
+                    mode = ComposeMode.THREAD
+                }
+                "TEXTSHOT" -> {
+                    singleText = TextFieldValue(first?.text ?: "")
+                    textshotPostText = TextFieldValue(d.textshotPostText)
+                    mode = ComposeMode.TEXTSHOT
+                }
+                "POLL" -> {
+                    singleText = TextFieldValue(first?.text ?: "")
+                    pollOptions = d.pollOptions.map { TextFieldValue(it) }.let { o -> if (o.size >= 2) o else o + List(2 - o.size) { TextFieldValue("") } }
+                    pollOn = true
+                    mode = ComposeMode.SINGLE
+                }
+                else -> {
+                    singleText = TextFieldValue(first?.text ?: "")
+                    images = first?.images?.map { uri(it) } ?: emptyList()
+                    mode = ComposeMode.SINGLE
+                }
+            }
+            draftsOpen = false
+        }
+        if (confirmDraft) {
+            ConfirmPopup(
+                title = "Save as a draft?",
+                message = "This post — its text, media and labels — is saved on this device and the composer closes. Find it again under Drafts on a new post.",
+                confirmLabel = "Save Draft",
+                liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
+                destructive = false, busy = savingDraft,
+                onConfirm = {
+                    if (!savingDraft) {
+                        savingDraft = true
+                        draftScope.launch {
+                            val entry = withContext(Dispatchers.IO) { currentDraftEntry() }
+                            com.mediaviewer.util.LocalData.saveDraft(entry)
+                            savingDraft = false
+                            confirmDraft = false
+                            com.mediaviewer.ui.compat.showPlatformToast("Saved to Drafts")
+                            onClose()
+                        }
+                    }
+                },
+                onDismiss = { confirmDraft = false },
+                modifier = Modifier.zIndex(6f)
+            )
+        }
+        if (draftsOpen) {
+            DraftsPopup(
+                liquidGlass = liquidGlass, tint = dominantColor,
+                onPick = { loadDraft(it) },
+                onDismiss = { draftsOpen = false }
             )
         }
 
@@ -1775,18 +1992,20 @@ private fun TextToggleButton(
     enabled: Boolean = true,
     selected: Boolean = true,
     backdrop: GlassBackdrop? = null,
+    /** A supporter-only button shown to someone who isn't one: shimmering pink. */
+    locked: Boolean = false,
     onClick: () -> Unit
 ) {
     val tap = rememberHapticTap()
     val shape = RoundedCornerShape(14.dp)
     val clickMod = Modifier.clip(shape).clickable(enabled = enabled, onClick = { tap(); onClick() })
-    val alpha = if (enabled && selected) 1f else 0.35f
+    val alpha = if (locked) (if (enabled) 1f else 0.35f) else if (enabled && selected) 1f else 0.35f
 
     @Composable
     fun Content() {
         Text(
             label, color = Color.White.copy(alpha = alpha), fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp).supporterShine(locked)
         )
     }
     if (liquidGlass) {
@@ -2389,4 +2608,86 @@ private fun probeVideoAspect(context: com.mediaviewer.platform.PlatformContext, 
         0 to 0
     }
     return if (w > 0 && h > 0) w.toFloat() / h else 16f / 9f
+}
+
+
+/** The saved drafts (New Post → Drafts): tap one to open it in the composer,
+ *  or its X (twice) to delete it. Drafts live only on this device. */
+@Composable
+private fun DraftsPopup(
+    liquidGlass: Boolean, tint: Color,
+    onPick: (com.mediaviewer.util.PostDraftEntry) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val drafts = com.mediaviewer.util.LocalData.drafts
+    val tap = rememberHapticTap()
+    var armed by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(armed) { if (armed != null) { kotlinx.coroutines.delay(3000); armed = null } }
+    LocalPopup(title = "Drafts", liquidGlass = liquidGlass, tint = tint, onClose = onDismiss, modifier = Modifier.zIndex(6f)) {
+        if (drafts.isEmpty()) {
+            Text(
+                "No drafts yet. Start a post and tap Drafts to save it for later.",
+                color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp, lineHeight = 18.sp,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 22.dp)
+            )
+        } else {
+            Column(
+                Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                drafts.forEach { draft ->
+                    val shape = RoundedCornerShape(16.dp)
+                    Row(
+                        Modifier.fillMaxWidth().clip(shape).background(Color.Black.copy(alpha = 0.28f))
+                            .border(1.dp, tint.copy(alpha = 0.45f), shape)
+                            .clickable { tap(); onPick(draft) }
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val thumb = draft.firstImage
+                        if (thumb != null) {
+                            AsyncImage(
+                                model = com.mediaviewer.platform.LocalPlatform.parseUri(thumb), contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.size(40.dp).clip(RoundedCornerShape(10.dp))
+                            )
+                            Spacer(Modifier.width(10.dp))
+                        }
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                draft.preview, color = Color.White, fontSize = 14.sp, lineHeight = 18.sp,
+                                maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                            )
+                            Text(
+                                draft.label + " · " + com.mediaviewer.util.DateText.format(draft.savedAt, "MMM d, h:mm a"),
+                                color = DimGray, fontSize = 11.sp, maxLines = 1
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        val confirming = armed == draft.id
+                        Box(
+                            Modifier.clip(RoundedCornerShape(12.dp))
+                                .background(if (confirming) Color(0xFFE0245E).copy(alpha = 0.3f) else Color.White.copy(alpha = 0.10f))
+                                .clickable {
+                                    tap()
+                                    if (confirming) {
+                                        armed = null
+                                        (draft.posts.flatMap { it.images + listOfNotNull(it.video) } + listOfNotNull(draft.videoUri, draft.videoThumbUri))
+                                            .forEach { com.mediaviewer.platform.LocalPlatform.deleteMedia(context, it) }
+                                        com.mediaviewer.util.LocalData.deleteDraft(draft.id)
+                                    } else armed = draft.id
+                                }
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (confirming) Text("Delete?", color = Color(0xFFFF6B8A), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            else Icon(Icons.Default.Close, contentDescription = "Delete draft", tint = Color.White, modifier = Modifier.size(14.dp))
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

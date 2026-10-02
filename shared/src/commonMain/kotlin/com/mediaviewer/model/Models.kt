@@ -118,7 +118,17 @@ data class MediaItem(
     val captionText: String? = null,
     /** The author has blocked the signed-in user: shown with a "This user
      *  has you blocked" status, and liking/reposting/following is off. */
-    val authorBlocksViewer: Boolean = false
+    val authorBlocksViewer: Boolean = false,
+    /** The post was edited in Stellar (ISO time of the last edit). */
+    val editedAt: String? = null,
+    /** Its earlier versions, oldest first. */
+    val editHistory: List<com.mediaviewer.util.PostEditVersion>? = null,
+    /** A Stellar poll: [text] is "Q. …" then one "A. …" line per answer. */
+    val isPoll: Boolean = false,
+    /** A Textshot post ([text] is the picture's message). */
+    val isTextshot: Boolean = false,
+    /** When the post was written (ISO), where the source says. */
+    val createdAt: String? = null
 ) {
     // Crash fix: mediaUrl/thumbUrl/textshotImageUrl/labels are all declared
     // as non-null Kotlin types with defaults ("", "", "", emptyList()) — but
@@ -399,7 +409,12 @@ data class BskyRecord(
     @SerialName("\$type") val type: String = "",
     val text: String? = null,
     val createdAt: String? = null,
-    val reply: BskyReplyRef? = null
+    val reply: BskyReplyRef? = null,
+    /** Stellar's post editing: when the post was last edited, and its
+     *  earlier versions (oldest first). Extra fields on the post record —
+     *  other apps ignore them. */
+    val stellarEditedAt: String? = null,
+    val stellarEditHistory: List<com.mediaviewer.util.PostEditVersion>? = null
 )
 
 @Serializable

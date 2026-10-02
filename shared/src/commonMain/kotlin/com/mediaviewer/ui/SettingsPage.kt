@@ -149,6 +149,103 @@ private fun SectionHeader(text: String, tint: Color, first: Boolean = false) {
     )
 }
 
+/** A supporter-only switch: for supporters an ordinary switch; for everyone
+ *  else it wears the supporter pink, stays off, and opens the Support page. */
+@Composable
+private fun SupporterSwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    if (com.mediaviewer.util.Supporter.active) {
+        CompactSwitch(checked, onCheckedChange)
+    } else {
+        Box(Modifier.supporterShine(recolor = false)) {
+            Switch(
+                checked = true, onCheckedChange = { com.mediaviewer.util.Supporter.openPage() },
+                modifier = Modifier.size(width = 36.dp, height = 22.dp).scale(0.7f),
+                colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = SupporterPink)
+            )
+        }
+    }
+}
+
+/** Settings → "Supporter Settings" (the first category): its title wears
+ *  the supporter pink with the same sweeping shine as the profile badge. */
+@Composable
+private fun SupporterSettingsSection(liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?) {
+    val local = com.mediaviewer.util.LocalData
+    val context = com.mediaviewer.ui.compat.LocalContext.current
+    val supporter = com.mediaviewer.util.Supporter.active
+    Text(
+        "Supporter Settings",
+        color = Color.White,
+        fontSize = 26.sp, lineHeight = 30.sp, fontWeight = FontWeight.Bold,
+        textAlign = TextAlign.Start,
+        modifier = Modifier.padding(top = 2.dp).supporterShine()
+    )
+    // App notifications (Android): unread DMs and new Inbox activity,
+    // checked in the background and shown as ordinary device notifications.
+    val android = com.mediaviewer.platform.currentPlatform == com.mediaviewer.platform.PlatformKind.ANDROID
+    SettingsBubble(liquidGlass, tint, backdrop) {
+        BubbleRow {
+            RowLabel(
+                "DM Notifications", Modifier.weight(1f),
+                sub = if (android) "Get notified about new messages while Stellar is closed." else "Android only for now.",
+                dim = !android
+            )
+            if (android) SupporterSwitch(local.notifyDms) {
+                local.updateNotifyDms(it)
+                com.mediaviewer.platform.LocalPlatform.syncNotifications(context, requestPermission = it)
+            }
+        }
+        BubbleDivider()
+        BubbleRow {
+            RowLabel(
+                "Inbox Notifications", Modifier.weight(1f),
+                sub = if (android) "Likes, replies, follows and mentions." else "Android only for now.",
+                dim = !android
+            )
+            if (android) SupporterSwitch(local.notifyInbox) {
+                local.updateNotifyInbox(it)
+                com.mediaviewer.platform.LocalPlatform.syncNotifications(context, requestPermission = it)
+            }
+        }
+    }
+    // Search's Web Browser tab: what the address bar searches with.
+    SettingsBubble(liquidGlass, tint, backdrop) {
+        var engineMenu by remember { mutableStateOf(false) }
+        BubbleRow {
+            RowLabel("Browser Search Engine", Modifier.weight(1f), sub = "Used by the Web Browser tab in Search.")
+            Box {
+                Text(
+                    local.searchEngine.label,
+                    color = if (supporter) LocalSettingsAccent.current else Color.White,
+                    fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.supporterShine(!supporter).clickable {
+                        if (supporter) engineMenu = true else com.mediaviewer.util.Supporter.openPage()
+                    }
+                )
+                DropdownMenu(expanded = engineMenu, onDismissRequest = { engineMenu = false }) {
+                    com.mediaviewer.util.LocalData.SearchEngine.values().forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option.label, fontWeight = if (option == local.searchEngine) FontWeight.SemiBold else FontWeight.Normal) },
+                            onClick = { local.updateSearchEngine(option); engineMenu = false }
+                        )
+                    }
+                }
+            }
+        }
+    }
+    // Battery Saver (experimental): flat buttons instead of live blur, no
+    // starfield or visualizer, a 60 Hz cap and slower background checks.
+    SettingsBubble(liquidGlass, tint, backdrop) {
+        BubbleRow {
+            RowLabel(
+                "Battery Saver", Modifier.weight(1f),
+                sub = "Experimental. Solid buttons instead of blur, a lower frame rate, no starfield or visualizer, and less background activity."
+            )
+            SupporterSwitch(local.batterySaver) { local.updateBatterySaver(it) }
+        }
+    }
+}
+
 /** One settings bubble. Rows placed inside are plain — they never draw their
  *  own glass surface/outline, only this bubble does — so a bubble holding
  *  several rows (with [BubbleDivider]s between them) reads as one shape. */
@@ -431,8 +528,11 @@ internal fun SettingsPageContent(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
+        // ── Supporter Settings ──────────────────────────────────────────
+        SupporterSettingsSection(liquidGlass, tint, backdrop)
+
         // ── UI Customization ────────────────────────────────────────────
-        SectionHeader("UI Customization", tint, first = true)
+        SectionHeader("UI Customization", tint)
 
         ToggleBubble("Reduced Animations", reducedAnimations, onToggleReducedAnimations, liquidGlass, tint, backdrop)
         ToggleBubble("Rounded Grid Tiles", squareGridRounded, onToggleSquareGridRounded, liquidGlass, tint, backdrop)
@@ -1736,11 +1836,22 @@ private fun HubRowBubble(
                 PillButton(if (row.showPosts) "Posts" else "Profiles", { hub.setShowPosts(row.id, !row.showPosts) })
                 Spacer(Modifier.width(8.dp))
             }
-            CompactSwitch(row.enabled) { hub.setEnabled(row.id, it) }
-            // Every row can be taken out; default ones come back from
-            // Add → Default.
-            Spacer(Modifier.width(8.dp))
-            RemoveHubListButton(onRemove = { hub.remove(row.id) })
+            if (row.id == com.mediaviewer.util.HubLayout.SUPPORTERS && !com.mediaviewer.util.Supporter.active) {
+                // Not a supporter: the row can't be switched off or removed
+                // (it can still be dragged). Its switch wears the supporter
+                // pink and opens the Support page instead.
+                Box(Modifier.supporterShine(recolor = false)) {
+                    androidx.compose.runtime.CompositionLocalProvider(LocalSettingsAccent provides SupporterPink) {
+                        CompactSwitch(true) { com.mediaviewer.util.Supporter.openPage() }
+                    }
+                }
+            } else {
+                CompactSwitch(row.enabled) { hub.setEnabled(row.id, it) }
+                // Every row can be taken out; default ones come back from
+                // Add → Default.
+                Spacer(Modifier.width(8.dp))
+                RemoveHubListButton(onRemove = { hub.remove(row.id) })
+            }
         }
     }
 }

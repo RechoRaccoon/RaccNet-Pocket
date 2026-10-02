@@ -817,6 +817,7 @@ class MainViewModel(
         // placeholder tiles (not the previous feed's posts) until the saves
         // arrive.
         _currentIndex.value = 0
+        _bookmarkFolderId.value = null
         enterSpecialFeed("Saved Posts")
         feedLoadGeneration++
         val generation = feedLoadGeneration
@@ -846,6 +847,8 @@ class MainViewModel(
     }
 
     private fun loadMoreSaves() {
+        // A bookmark folder is loaded whole.
+        if (_bookmarkFolderId.value != null) return
         viewModelScope.launch(Dispatchers.IO) {
             isLoadingMore = true
             var result = bskyRepo.getBookmarkedPosts(bskyToken, feedCursor)
@@ -1033,7 +1036,7 @@ class MainViewModel(
                     if (tick % 2 == 0) refreshDmConvosQuick()
                     tick++
                 }
-                delay(60_000)
+                delay(if (com.mediaviewer.util.LocalData.batterySaverActive) 240_000 else 60_000)
             }
         }
     }
@@ -1507,6 +1510,62 @@ class MainViewModel(
         _initialComposeImageUri.value = null
         _initialComposeVideoUri.value = null
         _blogEditDraft.value = null
+        com.mediaviewer.ui.ComposerSeed.editPost = null
+    }
+
+    // ── Editing a post (supporters) ─────────────────────────────────────
+    /** More → Edit: opens the post on screen in the composer, filled in. */
+    fun editCurrentPost() {
+        val item = currentItem.value ?: return
+        if (_appMode.value != AppMode.BLUESKY) return
+        if (item.postUri.isBlank() || item.author.did != _bskyDid.value) return
+        if (item.isPoll || item.isTextshot) { showToast("Polls and Textshots can't be edited yet"); return }
+        val urls = when {
+            item.isVideo || item.isTextOnly -> emptyList()
+            item.mediaGroup.isNotEmpty() -> item.mediaGroup.map { it.mediaUrl }
+            else -> listOf(item.mediaUrl)
+        }.filter { it.isNotBlank() }
+        _blogEditDraft.value = null
+        _reviewComposeTarget.value = null
+        _initialComposeImageUri.value = null
+        _initialComposeVideoUri.value = null
+        com.mediaviewer.ui.ComposerSeed.editPost = com.mediaviewer.ui.EditPostTarget(
+            postUri = item.postUri, text = item.text, imageUrls = urls,
+            labels = item.labels, imagesEditable = !item.isVideo
+        )
+        _composePostOpen.value = true
+    }
+
+    /** Shows the edit straight away, before Bluesky has re-indexed it. */
+    private fun applyEditedPostLocally(edit: com.mediaviewer.ui.EditPostTarget, newText: String, newCid: String?) {
+        val now = com.mediaviewer.platform.nowIsoString()
+        _mediaItems.value = _mediaItems.value.map { m ->
+            if (m.postUri != edit.postUri) m else m.copy(
+                text = newText,
+                postCid = newCid ?: m.postCid,
+                editedAt = now,
+                editHistory = (m.editHistory ?: emptyList()) + com.mediaviewer.util.PostEditVersion(
+                    text = edit.text, at = m.editedAt ?: m.createdAt.orEmpty(), images = edit.imageUrls.size
+                )
+            )
+        }
+    }
+
+    /** Then swaps in Bluesky's own copy once it has caught up (new
+     *  pictures, labels…). The item keeps its place and id in the pager. */
+    private suspend fun refreshEditedPost(postUri: String) {
+        for (attempt in 0 until 4) {
+            delay(if (attempt == 0) 1500 else 1200)
+            val fresh = bskyRepo.getPostsByUris(bskyToken, listOf(postUri)).getOrNull()?.firstOrNull { it.postUri == postUri } ?: continue
+            if (fresh.editedAt == null) continue
+            withContext(Dispatchers.Main) {
+                _mediaItems.value = _mediaItems.value.map { m ->
+                    if (m.postUri != postUri) m
+                    else fresh.copy(id = m.id, sentByAuthor = m.sentByAuthor, sentByMessage = m.sentByMessage, sentByConvoId = m.sentByConvoId, sentByIsRepost = m.sentByIsRepost, feedContext = m.feedContext, isBookmarked = m.isBookmarked, bookmarkUri = m.bookmarkUri)
+                }
+            }
+            return
+        }
     }
 
     /** Routes a finished [com.mediaviewer.ui.ComposePostDraft] to the right
@@ -1534,6 +1593,22 @@ class MainViewModel(
                 _errorMessage.value = message
                 showToast(message)
                 _composePostSubmitting.value = false
+                return@launch
+            }
+            // Posted from a saved draft: the draft has done its job.
+            draft.fromDraftId?.let { id -> withContext(Dispatchers.Main) { com.mediaviewer.util.LocalData.deleteDraft(id) } }
+            // An edit: the post on screen updates in place; nothing to open.
+            val edited = draft.editingPost
+            if (edited != null) {
+                val newCid = (result.getOrNull() as? BskyRef)?.cid
+                val newText = draft.posts.firstOrNull()?.text.orEmpty()
+                withContext(Dispatchers.Main) {
+                    applyEditedPostLocally(edited, newText, newCid)
+                    _composePostSubmitting.value = false
+                    resetComposeState()
+                    showToast("Post edited")
+                }
+                refreshEditedPost(edited.postUri)
                 return@launch
             }
             // Work out what to open while the Post button keeps spinning, so
@@ -1668,6 +1743,17 @@ class MainViewModel(
             com.mediaviewer.ui.ComposeMode.SINGLE -> {
                 val post = draft.posts.firstOrNull()
                 if (post == null) Result.failure(IllegalStateException("Empty post"))
+                else if (draft.editingPost != null) {
+                    // More → Edit: rewrite the existing post in place.
+                    val edit = draft.editingPost!!
+                    bskyRepo.editPost(
+                        bskyToken, did, context, edit.postUri, post.text, post.images,
+                        edit.imageUrls, edit.imagesEditable, draft.selfLabels
+                    )
+                }
+                else if (draft.pollOptions.isNotEmpty()) {
+                    bskyRepo.createPollPost(bskyToken, did, post.text, draft.pollOptions, draft.selfLabels)
+                }
                 else runCatching {
                     val images = post.images.map { uri -> bskyRepo.uploadImageBlob(bskyToken, context, uri).getOrElse { throw it } }
                     bskyRepo.createPost(bskyToken, did, post.text, images, selfLabels = draft.selfLabels).getOrElse { throw it }
@@ -1741,7 +1827,7 @@ class MainViewModel(
     // backed by a real search. Enum name kept as ACCOUNTS/FEEDS rather than
     // renaming the Kotlin identifiers too, to keep this diff scoped to
     // what's user-visible; .label() below is what actually says "People".
-    enum class SearchFilter { ACCOUNTS, POSTS, LIKED_TAGS, FEEDS, STARTER_PACKS, E621 }
+    enum class SearchFilter { ACCOUNTS, POSTS, LIKED_TAGS, FEEDS, STARTER_PACKS, E621, WEB }
 
     data class SearchState(
         val query: String = "",
@@ -1795,6 +1881,10 @@ class MainViewModel(
             // behavior the other tabs use.
             _tagSuggestions.value = emptyList()
             viewModelScope.launch(Dispatchers.IO) { performLikedTagSearch(_searchState.value.query) }
+        } else if (filter == SearchFilter.WEB) {
+            // The Web Browser tab has its own address bar text; nothing to search here.
+            searchJob?.cancel()
+            _searchState.value = _searchState.value.copy(loading = false)
         } else if (_searchState.value.query.isNotBlank()) runSearch(_searchState.value.query)
     }
 
@@ -1829,6 +1919,7 @@ class MainViewModel(
                 // the e621 filter routes through updateLikedQueryText/
                 // submitE621SearchFromOverlay instead, never through here.
                 SearchFilter.E621 -> {}
+                SearchFilter.WEB -> { _searchState.value = _searchState.value.copy(loading = false) }
                 SearchFilter.ACCOUNTS -> {
                     bskyRepo.searchActors(bskyToken, query).onSuccess { (accounts, _) ->
                         _searchState.value = _searchState.value.copy(accounts = accounts, loading = false, hasSearched = true)
@@ -3582,6 +3673,9 @@ _bskyDid.value          = session.did
                     bskyRepo.getTimeline(bskyToken, feedCursor, limit)
                 // A list pinned as a feed: its members' original posts only
                 // (no reposts, no replies), newest first.
+                else if (com.mediaviewer.util.LocalData.isLocalFeedUri(feedUri))
+                    // A feed built on this device (Hub → + → Feed Builder).
+                    loadLocalFeedPage(feedUri, feedCursor)
                 else if (com.mediaviewer.util.StellarOfficial.isListUri(feedUri))
                     bskyRepo.getListFeedOriginals(bskyToken, _bskyDid.value, feedUri, feedCursor)
                 else bskyRepo.getFeed(bskyToken, feedUri, feedCursor, limit)
@@ -5646,7 +5740,7 @@ _bskyDid.value          = session.did
             // replaying recent history as if it just happened.
             bskyRepo.getConvoLog(bskyToken, _bskyDid.value, null).onSuccess { (_, cursor) -> dmLogCursor = cursor }
             while (_bskyLoggedIn.value) {
-                delay(4000)
+                delay(if (com.mediaviewer.util.LocalData.batterySaverActive) 15_000 else 4000)
                 // Paused while the app isn't on screen (it catches up from
                 // the same cursor when you come back).
                 if (!appInForeground) continue
@@ -6087,6 +6181,8 @@ _bskyDid.value          = session.did
             viewModelScope.launch(Dispatchers.IO) {
                 if (wasBookmarked) {
                     bskyRepo.removeBookmark(bskyToken, item.postUri)
+                        // No longer saved: it leaves any bookmark folder too.
+                        .onSuccess { withContext(Dispatchers.Main) { com.mediaviewer.util.LocalData.removeFromAllBookmarkFolders(item.postUri) } }
                         .onFailure { updateCurrentItem { it.copy(isBookmarked = true) } }
                 } else {
                     bskyRepo.addBookmark(bskyToken, item.postUri, item.postCid)
@@ -7600,6 +7696,8 @@ _bskyDid.value          = session.did
         _navDirection.value = 0
         _profileOverlay.value?.let { if (it.hidden) _profileOverlay.value = it.copy(hidden = false) }
         _screenState.value = back.screen
+        // A feed opened from a DM: the DM page comes back.
+        _dmHiddenBehindFeed.value = false
         tapHaptic()
     }
 
@@ -7913,6 +8011,311 @@ _bskyDid.value          = session.did
         com.mediaviewer.util.StellarSupporters.init(platform.context)
         com.mediaviewer.util.Onboarding.init(platform.context)
         refreshSupporters()
+    }
+
+    // ── Supporter features ──────────────────────────────────────────────
+
+    /** Leaves whatever page is open for the Hub, ready for Settings →
+     *  Support Stellar (a supporter-only button tapped by a non-supporter). */
+    fun closeEverythingForSupportPage() {
+        if (!_composePostSubmitting.value) resetComposeState()
+        _searchOpen.value = false
+        _dmInboxOpen.value = false
+        _dmThread.value = null
+        _inboxOpen.value = false
+        closeAllProfilesForSettings()
+    }
+
+    // ── Polls ───────────────────────────────────────────────────────────
+    /** The current count for a poll post (see BlueskyRepository.getPollVotes). */
+    suspend fun pollTally(postUri: String): com.mediaviewer.ui.PollTally? {
+        if (!_bskyLoggedIn.value) return null
+        val item = _mediaItems.value.firstOrNull { it.postUri == postUri }
+        val optionCount = item?.let { com.mediaviewer.ui.PollFormat.parse(it.text)?.second?.size } ?: com.mediaviewer.ui.PollFormat.MAX_OPTIONS
+        val me = _bskyDid.value
+        val votes = withContext(Dispatchers.IO) { bskyRepo.getPollVotes(bskyToken, me, postUri, optionCount).getOrNull() } ?: return null
+        return com.mediaviewer.ui.PollTally(counts = votes.values.groupingBy { it }.eachCount(), myVote = votes[me])
+    }
+
+    /** Votes on a poll: a reply to it with just the answer's letter. */
+    fun votePoll(item: MediaItem, letter: String, onDone: (Boolean) -> Unit) {
+        if (!_bskyLoggedIn.value || item.postUri.isBlank()) { onDone(false); return }
+        viewModelScope.launch(Dispatchers.IO) {
+            val root = bskyRepo.threadRootOf(item.postUri)
+            suspend fun send() = bskyRepo.replyToPost(
+                bskyToken, _bskyDid.value,
+                root?.uri ?: item.postUri, root?.cid ?: item.postCid,
+                item.postUri, item.postCid, letter
+            )
+            var result = send()
+            if (result.isFailure && isAuthError(result.exceptionOrNull()?.message) && refreshBskyTokenIfPossible()) result = send()
+            withContext(Dispatchers.Main) {
+                if (result.isFailure) showToast("Couldn't send your vote")
+                onDone(result.isSuccess)
+            }
+        }
+    }
+
+    // ── Feed Builder: feeds built and read on this device ───────────────
+    /** Posts already handed out for the local feed being read (no repeats). */
+    private val localFeedSeen = HashSet<String>()
+
+    /** Cursor for a local feed: one entry per source, "\u0001"-separated;
+     *  "-" = that source hasn't been read yet, "!" = it has run out. */
+    private fun decodeLocalCursor(cursor: String?, n: Int): List<String> =
+        cursor?.split('\u0001')?.takeIf { it.size == n } ?: List(n) { "-" }
+
+    /**
+     * One page of a locally built feed: the next page of each of its sources
+     * (a list's original posts, an account's own posts, a hashtag search),
+     * all read from Bluesky's AppView with service auth — never from the
+     * PDS — then filtered by the feed's content types and merged newest
+     * first. Nothing about the feed leaves the device.
+     */
+    private suspend fun loadLocalFeedPage(feedUri: String, cursor: String?): Result<Pair<List<MediaItem>, String?>> = runCatching {
+        val feed = com.mediaviewer.util.LocalData.localFeed(feedUri) ?: error("That feed was removed")
+        val sources = feed.sources
+        if (sources.isEmpty()) return@runCatching Pair(emptyList<MediaItem>(), null)
+        if (cursor == null) localFeedSeen.clear()
+        var cursors = decodeLocalCursor(cursor, sources.size)
+        val me = _bskyDid.value
+        val out = ArrayList<MediaItem>()
+        var rounds = 0
+        // A page can filter down to nothing (e.g. a videos-only feed): keep
+        // reading a little further rather than showing an empty feed.
+        while (out.size < 12 && rounds < 4 && cursors.any { it != "!" }) {
+            rounds++
+            val pages = coroutineScope {
+                sources.mapIndexed { i, src ->
+                    async {
+                        val cur = cursors[i]
+                        if (cur == "!") return@async Pair(emptyList<MediaItem>(), "!")
+                        val c = cur.takeIf { it != "-" }
+                        val page: Pair<List<MediaItem>, String?>? = when (src.kind) {
+                            "list" -> bskyRepo.getListFeedOriginals(bskyToken, me, src.value, c).getOrNull()
+                            "account" -> bskyRepo.getHubListMemberPostsPage(bskyToken, me, src.value, c, 30).getOrNull()
+                                ?.let { (posts, next) -> posts.map { it.second } to next }
+                            "hashtag" -> bskyRepo.searchPostsDirect(bskyToken, me, "#" + src.value.removePrefix("#"), c).getOrNull()
+                            else -> null
+                        }
+                        if (page == null) Pair(emptyList<MediaItem>(), "!") else Pair(page.first, page.second?.takeIf { it.isNotBlank() } ?: "!")
+                    }
+                }.awaitAll()
+            }
+            cursors = pages.map { it.second }
+            for (item in pages.flatMap { it.first }) {
+                val keep = when {
+                    item.isTextOnly -> feed.textPosts
+                    item.isVideo -> if (item.isHorizontalVideo) feed.horizontalVideos else feed.verticalVideos
+                    else -> feed.images
+                }
+                if (keep && item.postUri.isNotBlank() && localFeedSeen.add(item.postUri)) out += item
+            }
+        }
+        // Newest first (ISO times sort as text).
+        val sorted = out.sortedByDescending { it.createdAt.orEmpty() }
+        Pair(sorted, if (cursors.all { it == "!" }) null else cursors.joinToString("\u0001"))
+    }
+
+    /** Feed Builder → Add list by link: resolves a bsky.app list link. */
+    fun resolveListForBuilder(input: String, onDone: (com.mediaviewer.util.LocalFeedSource?, String?) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = bskyRepo.resolveListUrl(input)
+            withContext(Dispatchers.Main) {
+                r.onSuccess { (uri, name) -> onDone(com.mediaviewer.util.LocalFeedSource("list", uri, name), null) }
+                    .onFailure { onDone(null, it.message ?: "Couldn't open that list") }
+            }
+        }
+    }
+
+    /** Feed Builder → Add account: resolves a handle (or DID). */
+    fun resolveAccountForBuilder(input: String, onDone: (com.mediaviewer.util.LocalFeedSource?, String?) -> Unit) {
+        val actor = input.trim().removePrefix("@").substringAfter("bsky.app/profile/").substringBefore('/').trim()
+        if (actor.isBlank()) { onDone(null, "Type a handle"); return }
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = bskyRepo.getProfileBasics(bskyToken, actor)
+            withContext(Dispatchers.Main) {
+                r.onSuccess { a -> onDone(com.mediaviewer.util.LocalFeedSource("account", a.did, "@" + a.handle), null) }
+                    .onFailure { onDone(null, "Couldn't find @$actor") }
+            }
+        }
+    }
+
+    /** Your own lists, for the Feed Builder's picker. */
+    fun loadListsForBuilder() {
+        if (_userLists.value.isNotEmpty() || !_bskyLoggedIn.value) return
+        viewModelScope.launch(Dispatchers.IO) {
+            bskyRepo.getUserLists(bskyToken, _bskyDid.value).onSuccess { _userLists.value = it }
+        }
+    }
+
+    // ── Bookmark folders (local) ────────────────────────────────────────
+    /** Saved Posts → the folder being shown (null = every saved post). */
+    private val _bookmarkFolderId = MutableStateFlow<String?>(null)
+    val bookmarkFolderId: StateFlow<String?> = _bookmarkFolderId
+
+    fun showBookmarkFolder(id: String?) {
+        val folder = com.mediaviewer.util.LocalData.bookmarkFolders.firstOrNull { it.id == id }
+        if (folder == null) { showSaves(); return }
+        if (!_bskyLoggedIn.value) return
+        tapHaptic()
+        _bookmarkFolderId.value = folder.id
+        feedLoadGeneration++
+        val generation = feedLoadGeneration
+        feedCursor = null
+        activeFeedMode = ActiveFeedMode.SAVES
+        _currentIndex.value = 0
+        _mediaItems.value = emptyList()
+        _isLoading.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            var result = bskyRepo.getPostsByUris(bskyToken, folder.posts)
+            if (result.getOrNull().isNullOrEmpty() && folder.posts.isNotEmpty() && refreshBskyTokenIfPossible()) {
+                result = bskyRepo.getPostsByUris(bskyToken, folder.posts)
+            }
+            if (generation != feedLoadGeneration || activeFeedMode != ActiveFeedMode.SAVES) return@launch
+            val order = folder.posts.withIndex().associate { (i, u) -> u to i }
+            _mediaItems.value = filterHidden(result.getOrNull().orEmpty())
+                .distinctBy { it.postUri }
+                .sortedBy { order[it.postUri] ?: Int.MAX_VALUE }
+                .map { it.copy(isBookmarked = true) }
+            _isLoading.value = false
+        }
+    }
+
+    // ── Feeds shared in DMs ─────────────────────────────────────────────
+    /** A feed dragged onto the Hub's DMs button: the "Share with" popup,
+     *  sending the feed's bsky.app link under whatever is typed. */
+    fun openShareFeed(feed: BskyFeedInfo) {
+        val parts = feed.uri.removePrefix("at://").split('/')
+        val did = parts.getOrNull(0) ?: return
+        val rkey = parts.getOrNull(2) ?: return
+        val kind = if (com.mediaviewer.util.StellarOfficial.isListUri(feed.uri)) "lists" else "feed"
+        _sendPopupTarget.value = MediaItem(
+            id = PROFILE_SHARE_PREFIX + "feed:" + feed.uri,
+            author = AuthorInfo(did = did, handle = feed.displayName, displayName = feed.displayName, avatarUrl = feed.avatarUrl),
+            thumbUrl = feed.avatarUrl.orEmpty(),
+            text = "https://bsky.app/profile/$did/$kind/$rkey"
+        )
+        _sendPopupSelected.value = emptySet()
+        if (_dmConversations.value.isEmpty()) loadDmConversations()
+    }
+
+    private val sharedFeedCards = com.mediaviewer.platform.ConcurrentHashMap<String, ProfileListEntry>()
+
+    /** A feed/list link in a DM → what its card shows. [kind] is "feed" or
+     *  "lists" (the link's own path segment). Remembered per session. */
+    suspend fun sharedFeedCard(actor: String, kind: String, rkey: String): ProfileListEntry? {
+        val key = "$actor/$kind/$rkey"
+        sharedFeedCards[key]?.let { return it }
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val did = if (actor.startsWith("did:")) actor else bskyRepo.getProfileBasics(bskyToken, actor).getOrNull()?.did ?: return@runCatching null
+                if (kind == "lists") {
+                    val uri = "at://$did/app.bsky.graph.list/$rkey"
+                    val info = bskyRepo.getListInfo(bskyToken, uri).getOrNull() ?: return@runCatching null
+                    ProfileListEntry(ProfileListKind.LIST, info.uri, info.displayName, avatarUrl = info.avatarUrl, listUri = info.uri)
+                } else {
+                    val uri = "at://$did/app.bsky.feed.generator/$rkey"
+                    val info = bskyRepo.getFeedGeneratorInfo(bskyToken, uri).getOrNull() ?: return@runCatching null
+                    ProfileListEntry(ProfileListKind.FEED, info.uri.ifBlank { uri }, info.displayName, description = info.description, avatarUrl = info.avatar)
+                }
+            }.getOrNull()?.also { sharedFeedCards[key] = it }
+        }
+    }
+
+    /** True while a feed opened from a DM is showing: the DM page is kept
+     *  (hidden) underneath and comes back when the feed is left. */
+    private val _dmHiddenBehindFeed = MutableStateFlow(false)
+    val dmHiddenBehindFeed: StateFlow<Boolean> = _dmHiddenBehindFeed
+
+    /** Opens a feed (or list) shared in a DM, in front of the DMs. */
+    fun openFeedFromDm(entry: ProfileListEntry) {
+        if (!_bskyLoggedIn.value || entry.uri.isBlank()) return
+        tapHaptic()
+        if (profileFeedReturn == null || !isProfileFeedActive()) {
+            profileFeedReturn = ProfileFeedReturn(
+                _authorFeedState.value, _mediaItems.value, _currentIndex.value, feedCursor,
+                activeFeedMode, activeFeedActorDid, _selectedFeedUri.value, _screenState.value
+            )
+        }
+        val pseudo = AuthorInfo(_bskyDid.value, PROFILE_FEED_HANDLE_PREFIX + entry.uri, entry.name.ifBlank { "Feed" }, null)
+        val cur = _authorFeedState.value
+        _authorFeedState.value = cur?.copy(author = pseudo) ?: AuthorFeedSavedState(
+            author = pseudo, items = _mediaItems.value, currentIndex = _currentIndex.value,
+            cursor = feedCursor, feedUri = _selectedFeedUri.value
+        )
+        feedLoadGeneration++
+        feedCursor = null
+        activeFeedMode = ActiveFeedMode.EXTERNAL
+        activeFeedActorDid = null
+        externalFeedUri = entry.uri
+        _mediaItems.value = emptyList()
+        _currentIndex.value = 0
+        _navDirection.value = 0
+        _isLoading.value = true
+        _dmHiddenBehindFeed.value = true
+        _screenState.value = ScreenState.GRID
+        loadExternalFeed(reset = true)
+    }
+
+    /** "Add" on a feed shared in a DM. */
+    fun addSharedFeed(entry: ProfileListEntry) {
+        if (entry.kind == ProfileListKind.FEED) addFeedFromProfile(entry)
+        else pinListAsFeed(entry.uri, entry.name, entry.avatarUrl)
+    }
+
+    /** The DM page no longer has a feed in front of it to come back from. */
+    fun dropHiddenDm() {
+        if (!_dmHiddenBehindFeed.value) return
+        _dmHiddenBehindFeed.value = false
+        _dmInboxOpen.value = false
+        _dmThread.value = null
+    }
+
+    // ── DM streaks (local) ──────────────────────────────────────────────
+    /** Tapping a streak: re-counts it from the chat's history, reading
+     *  older pages only until the streak's start is found. Chat service
+     *  directly (service auth) — the PDS isn't involved. */
+    fun scanDmStreak(convoId: String, onDone: () -> Unit) {
+        if (convoId.isBlank() || !_bskyLoggedIn.value) { onDone(); return }
+        viewModelScope.launch(Dispatchers.IO) {
+            val me = _bskyDid.value
+            val all = ArrayList<BskyMessageView>()
+            var cursor: String? = null
+            var pages = 0
+            var last: com.mediaviewer.util.DmStreaks.Count? = null
+            while (pages < 60) {
+                val page = bskyRepo.getConvoMessages(bskyToken, me, convoId, cursor, 100).getOrNull() ?: break
+                all += page.first
+                cursor = page.second
+                pages++
+                val c = com.mediaviewer.util.DmStreaks.count(all, me)
+                last = c
+                if (c.settled || cursor.isNullOrBlank() || page.first.isEmpty()) break
+            }
+            withContext(Dispatchers.Main) {
+                last?.let { com.mediaviewer.util.DmStreaks.save(convoId, it) }
+                onDone()
+            }
+        }
+    }
+
+    // ── Trending (Search → Posts) ───────────────────────────────────────
+    private val _trendingTopics = MutableStateFlow<List<BlueskyRepository.TrendingTopic>>(emptyList())
+    val trendingTopics: StateFlow<List<BlueskyRepository.TrendingTopic>> = _trendingTopics
+    private var trendingLoadedAt = 0L
+
+    /** Bluesky's Trending list, re-read at most every 10 minutes. */
+    fun loadTrendingTopics() {
+        if (!_bskyLoggedIn.value) return
+        val now = com.mediaviewer.platform.currentTimeMillis()
+        if (_trendingTopics.value.isNotEmpty() && now - trendingLoadedAt < 10 * 60_000) return
+        trendingLoadedAt = now
+        viewModelScope.launch(Dispatchers.IO) {
+            bskyRepo.getTrendingTopics(bskyToken, _bskyDid.value)
+                .onSuccess { if (it.isNotEmpty()) _trendingTopics.value = it }
+                .onFailure { trendingLoadedAt = 0L }
+        }
     }
 
     fun clearError() { _errorMessage.value = null }

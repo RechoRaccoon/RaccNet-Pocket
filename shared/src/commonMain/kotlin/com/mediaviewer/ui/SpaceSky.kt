@@ -139,7 +139,7 @@ private class ShootingStars(seed: Long) {
 fun SpaceSky(color: Color, modifier: Modifier = Modifier, dim: Float = SPACE_BACKGROUND_DIM, bottomColor: Color? = null) {
     val base = remember(color, dim) { dimSpaceColor(color, dim) }
     val baseBottom = remember(bottomColor, dim) { bottomColor?.let { dimSpaceColor(it, dim) } }
-    if (!UiToggles.starryBackground) {
+    if (!UiToggles.starryBackground || com.mediaviewer.util.LocalData.batterySaverActive) {
         Box(if (baseBottom != null) modifier.background(Brush.verticalGradient(listOf(base, baseBottom))) else modifier.background(base))
         return
     }

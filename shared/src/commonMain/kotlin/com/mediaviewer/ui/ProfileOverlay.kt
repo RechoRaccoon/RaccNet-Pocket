@@ -60,6 +60,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.StickyNote2
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
@@ -1063,6 +1064,18 @@ fun ProfileOverlay(
                         anchorSize = more.second,
                         containerRootOrigin = rootOrigin,
                         actions = buildList {
+                            // Profile Note (supporters): a private note about
+                            // this profile, kept on this device. Pink for
+                            // everyone else — tapping it opens the Support page.
+                            val supporter = com.mediaviewer.util.Supporter.active
+                            add(BubbleAction(
+                                "Profile Note",
+                                iconContent = { m, c ->
+                                    Icon(Icons.Filled.StickyNote2, contentDescription = "Profile Note", tint = c, modifier = m.supporterShine(!supporter))
+                                }
+                            ) {
+                                if (supporter) LocalOverlays.profileNoteFor = author else com.mediaviewer.util.Supporter.openPage()
+                            })
                             add(BubbleAction("View on Bluesky", iconContent = { m, c -> BlueskyLogoIcon(m, tint = c) }) {
                                 uriHandler.openUri("https://bsky.app/profile/${author.handle}")
                             })
@@ -1380,7 +1393,7 @@ private fun ProfileInteractionBar(
             // Audio visualizer resting on top of the bar, as wide as the
             // pill, in this profile's color — drawn just above it, so it
             // takes no layout space and never moves the bar.
-            if (com.mediaviewer.util.UiToggles.audioVisualizer) {
+            if ((com.mediaviewer.util.UiToggles.audioVisualizer && !com.mediaviewer.util.LocalData.batterySaverActive)) {
                 AudioVisualizerBars(
                     color = tint,
                     matchTimelineBarWidth = true,
@@ -1500,6 +1513,34 @@ private fun ProfileHeaderSection(
                 onClose = onClose,
                 onEditProfile = onEditProfile
             )
+        }
+
+        // ── Profile note (supporters; private, on this device) ──
+        // Above the "Listening to" line and the bio, in YOUR own profile
+        // colors so it never reads as part of their profile. Tap to edit.
+        val profileNote = com.mediaviewer.util.LocalData.profileNote(author.did)
+        if (profileNote.isNotBlank() && com.mediaviewer.util.Supporter.active) {
+            val noteTint = rememberSelfTint(null, NeutralGlassTint)
+            val noteShape = RoundedCornerShape(16.dp)
+            val noteTap = rememberHapticTap()
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(top = 10.dp)
+                    .then(
+                        if (liquidGlass) Modifier.glassPanel(true, tint = noteTint, shape = noteShape)
+                        else Modifier.clip(noteShape).background(androidx.compose.ui.graphics.lerp(Color(0xFF16161B), noteTint, 0.3f))
+                    )
+                    .clip(noteShape)
+                    .clickable { noteTap(); LocalOverlays.profileNoteFor = author }
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.Top
+            ) {
+                Icon(
+                    Icons.Filled.StickyNote2, contentDescription = "Your note",
+                    tint = androidx.compose.ui.graphics.lerp(noteTint, Color.White, 0.55f), modifier = Modifier.padding(top = 1.dp).size(15.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(profileNote, color = Color.White.copy(alpha = 0.95f), fontSize = 13.sp, lineHeight = 18.sp)
+            }
         }
 
         // ── "Listening to ..." (Rocksky, item 16) ──
@@ -5364,6 +5405,8 @@ fun ProfileStyleTabRow(
     labels: List<String>, selectedIndex: Int, liquidGlass: Boolean, tint: Color,
     /** Popups: each tab bubble gets the same dim backing as the popup's other bubbles. */
     shadowed: Boolean = false,
+    /** A supporter-only tab shown to a non-supporter: shimmering pink. */
+    lockedIndex: Int = -1,
     onSelect: (Int) -> Unit
 ) {
     val tap = rememberHapticTap()
@@ -5387,8 +5430,9 @@ fun ProfileStyleTabRow(
                     .clickable { tap(); onSelect(index) }
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
-                Text(label, color = if (isSelected) Color.White else DimGray, fontSize = 13.sp,
-                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1)
+                Text(label, color = if (isSelected || index == lockedIndex) Color.White else DimGray, fontSize = 13.sp,
+                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1,
+                    modifier = Modifier.supporterShine(index == lockedIndex))
             }
         }
     }

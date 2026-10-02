@@ -1801,6 +1801,51 @@ class BlueskyRepository {
         Pair(body.posts.flatMap { parseFeedItemSafe(BskyFeedItem(post = it)) }, body.cursor)
     }
 
+    /** Posts search straight from the AppView (service auth) — used by the
+     *  on-device Feed Builder's hashtag sources, so paging a built feed
+     *  never counts against the PDS. */
+    suspend fun searchPostsDirect(token: String, myDid: String, query: String, cursor: String? = null)
+        : Result<Pair<List<MediaItem>, String?>> = runCatching {
+        val resp = viaAppView(token, myDid, "app.bsky.feed.searchPosts") { a, auth -> a.searchPosts(auth, query, cursor = cursor) }
+        val body = resp.body() ?: error("Search posts ${resp.code()}")
+        Pair(body.posts.flatMap { parseFeedItemSafe(BskyFeedItem(post = it)) }, body.cursor)
+    }
+
+    /** One of Bluesky's trending topics. */
+    data class TrendingTopic(val title: String, val detail: String, val query: String)
+
+    /** Bluesky's own Trending list (what the official app's Search page
+     *  shows), from the AppView. */
+    suspend fun getTrendingTopics(token: String, myDid: String): Result<List<TrendingTopic>> = runCatching {
+        fun str(o: com.mediaviewer.json.JsonObject, key: String): String =
+            runCatching { o.get(key)?.takeIf { !it.isJsonNull }?.asString }.getOrNull().orEmpty()
+        val trends = runCatching {
+            val resp = viaAppView(token, myDid, "app.bsky.unspecced.getTrends") { a, auth -> a.getUnspecced(auth, "getTrends", 10) }
+            resp.body()?.getAsJsonArray("trends")?.mapNotNull { el ->
+                val o = runCatching { el.asJsonObject }.getOrNull() ?: return@mapNotNull null
+                val name = str(o, "displayName").ifBlank { str(o, "topic") }
+                if (name.isBlank()) return@mapNotNull null
+                val count = runCatching { o.get("postCount")?.asInt }.getOrNull() ?: 0
+                val category = str(o, "category").replace('-', ' ').replaceFirstChar { it.uppercase() }
+                val posts = when {
+                    count >= 1_000_000 -> "${count / 100_000 / 10.0}M posts"
+                    count >= 1_000 -> "${count / 100 / 10.0}K posts"
+                    count > 0 -> "$count posts"
+                    else -> ""
+                }
+                TrendingTopic(name, listOf(posts, category).filter { it.isNotBlank() }.joinToString(" · "), str(o, "topic").ifBlank { name })
+            }
+        }.getOrNull().orEmpty()
+        if (trends.isNotEmpty()) return@runCatching trends
+        val resp = viaAppView(token, myDid, "app.bsky.unspecced.getTrendingTopics") { a, auth -> a.getUnspecced(auth, "getTrendingTopics", 10) }
+        val body = resp.body() ?: error("Trending ${resp.code()}")
+        body.getAsJsonArray("topics")?.mapNotNull { el ->
+            val o = runCatching { el.asJsonObject }.getOrNull() ?: return@mapNotNull null
+            val name = str(o, "displayName").ifBlank { str(o, "topic") }
+            if (name.isBlank()) null else TrendingTopic(name, str(o, "description"), str(o, "topic").ifBlank { name })
+        } ?: emptyList()
+    }
+
     suspend fun searchActors(token: String, query: String, cursor: String? = null)
         : Result<Pair<List<SearchAccountResult>, String?>> = runCatching {
         val resp = api.searchActors("Bearer $token", query, cursor = cursor)
@@ -2607,6 +2652,28 @@ class BlueskyRepository {
         "createdAt" to com.mediaviewer.platform.nowIsoString()
     ))
 
+    /**
+     * A poll's votes: every direct reply that is just one answer letter,
+     * one per account (their first). Read straight from Bluesky's AppView
+     * (service auth), so refreshing it every few seconds never touches the
+     * PDS. Returns account DID → letter.
+     */
+    suspend fun getPollVotes(token: String, myDid: String, postUri: String, optionCount: Int): Result<Map<String, String>> = runCatching {
+        val resp = viaAppView(token, myDid, "app.bsky.feed.getPostThread") { a, auth -> a.getPostThread(auth, postUri, 1) }
+        val body = resp.body() ?: error("Poll ${resp.code()}")
+        val letters = (0 until optionCount).map { com.mediaviewer.ui.PollFormat.letter(it) }.toSet()
+        val votes = LinkedHashMap<String, Pair<String, String>>() // did → (createdAt, letter)
+        for (reply in body.thread.replies ?: emptyList()) {
+            val post = reply.post ?: continue
+            val letter = post.record.text?.trim()?.removeSuffix(".")?.uppercase() ?: continue
+            if (letter !in letters) continue
+            val at = post.record.createdAt.orEmpty()
+            val existing = votes[post.author.did]
+            if (existing == null || at < existing.first) votes[post.author.did] = at to letter
+        }
+        votes.mapValues { it.value.second }
+    }
+
     // ── Customize Hub: list rows ─────────────────────────────────────────────
     // Everything here goes to Bluesky's AppView (service-auth'd straight to
     // api.bsky.app, or the unauthenticated public AppView) — never to the
@@ -2633,8 +2700,17 @@ class BlueskyRepository {
         val body = resp.body() ?: error("List feed ${resp.code()}")
         // A page the AppView filtered down to nothing can still carry a
         // cursor; only a missing or unchanged cursor means the end.
-        hubListOriginalPosts(body.feed) to body.cursor?.takeIf { it.isNotBlank() && it != cursor }
+        hubListOriginalPosts(body.feed).withoutRecho(listUri) to body.cursor?.takeIf { it.isNotBlank() && it != cursor }
     }
+
+    /** Recho is on the Stellar Supporters list (so the supporter features
+     *  work for them) but isn't shown in the Stellar Supporters row or feed. */
+    private fun isHiddenSupporter(listUri: String, handle: String): Boolean =
+        listUri == com.mediaviewer.util.StellarOfficial.SUPPORTERS_LIST_URI &&
+            handle.equals(com.mediaviewer.util.StellarOfficial.RECHO_HANDLE, ignoreCase = true)
+    private fun List<MediaItem>.withoutRecho(listUri: String): List<MediaItem> =
+        if (listUri != com.mediaviewer.util.StellarOfficial.SUPPORTERS_LIST_URI) this
+        else filterNot { isHiddenSupporter(listUri, it.author.handle) }
 
     /** One page of a single list member's own original posts (AppView
      *  author feed, no replies, no reposts, no pinned post), each with its
@@ -2708,6 +2784,7 @@ class BlueskyRepository {
             val feed = feedBody?.feed ?: emptyList()
             val (name, rawMembers) = membersJob.await()
             val members = rawMembers.distinctBy { it.did }.filterNot { com.mediaviewer.util.BlockedAccounts.isHidden(it.did) }
+                .filterNot { isHiddenSupporter(listUri, it.handle) }
             // Most recent poster first: order of each member's first
             // appearance in the (newest-first) list feed; quiet members after.
             val recency = HashMap<String, Int>()
@@ -2717,7 +2794,7 @@ class BlueskyRepository {
             val sortedMembers = members.withIndex()
                 .sortedWith(compareBy({ recency[it.value.did] ?: Int.MAX_VALUE }, { it.index }))
                 .map { it.value }
-            val posts = hubListOriginalPosts(feed)
+            val posts = hubListOriginalPosts(feed).withoutRecho(listUri)
             HubListContent(name, sortedMembers, posts, feedBody?.cursor?.takeIf { it.isNotBlank() })
         }
     }
@@ -2775,7 +2852,7 @@ class BlueskyRepository {
             val resp = viaAppView(token, myDid, "app.bsky.feed.getListFeed") { a, auth -> a.getListFeed(auth, listUri, 100, cur) }
             if (!resp.isSuccessful) error("ListFeed ${resp.code()}: ${errorBodyText(resp)}")
             val body = resp.body() ?: error("ListFeed ${resp.code()}")
-            out += hubListOriginalPosts(body.feed)
+            out += hubListOriginalPosts(body.feed).withoutRecho(listUri)
             pages++
             c = body.cursor?.takeIf { it.isNotBlank() && it != cur }
             if (c == null || out.size >= 12 || pages >= 5) break
@@ -3270,6 +3347,129 @@ class BlueskyRepository {
     }
     }
 
+    /** A poll: the "Q. / A. / B." text, plus a small generated picture whose
+     *  alt text ("A poll asking …") is how Stellar recognises it. */
+    suspend fun createPollPost(
+        token: String, did: String, question: String, options: List<String>, selfLabels: List<String> = emptyList()
+    ): Result<BskyRef> = withContext(Dispatchers.IO) {
+        runCatching {
+            val bytes = com.mediaviewer.util.PollImage.png(options.size)
+            val resp = api.uploadBlob("Bearer $token", "image/png", bytes.toRequestBody("image/png".toMediaType()))
+            val blob = resp.body()?.blob ?: error("uploadBlob ${resp.code()}: ${resp.errorBody()?.string()}")
+            createPost(
+                token, did, com.mediaviewer.ui.PollFormat.postText(question, options),
+                listOf(UploadedImage(blob, com.mediaviewer.util.PollImage.WIDTH, com.mediaviewer.util.PollImage.HEIGHT)),
+                imageAlts = listOf(com.mediaviewer.ui.PollFormat.altText(question, options)),
+                selfLabels = selfLabels
+            ).getOrElse { throw it }
+        }
+    }
+
+    /**
+     * Edits one of your own posts in place: the same record (same rkey) is
+     * rewritten with putRecord, so the post keeps its link, its place in
+     * your profile (createdAt is untouched) and — since likes, reposts and
+     * replies point at the post's URI — its likes, reposts and comments.
+     * Every Bluesky/AT Protocol app then shows the edited version.
+     *
+     * The previous version is appended to the record's own
+     * "stellarEditHistory" field (and "stellarEditedAt" is set), so anyone
+     * using Stellar can see that it was edited and read the earlier
+     * versions without any extra request. One read + one write to the PDS
+     * (plus one upload per newly added picture).
+     *
+     * [images] is the edited picture list in order: remote (http) entries
+     * are pictures the post already had (matched against [existingImageUrls]
+     * by position in that list), anything else is a new local picture.
+     */
+    suspend fun editPost(
+        token: String, did: String, context: com.mediaviewer.platform.PlatformContext,
+        postUri: String, newText: String,
+        images: List<com.mediaviewer.platform.PlatformUri>, existingImageUrls: List<String>,
+        imagesEditable: Boolean, selfLabels: List<String>
+    ): Result<BskyRef> = withContext(Dispatchers.IO) {
+        runCatching {
+            val rkey = postUri.substringAfterLast('/')
+            val existing = api.getRecord("Bearer $token", did, "app.bsky.feed.post", rkey)
+            val old = existing.body()?.value?.takeIf { it.isJsonObject }?.asJsonObject
+                ?: error("Couldn't read the post (${existing.code()})")
+            val record = LinkedHashMap<String, Any>()
+            old.entrySet().forEach { (k, v) -> record[k] = v }
+
+            val oldText = runCatching { old.get("text")?.asString }.getOrNull().orEmpty()
+            val oldEmbed = runCatching { old.getAsJsonObject("embed") }.getOrNull()
+            val oldEmbedType = runCatching { oldEmbed?.get("\$type")?.asString }.getOrNull().orEmpty()
+            val oldImages: List<com.mediaviewer.json.JsonObject> = when {
+                oldEmbedType.contains("embed.images") -> runCatching { oldEmbed?.getAsJsonArray("images")?.map { it.asJsonObject } }.getOrNull()
+                oldEmbedType.contains("embed.gallery") -> runCatching { oldEmbed?.getAsJsonArray("items")?.map { it.asJsonObject } }.getOrNull()
+                else -> null
+            } ?: emptyList()
+
+            // ── Pictures ──
+            if (imagesEditable && (oldEmbed == null || oldEmbedType.contains("embed.images") || oldEmbedType.contains("embed.gallery"))) {
+                val entries = ArrayList<Map<String, Any>>()
+                for (uri in images) {
+                    val text = uri.toString()
+                    if (text.startsWith("http://") || text.startsWith("https://")) {
+                        val src = oldImages.getOrNull(existingImageUrls.indexOf(text)) ?: continue
+                        val e = LinkedHashMap<String, Any>()
+                        src.get("image")?.let { e["image"] = it }
+                        e["alt"] = runCatching { src.get("alt")?.asString }.getOrNull().orEmpty()
+                        src.get("aspectRatio")?.takeIf { !it.isJsonNull }?.let { e["aspectRatio"] = it }
+                        if (e.containsKey("image")) entries += e
+                    } else {
+                        val up = uploadImageBlob(token, context, uri).getOrElse { throw it }
+                        val e = LinkedHashMap<String, Any>()
+                        e["image"] = up.blob
+                        e["alt"] = ""
+                        if (up.width > 0 && up.height > 0) e["aspectRatio"] = mapOf("width" to up.width, "height" to up.height)
+                        entries += e
+                    }
+                }
+                when {
+                    entries.isEmpty() -> record.remove("embed")
+                    entries.size <= 4 -> record["embed"] = mapOf("\$type" to "app.bsky.embed.images", "images" to entries)
+                    else -> record["embed"] = mapOf(
+                        "\$type" to "app.bsky.embed.gallery",
+                        "items" to entries.map { e -> LinkedHashMap<String, Any>(e).also { it["\$type"] = "app.bsky.embed.gallery#image" } }
+                    )
+                }
+            }
+
+            // ── Text, tags, labels ──
+            record["\$type"] = "app.bsky.feed.post"
+            record["text"] = newText
+            // Unchanged text keeps its tags/links/mentions exactly as they were.
+            if (newText != oldText) {
+                val facets = buildHashtagFacets(newText) + buildLinkFacets(newText)
+                if (facets.isNotEmpty()) record["facets"] = facets else record.remove("facets")
+            }
+            if (selfLabels.isNotEmpty()) record["labels"] = selfLabelsField(selfLabels) else record.remove("labels")
+
+            // ── History ──
+            val now = com.mediaviewer.platform.nowIsoString()
+            val history = ArrayList<Map<String, Any>>()
+            runCatching { old.getAsJsonArray("stellarEditHistory") }.getOrNull()?.forEach { el ->
+                val o = runCatching { el.asJsonObject }.getOrNull() ?: return@forEach
+                history += mapOf(
+                    "text" to (runCatching { o.get("text")?.asString }.getOrNull().orEmpty()),
+                    "at" to (runCatching { o.get("at")?.asString }.getOrNull().orEmpty()),
+                    "images" to (runCatching { o.get("images")?.asInt }.getOrNull() ?: 0)
+                )
+            }
+            val previousAt = runCatching { old.get("stellarEditedAt")?.asString }.getOrNull()?.takeIf { it.isNotBlank() }
+                ?: runCatching { old.get("createdAt")?.asString }.getOrNull().orEmpty()
+            history += mapOf("text" to oldText, "at" to previousAt, "images" to oldImages.size)
+            // Keeps the record comfortably small however often it's edited.
+            record["stellarEditHistory"] = history.takeLast(30)
+            record["stellarEditedAt"] = now
+
+            val resp = api.putRecord("Bearer $token", BskyPutRecordRequest(did, "app.bsky.feed.post", rkey, record))
+            val body = resp.body() ?: error("Editing the post failed (${resp.code()}): ${resp.errorBody()?.string()?.take(160)}")
+            BskyRef(body.uri, body.cid)
+        }
+    }
+
     /** Posts a self-thread: each entry's images are uploaded and attached to
      *  that entry, and each post after the first replies to the previous one
      *  (root always the first post) — a standard Bluesky self-thread. Stops
@@ -3513,7 +3713,12 @@ class BlueskyRepository {
         runCatching { parseFeedItem(item) }.getOrDefault(emptyList()).let { list ->
             // Their posts still show; they're just flagged (see MediaItem.authorBlocksViewer).
             if (item.post.author.viewer?.blockedBy == true) list.map { it.copy(authorBlocksViewer = true) } else list
-        }.filterNot { com.mediaviewer.util.AdultContentPolicy.hides(it) }
+        }.filterNot { com.mediaviewer.util.AdultContentPolicy.hides(it) }.let { list ->
+            // Edited in Stellar: carry the edit time and earlier versions.
+            val rec = item.post.record
+            val edited = rec.stellarEditedAt?.takeIf { it.isNotBlank() }
+            list.map { it.copy(editedAt = edited ?: it.editedAt, editHistory = if (edited != null) rec.stellarEditHistory else it.editHistory, createdAt = rec.createdAt) }
+        }
 
     private fun parseFeedItem(item: BskyFeedItem): List<MediaItem> {
         val post   = item.post
@@ -3615,7 +3820,26 @@ class BlueskyRepository {
                     if (images.isEmpty()) textOnlyItem() else {
                         val first = images.first()
                         val firstAlt = first.alt
-                        if (images.size == 1 && firstAlt != null && firstAlt.startsWith(TEXTSHOT_ALT_PREFIX)) {
+                        if (images.size == 1 && firstAlt != null && firstAlt.startsWith(com.mediaviewer.ui.PollFormat.ALT_PREFIX) &&
+                            com.mediaviewer.ui.PollFormat.parse(text) != null
+                        ) {
+                            // A Stellar poll: on the wire it's the "Q. / A. /
+                            // B." text plus one small picture whose alt text
+                            // starts with "A poll asking". Shown as a text
+                            // post (Explore, profiles) with tappable answers
+                            // in the timeline.
+                            listOf(
+                                MediaItem(
+                                    id = post.cid, mediaUrl = "", thumbUrl = "", isVideo = false,
+                                    postUri = post.uri, postCid = post.cid, feedContext = item.feedContext,
+                                    author = author, likeUri = post.viewer?.like, repostUri = post.viewer?.repost,
+                                    isLiked = post.viewer?.like != null, isReposted = post.viewer?.repost != null,
+                                    likeCount = post.likeCount ?: 0, replyCount = post.replyCount ?: 0,
+                                    repostCount = post.repostCount ?: 0,
+                                    text = text, labels = nsfwLabels, isPoll = true
+                                )
+                            )
+                        } else if (images.size == 1 && firstAlt != null && firstAlt.startsWith(TEXTSHOT_ALT_PREFIX)) {
                             // Item 10: on the wire, a Textshot post is just a
                             // single image whose alt text is tagged with
                             // TEXTSHOT_ALT_PREFIX (see createTextshotPost).
@@ -3636,7 +3860,7 @@ class BlueskyRepository {
                                     repostCount = post.repostCount ?: 0,
                                     text = firstAlt.removePrefix(TEXTSHOT_ALT_PREFIX),
                                     captionText = text.takeIf { it.isNotBlank() },
-                                    labels = nsfwLabels
+                                    labels = nsfwLabels, isTextshot = true
                                 )
                             )
                         } else if (images.size == 1 && firstAlt != null && firstAlt.startsWith(TEXTSHOT_EMOJI_ALT_PREFIX)) {
@@ -3658,7 +3882,7 @@ class BlueskyRepository {
                                     aspectRatio = resolvedRatio(first) ?: 1f,
                                     textshotImageUrl = first.fullsize ?: "",
                                     captionText = text.takeIf { it.isNotBlank() },
-                                    labels = nsfwLabels
+                                    labels = nsfwLabels, isTextshot = true
                                 )
                             )
                         } else listOf(

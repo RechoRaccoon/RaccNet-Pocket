@@ -61,6 +61,7 @@ object SharedAppStartup {
         com.mediaviewer.util.FontStore.init(context)
         com.mediaviewer.util.ListRecency.init(context)
         com.mediaviewer.util.HubLayout.init(context)
+        com.mediaviewer.util.LocalData.init(context)
         com.mediaviewer.util.TitleCovers.init(context)
         com.mediaviewer.repository.WikipediaRepository.init(context)
         ProfileColorStore.init(context)

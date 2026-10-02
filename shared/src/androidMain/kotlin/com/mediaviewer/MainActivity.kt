@@ -193,6 +193,7 @@ class MainActivity : ComponentActivity() {
         com.mediaviewer.util.FontStore.init(applicationContext)
         com.mediaviewer.util.ListRecency.init(applicationContext)
         com.mediaviewer.util.HubLayout.init(applicationContext)
+        com.mediaviewer.util.LocalData.init(applicationContext)
         com.mediaviewer.util.TitleCovers.init(applicationContext)
         com.mediaviewer.repository.WikipediaRepository.init(applicationContext)
         com.mediaviewer.ui.ProfileColorStore.init(applicationContext)
@@ -274,12 +275,16 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         viewModel.setAppForeground(true)
+        com.mediaviewer.worker.StellarNotificationScheduler.appInForeground = true
+        // Keeps the background notification check in step with the toggles.
+        com.mediaviewer.platform.LocalPlatform.syncNotifications(this, requestPermission = false)
     }
 
     override fun onStop() {
         super.onStop()
         // DM/Inbox polling pauses while the app is off screen.
         viewModel.setAppForeground(false)
+        com.mediaviewer.worker.StellarNotificationScheduler.appInForeground = false
     }
 
     override fun onResume() {

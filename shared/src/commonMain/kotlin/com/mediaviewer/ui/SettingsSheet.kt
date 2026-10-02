@@ -39,6 +39,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.Calculate
+import androidx.compose.material.icons.filled.StickyNote2
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Chat
@@ -893,10 +897,20 @@ private fun AtProtocolPageContent(
             )
             HorizontalDivider(modifier = Modifier.weight(1f), color = dominantColor.copy(alpha = 0.6f))
         }
-        Spacer(Modifier.height(6.dp))
-
+        // The Launchpad swipes sideways: page two holds the supporter
+        // apps (Calendar, Notes, Calculator, Timer).
+        val launchPager = androidx.compose.foundation.pager.rememberPagerState { 2 }
+        androidx.compose.foundation.pager.HorizontalPager(
+            state = launchPager,
+            contentPadding = PaddingValues(horizontal = 16.dp),
+            pageSpacing = 16.dp,
+            // The badges poke out past the buttons' corners.
+            modifier = Modifier.fillMaxWidth().graphicsLayer { clip = false },
+            verticalAlignment = Alignment.Top
+        ) { page ->
+        if (page == 0) {
         Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -905,12 +919,59 @@ private fun AtProtocolPageContent(
                 // you haven't seen yet.
                 SettingsGridButton("Inbox", Icons.Default.Email, Color.White, liquidGlass, Modifier.weight(1f), onOpenInbox, panelTint = dominantColor, backdrop = backdrop, badge = inboxUnreadCount)
                 ProfileGridButton(selfProfile, bskyHandle, liquidGlass, Modifier.weight(1f), onOpenOwnProfile, panelTint = dominantColor, backdrop = backdrop)
-                SettingsGridButton("DMs", Icons.Default.Chat, Color.White, liquidGlass, Modifier.weight(1f), onOpenDmInbox, panelTint = dominantColor, backdrop = backdrop, badge = dmUnreadCount)
+                // (Drop a held feed on DMs to share it in a chat.)
+                SettingsGridButton(
+                    "DMs", Icons.Default.Chat, Color.White, liquidGlass,
+                    Modifier.weight(1f).onGloballyPositioned { feedDrag.dmBounds = it.boundsInRoot() }
+                        .graphicsLayer { val sc = if (feedDrag.overDm) 1.08f else 1f; scaleX = sc; scaleY = sc },
+                    onOpenDmInbox, panelTint = if (feedDrag.overDm) vividAccent(dominantColor) else dominantColor, backdrop = backdrop, badge = dmUnreadCount
+                )
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SettingsGridButton("Saved Posts", Icons.Default.Star, BookmarkYellow, liquidGlass, Modifier.weight(1f), onShowSaves, panelTint = dominantColor, backdrop = backdrop)
                 SettingsGridButton("History", Icons.Default.History, Color.White, liquidGlass, Modifier.weight(1f), onShowHistory, panelTint = dominantColor, backdrop = backdrop)
                 SettingsGridButton("From Friends", Icons.Default.Send, Color.White, liquidGlass, Modifier.weight(1f), onShowFriends, panelTint = dominantColor, backdrop = backdrop)
+            }
+        }
+        } else {
+        // Page two (supporters): everyone else sees the buttons in the
+        // supporter pink, and tapping one opens the Support page.
+        val supporter = com.mediaviewer.util.Supporter.active
+        fun open(app: LaunchApp): () -> Unit = {
+            if (supporter) LocalOverlays.launchApp = app else com.mediaviewer.util.Supporter.openPage()
+        }
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SettingsGridButton("Calendar", Icons.Default.CalendarMonth, Color.White, liquidGlass, Modifier.weight(1f), open(LaunchApp.CALENDAR), panelTint = dominantColor, backdrop = backdrop, locked = !supporter)
+                SettingsGridButton("Notes", Icons.Default.StickyNote2, Color.White, liquidGlass, Modifier.weight(1f), open(LaunchApp.NOTES), panelTint = dominantColor, backdrop = backdrop, locked = !supporter)
+                SettingsGridButton("Calculator", Icons.Default.Calculate, Color.White, liquidGlass, Modifier.weight(1f), open(LaunchApp.CALCULATOR), panelTint = dominantColor, backdrop = backdrop, locked = !supporter)
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SettingsGridButton("Timer", Icons.Default.Timer, Color.White, liquidGlass, Modifier.weight(1f), open(LaunchApp.TIMER), panelTint = dominantColor, backdrop = backdrop, locked = !supporter)
+                // The last two spots are empty for now.
+                Spacer(Modifier.weight(1f).height(36.dp))
+                Spacer(Modifier.weight(1f).height(36.dp))
+            }
+        }
+        }
+        }
+        // Two little dots for the Launchpad's page — drawn over the gap
+        // below it (a zero-height anchor), so they add no space of their own.
+        Box(Modifier.fillMaxWidth().height(0.dp).zIndex(1f), contentAlignment = Alignment.TopCenter) {
+            Row(
+                Modifier.wrapContentHeight(align = Alignment.Top, unbounded = true).padding(top = 3.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                repeat(2) { i ->
+                    val on = launchPager.currentPage == i
+                    Box(
+                        Modifier.size(if (on) 5.dp else 4.dp).clip(CircleShape)
+                            .background(if (on) Color.White.copy(alpha = 0.9f) else Color.White.copy(alpha = 0.32f))
+                    )
+                }
             }
         }
         }
@@ -2170,7 +2231,7 @@ private fun ReturnToFeedBar(
         // Audio visualizer resting on top of the Timeline/Explore pills, in
         // your own color: laid out at zero height and drawn upward, so it
         // never moves the bar or anything above it.
-        if (com.mediaviewer.util.UiToggles.audioVisualizer) {
+        if ((com.mediaviewer.util.UiToggles.audioVisualizer && !com.mediaviewer.util.LocalData.batterySaverActive)) {
             AudioVisualizerBars(
                 color = tint,
                 modifier = Modifier
@@ -2406,11 +2467,13 @@ private fun SettingsGridButton(
     panelTint: Color = NeutralGlassTint,
     backdrop: GlassBackdrop? = null,
     /** Unseen count: a small bubble on the button's top-right corner. */
-    badge: Int = 0
+    badge: Int = 0,
+    /** A supporter-only button shown to a non-supporter: shimmering pink. */
+    locked: Boolean = false
 ) {
     val shape = RoundedCornerShape(12.dp)
     Box(modifier) {
-        SettingsGridButtonBody(label, icon, iconTint, liquidGlass, Modifier.fillMaxWidth(), onClick, panelTint, backdrop, shape)
+        SettingsGridButtonBody(label, icon, iconTint, liquidGlass, Modifier.fillMaxWidth(), onClick, panelTint, backdrop, shape, locked)
         HubCountBadge(badge, panelTint, Modifier.align(Alignment.TopEnd).offset(x = 5.dp, y = (-6).dp))
     }
 }
@@ -2455,14 +2518,15 @@ private fun SettingsGridButtonBody(
     onClick: () -> Unit,
     panelTint: Color,
     backdrop: GlassBackdrop?,
-    shape: RoundedCornerShape
+    shape: RoundedCornerShape,
+    locked: Boolean = false
 ) {
     @Composable
     fun ButtonContent() {
         // Item 1: half the previous height, icon and label share one row
         // with the icon on the right instead of stacked icon-over-label.
         Row(
-            Modifier.fillMaxSize().clickable(onClick = onClick).padding(horizontal = 8.dp),
+            Modifier.fillMaxSize().clickable(onClick = onClick).padding(horizontal = 8.dp).supporterShine(locked),
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -2750,9 +2814,12 @@ class HubFeedDragState {
     var overRemove by mutableStateOf(false)
     var removeBounds: Rect? = null
     var rootOrigin: Offset = Offset.Zero
+    /** The Launchpad's DMs button: dropping a feed on it shares the feed. */
+    var dmBounds: Rect? = null
+    var overDm by mutableStateOf(false)
 
     fun reset() {
-        active = false; feed = null; fromIndex = -1; targetIndex = -1; overRemove = false
+        active = false; feed = null; fromIndex = -1; targetIndex = -1; overRemove = false; overDm = false
     }
 }
 
@@ -2804,6 +2871,13 @@ private fun HubFeedRow(
             view.hubHaptic(if (over) HapticFeedbackConstants.LONG_PRESS else HapticFeedbackConstants.CLOCK_TICK)
             drag.overRemove = over
         }
+        val overDm = !over && drag.dmBounds?.let { r ->
+            Rect(r.left - 10f, r.top - 14f, r.right + 10f, r.bottom + 14f).contains(drag.pointer)
+        } == true
+        if (overDm != drag.overDm) {
+            view.hubHaptic(if (overDm) HapticFeedbackConstants.LONG_PRESS else HapticFeedbackConstants.CLOCK_TICK)
+            drag.overDm = overDm
+        }
     }
 
     fun finish(commit: Boolean) {
@@ -2815,6 +2889,10 @@ private fun HubFeedRow(
                 order = latestOrder.filterNot { it.uri == f.uri }
                 view.hubHaptic(if (com.mediaviewer.ui.compat.Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.LONG_PRESS)
                 onRemoveFeed(f.uri)
+            } else if (drag.overDm) {
+                // Dropped on the DMs button: share this feed in a chat.
+                view.hubHaptic(HapticFeedbackConstants.LONG_PRESS)
+                LocalOverlays.shareFeed = f
             } else if (from >= 0 && to >= 0 && to != from) {
                 order = latestOrder.toMutableList().apply { add(to, removeAt(from)) }
                 view.hubHaptic(HapticFeedbackConstants.VIRTUAL_KEY)
@@ -2929,6 +3007,49 @@ private fun HubFeedRow(
                 }
             }
         }
+        // Feeds built on this device (Feed Builder): after the saved feeds.
+        // Tap to open; press and hold to edit or delete.
+        com.mediaviewer.util.LocalData.localFeeds.forEach { local ->
+            key(local.uri) {
+                Box(
+                    Modifier.pointerInput(local.uri) {
+                        detectTapGestures(
+                            onTap = { view.hubHaptic(HapticFeedbackConstants.VIRTUAL_KEY); onSelectFeed(local.uri) },
+                            onLongPress = { view.hubHaptic(HapticFeedbackConstants.LONG_PRESS); LocalOverlays.feedBuilder = local }
+                        )
+                    }
+                ) {
+                    FeedChip(
+                        local.name.ifBlank { "My Feed" }, null,
+                        highlightedFeedUri == local.uri && !authorChipSelected,
+                        liquidGlass = liquidGlass, dominantColor = dominantColor, onClick = null
+                    )
+                }
+            }
+        }
+        // The Feed Builder's "+" (supporters). Everyone else sees it in the
+        // supporter pink; tapping it opens the Support page.
+        val supporter = com.mediaviewer.util.Supporter.active
+        val plusShape = CircleShape
+        Box(
+            Modifier.size(30.dp)
+                .then(
+                    if (liquidGlass) Modifier.glassPanel(true, tint = dominantColor.copy(alpha = 0.5f), shape = plusShape)
+                    else Modifier.clip(plusShape).background(Color.White.copy(0.06f))
+                )
+                .clip(plusShape)
+                .clickable {
+                    view.hubHaptic(HapticFeedbackConstants.VIRTUAL_KEY)
+                    if (supporter) LocalOverlays.feedBuilder = com.mediaviewer.util.LocalFeed()
+                    else com.mediaviewer.util.Supporter.openPage()
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                Icons.Default.Add, contentDescription = "Feed Builder", tint = Color.White,
+                modifier = Modifier.size(17.dp).supporterShine(!supporter)
+            )
+        }
     }
 }
 
@@ -2941,7 +3062,7 @@ private fun HubFeedDragGhost(drag: HubFeedDragState, liquidGlass: Boolean, tint:
     val red = Color(0xFFFF453A)
     val lift = remember(feed.uri) { Animatable(1f) }
     LaunchedEffect(feed.uri) { lift.animateTo(1.14f, androidx.compose.animation.core.spring(dampingRatio = 0.5f, stiffness = 600f)) }
-    val overScale by animateFloatAsState(if (drag.overRemove) 0.78f else 1f, androidx.compose.animation.core.spring(dampingRatio = 0.6f, stiffness = 500f), label = "ghostOver")
+    val overScale by animateFloatAsState(if (drag.overRemove || drag.overDm) 0.78f else 1f, androidx.compose.animation.core.spring(dampingRatio = 0.6f, stiffness = 500f), label = "ghostOver")
     Box(
         Modifier
             .zIndex(30f)

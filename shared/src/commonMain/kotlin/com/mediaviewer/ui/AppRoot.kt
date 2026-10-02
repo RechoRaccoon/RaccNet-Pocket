@@ -91,7 +91,9 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
     val hateFunBlurNsfwPref by viewModel.hateFunBlurNsfw.collectAsState()
     // iOS has no "I Hate Fun" blur (adult content follows the Bluesky account there).
     val hateFunBlurNsfw = hateFunBlurNsfwPref && !com.mediaviewer.util.AdultContentPolicy.appliesHere
-    val liquidGlass        by viewModel.liquidGlass.collectAsState()
+    val liquidGlassPref    by viewModel.liquidGlass.collectAsState()
+    // Supporter Settings → Battery Saver: flat (un-blurred) buttons everywhere.
+    val liquidGlass = liquidGlassPref && !com.mediaviewer.util.LocalData.batterySaverActive
     val liquidGlassIntensity by viewModel.liquidGlassIntensity.collectAsState()
     val glassRimIntensity  by viewModel.glassRimIntensity.collectAsState()
     val glassRimVibrantSecondary by viewModel.glassRimVibrantSecondary.collectAsState()
@@ -285,7 +287,7 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
     LaunchedEffect(screenState) {
         if (screenState == ScreenState.FEED &&
             com.mediaviewer.platform.PlatformFeature.AUDIO_VISUALIZER.isAvailable &&
-            com.mediaviewer.util.UiToggles.audioVisualizer &&
+            (com.mediaviewer.util.UiToggles.audioVisualizer && !com.mediaviewer.util.LocalData.batterySaverActive) &&
             !com.mediaviewer.util.UiToggles.visualizerPermissionAsked &&
             !com.mediaviewer.util.AudioVisualizerEngine.hasPermission(context)
         ) {
@@ -543,6 +545,29 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
     // Item 26: makes the glass-intensity dial reach every LiquidGlassSurface/
     // glassPanel below without threading a Float through every composable's
     // parameter list.
+    // ── Supporter plumbing ──
+    // Who's signed in (for supporter-only buttons anywhere in the app), how
+    // to reach the Support page from anywhere, the non-supporter Hub row
+    // rule, and Battery Saver's frame-rate cap.
+    run {
+        val supporterContext = com.mediaviewer.ui.compat.LocalContext.current
+        androidx.compose.runtime.SideEffect {
+            com.mediaviewer.util.Supporter.selfDid = bskyDid
+            com.mediaviewer.util.Supporter.openPageHook = {
+                com.mediaviewer.ui.LocalOverlays.closeAll()
+                viewModel.closeEverythingForSupportPage()
+                com.mediaviewer.util.UiToggles.supportPageRequest++
+            }
+        }
+        val supporterActive = com.mediaviewer.util.Supporter.active
+        val supportersKnown = com.mediaviewer.util.StellarSupporters.dids.isNotEmpty()
+        LaunchedEffect(bskyDid, supporterActive, supportersKnown) {
+            if (bskyDid.isNotBlank() && supportersKnown) com.mediaviewer.util.HubLayout.enforceSupportersRow()
+        }
+        val saver = com.mediaviewer.util.LocalData.batterySaverActive
+        LaunchedEffect(saver) { com.mediaviewer.platform.LocalPlatform.setBatterySaver(supporterContext, saver) }
+    }
+
     CompositionLocalProvider(
         LocalGlassIntensity provides liquidGlassIntensity,
         LocalGlassRimIntensity provides glassRimIntensity,
@@ -898,6 +923,7 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
             }
         }
 
+        val trendingTopics by viewModel.trendingTopics.collectAsState()
         if (searchOpen) {
             SearchOverlay(
                 state              = searchState,
@@ -917,6 +943,8 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                 onOpenPost         = viewModel::openPostFromSearch,
                 onOpenAccount      = { author -> viewModel.closeSearch(); viewModel.openProfile(author) },
                 onLoadMorePosts    = viewModel::loadMoreSearchPosts,
+                trendingTopics     = trendingTopics,
+                onLoadTrending     = viewModel::loadTrendingTopics,
                 onAddFeed          = viewModel::addSavedFeedFromSearch,
                 savedFeedUris      = savedFeedUris,
                 listActions        = listActions,
@@ -1063,7 +1091,9 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
         // still before every dialog/popup below it) puts it back on top,
         // matching the "layered on top of everything else" comment this
         // block used to sit under.
-        if (dmInboxOpen) {
+        // (Hidden, not closed, while a feed opened from a DM is in front of it.)
+        val dmHiddenBehindFeed by viewModel.dmHiddenBehindFeed.collectAsState()
+        if (dmInboxOpen && !dmHiddenBehindFeed) {
             DmInboxOverlay(
                 conversations   = dmConversations,
                 loading         = dmConversationsLoading,
@@ -1231,6 +1261,17 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                 onDismiss   = viewModel::dismissReport
             )
         }
+
+        // Supporter features: their popups, the Launchpad apps and the
+        // floating web pages (see LocalOverlays).
+        com.mediaviewer.ui.LocalOverlayHost(
+            viewModel = viewModel,
+            liquidGlass = liquidGlass,
+            tint = selfProfileTint,
+            postTint = if (screenState == ScreenState.FEED) currentDominantColor else selfProfileTint,
+            savedFeedUris = savedFeedUris,
+            hubShowing = screenState == ScreenState.SETTINGS && profileOverlay?.hidden != false
+        )
 
         // Settings → Dev Tools → "Preview Login Page": the login page over
         // everything, without signing out. Back (or its back button) closes it.

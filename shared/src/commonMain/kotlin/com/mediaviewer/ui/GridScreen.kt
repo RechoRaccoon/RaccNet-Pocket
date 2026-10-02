@@ -360,6 +360,21 @@ fun GridScreen(
                             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                             modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp)
                         )
+                        // Saved Posts (supporters): a bubble per bookmark
+                        // folder, like the feed row — tap one to see just
+                        // that folder; "All" is every saved post.
+                        val folders = com.mediaviewer.util.LocalData.bookmarkFolders
+                        if (specialFeed.displayName == "Saved Posts" && com.mediaviewer.util.Supporter.active && folders.isNotEmpty()) {
+                            val openFolder = LocalOverlays.bookmarkFolderId
+                            HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
+                            ProfileStyleTabRow(
+                                labels = listOf("All") + folders.map { it.name },
+                                selectedIndex = folders.indexOfFirst { it.id == openFolder } + 1,
+                                liquidGlass = liquidGlass, tint = tint
+                            ) { i ->
+                                LocalOverlays.onShowBookmarkFolder?.invoke(if (i == 0) null else folders.getOrNull(i - 1)?.id)
+                            }
+                        }
                     } else if (appMode == AppMode.BLUESKY) {
                         val saved = authorFeedState
                         val labels = buildList {

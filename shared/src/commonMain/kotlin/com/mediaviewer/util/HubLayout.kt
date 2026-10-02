@@ -157,7 +157,20 @@ object HubLayout {
         update(list)
     }
 
-    fun setEnabled(id: String, enabled: Boolean) = update(rows.map { if (it.id == id) it.copy(enabled = enabled) else it })
+    fun setEnabled(id: String, enabled: Boolean) {
+        // Only supporters can switch the Stellar Supporters row off.
+        if (id == SUPPORTERS && !enabled && !Supporter.active) return
+        update(rows.map { if (it.id == id) it.copy(enabled = enabled) else it })
+    }
+
+    /** The Stellar Supporters row stays in the Hub (and on) for everyone who
+     *  isn't a supporter — hiding it is one of the supporter benefits. It can
+     *  still be dragged anywhere. */
+    fun enforceSupportersRow() {
+        if (Supporter.active) return
+        if (rows.none { it.id == SUPPORTERS }) addDefault(SUPPORTERS)
+        if (rows.any { it.id == SUPPORTERS && !it.enabled }) update(rows.map { if (it.id == SUPPORTERS) it.copy(enabled = true) else it })
+    }
 
     fun setShowPosts(id: String, showPosts: Boolean) = update(rows.map { if (it.id == id) it.copy(showPosts = showPosts) else it })
 
@@ -203,6 +216,7 @@ object HubLayout {
     /** Removes a row. A default row can be added back from Add → Default. */
     fun remove(id: String) {
         if (rows.none { it.id == id }) return
+        if (id == SUPPORTERS && !Supporter.active) return
         if (BUILT_IN_LABELS.containsKey(id)) {
             removedDefaults = removedDefaults + id
             saveRemoved()

@@ -77,6 +77,18 @@ class BlueskyApi(baseUrl: String = "https://bsky.social/", profile: HttpProfile 
         headers = listOf("Authorization" to token),
         query = listOf("q" to query, "limit" to limit, "cursor" to cursor)
     )
+    /** Bluesky's Trending (app.bsky.unspecced.getTrends, or the older
+     *  getTrendingTopics) — read as a JSON tree. */
+    suspend fun getUnspecced(
+        token: String,
+        method: String,
+        limit: Int = 10
+    ): Response<com.mediaviewer.json.JsonObject> = call(
+        "GET",
+        "xrpc/app.bsky.unspecced.$method",
+        headers = listOf("Authorization" to token),
+        query = listOf("limit" to limit)
+    )
     suspend fun searchActors(
         token: String,
         query: String,

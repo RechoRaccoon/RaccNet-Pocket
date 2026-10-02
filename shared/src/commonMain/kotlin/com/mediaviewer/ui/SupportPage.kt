@@ -91,72 +91,135 @@ private val supportMethods = listOf(
     )
 )
 
-/** Settings → "Support Stellar": the logo, a short note, and a big glassy
- *  card for each way to chip in (Cash App, PayPal, Ko-fi, top to bottom). */
+/** The supporter benefits, exactly as listed on the Support page. */
+internal val SUPPORTER_BENEFITS = listOf(
+    "Supporter Profile Badge and Animation!!",
+    "The Ability to Edit Posts!!",
+    "Save Posts as Drafts!!",
+    "Build your own local Feeds!!",
+    "Save posts into local Bookmark Folders!!",
+    "Pin DMs!!",
+    "Use the Launchpad's Calendar, Notes, Calculator, and Timer features!!",
+    "Create Polls!!",
+    "View Trending Topics in Search!!",
+    "Use the In-App Multitasking Browser while you explore Stellar!!",
+    "Receive App Notifications!! (Android Only.)",
+    "Add Notes to Profiles!!",
+    "Enable the Experimental Battery Saver Mode!!",
+    "Remove the \"Stellar Supporters\" row from the Hub!!"
+)
+
+/** Settings → "Support Stellar": the logo, what supporting unlocks, and a
+ *  compact row for each way to chip in — all on one page (scaled down to
+ *  fit a short screen rather than scrolling). */
 @Composable
 internal fun SupportPageContent(liquidGlass: Boolean, tint: Color) {
     val glow = rememberInfiniteTransition(label = "supportGlow")
     val breathe by glow.animateFloat(
         0f, 1f, infiniteRepeatable(tween(2600), RepeatMode.Reverse), label = "supportBreathe"
     )
+    val pink = Color(0xFFFF4FA1)
+    val uriHandler = LocalUriHandler.current
+    val tap = rememberHapticTap()
 
-    Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState())
-            .padding(horizontal = 22.dp, vertical = 22.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        // ── Logo with a soft breathing glow in the profile color ──
-        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-            Box(
-                Modifier.size(width = 260.dp, height = 90.dp)
-                    .graphicsLayer { alpha = 0.35f + 0.25f * breathe; scaleX = 1.1f; scaleY = 1.3f }
-                    .background(
-                        Brush.radialGradient(listOf(tint.copy(alpha = 0.55f), Color.Transparent)),
-                        RoundedCornerShape(50)
+    ScaleToFit(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 10.dp)) {
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+            // ── Logo with a soft breathing glow in the profile color ──
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Box(
+                    Modifier.size(width = 200.dp, height = 56.dp)
+                        .graphicsLayer { alpha = 0.35f + 0.25f * breathe; scaleX = 1.1f; scaleY = 1.3f }
+                        .background(
+                            Brush.radialGradient(listOf(tint.copy(alpha = 0.55f), Color.Transparent)),
+                            RoundedCornerShape(50)
+                        )
+                )
+                Image(
+                    painterResource(com.mediaviewer.resources.Res.drawable.stellar_logo_vector), contentDescription = "Stellar",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.widthIn(max = 190.dp).fillMaxWidth(0.5f)
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Help fund Stellar's development (and Recho's survival) by donating \$4.99 or more, and you'll unlock these exclusive benefits for a month!!",
+                color = Color.White.copy(alpha = 0.92f), fontSize = 13.sp, lineHeight = 18.sp,
+                textAlign = TextAlign.Center, modifier = Modifier.widthIn(max = 420.dp)
+            )
+
+            Spacer(Modifier.height(8.dp))
+            // ── Benefits, in their own softly pink panel ──
+            val panelShape = RoundedCornerShape(18.dp)
+            Column(
+                Modifier.widthIn(max = 460.dp).fillMaxWidth().clip(panelShape)
+                    .background(Brush.verticalGradient(listOf(pink.copy(alpha = 0.16f), lerp(Color(0xFF101014), tint, 0.14f).copy(alpha = 0.7f))))
+                    .border(1.dp, Brush.linearGradient(listOf(pink.copy(alpha = 0.85f), Color.White.copy(alpha = 0.16f), tint.copy(alpha = 0.5f))), panelShape)
+                    .padding(horizontal = 12.dp, vertical = 9.dp)
+            ) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.Favorite, contentDescription = null, tint = pink,
+                        modifier = Modifier.size(14.dp).graphicsLayer { scaleX = 0.92f + 0.12f * breathe; scaleY = 0.92f + 0.12f * breathe }
                     )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "Supporter Benefits:", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.supporterShine()
+                    )
+                }
+                Spacer(Modifier.height(5.dp))
+                SUPPORTER_BENEFITS.forEach { benefit ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp), verticalAlignment = Alignment.Top) {
+                        Text("•", color = pink, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.width(6.dp))
+                        Text(benefit, color = Color.White.copy(alpha = 0.92f), fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium)
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "You can donate through any of these platforms!! Just make sure to attach your Stellar/Bluesky handle to the note!!",
+                color = lerp(pink, Color.White, 0.4f), fontSize = 12.sp, lineHeight = 17.sp, fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center, modifier = Modifier.widthIn(max = 420.dp)
             )
-            Image(
-                painterResource(com.mediaviewer.resources.Res.drawable.stellar_logo_vector), contentDescription = "Stellar",
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.widthIn(max = 300.dp).fillMaxWidth(0.82f)
-            )
+
+            Spacer(Modifier.height(8.dp))
+            // ── The compact links (same rows as the Support popup) ──
+            Column(Modifier.widthIn(max = 460.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                supportMethods.forEach { method ->
+                    val shape = RoundedCornerShape(16.dp)
+                    val panel = lerp(Color(0xFF101014), lerp(tint, method.accent, 0.6f), if (liquidGlass) 0.16f else 0.12f)
+                    Row(
+                        Modifier.fillMaxWidth().clip(shape)
+                            .background(Brush.horizontalGradient(listOf(method.accent.copy(alpha = 0.30f), panel.copy(alpha = 0.85f), panel.copy(alpha = 0.85f))))
+                            .border(1.dp, Brush.linearGradient(listOf(method.accent.copy(alpha = 0.9f), Color.White.copy(alpha = 0.18f), tint.copy(alpha = 0.5f))), shape)
+                            .clickable { tap(); runCatching { uriHandler.openUri(method.url) } }
+                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(method.accent),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(method.fallback, contentDescription = null, tint = Color.White, modifier = Modifier.size(19.dp))
+                            AsyncImage(
+                                model = "https://www.google.com/s2/favicons?domain=${method.domain}&sz=128",
+                                contentDescription = method.name, contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp))
+                            )
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(method.name, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                            Text(method.handle, color = lerp(method.accent, Color.White, 0.45f), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                        }
+                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "Open ${method.name}", tint = Color.White.copy(alpha = 0.85f), modifier = Modifier.size(16.dp))
+                    }
+                }
+            }
         }
-
-        Spacer(Modifier.height(22.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                Icons.Default.Favorite, contentDescription = null, tint = Color(0xFFFF4FA1),
-                modifier = Modifier.size(18.dp).graphicsLayer { scaleX = 0.92f + 0.12f * breathe; scaleY = 0.92f + 0.12f * breathe }
-            )
-            Spacer(Modifier.width(8.dp))
-            Text("Support Stellar", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        }
-        Spacer(Modifier.height(10.dp))
-        Text(
-            "Help fund Stellar's development and Recho's survival with any of the methods below.",
-            color = Color.White.copy(alpha = 0.86f), fontSize = 15.sp, lineHeight = 22.sp,
-            textAlign = TextAlign.Center, modifier = Modifier.widthIn(max = 360.dp)
-        )
-
-        Spacer(Modifier.height(10.dp))
-        Text(
-            SUPPORTER_PERK_TEXT,
-            color = lerp(Color(0xFFFF4FA1), Color.White, 0.35f), fontSize = 13.sp, lineHeight = 19.sp,
-            fontWeight = FontWeight.SemiBold,
-            textAlign = TextAlign.Center, modifier = Modifier.widthIn(max = 360.dp)
-        )
-
-        Spacer(Modifier.height(20.dp))
-        Column(Modifier.widthIn(max = 460.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            supportMethods.forEach { SupportCard(it, liquidGlass, tint) }
-        }
-
-        Spacer(Modifier.height(22.dp))
-        Text(
-            "Thank you for using Stellar <3",
-            color = DimGray, fontSize = 13.sp, textAlign = TextAlign.Center
-        )
-        Spacer(Modifier.height(12.dp))
     }
 }
 
