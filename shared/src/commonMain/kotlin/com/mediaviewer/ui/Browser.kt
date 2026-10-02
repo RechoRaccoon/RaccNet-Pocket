@@ -38,6 +38,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -67,6 +68,9 @@ class BrowserState(initialUrl: String) {
     var canGoBack by mutableStateOf(false)
     var canGoForward by mutableStateOf(false)
     var loading by mutableStateOf(false)
+    /** A popped-out window smaller than a phone page: how much the whole
+     *  page is shrunk to fit it (1 = full size). */
+    var zoom by mutableStateOf(1f)
 
     /** The address to open when the web view is first created. */
     var pendingUrl: String = initialUrl
@@ -190,7 +194,30 @@ fun BrowserPopoutLayer(tint: Color, modifier: Modifier = Modifier) {
                         WindowButton(Icons.Default.Close, "Close") { LocalOverlays.closePopout(p) }
                     }
                     Box(Modifier.fillMaxWidth().weight(1f)) {
-                        PlatformBrowserView(p.state, Modifier.fillMaxSize())
+                        // The page is always laid out a full phone-page wide and
+                        // the WHOLE page is scaled to the window, so making the
+                        // window smaller shrinks the page instead of cutting it off.
+                        val pageW = with(density) { 400.dp.toPx() }
+                        val scale = (wPx / pageW).coerceIn(0.2f, 1f)
+                        if (com.mediaviewer.platform.currentPlatform == com.mediaviewer.platform.PlatformKind.ANDROID) {
+                            Box(
+                                Modifier.fillMaxSize().layout { measurable, constraints ->
+                                    val w = (constraints.maxWidth / scale).roundToInt()
+                                    val h = (constraints.maxHeight / scale).roundToInt()
+                                    val placeable = measurable.measure(androidx.compose.ui.unit.Constraints.fixed(w, h))
+                                    layout(constraints.maxWidth, constraints.maxHeight) {
+                                        placeable.placeWithLayer(0, 0) {
+                                            scaleX = scale; scaleY = scale
+                                            transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
+                                        }
+                                    }
+                                }
+                            ) { PlatformBrowserView(p.state, Modifier.fillMaxSize()) }
+                        } else {
+                            // iOS: the web view zooms its own page out.
+                            androidx.compose.runtime.SideEffect { p.state.zoom = scale }
+                            PlatformBrowserView(p.state, Modifier.fillMaxSize())
+                        }
                         // Resize grip.
                         Box(
                             Modifier.align(Alignment.BottomEnd).size(30.dp)

@@ -16,6 +16,8 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.google.gson.JsonPrimitive
+import com.google.gson.stream.JsonReader
 import com.mediaviewer.tagging.TagDatabase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -32,6 +34,12 @@ import java.io.File
  *  - the custom app font, embedded;
  *  - the main (on-device) AI-tagged post dataset. On import it REPLACES
  *    the main dataset — it isn't added as an extra imported one.
+ *
+ * Images and videos attached to drafts, notes and bookmark-folder covers
+ * (the files under local_media) travel in the same file too, as a trailing
+ * "localMedia" section. It is written and read as a stream, in small
+ * base64 chunks, so a large video never has to fit in memory. Backups made
+ * before this section existed simply don't have it and import as before.
  *
  * Left out on purpose: sign-in tokens/passwords (you sign in again, which
  * is safer than a file carrying live credentials), per-account caches,
@@ -105,20 +113,89 @@ actual object AppBackup {
         }
         root.add("taggedPosts", arr)
 
+        // Local media (drafts, notes, folder covers), streamed after the rest.
+        val mediaDir = mediaDir(context)
+        val mediaFiles = mediaDir.walkTopDown().filter { it.isFile }.toList()
+        var mediaCount = 0
         context.contentResolver.openOutputStream(uri, "wt")?.use { out ->
-            out.writer(Charsets.UTF_8).use { it.write(root.toString()) }
+            out.bufferedWriter(Charsets.UTF_8).use { w ->
+                val json = root.toString()
+                w.write(json, 0, json.length - 1) // everything but the closing brace
+                w.write(",\"localMedia\":{\"root\":" + JsonPrimitive(mediaRoot(context)).toString() + ",\"files\":[")
+                val buf = ByteArray(CHUNK)
+                for (f in mediaFiles) {
+                    val rel = f.relativeTo(mediaDir).path.replace(File.separatorChar, '/')
+                    runCatching { f.inputStream() }.getOrNull()?.use { input ->
+                        if (mediaCount > 0) w.write(",")
+                        w.write("{\"p\":" + JsonPrimitive(rel).toString() + ",\"d\":[")
+                        var first = true
+                        while (true) {
+                            var n = 0
+                            while (n < buf.size) {
+                                val r = input.read(buf, n, buf.size - n)
+                                if (r < 0) break
+                                n += r
+                            }
+                            if (n <= 0) break
+                            if (!first) w.write(",")
+                            first = false
+                            w.write("\"")
+                            w.write(Base64.encodeToString(buf, 0, n, Base64.NO_WRAP))
+                            w.write("\"")
+                            if (n < buf.size) break
+                        }
+                        w.write("]}")
+                        mediaCount++
+                    }
+                }
+                w.write("]}}")
+            }
         } ?: error("Couldn't open the chosen file for writing")
-        "Exported ${ds.size()} settings and ${posts.size} tagged posts"
+        "Exported ${ds.size()} settings, ${posts.size} tagged posts and $mediaCount media files"
     }
 
     /** Reads a backup from [uri] and applies it. Throws on a bad file. The
      *  app should be restarted afterwards so every screen reloads. */
     actual suspend fun import(context: Context, uri: Uri): String = withContext(Dispatchers.IO) {
-        val text = context.contentResolver.openInputStream(uri)?.use { it.reader(Charsets.UTF_8).readText() }
-            ?: error("Couldn't open the chosen file")
-        val root = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull()
-            ?: error("That isn't a Stellar backup file")
+        // Read as a stream: everything is parsed into [root] as before, except
+        // the optional "localMedia" section, whose files go straight to disk.
+        var oldMediaRoot: String? = null
+        var mediaCount = 0
+        val input = context.contentResolver.openInputStream(uri) ?: error("Couldn't open the chosen file")
+        val root = runCatching {
+            input.use { stream ->
+                val reader = JsonReader(stream.bufferedReader(Charsets.UTF_8))
+                val obj = JsonObject()
+                reader.beginObject()
+                while (reader.hasNext()) {
+                    val name = reader.nextName()
+                    if (name == "localMedia") {
+                        reader.beginObject()
+                        while (reader.hasNext()) {
+                            when (reader.nextName()) {
+                                "root" -> oldMediaRoot = reader.nextString()
+                                "files" -> mediaCount += readMediaFiles(context, reader)
+                                else -> reader.skipValue()
+                            }
+                        }
+                        reader.endObject()
+                    } else {
+                        obj.add(name, JsonParser.parseReader(reader))
+                    }
+                }
+                reader.endObject()
+                obj
+            }
+        }.getOrNull() ?: error("That isn't a Stellar backup file")
         if (root.get("format")?.asString != FORMAT) error("That isn't a Stellar backup file")
+        // Drafts, notes and covers point at their files by full path; aim
+        // those at this install's copy of the files.
+        val newMediaRoot = mediaRoot(context)
+        fun remap(name: String, s: String): String {
+            val old = oldMediaRoot
+            if (name != "supporter_local" || old.isNullOrEmpty() || old == newMediaRoot) return s
+            return s.replace(old, newMediaRoot).replace(old.replace("/", "\\/"), newMediaRoot.replace("/", "\\/"))
+        }
 
         // Font first, so its new path can be written with the settings.
         var fontPath: String? = null
@@ -157,7 +234,7 @@ actual object AppBackup {
                         "int" -> editor.putInt(k, value.asInt)
                         "long" -> editor.putLong(k, value.asLong)
                         "float", "double" -> editor.putFloat(k, value.asFloat)
-                        "string" -> editor.putString(k, value.asString)
+                        "string" -> editor.putString(k, remap(name, value.asString))
                         "set" -> editor.putStringSet(k, value.asJsonArray.map { it.asString }.toSet())
                     }
                     settingsCount++
@@ -184,7 +261,51 @@ actual object AppBackup {
                 postCount = posts.size
             }
         }
-        "Imported $settingsCount settings and $postCount tagged posts"
+        "Imported $settingsCount settings, $postCount tagged posts and $mediaCount media files"
+    }
+
+    private const val CHUNK = 180_000 // bytes per base64 chunk (a multiple of 3)
+
+    private fun mediaDir(context: Context) = File(context.filesDir, "local_media")
+
+    /** The prefix every stored draft/note/cover file URI on this device starts with. */
+    private fun mediaRoot(context: Context) = Uri.fromFile(mediaDir(context)).toString()
+
+    /** Reads the "files" array of the localMedia section, writing each file
+     *  into local_media. Returns how many were restored. */
+    private fun readMediaFiles(context: Context, reader: JsonReader): Int {
+        val dir = mediaDir(context)
+        var count = 0
+        reader.beginArray()
+        while (reader.hasNext()) {
+            var target: File? = null
+            reader.beginObject()
+            while (reader.hasNext()) {
+                when (reader.nextName()) {
+                    "p" -> {
+                        val rel = reader.nextString()
+                        val parts = rel.split('/')
+                        target = if (rel.isBlank() || parts.any { it.isEmpty() || it == "." || it == ".." }) null else File(dir, rel)
+                    }
+                    "d" -> {
+                        val f = target
+                        if (f == null) { reader.skipValue() } else {
+                            f.parentFile?.mkdirs()
+                            f.outputStream().use { out ->
+                                reader.beginArray()
+                                while (reader.hasNext()) out.write(Base64.decode(reader.nextString(), Base64.DEFAULT))
+                                reader.endArray()
+                            }
+                            count++
+                        }
+                    }
+                    else -> reader.skipValue()
+                }
+            }
+            reader.endObject()
+        }
+        reader.endArray()
+        return count
     }
 
     private fun typed(value: Any): JsonObject? {

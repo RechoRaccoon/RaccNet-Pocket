@@ -57,9 +57,12 @@ object LocalOverlays {
     /** A DM chat held down: the pin / unpin confirmation. */
     var pinDmFor by mutableStateOf<com.mediaviewer.model.DmConversation?>(null)
 
+    /** More → Edit: the "Important" notice shown before the composer opens. */
+    var editWarningOpen by mutableStateOf(false)
+
     /** One of the popups is up: the app behind it blurs. */
     val popupOpen: Boolean
-        get() = editHistoryFor != null || bookmarkFolderFor != null || profileNoteFor != null || feedBuilder != null || pinDmFor != null
+        get() = editWarningOpen || editHistoryFor != null || bookmarkFolderFor != null || profileNoteFor != null || feedBuilder != null || pinDmFor != null
 
     /** Floating web pages, drawn over everything. */
     val popouts = mutableStateListOf<BrowserPopout>()
@@ -91,6 +94,7 @@ object LocalOverlays {
         bookmarkFolderFor = null
         profileNoteFor = null
         feedBuilder = null
+        editWarningOpen = false
         pinDmFor = null
         launchApp = null
         shareFeed = null

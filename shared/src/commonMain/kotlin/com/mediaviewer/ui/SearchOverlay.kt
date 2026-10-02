@@ -118,6 +118,8 @@ fun SearchOverlay(
     /** Bluesky's Trending list (supporters: shown on the Posts tab before a search). */
     trendingTopics: List<com.mediaviewer.repository.BlueskyRepository.TrendingTopic> = emptyList(),
     onLoadTrending: () -> Unit = {},
+    /** A trending topic tapped: opens Bluesky's own feed for it. */
+    onOpenTrending: (com.mediaviewer.repository.BlueskyRepository.TrendingTopic) -> Unit = {},
     onClose: () -> Unit
 ) {
     // The bar "splits": the page opens looking exactly like the Hub's search
@@ -410,7 +412,7 @@ fun SearchOverlay(
                     // Posts tab before searching (supporters): Bluesky's own
                     // Trending list; tap one to search it.
                     isPosts && state.query.isBlank() && supporter && trendingTopics.isNotEmpty() -> {
-                        TrendingSearchesList(trendingTopics, liquidGlass, profileTint, searchBackdrop) { topic -> onQueryChange(topic.query) }
+                        TrendingSearchesList(trendingTopics, liquidGlass, profileTint, searchBackdrop) { topic -> onOpenTrending(topic) }
                     }
                     // Bug fix: this used to sit below the generic
                     // `!state.hasSearched` fallback branch, which intercepts

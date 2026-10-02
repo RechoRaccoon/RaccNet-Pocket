@@ -207,12 +207,11 @@ object LocalData {
     var searchEngine by mutableStateOf(SearchEngine.DUCKDUCKGO)
         private set
 
-    /** Supporter Settings → Battery Saver. */
+    /** Settings → Dev Tools → Battery Saver. */
     var batterySaver by mutableStateOf(false)
         private set
 
-    /** Battery Saver only counts while the account is a supporter. */
-    val batterySaverActive: Boolean get() = batterySaver && Supporter.active
+    val batterySaverActive: Boolean get() = batterySaver
 
     enum class SearchEngine(val label: String, val home: String, private val query: String) {
         DUCKDUCKGO("DuckDuckGo", "https://duckduckgo.com/", "https://duckduckgo.com/?q="),

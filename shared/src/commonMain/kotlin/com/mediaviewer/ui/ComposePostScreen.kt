@@ -1461,6 +1461,19 @@ fun ComposePostScreen(
                                     }
                                 }
                             )
+                            // Bluesky content-warning self-labels. Lit whenever
+                            // any label is currently applied. Focus is dropped
+                            // first so the keyboard is out of the way of the
+                            // centered popup.
+                            TextToggleButton(
+                                label = "Labels",
+                                liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
+                                selected = adultLabel != null || graphicMedia,
+                                onClick = {
+                                    focusManager.clearFocus()
+                                    labelsOpen = true
+                                }
+                            )
                             // Poll (supporters): a question and lettered
                             // answers, posted as plain text any app can read.
                             TextToggleButton(
@@ -1475,19 +1488,6 @@ fun ComposePostScreen(
                                         pollOn = !pollOn
                                         if (pollOn && singleText.text.contains('\n')) singleText = TextFieldValue(singleText.text.replace("\n", " "))
                                     }
-                                }
-                            )
-                            // Bluesky content-warning self-labels. Lit whenever
-                            // any label is currently applied. Focus is dropped
-                            // first so the keyboard is out of the way of the
-                            // centered popup.
-                            TextToggleButton(
-                                label = "Labels",
-                                liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
-                                selected = adultLabel != null || graphicMedia,
-                                onClick = {
-                                    focusManager.clearFocus()
-                                    labelsOpen = true
                                 }
                             )
                             // Item 3: Auto Format is thread-mode exclusive —

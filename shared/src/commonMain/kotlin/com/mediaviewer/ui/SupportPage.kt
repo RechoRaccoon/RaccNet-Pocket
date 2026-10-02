@@ -94,18 +94,17 @@ private val supportMethods = listOf(
 /** The supporter benefits, exactly as listed on the Support page. */
 internal val SUPPORTER_BENEFITS = listOf(
     "Supporter Profile Badge and Animation!!",
-    "The Ability to Edit Posts!!",
+    "The Ability to Edit Posts!! (with limitations)",
     "Save Posts as Drafts!!",
-    "Build your own local Feeds!!",
+    "Build your own local Feeds!! (experimental)",
     "Save posts into local Bookmark Folders!!",
     "Pin DMs!!",
-    "Use the Launchpad's Calendar, Notes, Calculator, and Timer features!!",
-    "Create Polls!!",
+    "Use the Launchpad's Calendar, Notes, Calculator, and Timer features!! (experimental)",
+    "Create Polls on Stellar!!",
     "View Trending Topics in Search!!",
     "Use the In-App Multitasking Browser while you explore Stellar!!",
-    "Receive App Notifications!! (Android Only.)",
+    "Receive App Notifications!! (android only) (checks every 15 minutes)",
     "Add Notes to Profiles!!",
-    "Enable the Experimental Battery Saver Mode!!",
     "Remove the \"Stellar Supporters\" row from the Hub!!"
 )
 

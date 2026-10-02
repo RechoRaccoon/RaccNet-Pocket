@@ -233,17 +233,6 @@ private fun SupporterSettingsSection(liquidGlass: Boolean, tint: Color, backdrop
             }
         }
     }
-    // Battery Saver (experimental): flat buttons instead of live blur, no
-    // starfield or visualizer, a 60 Hz cap and slower background checks.
-    SettingsBubble(liquidGlass, tint, backdrop) {
-        BubbleRow {
-            RowLabel(
-                "Battery Saver", Modifier.weight(1f),
-                sub = "Experimental. Solid buttons instead of blur, a lower frame rate, no starfield or visualizer, and less background activity."
-            )
-            SupporterSwitch(local.batterySaver) { local.updateBatterySaver(it) }
-        }
-    }
 }
 
 /** One settings bubble. Rows placed inside are plain — they never draw their
@@ -529,10 +518,12 @@ internal fun SettingsPageContent(
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         // ── Supporter Settings ──────────────────────────────────────────
-        SupporterSettingsSection(liquidGlass, tint, backdrop)
+        // (Only shown to supporters.)
+        val showSupporterSettings = com.mediaviewer.util.Supporter.active
+        if (showSupporterSettings) SupporterSettingsSection(liquidGlass, tint, backdrop)
 
         // ── UI Customization ────────────────────────────────────────────
-        SectionHeader("UI Customization", tint)
+        SectionHeader("UI Customization", tint, first = !showSupporterSettings)
 
         ToggleBubble("Reduced Animations", reducedAnimations, onToggleReducedAnimations, liquidGlass, tint, backdrop)
         ToggleBubble("Rounded Grid Tiles", squareGridRounded, onToggleSquareGridRounded, liquidGlass, tint, backdrop)
@@ -1228,6 +1219,18 @@ internal fun SettingsPageContent(
         // ── Dev Tools (hidden: hold the "Settings" tab for 10 seconds) ─
         if (com.mediaviewer.util.UiToggles.devToolsUnlocked) {
             SectionHeader("Dev Tools", tint)
+            // Battery Saver (experimental): flat buttons instead of live
+            // blur, no starfield or visualizer, a 60 Hz cap and slower
+            // background checks.
+            SettingsBubble(liquidGlass, tint, backdrop) {
+                BubbleRow {
+                    RowLabel(
+                        "Battery Saver", Modifier.weight(1f),
+                        sub = "Experimental. Solid buttons instead of blur, a lower frame rate, no starfield or visualizer, and less background activity."
+                    )
+                    CompactSwitch(com.mediaviewer.util.LocalData.batterySaver) { com.mediaviewer.util.LocalData.updateBatterySaver(it) }
+                }
+            }
             // Frame rate beside the camera cutout — see DebugOverlay.
             ToggleBubble(
                 "FPS Overlay", com.mediaviewer.util.UiToggles.debugOverlay,

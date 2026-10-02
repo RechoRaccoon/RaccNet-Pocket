@@ -960,6 +960,7 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                 onLoadMorePosts    = viewModel::loadMoreSearchPosts,
                 trendingTopics     = trendingTopics,
                 onLoadTrending     = viewModel::loadTrendingTopics,
+                onOpenTrending     = viewModel::openTrendingTopic,
                 onAddFeed          = viewModel::addSavedFeedFromSearch,
                 savedFeedUris      = savedFeedUris,
                 listActions        = listActions,

@@ -43,6 +43,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -1497,7 +1498,13 @@ private fun SharedFeedCard(link: SharedFeedLink, liquidGlass: Boolean, tint: Col
         return
     }
     val saved = e.uri in LocalOverlays.savedFeedUris
-    Box(Modifier.widthIn(min = 240.dp)) {
+    // Edge to edge inside the bubble: the row's own side padding (and the
+    // bubble's) is taken back, so the card spans the bubble's full width.
+    Box(Modifier.fillMaxWidth().layout { measurable, constraints ->
+        val extra = 44.dp.roundToPx()
+        val placeable = measurable.measure(constraints.copy(minWidth = 0, maxWidth = constraints.maxWidth + extra))
+        layout((placeable.width - extra).coerceAtLeast(0), placeable.height) { placeable.place(-extra / 2, 0) }
+    }) {
         ProfileListRow(
             entry = e, liquidGlass = liquidGlass, tint = tint,
             label = if (saved) "Added" else "Add", busy = false, done = saved,

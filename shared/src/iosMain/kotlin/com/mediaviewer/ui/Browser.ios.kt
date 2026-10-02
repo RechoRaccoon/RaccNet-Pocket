@@ -43,7 +43,7 @@ actual fun PlatformBrowserView(state: BrowserState, modifier: Modifier) {
             web
         },
         modifier = modifier,
-        update = { }
+        update = { web -> web.pageZoom = state.zoom.toDouble() }
     )
     // The page's address, title and history buttons, read a few times a
     // second while it's on screen.

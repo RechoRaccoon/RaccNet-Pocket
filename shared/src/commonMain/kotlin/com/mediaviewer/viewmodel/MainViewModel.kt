@@ -8228,8 +8228,31 @@ _bskyDid.value          = session.did
     private val _dmHiddenBehindFeed = MutableStateFlow(false)
     val dmHiddenBehindFeed: StateFlow<Boolean> = _dmHiddenBehindFeed
 
+    /** A trending topic tapped: Bluesky's Trending entries are feeds it
+     *  curates for each topic (the title is only a summary, so searching it
+     *  finds little) — this opens that feed. Topics without one fall back
+     *  to a post search. */
+    fun openTrendingTopic(topic: BlueskyRepository.TrendingTopic) {
+        val m = Regex("""profile/([^/\s?#]+)/feed/([^/\s?#]+)""").find(topic.link)
+        if (m == null) { runSearch(topic.query); return }
+        tapHaptic()
+        viewModelScope.launch(Dispatchers.IO) {
+            val actor = m.groupValues[1]
+            val did = if (actor.startsWith("did:")) actor else bskyRepo.getProfileBasics(bskyToken, actor).getOrNull()?.did
+            withContext(Dispatchers.Main) {
+                if (did == null) runSearch(topic.query)
+                else {
+                    closeSearch()
+                    openFeedFromDm(ProfileListEntry(ProfileListKind.FEED, "at://$did/app.bsky.feed.generator/${m.groupValues[2]}", topic.title), fromDm = false)
+                }
+            }
+        }
+    }
+
     /** Opens a feed (or list) shared in a DM, in front of the DMs. */
-    fun openFeedFromDm(entry: ProfileListEntry) {
+    fun openFeedFromDm(entry: ProfileListEntry) = openFeedFromDm(entry, fromDm = true)
+
+    private fun openFeedFromDm(entry: ProfileListEntry, fromDm: Boolean) {
         if (!_bskyLoggedIn.value || entry.uri.isBlank()) return
         tapHaptic()
         if (profileFeedReturn == null || !isProfileFeedActive()) {
@@ -8253,7 +8276,7 @@ _bskyDid.value          = session.did
         _currentIndex.value = 0
         _navDirection.value = 0
         _isLoading.value = true
-        _dmHiddenBehindFeed.value = true
+        _dmHiddenBehindFeed.value = fromDm
         _screenState.value = ScreenState.GRID
         loadExternalFeed(reset = true)
     }

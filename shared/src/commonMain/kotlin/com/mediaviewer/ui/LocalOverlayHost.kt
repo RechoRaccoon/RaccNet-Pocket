@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -118,6 +119,26 @@ fun LocalOverlayHost(
             onDeleted = { gone -> if (selectedFeed == gone.uri) viewModel.selectFeed(null) },
             onClose = { LocalOverlays.feedBuilder = null }
         )
+    }
+
+    // More → Edit: what editing does to a post, before the composer opens.
+    FadingPopupHost(if (LocalOverlays.editWarningOpen) true else null, Modifier.zIndex(10.6f)) { _ ->
+        LocalPopup(
+            title = "Important", liquidGlass = liquidGlass, tint = postTint, backdrop = backdrop,
+            onClose = { LocalOverlays.editWarningOpen = false }
+        ) {
+            Text(
+                "Editing a post will retain it's place in your feed, it's comments, and it's reposts, but it's visible stats like the Likes, Reposts, and Comments counters will be reset.",
+                color = Color.White.copy(alpha = 0.92f), fontSize = 14.sp, lineHeight = 20.sp,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 6.dp).padding(bottom = 14.dp)
+            )
+            LocalPillButton(
+                "Edit Post", liquidGlass, postTint,
+                { LocalOverlays.editWarningOpen = false; viewModel.editCurrentPost() },
+                Modifier.fillMaxWidth()
+            )
+        }
     }
 
     // Press and hold a chat in the DM list (supporters): pin / unpin.

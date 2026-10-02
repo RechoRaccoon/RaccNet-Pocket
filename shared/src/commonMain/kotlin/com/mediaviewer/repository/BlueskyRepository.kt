@@ -1812,7 +1812,9 @@ class BlueskyRepository {
     }
 
     /** One of Bluesky's trending topics. */
-    data class TrendingTopic(val title: String, val detail: String, val query: String)
+    data class TrendingTopic(val title: String, val detail: String, val query: String,
+        /** Bluesky's own feed for the topic ("/profile/trending.bsky.app/feed/…"), when it gives one. */
+        val link: String = "")
 
     /** Bluesky's own Trending list (what the official app's Search page
      *  shows), from the AppView. */
@@ -1833,7 +1835,7 @@ class BlueskyRepository {
                     count > 0 -> "$count posts"
                     else -> ""
                 }
-                TrendingTopic(name, listOf(posts, category).filter { it.isNotBlank() }.joinToString(" · "), name)
+                TrendingTopic(name, listOf(posts, category).filter { it.isNotBlank() }.joinToString(" · "), name, str(o, "link"))
             }
         }.getOrNull().orEmpty()
         if (trends.isNotEmpty()) return@runCatching trends
@@ -1842,7 +1844,7 @@ class BlueskyRepository {
         body.getAsJsonArray("topics")?.mapNotNull { el ->
             val o = runCatching { el.asJsonObject }.getOrNull() ?: return@mapNotNull null
             val name = str(o, "displayName").ifBlank { str(o, "topic") }
-            if (name.isBlank()) null else TrendingTopic(name, str(o, "description"), name)
+            if (name.isBlank()) null else TrendingTopic(name, str(o, "description"), name, str(o, "link"))
         } ?: emptyList()
     }
 

@@ -3269,7 +3269,7 @@ private fun MoreBubbleMenu(
                 iconContent = { m, c ->
                     Icon(Icons.Default.Edit, contentDescription = "Edit", tint = c, modifier = m.supporterShine(!supporter))
                 }
-            ) { if (supporter) LocalOverlays.onEditCurrentPost?.invoke() else com.mediaviewer.util.Supporter.openPage() })
+            ) { if (supporter) LocalOverlays.editWarningOpen = true else com.mediaviewer.util.Supporter.openPage() })
             add(BubbleAction(
                 if (confirmDelete) "Tap again to delete" else "Delete",
                 icon = if (confirmDelete) Icons.Default.DeleteForever else Icons.Default.Delete,
