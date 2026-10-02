@@ -118,6 +118,23 @@ fun LocalOverlayHost(
         )
     }
 
+    // Press and hold a chat in the DM list (supporters): pin / unpin.
+    LocalOverlays.pinDmFor?.let { convo ->
+        val isPinned = LocalData.isDmPinned(convo.convoId)
+        ConfirmPopup(
+            title = if (isPinned) "Unpin this chat?" else "Pin this chat?",
+            message = if (isPinned) "\"${convo.member.displayName}\" goes back to the regular list."
+                else "\"${convo.member.displayName}\" stays at the top of your DMs, under Pinned.",
+            confirmLabel = if (isPinned) "Unpin" else "Pin",
+            liquidGlass = liquidGlass, tint = tint, backdrop = null,
+            onConfirm = { LocalData.setDmPinned(convo.convoId, !isPinned); LocalOverlays.pinDmFor = null },
+            onDismiss = { LocalOverlays.pinDmFor = null },
+            preview = convo.member.avatarUrl,
+            destructive = false,
+            modifier = Modifier.zIndex(10.6f)
+        )
+    }
+
     // ── "Time's up" (when the Timer page itself isn't open) ──
     if (TimerEngine.ringing && LocalOverlays.launchApp != LaunchApp.TIMER) {
         val tap = rememberHapticTap()

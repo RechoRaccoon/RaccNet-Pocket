@@ -54,6 +54,13 @@ object LocalOverlays {
     /** A feed dragged onto the Hub's DMs button, waiting to be shared. */
     var shareFeed by mutableStateOf<BskyFeedInfo?>(null)
 
+    /** A DM chat held down: the pin / unpin confirmation. */
+    var pinDmFor by mutableStateOf<com.mediaviewer.model.DmConversation?>(null)
+
+    /** One of the popups is up: the app behind it blurs. */
+    val popupOpen: Boolean
+        get() = editHistoryFor != null || bookmarkFolderFor != null || profileNoteFor != null || feedBuilder != null || pinDmFor != null
+
     /** Floating web pages, drawn over everything. */
     val popouts = mutableStateListOf<BrowserPopout>()
     private var nextPopoutId = 1L
@@ -84,6 +91,7 @@ object LocalOverlays {
         bookmarkFolderFor = null
         profileNoteFor = null
         feedBuilder = null
+        pinDmFor = null
         launchApp = null
         shareFeed = null
     }

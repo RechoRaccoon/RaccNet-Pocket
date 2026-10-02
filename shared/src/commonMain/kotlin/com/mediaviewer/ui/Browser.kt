@@ -103,7 +103,13 @@ class BrowserState(initialUrl: String) {
 object BrowserHome {
     private var instance: BrowserState? = null
     val state: BrowserState
-        get() = instance ?: BrowserState(LocalData.browserLastUrl.ifBlank { LocalData.searchEngine.home }).also { instance = it }
+        get() = instance ?: BrowserState(LocalData.searchEngine.home).also { instance = it }
+
+    /** Leaving Search: the page is stopped and its web view destroyed. */
+    fun close() {
+        instance?.dispose()
+        instance = null
+    }
 }
 
 /** The live web page for [state]. */

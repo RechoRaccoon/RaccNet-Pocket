@@ -1692,7 +1692,7 @@ fun ComposePostScreen(
         }
         if (draftsOpen) {
             DraftsPopup(
-                liquidGlass = liquidGlass, tint = dominantColor,
+                liquidGlass = liquidGlass, tint = dominantColor, backdrop = backdrop,
                 onPick = { loadDraft(it) },
                 onDismiss = { draftsOpen = false }
             )
@@ -2615,7 +2615,7 @@ private fun probeVideoAspect(context: com.mediaviewer.platform.PlatformContext, 
  *  or its X (twice) to delete it. Drafts live only on this device. */
 @Composable
 private fun DraftsPopup(
-    liquidGlass: Boolean, tint: Color,
+    liquidGlass: Boolean, tint: Color, backdrop: GlassBackdrop?,
     onPick: (com.mediaviewer.util.PostDraftEntry) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -2624,7 +2624,7 @@ private fun DraftsPopup(
     val tap = rememberHapticTap()
     var armed by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(armed) { if (armed != null) { kotlinx.coroutines.delay(3000); armed = null } }
-    LocalPopup(title = "Drafts", liquidGlass = liquidGlass, tint = tint, onClose = onDismiss, modifier = Modifier.zIndex(6f)) {
+    LocalPopup(title = "Drafts", liquidGlass = liquidGlass, tint = tint, onClose = onDismiss, modifier = Modifier.zIndex(6f), backdrop = backdrop) {
         if (drafts.isEmpty()) {
             Text(
                 "No drafts yet. Start a post and tap Drafts to save it for later.",

@@ -303,25 +303,8 @@ private fun DmConversationPicker(
     // Only accounts we actually have history with — a mutual with no convo yet
     // has nothing to show in a linear-history view.
     val withHistory = remember(conversations) { conversations.filter { it.convoId.isNotBlank() } }
-    // The chat being pinned/unpinned (press and hold), awaiting its confirmation.
-    var pinTarget by remember { mutableStateOf<DmConversation?>(null) }
 
     Box(Modifier.fillMaxSize()) {
-        pinTarget?.let { convo ->
-            val isPinned = com.mediaviewer.util.LocalData.isDmPinned(convo.convoId)
-            ConfirmPopup(
-                title = if (isPinned) "Unpin this chat?" else "Pin this chat?",
-                message = if (isPinned) "\"${convo.member.displayName}\" goes back to the regular list."
-                    else "\"${convo.member.displayName}\" stays at the top of your DMs, under Pinned.",
-                confirmLabel = if (isPinned) "Unpin" else "Pin",
-                liquidGlass = liquidGlass, tint = tint, backdrop = null,
-                onConfirm = { com.mediaviewer.util.LocalData.setDmPinned(convo.convoId, !isPinned); pinTarget = null },
-                onDismiss = { pinTarget = null },
-                preview = convo.member.avatarUrl,
-                destructive = false,
-                modifier = Modifier.zIndex(5f)
-            )
-        }
         when {
             loading && withHistory.isEmpty() -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -346,14 +329,14 @@ private fun DmConversationPicker(
                     if (pinned.isNotEmpty()) {
                         item(key = "pinned_header") { DmSectionTitle("Pinned") }
                         items(pinned, key = { it.convoId }) { convo ->
-                            DmConvoRow(convo, liquidGlass, tint, onClick = { tap(); onSelectConvo(convo) }, onLongClick = { pinTarget = convo })
+                            DmConvoRow(convo, liquidGlass, tint, onClick = { tap(); onSelectConvo(convo) }, onLongClick = { LocalOverlays.pinDmFor = convo })
                         }
                         item(key = "unpinned_header") { DmSectionTitle("Unpinned") }
                     }
                     items(unpinned, key = { it.convoId }) { convo ->
                         DmConvoRow(convo, liquidGlass, tint, onClick = { tap(); onSelectConvo(convo) }, onLongClick = {
                             // Pinning is a supporter benefit.
-                            if (com.mediaviewer.util.Supporter.active) pinTarget = convo else com.mediaviewer.util.Supporter.openPage()
+                            if (com.mediaviewer.util.Supporter.active) LocalOverlays.pinDmFor = convo else com.mediaviewer.util.Supporter.openPage()
                         })
                     }
                     // Room for the + button.

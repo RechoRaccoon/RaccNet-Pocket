@@ -200,6 +200,9 @@ fun SearchOverlay(
     val webFocus = androidx.compose.ui.platform.LocalFocusManager.current
     // Trending Searches (supporters): loaded when the Posts tab is showing.
     LaunchedEffect(isPosts, supporter) { if (isPosts && supporter) onLoadTrending() }
+    // Leaving Search closes the browser page for good (popped-out windows
+    // are separate and stay).
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { BrowserHome.close() } }
     // A lapsed supporter doesn't stay on the browser tab.
     LaunchedEffect(isWeb, supporter) { if (isWeb && !supporter) onSelectFilter(MainViewModel.SearchFilter.ACCOUNTS) }
     val kindForTab = if (isLiked) taggedKind else postsKind
@@ -307,7 +310,7 @@ fun SearchOverlay(
                             value = if (isWeb) webQuery else state.query,
                             onValueChange = if (isWeb) ({ webQuery = it }) else if (isTagInputFilter) onLikedQueryTextChange else onQueryChange,
                             // Item 1: just "Search" — no app-name text needed.
-                            placeholder = if (isWeb) "Search the web or type an address" else "Search", focusRequester = focusRequester,
+                            placeholder = if (isWeb) "Search the web" else "Search", focusRequester = focusRequester,
                             // Item 8: haptic tap when the keyboard's search
                             // action actually submits a query.
                             onSearch = {
@@ -396,7 +399,6 @@ fun SearchOverlay(
                     // tabs and the interaction bar.
                     isWeb -> {
                         val home = BrowserHome.state
-                        LaunchedEffect(home.url) { com.mediaviewer.util.LocalData.browserLastUrl = home.url }
                         Box(
                             Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.navBarSpace)
                                 .padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 64.dp)

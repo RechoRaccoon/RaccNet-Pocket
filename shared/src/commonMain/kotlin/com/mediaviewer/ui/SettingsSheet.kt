@@ -2926,7 +2926,8 @@ private fun HubFeedRow(
             .onGloballyPositioned { rowCoords = it }
             .horizontalScroll(scroll)
             .padding(horizontal = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
         val saved = authorFeedState
         // Saved Posts / From Friends / History aren't feeds to pick here.

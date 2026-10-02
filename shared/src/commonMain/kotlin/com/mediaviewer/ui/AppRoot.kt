@@ -581,9 +581,17 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
     // (The layer only exists while a popup is up or fading, so the app is
     // drawn exactly as before the rest of the time.)
     val onboardingBlurActive by remember { androidx.compose.runtime.derivedStateOf { onboardingBlur.value > 0.01f } }
+    // The supporter popups (Feed Builder, folders, notes, edit history, pin
+    // a chat, sharing a feed) blur the app behind them the same way.
+    val feedShareOpen = sendPopupTarget?.id?.startsWith(com.mediaviewer.viewmodel.MainViewModel.PROFILE_SHARE_PREFIX + "feed:") == true
+    val localPopupShown = (com.mediaviewer.ui.LocalOverlays.popupOpen || feedShareOpen) && liquidGlass
+    val localBlur = androidx.compose.animation.core.animateFloatAsState(
+        if (localPopupShown) 0.7f else 0f, androidx.compose.animation.core.tween(220), label = "localPopupBlur"
+    )
+    val localBlurActive by remember { androidx.compose.runtime.derivedStateOf { localBlur.value > 0.01f } }
     Box(Modifier.fillMaxSize().then(
-        if (onboardingBlurActive || onboardingShown) Modifier.graphicsLayer {
-            val amount = onboardingBlur.value
+        if (onboardingBlurActive || onboardingShown || localBlurActive || localPopupShown) Modifier.graphicsLayer {
+            val amount = maxOf(onboardingBlur.value, localBlur.value)
             renderEffect = if (amount > 0.01f) {
                 val r = 26.dp.toPx() * amount
                 androidx.compose.ui.graphics.BlurEffect(r, r, androidx.compose.ui.graphics.TileMode.Clamp)
@@ -1183,7 +1191,7 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
 
         // Share To / Quote Repost fade (and gently scale) in over the post
         // while its own UI fades away, and reverse that when they close.
-        com.mediaviewer.ui.FadingPopupHost(sendPopupTarget, Modifier.zIndex(10f)) { target ->
+        com.mediaviewer.ui.FadingPopupHost(sendPopupTarget?.takeIf { !feedShareOpen }, Modifier.zIndex(10f)) { target ->
             SendDmDialog(
                 target          = target,
                 conversations   = dmConversations,
@@ -1261,17 +1269,6 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
                 onDismiss   = viewModel::dismissReport
             )
         }
-
-        // Supporter features: their popups, the Launchpad apps and the
-        // floating web pages (see LocalOverlays).
-        com.mediaviewer.ui.LocalOverlayHost(
-            viewModel = viewModel,
-            liquidGlass = liquidGlass,
-            tint = selfProfileTint,
-            postTint = if (screenState == ScreenState.FEED) currentDominantColor else selfProfileTint,
-            savedFeedUris = savedFeedUris,
-            hubShowing = screenState == ScreenState.SETTINGS && profileOverlay?.hidden != false
-        )
 
         // Settings → Dev Tools → "Preview Login Page": the login page over
         // everything, without signing out. Back (or its back button) closes it.
@@ -1405,6 +1402,35 @@ fun AppRoot(viewModel: MainViewModel, pendingProfileLink: String? = null, onProf
         com.mediaviewer.ui.SpaceOverlay(controller = pixelController.space, modifier = Modifier.fillMaxSize().zIndex(13f))
 
     } // the blurred app content
+
+        // Supporter features: their popups, the Launchpad apps and the
+        // floating web pages (see LocalOverlays).
+        com.mediaviewer.ui.LocalOverlayHost(
+            viewModel = viewModel,
+            liquidGlass = liquidGlass,
+            tint = selfProfileTint,
+            postTint = if (screenState == ScreenState.FEED) currentDominantColor else selfProfileTint,
+            savedFeedUris = savedFeedUris,
+            hubShowing = screenState == ScreenState.SETTINGS && profileOverlay?.hidden != false
+        )
+
+        // A feed being shared (dragged onto the Hub's DMs button): the same
+        // "Share with" popup, drawn here so the Hub behind it blurs.
+        com.mediaviewer.ui.FadingPopupHost(sendPopupTarget?.takeIf { feedShareOpen }, Modifier.zIndex(10.6f)) { target ->
+            SendDmDialog(
+                target          = target,
+                conversations   = dmConversations,
+                loading         = dmConversationsLoading,
+                selected        = sendPopupSelected,
+                sending         = sendPopupSending,
+                liquidGlass     = liquidGlass,
+                dominantColor   = selfProfileTint,
+                backdrop        = null,
+                onToggleSelect  = viewModel::toggleSendRecipient,
+                onSend          = viewModel::sendToSelectedRecipients,
+                onDismiss       = viewModel::dismissSendPopup
+            )
+        }
 
         // ── Welcome → tutorial, and the Support popup ──
         val hubShowing = appInitialized && bskyLoggedIn && screenState == ScreenState.SETTINGS &&

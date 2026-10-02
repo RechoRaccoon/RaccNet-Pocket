@@ -1922,7 +1922,8 @@ private fun PostContent(
                             liquidGlass = liquidGlass, tint = dominantColor, backdrop = glassBackdrop,
                             reducedAnimations = reducedAnimations,
                             onHorizontalSwipe = handleHorizontalSwipe,
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 4.dp)
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 4.dp),
+                            centeredText = "Tap to Add Saved Post to Folder"
                         )
                     } else {
                         Spacer(Modifier.fillMaxWidth().height(0.dp))
@@ -2563,7 +2564,9 @@ private fun PostTextBubble(
     backdrop: GlassBackdrop?,
     reducedAnimations: Boolean,
     onHorizontalSwipe: (Float) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** Text that should sit centered (the "add to folder" prompt). */
+    centeredText: String? = null
 ) {
     val shape = RoundedCornerShape(18.dp)
     val progress = remember { Animatable(if (expanded) 1f else 0f) }
@@ -2593,10 +2596,18 @@ private fun PostTextBubble(
                 // Saved Post to Folder" prompt and back) — the bubble keeps
                 // its shape.
                 Crossfade(text, animationSpec = tween(260), label = "bubbleTextOne") { t ->
-                    Text(t, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        t, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        textAlign = if (t == centeredText) TextAlign.Center else TextAlign.Start,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
                 Crossfade(text, animationSpec = tween(260), label = "bubbleTextFull") { t ->
-                    Text(t, style = style)
+                    Text(
+                        t, style = style,
+                        textAlign = if (t == centeredText) TextAlign.Center else TextAlign.Start,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
             },
             modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)

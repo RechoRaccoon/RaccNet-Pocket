@@ -113,6 +113,9 @@ fun LocalPopup(
     maxWidth: Dp = 420.dp,
     maxHeight: Dp = 560.dp,
     subtitle: String? = null,
+    /** A live backdrop to blur (a page that records one); without it the
+     *  popup relies on whatever is behind it already being blurred. */
+    backdrop: GlassBackdrop? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     BackHandler(onBack = onClose)
@@ -128,7 +131,7 @@ fun LocalPopup(
         contentAlignment = Alignment.Center
     ) {
         PopupSheetSurface(
-            liquidGlass = liquidGlass, tint = tint, backdrop = null,
+            liquidGlass = liquidGlass, tint = tint, backdrop = backdrop,
             modifier = Modifier.widthIn(max = maxWidth).fillMaxWidth().heightIn(max = maxHeight)
                 .graphicsLayer {
                     val sc = 0.92f + 0.08f * appear.value

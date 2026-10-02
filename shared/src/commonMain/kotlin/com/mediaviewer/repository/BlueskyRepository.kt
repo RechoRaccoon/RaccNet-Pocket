@@ -1833,7 +1833,7 @@ class BlueskyRepository {
                     count > 0 -> "$count posts"
                     else -> ""
                 }
-                TrendingTopic(name, listOf(posts, category).filter { it.isNotBlank() }.joinToString(" · "), str(o, "topic").ifBlank { name })
+                TrendingTopic(name, listOf(posts, category).filter { it.isNotBlank() }.joinToString(" · "), name)
             }
         }.getOrNull().orEmpty()
         if (trends.isNotEmpty()) return@runCatching trends
@@ -1842,7 +1842,7 @@ class BlueskyRepository {
         body.getAsJsonArray("topics")?.mapNotNull { el ->
             val o = runCatching { el.asJsonObject }.getOrNull() ?: return@mapNotNull null
             val name = str(o, "displayName").ifBlank { str(o, "topic") }
-            if (name.isBlank()) null else TrendingTopic(name, str(o, "description"), str(o, "topic").ifBlank { name })
+            if (name.isBlank()) null else TrendingTopic(name, str(o, "description"), name)
         } ?: emptyList()
     }
 
