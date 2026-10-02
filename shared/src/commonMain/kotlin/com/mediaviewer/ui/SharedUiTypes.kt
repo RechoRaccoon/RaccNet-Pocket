@@ -1,5 +1,7 @@
 package com.mediaviewer.ui
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import com.mediaviewer.model.MediaItem
 import com.mediaviewer.model.PopfeedBacklogItem
 import com.mediaviewer.model.PopfeedReview
